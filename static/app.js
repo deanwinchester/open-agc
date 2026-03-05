@@ -10,15 +10,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Skills Elements
     const skillsContainer = document.getElementById('skills-container');
 
-    // Settings Modal Elements
+    // Settings Page Transition
     const settingsBtn = document.getElementById('settings-btn');
-    const settingsModal = document.getElementById('settings-modal');
-    const closeSettingsBtn = document.getElementById('close-settings');
-    const saveSettingsBtn = document.getElementById('save-settings-btn');
-    const providerSelect = document.getElementById('provider-select');
-    const modelInput = document.getElementById('model-input');
-    const apiKeyInput = document.getElementById('api-key-input');
-    const settingsNotification = document.getElementById('settings-notification');
 
     // State
     let ws = null;
@@ -102,17 +95,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (settingsRes.ok) {
                 const data = await settingsRes.json();
                 currentModelBadge.textContent = data.model_name || 'gpt-4o';
-
-                if (data.provider) {
-                    providerSelect.value = data.provider;
-                }
-
-                // Populate the dropdown correctly based on provider and select current model
-                populateModelList(providerSelect.value, data.model_name);
-
-                if (data.api_key_masked) {
-                    apiKeyInput.placeholder = data.api_key_masked;
-                }
+                // Nothing to populate on index anymore, 
+                // Settings are handled on settings.html
             }
 
             // Fetch Skills
@@ -151,102 +135,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ==========================================
-    // Settings Modal Logic
+    // Settings Navigation
     // ==========================================
-    async function populateModelList(provider, selectedModel = null) {
-        modelInput.innerHTML = '<option value="">Loading models...</option>';
-        modelInput.disabled = true;
-
-        try {
-            const res = await fetch(`/api/provider-models?provider=${provider}`);
-            if (res.ok) {
-                const data = await res.json();
-                const models = data.models || [];
-
-                modelInput.innerHTML = '';
-                models.forEach(model => {
-                    const option = document.createElement('option');
-                    option.value = model;
-                    option.textContent = model;
-                    modelInput.appendChild(option);
-                });
-
-                if (selectedModel && models.includes(selectedModel)) {
-                    modelInput.value = selectedModel;
-                } else if (!models.includes(selectedModel) && selectedModel) {
-                    // In case the currently saved model is no longer in the standard list, still show it
-                    const option = document.createElement('option');
-                    option.value = selectedModel;
-                    option.textContent = selectedModel + ' (Current/Unlisted)';
-                    modelInput.appendChild(option);
-                    modelInput.value = selectedModel;
-                } else if (models.length > 0) {
-                    modelInput.value = models[0];
-                }
-            } else {
-                modelInput.innerHTML = '<option value="">Error loading models</option>';
-            }
-        } catch (e) {
-            console.error(e);
-            modelInput.innerHTML = '<option value="">Error loading models</option>';
-        } finally {
-            modelInput.disabled = false;
-        }
-    }
-
     settingsBtn.addEventListener('click', () => {
-        settingsModal.classList.add('show');
+        window.location.href = '/static/settings.html';
     });
-
-    closeSettingsBtn.addEventListener('click', () => {
-        settingsModal.classList.remove('show');
-        settingsNotification.style.display = 'none';
-    });
-
-    providerSelect.addEventListener('change', () => {
-        populateModelList(providerSelect.value);
-    });
-
-    saveSettingsBtn.addEventListener('click', async () => {
-        const payload = {
-            provider: providerSelect.value,
-            model_name: modelInput.value,
-            api_key: apiKeyInput.value
-        };
-
-        if (!payload.api_key || !payload.model_name) {
-            showNotification(currentLang === 'zh-CN' ? '请完整填写配置参数' : 'Please fill all fields', 'error');
-            return;
-        }
-
-        saveSettingsBtn.disabled = true;
-        try {
-            const res = await fetch('/api/settings', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-            if (res.ok) {
-                showNotification(currentLang === 'zh-CN' ? '修改成功！已保存。' : 'Settings saved successfully!', 'success');
-                currentModelBadge.textContent = payload.model_name;
-                apiKeyInput.value = ''; // clear key after save
-            } else {
-                const err = await res.json();
-                showNotification(err.detail || 'Failed to save settings', 'error');
-            }
-        } catch (e) {
-            showNotification('Network error occurred.', 'error');
-        } finally {
-            saveSettingsBtn.disabled = false;
-        }
-    });
-
-    function showNotification(msg, type) {
-        settingsNotification.textContent = msg;
-        settingsNotification.className = `notification ${type}`;
-        settingsNotification.style.display = 'block';
-    }
 
     // ==========================================
     // WebSocket & Chat Logic
@@ -285,20 +178,252 @@ document.addEventListener('DOMContentLoaded', () => {
             const msg = translations[currentLang] ? translations[currentLang]['agent_thinking'] : data.message;
             showThinkingStatus(msg);
         }
+        else if (data.type === 'progress') {
+            handleProgressEvent(data);
+        }
         else if (data.type === 'message') {
             hideThinkingStatus();
+            hideProgressContainer();
             appendMessage(data.content, 'agent');
+            if (wasVoiceQuery) {
+                speakText(data.content);
+                wasVoiceQuery = false;
+            }
             isAgentThinking = false;
             updateInputState();
         }
         else if (data.type === 'error') {
             hideThinkingStatus();
+            hideProgressContainer();
             const msg = translations[currentLang] ? translations[currentLang]['agent_error'] : "Error";
             appendMessage(`**${msg}**: ${data.content}`, 'system');
+
+            // Show retry bar
+            showRetryBar(data.original_query || '', data.content);
+
+            // Check if this is a permission-related error
+            checkPermissionError(data.content);
+
             isAgentThinking = false;
             updateInputState();
         }
     }
+
+    // ==========================================
+    // Retry Bar
+    // ==========================================
+    function showRetryBar(originalQuery, errorContent) {
+        const retryBar = document.createElement('div');
+        retryBar.className = 'retry-bar';
+
+        const isZh = currentLang === 'zh-CN';
+
+        retryBar.innerHTML = `
+            <button class="retry-btn" title="${isZh ? '使用相同模型重试' : 'Retry with same model'}">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <polyline points="23 4 23 10 17 10"></polyline>
+                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                </svg>
+                ${isZh ? '重试' : 'Retry'}
+            </button>
+            <button class="retry-btn retry-btn-alt" title="${isZh ? '跳过此步骤继续' : 'Continue'}">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                </svg>
+                ${isZh ? '继续' : 'Continue'}
+            </button>
+        `;
+
+        chatContainer.appendChild(retryBar);
+        scrollToBottom();
+
+        // Retry button: re-send the same query
+        retryBar.querySelector('.retry-btn').addEventListener('click', () => {
+            retryBar.remove();
+            if (ws && isConnected && originalQuery) {
+                isAgentThinking = true;
+                updateInputState();
+                ws.send(JSON.stringify({ type: "retry", query: originalQuery }));
+            }
+        });
+
+        // Continue button: tell agent to skip/continue
+        retryBar.querySelector('.retry-btn-alt').addEventListener('click', () => {
+            retryBar.remove();
+            if (ws && isConnected) {
+                const continueMsg = currentLang === 'zh-CN'
+                    ? '上一步操作失败了，请跳过这一步，继续完成剩余的任务。'
+                    : 'The previous step failed. Please skip it and continue with the remaining tasks.';
+                appendMessage(continueMsg, 'user');
+                isAgentThinking = true;
+                updateInputState();
+                ws.send(JSON.stringify({ query: continueMsg }));
+            }
+        });
+    }
+
+    // ==========================================
+    // Progress Tracking UI
+    // ==========================================
+    let progressContainer = null;
+    let progressSteps = {};
+
+    function ensureProgressContainer() {
+        if (!progressContainer) {
+            hideThinkingStatus(); // Replace the simple spinner
+            progressContainer = document.createElement('div');
+            progressContainer.className = 'progress-container';
+            progressContainer.innerHTML = `
+                <div class="progress-header">
+                    <div class="progress-spinner"></div>
+                    <span class="progress-title">${currentLang === 'zh-CN' ? '🐼 执行中...' : '🐼 Working...'}</span>
+                </div>
+                <div class="progress-steps"></div>
+            `;
+            chatContainer.appendChild(progressContainer);
+            scrollToBottom();
+        }
+        return progressContainer;
+    }
+
+    function handleProgressEvent(data) {
+        const event = data.event;
+
+        if (event === 'thinking') {
+            const thinkMsg = currentLang === 'zh-CN' ? '熊猫正在思考对策...' : 'Thinking...';
+            showThinkingStatus(thinkMsg);
+            return;
+        }
+
+        if (event === 'model_switched') {
+            ensureProgressContainer();
+            const stepsEl = progressContainer.querySelector('.progress-steps');
+            const switchNote = document.createElement('div');
+            switchNote.className = 'progress-step model-switch';
+            switchNote.innerHTML = `
+                <span class="step-icon">🔄</span>
+                <span class="step-text">${currentLang === 'zh-CN'
+                    ? `模型已切换: ${data.from} → <strong>${data.to}</strong>`
+                    : `Model switched: ${data.from} → <strong>${data.to}</strong>`}</span>
+            `;
+            stepsEl.appendChild(switchNote);
+            scrollToBottom();
+            return;
+        }
+
+        if (event === 'tool_start') {
+            ensureProgressContainer();
+            const stepsEl = progressContainer.querySelector('.progress-steps');
+            const stepEl = document.createElement('div');
+            stepEl.className = 'progress-step running';
+            stepEl.id = `progress-step-${data.step}`;
+            stepEl.innerHTML = `
+                <span class="step-icon">
+                    <div class="step-spinner"></div>
+                </span>
+                <div class="step-body">
+                    <span class="step-label">${data.step}. ${data.tool_label || data.tool}</span>
+                    ${data.args_preview ? `<span class="step-detail">${escapeHtml(data.args_preview)}</span>` : ''}
+                </div>
+            `;
+            stepsEl.appendChild(stepEl);
+            progressSteps[data.step] = stepEl;
+            scrollToBottom();
+            return;
+        }
+
+        if (event === 'tool_done') {
+            const stepEl = progressSteps[data.step];
+            if (stepEl) {
+                stepEl.classList.remove('running');
+                stepEl.classList.add(data.success ? 'done' : 'failed');
+                const iconEl = stepEl.querySelector('.step-icon');
+                iconEl.innerHTML = data.success ? '✅' : '❌';
+                // Add result preview
+                if (data.result_preview) {
+                    const detailEl = stepEl.querySelector('.step-detail');
+                    if (detailEl) {
+                        detailEl.textContent = data.result_preview;
+                    } else {
+                        const bodyEl = stepEl.querySelector('.step-body');
+                        const newDetail = document.createElement('span');
+                        newDetail.className = 'step-detail';
+                        newDetail.textContent = data.result_preview;
+                        bodyEl.appendChild(newDetail);
+                    }
+                }
+            }
+            scrollToBottom();
+            return;
+        }
+    }
+
+    function hideProgressContainer() {
+        if (progressContainer) {
+            // Mark it as complete instead of removing
+            progressContainer.classList.add('completed');
+            const titleEl = progressContainer.querySelector('.progress-title');
+            if (titleEl) {
+                titleEl.textContent = currentLang === 'zh-CN' ? '✨ 执行完成' : '✨ Done';
+            }
+            const spinnerEl = progressContainer.querySelector('.progress-spinner');
+            if (spinnerEl) spinnerEl.style.display = 'none';
+            progressContainer = null;
+            progressSteps = {};
+        }
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Permission error detection and dialog
+    function checkPermissionError(errorText) {
+        const lower = errorText.toLowerCase();
+        const permKeywords = ['permission', 'denied', '权限', 'access denied', 'not permitted',
+            'operation not permitted', 'eacces', 'eperm', 'chmod'];
+
+        const isPermError = permKeywords.some(kw => lower.includes(kw));
+        if (!isPermError) return;
+
+        const modal = document.getElementById('permission-modal');
+        const descEl = document.getElementById('perm-modal-desc');
+        const codeEl = document.getElementById('perm-modal-code');
+
+        if (!modal) return;
+
+        const pathMatch = errorText.match(/(?:\/[\w\-\.\/]+)+/);
+        const path = pathMatch ? pathMatch[0] : '目标路径';
+
+        descEl.textContent = '该操作因系统权限不足而失败。请在终端中执行以下命令后重试：';
+        codeEl.textContent = `# macOS / Linux\nsudo chmod -R 755 ${path}\n\n# 或授予当前用户所有权\nsudo chown -R $(whoami) ${path}`;
+
+        modal.classList.add('active');
+    }
+
+    // Modal close / copy handlers
+    (function initPermModal() {
+        const modal = document.getElementById('permission-modal');
+        const closeBtn = document.getElementById('perm-modal-close');
+        const copyBtn = document.getElementById('perm-modal-copy');
+
+        if (!modal) return;
+
+        closeBtn?.addEventListener('click', () => modal.classList.remove('active'));
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) modal.classList.remove('active');
+        });
+
+        copyBtn?.addEventListener('click', () => {
+            const code = document.getElementById('perm-modal-code')?.textContent || '';
+            navigator.clipboard.writeText(code.trim()).then(() => {
+                copyBtn.textContent = '✓ 已复制';
+                setTimeout(() => copyBtn.textContent = '复制命令', 2000);
+            });
+        });
+    })();
 
     // UI Helpers
     function appendMessage(content, role) {
@@ -381,6 +506,76 @@ document.addEventListener('DOMContentLoaded', () => {
         messageInput.style.height = 'auto';
         isAgentThinking = true;
         updateInputState();
+    }
+
+    // ==========================================
+    // Voice Interaction (Web Speech API)
+    // ==========================================
+    const micBtn = document.getElementById('mic-btn');
+    let recognition = null;
+    let isListening = false;
+    let wasVoiceQuery = false;
+
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+
+        recognition.onstart = () => {
+            isListening = true;
+            micBtn.classList.add('listening');
+            messageInput.placeholder = currentLang === 'zh-CN' ? "请说话..." : "Listening...";
+        };
+
+        recognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            messageInput.value = transcript;
+            wasVoiceQuery = true;
+            handleSend();
+        };
+
+        recognition.onerror = (event) => {
+            console.error("Speech recognition error", event.error);
+            stopListening();
+        };
+
+        recognition.onend = () => {
+            stopListening();
+        };
+    } else {
+        if (micBtn) micBtn.style.display = 'none';
+    }
+
+    function stopListening() {
+        isListening = false;
+        if (micBtn) micBtn.classList.remove('listening');
+        const defaultPlaceholder = translations[currentLang] ? translations[currentLang]['placeholder'] : "Ask Panda...";
+        messageInput.placeholder = defaultPlaceholder;
+    }
+
+    if (micBtn) {
+        micBtn.addEventListener('click', () => {
+            if (!recognition) return;
+            if (isListening) {
+                recognition.stop();
+            } else {
+                try {
+                    recognition.lang = currentLang === 'zh-CN' ? 'zh-CN' : 'en-US';
+                    recognition.start();
+                } catch (e) { }
+            }
+        });
+    }
+
+    function speakText(text) {
+        if (!('speechSynthesis' in window)) return;
+        window.speechSynthesis.cancel();
+        // Remove markdown elements to improve speech output pronunciation
+        const cleanText = text.replace(/[*#`_]|<\/?[\w\s="\/.\':;#-]+>/gi, '');
+        const utterance = new SpeechSynthesisUtterance(cleanText);
+        utterance.lang = currentLang === 'zh-CN' ? 'zh-CN' : 'en-US';
+        window.speechSynthesis.speak(utterance);
     }
 
     // Core Event Listeners

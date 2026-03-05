@@ -1,56 +1,92 @@
 import os
+from core.memory_store import MemoryStore, migrate_from_markdown
+
 
 class MemoryTool:
     """
-    A tool that allows the Agent to read, write, and update its own long-term memory.
-    The memory is stored in a markdown file (data/memory.md).
+    Smart memory management tool. Uses TF-IDF semantic search to store
+    and retrieve relevant memories from past conversations.
     """
-    def __init__(self, memory_path: str = "data/memory.md"):
-        self.memory_path = memory_path
-        os.makedirs(os.path.dirname(self.memory_path), exist_ok=True)
-        # Initialize if not exists
-        if not os.path.exists(self.memory_path):
-            with open(self.memory_path, 'w', encoding='utf-8') as f:
-                f.write("# Agent Long-Term Memory\n\n- No memories recorded yet.\n")
 
-    def execute(self, action: str, content: str = "") -> str:
+    def __init__(self, db_path: str = "data/memory.db"):
+        self.store = MemoryStore(db_path=db_path)
+        
+        # Migrate from old markdown format if it exists
+        old_md_path = "data/memory.md"
+        if os.path.exists(old_md_path):
+            migrate_from_markdown(old_md_path, self.store)
+
+    def execute(self, action: str, content: str = "", query: str = "",
+                category: str = "", importance: int = 1) -> str:
         """
         Execute memory operations.
         
         Args:
-            action: "read" to read the memory file, "append" to add a new memory bullet, "overwrite" to completely replace the memory content.
-            content: The text to append or overwrite. Ignored if action is "read".
-            
-        Returns:
-            The execution result or the file content.
+            action: 'search', 'add', 'read', 'consolidate', 'categories', or legacy 'append'/'overwrite'
+            content: Memory content to add (for 'add'/'append')
+            query: Search query (for 'search')
+            category: Optional category filter
+            importance: Priority level 1-5 (for 'add')
         """
-        if action == "read":
-            try:
-                with open(self.memory_path, 'r', encoding='utf-8') as f:
-                    return f.read()
-            except Exception as e:
-                return f"Error reading memory: {str(e)}"
-                
-        elif action == "append":
-            try:
-                with open(self.memory_path, 'a', encoding='utf-8') as f:
-                    # Automatically format as a bullet point if not already
-                    formatted_content = content if content.startswith("- ") else f"- {content}"
-                    f.write(f"{formatted_content}\n")
-                return "Successfully appended to memory."
-            except Exception as e:
-                return f"Error appending to memory: {str(e)}"
+        if action == "search":
+            search_query = query or content
+            if not search_query:
+                return "Error: Please provide a 'query' for search."
+            
+            results = self.store.search_memories(search_query, top_k=5, category=category or None)
+            if not results:
+                return "No relevant memories found."
+            
+            formatted = []
+            for m in results:
+                formatted.append(
+                    f"[{m['category']}] (relevance: {m['relevance']}) {m['content']}"
+                )
+            return "Found relevant memories:\n" + "\n".join(formatted)
+
+        elif action in ("add", "append"):
+            if not content:
+                return "Error: Please provide 'content' to add."
+            mid = self.store.add_memory(content, category=category or None, importance=importance)
+            return f"Memory added (ID: {mid}, category: auto-detected)."
+
+        elif action == "read":
+            memories = self.store.get_all_memories(category=category or None, limit=20)
+            if not memories:
+                return "No memories stored yet."
+            
+            formatted = []
+            for m in memories:
+                formatted.append(f"[{m['category']}] {m['content']}")
+            return "All memories:\n" + "\n".join(formatted)
+
+        elif action == "consolidate":
+            result = self.store.consolidate()
+            return result
+
+        elif action == "categories":
+            cats = self.store.get_categories_summary()
+            if not cats:
+                return "No memories stored yet."
+            lines = [f"  {cat}: {count} memories" for cat, count in cats.items()]
+            return "Memory categories:\n" + "\n".join(lines)
 
         elif action == "overwrite":
-            try:
-                with open(self.memory_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                return "Successfully overwrote memory."
-            except Exception as e:
-                return f"Error overwriting memory: {str(e)}"
-                
+            # Legacy: clear all and add new content
+            if content:
+                # Delete all existing
+                all_mems = self.store.get_all_memories(limit=1000)
+                for m in all_mems:
+                    self.store.delete_memory(m["id"])
+                self.store.add_memory(content)
+                return "Memory overwritten with new content."
+            return "Error: No content provided."
+
         else:
-            return f"Error: Unknown memory action '{action}'. Use 'read', 'append', or 'overwrite'."
+            return (
+                f"Error: Unknown action '{action}'. "
+                "Available: 'search', 'add', 'read', 'consolidate', 'categories'."
+            )
 
     def get_openai_schema(self) -> dict:
         return {
@@ -58,23 +94,38 @@ class MemoryTool:
             "function": {
                 "name": "manage_memory",
                 "description": (
-                    "Manage your long-term memory. Use this tool proactively to 'append' important facts "
-                    "about the user, their preferences, or the system configuration so you remember them in future conversations. "
-                    "You can 'read' the current memory, 'append' new bullet points, or 'overwrite' the entire memory if it gets too messy."
+                    "Manage your long-term memory with intelligent search. "
+                    "Use 'search' to find relevant past memories by semantic similarity. "
+                    "Use 'add' to store important facts, user preferences, or learned knowledge. "
+                    "Use 'read' to list all memories. Use 'consolidate' to clean up duplicates. "
+                    "Use 'categories' to see memory categories and counts."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "description": "The action to perform: 'read', 'append', or 'overwrite'."
+                            "enum": ["search", "add", "read", "consolidate", "categories"],
+                            "description": "The action to perform.",
                         },
                         "content": {
                             "type": "string",
-                            "description": "The text to add or overwrite. Leave empty if action is 'read'."
-                        }
+                            "description": "Memory content to add (for 'add' action).",
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Search query (for 'search' action).",
+                        },
+                        "category": {
+                            "type": "string",
+                            "description": "Category filter (optional). Values: tech, user_pref, project, knowledge, system, general.",
+                        },
+                        "importance": {
+                            "type": "integer",
+                            "description": "Priority level 1-5 for 'add' (default 1).",
+                        },
                     },
-                    "required": ["action"]
-                }
-            }
+                    "required": ["action"],
+                },
+            },
         }

@@ -102,6 +102,14 @@
                     <textarea id="message-input" data-i18n-prop="placeholder" data-i18n="placeholder"
                         placeholder="Ask Panda to do something on this computer..." rows="1" autofocus></textarea>
                     <div class="input-actions">
+                        <button class="action-btn mic-btn" id="mic-btn" title="Toggle Voice Input">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                <line x1="12" x2="12" y1="19" y2="22"></line>
+                            </svg>
+                        </button>
                         <button class="action-btn send-btn" id="send-btn">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                 stroke-width="2.5">
@@ -117,40 +125,19 @@
         </main>
     </div>
 
-    <!-- Settings Modal -->
-    <div class="modal-overlay" id="settings-modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 data-i18n="settings_title">Agent Settings</h3>
-                <button class="icon-btn" id="close-settings">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <line x1="18" y1="6" x2="6" y2="18"></line>
-                        <line x1="6" y1="6" x2="18" y2="18"></line>
-                    </svg>
-                </button>
+    <!-- Permission Request Dialog -->
+    <div class="modal-overlay" id="permission-modal">
+        <div class="modal-box">
+            <h3>⚠️ 需要系统权限</h3>
+            <p class="modal-desc" id="perm-modal-desc">
+                该操作需要额外的系统权限。请在终端中执行以下命令授权：
+            </p>
+            <div class="modal-code" id="perm-modal-code">
+                <!-- Dynamic content -->
             </div>
-            <div class="modal-body">
-                <div class="form-group">
-                    <label data-i18n="provider">AI Provider</label>
-                    <select class="form-control" id="provider-select">
-                        <option value="openai">OpenAI</option>
-                        <option value="anthropic">Anthropic</option>
-                        <option value="deepseek">DeepSeek</option>
-                        <option value="gemini">Google Gemini</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label data-i18n="model_name">Model Name</label>
-                    <select class="form-control" id="model-input">
-                        <!-- Options will be populated dynamically via app.js -->
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label data-i18n="api_key">API Key</label>
-                    <input type="password" class="form-control" id="api-key-input" placeholder="sk-...">
-                </div>
-                <button class="btn-primary" id="save-settings-btn" data-i18n="save_changes">Save Changes</button>
-                <div id="settings-notification" class="notification"></div>
+            <div class="modal-actions">
+                <button class="btn-secondary" id="perm-modal-close">关闭</button>
+                <button class="btn-primary" id="perm-modal-copy">复制命令</button>
             </div>
         </div>
     </div>
