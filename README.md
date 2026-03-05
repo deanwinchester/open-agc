@@ -1,11 +1,11 @@
 # Open-AGC (Agentic Computer Control)
 
-Open-AGC 是一款基于本地电脑操作环境构建的全能型智能体框架（类似 OpenDevin 和 OpenInterpreter）。该项目提供能够自主规划、思考并执行终端命令、文件系统操作、临时 Python 计算脚本以及直接控制键鼠的 AI 助手。不仅包含了强大易用的抽象核心代码，还配有极具现代感的炫酷网页交互界面。
+Open-AGC 是一款基于本地电脑操作环境构建的全能型智能体框架。该项目提供能够自主规划、思考并执行终端命令、文件系统操作、临时 Python 计算脚本以及直接控制键鼠的 AI 助手。不仅包含了强大易用的抽象核心代码，还配有极具现代感的炫酷网页交互界面。
 
 ![Interface Preview](/static/preview.png) *(可将预览图放在此处)*
 
 ## 🌟 核心特性 (Features)
-- **多模型支持 (Plug & Play LLMs)**: 基于 [`litellm`](https://docs.litellm.ai/) 完美支持 OpenAI, Anthropic, Gemini, DeepSeek 或本地部署模型（Ollama / vLLM）。
+- **多模型支持 (Plug & Play LLMs)**: 基于 [`litellm`](https://docs.litellm.ai/) 支持 OpenAI, Anthropic, Gemini, DeepSeek, Kimi, GLM 或本地部署模型（Ollama / vLLM）。
 - **物理设备控制 (PyAutoGUI)**: 支持让 Agent 取代您接管鼠标和键盘，点击特定屏幕像素与输入快捷键。
 - **动态隔离验证 (Python REPL)**: Agent 可在运行中编写代码，下发到隔离的零时环境中试运行检查，获取控制台报错日志后再自我纠正。
 - **现代化 Web 界面**: 全新打造的流光渐变拟物设计（Glassmorphism），不仅有暗黑模式，更支持工具状态气泡悬浮推送，科技感十足。
