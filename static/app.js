@@ -94,9 +94,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const settingsRes = await fetch('/api/settings');
             if (settingsRes.ok) {
                 const data = await settingsRes.json();
-                currentModelBadge.textContent = data.model_name || 'gpt-4o';
-                // Nothing to populate on index anymore, 
-                // Settings are handled on settings.html
+                currentModelBadge.textContent = data.default_model || 'gpt-4o';
             }
 
             // Fetch Skills
@@ -434,7 +432,17 @@ document.addEventListener('DOMContentLoaded', () => {
         if (role === 'user') {
             avatarSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>`;
         } else {
-            avatarSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>`;
+            avatarSvg = `<svg width="20" height="20" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="50" cy="50" r="45" fill="#f4f6f5" stroke="#1a1c1e" stroke-width="6"/>
+                <circle cx="25" cy="25" r="14" fill="#1a1c1e"/>
+                <circle cx="75" cy="25" r="14" fill="#1a1c1e"/>
+                <circle cx="35" cy="45" r="10" fill="#1a1c1e"/>
+                <circle cx="65" cy="45" r="10" fill="#1a1c1e"/>
+                <circle cx="35" cy="43" r="3.5" fill="#fff"/>
+                <circle cx="65" cy="43" r="3.5" fill="#fff"/>
+                <ellipse cx="50" cy="62" rx="5" ry="3.5" fill="#1a1c1e"/>
+                <path d="M44 68 C 50 73, 50 73, 56 68" stroke="#1a1c1e" stroke-width="3" stroke-linecap="round"/>
+            </svg>`;
         }
 
         // Parse Markdown for Agent & System

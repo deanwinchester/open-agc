@@ -250,9 +250,10 @@ class SkillManager:
                     arg_desc = ""
                 steps.append(f"{i}. 使用 `{name}` 工具{': ' + arg_desc if arg_desc else ''}")
             
+            steps_text = '\n'.join(steps)
             skill_md = f"""# 自动学习的技能
 当用户需要执行类似任务时：
-{'\\n'.join(steps)}
+{steps_text}
 """
             return skill_md
         
