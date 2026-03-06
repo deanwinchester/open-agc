@@ -2,6 +2,7 @@ import json
 import threading
 import hashlib
 from typing import List, Dict, Any, Optional, Callable
+import os
 
 from core.paths import get_data_path, get_skills_dir
 
@@ -28,7 +29,6 @@ class OpenAGCAgent:
         # Load config to check disabled skills
         disabled_skills = []
         config_path = get_data_path("config.json")
-        import os
         if os.path.exists(config_path):
             try:
                 import json
@@ -147,7 +147,6 @@ class OpenAGCAgent:
             prompt += f"\n--- 历史记忆回溯 (Episodic Memory) ---\n{memory_context}\n"
             
         # Optional: Inject MEMORY.md (Highest priority global rules)
-        import os
         if self.sandbox_dir:
             memory_file_path = os.path.join(self.sandbox_dir, "MEMORY.md")
             if os.path.exists(memory_file_path):
