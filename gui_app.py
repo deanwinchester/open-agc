@@ -69,9 +69,9 @@ def main():
         base_dir = sys._MEIPASS
         os.chdir(base_dir)
 
-        # Setup writable data dir
-        data_dir = os.path.expanduser("~/.open-agc")
-        os.makedirs(data_dir, exist_ok=True)
+        # Setup writable data dir using unified paths logic
+        from core.paths import get_base_dir
+        data_dir = get_base_dir()
         os.environ["OPEN_AGC_DATA_DIR"] = data_dir
 
         # Copy initial data files if needed

@@ -35,7 +35,7 @@ build_single_arch() {
     
     pyinstaller open_agc.spec --clean --noconfirm \
         --distpath "dist/${arch}" \
-        --workpath "build/${arch}" 2>&1 | tail -5
+        --workpath "build/${arch}"
     
     echo "  ✅ ${arch} build complete"
 }
