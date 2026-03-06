@@ -10,3 +10,7 @@ uvicorn[standard]>=0.20.0
 websockets>=11.0
 pywebview>=5.0
 playwright
+pyautogui
+Pillow
+opencv-python
+httptools
