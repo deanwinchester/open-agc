@@ -1002,7 +1002,19 @@ textarea {
 }
 
 @keyframes spin {
-    to {
-        transform: rotate(360deg);
-    }
+}
+
+/* Chat Image Styling */
+.message .content img {
+    max-width: 100%;
+    border-radius: var(--radius-sm);
+    margin: 0.8rem 0;
+    box-shadow: var(--shadow-glass);
+    display: block;
+    cursor: pointer;
+    transition: var(--trans-fast);
+}
+
+.message .content img:hover {
+    transform: scale(1.02);
 }

@@ -79,6 +79,10 @@ class OpenAGCAgent:
             f"绝对不要仅依赖训练数据回答时事问题。\n"
             f"\n重要：处理涉及多个步骤的复杂任务时，先简要说明你的计划，然后逐步执行。"
             f"这样用户能了解你的进展。\n"
+            f"\n【文件生成与显示规范（极其重要）】："
+            f"1. 你生成的所有文件（脚本、文档、尤其是图片等），如果用户没有显式指定绝对路径，必须统一保存在沙箱工作目录（Sandbox Directory: {{cwd_dir}}）中，严禁写在 /tmp 下。\n"
+            f"2. 当你生成了一张图片供用户查看时，请在最终回复中使用 Markdown 语法直观地渲染出来，图片链接使用：`![图片描述](/api/files/生成的文件名.png)` 的格式。这个内部 API 能将你沙箱里的图片直接推送到网页前端显示。\n"
+            f"3. 关于网页文件上传：优先使用 `browser_automation`（虚拟浏览器）工具的 `upload` 动作将文件填入网页。但如果遇到了必须通过操作系统原生文件选择框处理的情况，你可以临时切换使用 `computer_control`（键鼠控制工具 / pyautogui）来操作系统的上传弹窗完成文件选择和上传。\n"
             f"\n记忆系统：你拥有智能记忆系统。每次对话开始时，系统会自动检索并展示过去交互中的"
             f"相关记忆。你也可以使用 manage_memory 工具主动管理记忆："
             f"action='add' 保存重要事实、用户偏好和学到的知识；"
@@ -136,6 +140,7 @@ class OpenAGCAgent:
         current_date = datetime.now().strftime("%Y年%m月%d日")
         
         prompt = self.system_prompt_base.replace("{current_time}", current_time).replace("{current_date}", current_date)
+        prompt = prompt.replace("{cwd_dir}", self.sandbox_dir or os.getcwd())
         
         # Inject Episodic Memory Context
         if memory_context:

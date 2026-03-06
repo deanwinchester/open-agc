@@ -52,7 +52,7 @@ source build_venv/bin/activate
 pip install --upgrade pip -q 2>/dev/null
 pip install pyinstaller -q 2>/dev/null
 pip install -r requirements.txt -q 2>/dev/null
-pip install httptools websockets pywebview -q 2>/dev/null || true
+pip install httptools websockets pywebview pyautogui Pillow opencv-python -q 2>/dev/null || true
 
 # ---- 2. Build ----
 echo "[2/5] Building application..."

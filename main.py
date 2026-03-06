@@ -3,9 +3,11 @@ import sys
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
+from core.paths import get_data_path
 
 # Load environment variables (API keys)
-load_dotenv()
+env_file = get_data_path(".env")
+load_dotenv(env_file)
 
 from agent.agent import OpenAGCAgent
 

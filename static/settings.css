@@ -3,6 +3,13 @@
    Import style.css via the HTML <link> so we inherit all panda variables.
    ========================================================================== */
 
+/* ---------- Override Body Scroll ---------- */
+body {
+    overflow-y: auto !important;
+    height: auto !important;
+    min-height: 100vh;
+}
+
 /* ---------- Tab Bar ---------- */
 .tab-bar {
     display: flex;
@@ -420,28 +427,15 @@ input:checked+.slider:before {
     }
 }
 
-/* ---------- Sticky Save Bar ---------- */
-.save-bar {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    z-index: 100;
-    background: var(--bg-panel);
-    border-top: var(--border-glass);
-    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.06);
-    backdrop-filter: var(--blur-glass);
-    -webkit-backdrop-filter: var(--blur-glass);
-}
-
-.save-bar-inner {
-    max-width: 780px;
-    margin: 0 auto;
-    padding: 0.75rem 1.5rem;
+/* ---------- Global Save Actions ---------- */
+.global-actions {
     display: flex;
     align-items: center;
     justify-content: flex-end;
     gap: 1rem;
+    margin-top: 2rem;
+    padding-top: 1.5rem;
+    border-top: var(--border-glass);
 }
 
 .save-status {
@@ -578,6 +572,8 @@ input:checked+.slider:before {
     font-weight: 500;
     cursor: pointer;
     transition: var(--trans-fast);
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .modal-actions .btn-secondary:hover {
@@ -595,6 +591,8 @@ input:checked+.slider:before {
     font-weight: 600;
     cursor: pointer;
     transition: var(--trans-fast);
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
 [data-theme="dark"] .modal-actions .btn-primary {
@@ -654,4 +652,28 @@ input:checked+.slider:before {
         width: 100%;
         height: 42px;
     }
+}
+
+/* ---------- Checkbox Toggle Container ---------- */
+.toggle-container {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: var(--text-primary);
+    margin-top: 0.2rem;
+}
+
+.toggle-container input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--theme-color);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.toggle-label {
+    user-select: none;
+    line-height: 1.4;
 }

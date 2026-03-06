@@ -113,6 +113,12 @@ class BrowserAutomationTool:
             time.sleep(wait_time)
             return f"已按下按键: {key}"
             
+        elif action == "upload":
+            if not selector or not cmd.get("path"): return "Error: 缺少 selector 或 path(文件绝对路径) 参数"
+            page.set_input_files(selector, cmd.get("path"), timeout=5000)
+            time.sleep(wait_time)
+            return f"已将文件 {cmd.get('path')} 上传至元素 {selector}"
+            
         elif action == "read_dom":
             dom_script = '''
             () => {
@@ -156,7 +162,7 @@ class BrowserAutomationTool:
         return f"Error: 不支持的浏览器动作 '{action}'"
 
     def execute(self, action: str, url: str = "", selector: str = "", text: str = "", 
-                key: str = "", wait_time: int = 1) -> str:
+                key: str = "", path: str = "", wait_time: int = 1) -> str:
         """执行浏览器自动化相关操作，代理到后台线程"""
         if action == "close":
             if self.thread and self.thread.is_alive():
@@ -173,6 +179,7 @@ class BrowserAutomationTool:
                 "selector": selector, 
                 "text": text,
                 "key": key,
+                "path": path,
                 "wait_time": wait_time
             })
             
@@ -196,18 +203,19 @@ class BrowserAutomationTool:
                     "动作(action)支持："
                     "1. 'goto': 导航到指定网址 (需 url)。"
                     "2. 'read_dom': 获取当前页面的纯净交互元素DOM树(极度推荐在点击前先使用本命令以了解当前网页上的具体 CSS Seletor/class/id)。"
-                    "3. 'click': 使用 CSS 选择器点击元素 (需 selector)。"
+                    "3. 'click': 使用 CSS 选择器点击元素 (需 selector)。遇到真正的文件上传按钮切勿使用 click，而是使用 upload 动作。"
                     "4. 'fill': 向输入框填入文字 (需 selector 和 text)。"
                     "5. 'press': 按下键盘按键 (如 Enter、Escape)。"
-                    "6. 'get_url': 读当前页面的真实 URL。"
-                    "7. 'close': 关闭并清理浏览器沙盒环境。"
+                    "6. 'upload': 上传文件到网页表单 (非常重要：对准 <input type='file'> 元素的 selector 进行操作，用本地文件的绝对路径作为 path 参数)。"
+                    "7. 'get_url': 读当前页面的真实 URL。"
+                    "8. 'close': 关闭并清理浏览器沙盒环境。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["goto", "read_dom", "click", "fill", "press", "get_url", "close"],
+                            "enum": ["goto", "read_dom", "click", "fill", "press", "upload", "get_url", "close"],
                             "description": "要执行的浏览器指令",
                         },
                         "url": {
@@ -224,7 +232,11 @@ class BrowserAutomationTool:
                         },
                         "key": {
                             "type": "string",
-                            "description": "按键名称 (用于 press)，例如 'Enter'",
+                            "description": "按键名称 (用于 press)，例如 'Enter', 'Escape'",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "本地文件的绝对路径 (用于 upload)"
                         },
                         "wait_time": {
                             "type": "integer",

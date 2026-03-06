@@ -32,9 +32,26 @@ class PythonREPLTool(BaseTool):
         if not code:
             return "Error: No python code provided."
             
+        # Read sandbox config
+        import json
+        from core.paths import get_data_path
+        cwd = None
+        config_path = get_data_path("config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                if config.get("sandbox_mode", True):
+                    sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+                    os.makedirs(sandbox_dir, exist_ok=True)
+                    cwd = sandbox_dir
+            except Exception:
+                pass
+
         # Create a temporary file to run the python code cleanly
-        # This helps with multi-line statements and proper traceback
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as temp:
+        # Use Sandbox dir if available
+        temp_dir = cwd if cwd else None
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir=temp_dir) as temp:
             temp.write(code)
             temp_path = temp.name
 
@@ -45,7 +62,8 @@ class PythonREPLTool(BaseTool):
                 ["python3", temp_path],
                 capture_output=True,
                 text=True,
-                timeout=60
+                timeout=60,
+                cwd=cwd
             )
             
             output = ""

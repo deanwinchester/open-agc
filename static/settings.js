@@ -45,6 +45,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
             document.getElementById("sandbox-mode-toggle").checked = data.sandbox_mode ?? true;
             document.getElementById("sandbox-dir-input").value = data.sandbox_dir || "";
+            document.getElementById("heartbeat-toggle").checked = data.heartbeat_enabled ?? false;
 
         } catch (err) {
             console.error("Failed to load config:", err);
@@ -200,7 +201,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 .split(",").map(s => s.trim()).filter(s => s.length > 0),
             disabled_skills: [],
             sandbox_mode: document.getElementById("sandbox-mode-toggle").checked,
-            sandbox_dir: document.getElementById("sandbox-dir-input").value.trim()
+            sandbox_dir: document.getElementById("sandbox-dir-input").value.trim(),
+            heartbeat_enabled: document.getElementById("heartbeat-toggle").checked,
+            heartbeat_interval: 60
         };
 
         providers.forEach(p => {

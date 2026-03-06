@@ -10,15 +10,17 @@ from pydantic import BaseModel
 from typing import List, Dict, Optional
 from dotenv import load_dotenv, set_key
 
+from core.paths import get_data_path, get_skills_dir
+
 # Load environment variables
-load_dotenv()
+env_file = get_data_path(".env")
+load_dotenv(env_file)
 
 from agent.agent import OpenAGCAgent
 
 app = FastAPI(title="Open-AGC UI Server")
 
 # Initialize Database
-from core.paths import get_data_path, get_skills_dir
 DB_PATH = get_data_path("chat_history.db")
 
 def init_db():
@@ -52,6 +54,18 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def read_index():
     return FileResponse("static/index.html")
 
+@app.get("/api/files/{file_path:path}")
+async def get_sandbox_file(file_path: str):
+    """Serve files dynamically from the current sandbox directory to the UI."""
+    config = load_config()
+    sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+    full_path = os.path.abspath(os.path.join(sandbox_dir, file_path))
+    if not full_path.startswith(os.path.abspath(sandbox_dir)):
+        raise HTTPException(status_code=403, detail="Forbidden directory traversal")
+    if not os.path.exists(full_path) or not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(full_path)
+
 # --- Configuration System ---
 CONFIG_PATH = get_data_path("config.json")
 
@@ -68,7 +82,9 @@ def load_config() -> dict:
         "fallback_models": [],
         "disabled_skills": [],
         "sandbox_mode": True,
-        "sandbox_dir": os.path.abspath(os.path.join(os.getcwd(), "workspace"))
+        "sandbox_dir": os.path.abspath(os.path.join(os.getcwd(), "workspace")),
+        "heartbeat_enabled": False,
+        "heartbeat_interval": 60
     }
 
 class ConfigUpdate(BaseModel):
@@ -78,6 +94,8 @@ class ConfigUpdate(BaseModel):
     disabled_skills: List[str]
     sandbox_mode: bool
     sandbox_dir: str
+    heartbeat_enabled: bool
+    heartbeat_interval: int
 
 @app.get("/api/settings")
 async def get_settings():
@@ -98,14 +116,16 @@ async def get_settings():
         "fallback_models": config.get("fallback_models", []),
         "disabled_skills": config.get("disabled_skills", []),
         "sandbox_mode": config.get("sandbox_mode", True),
-        "sandbox_dir": config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+        "sandbox_dir": config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace"))),
+        "heartbeat_enabled": config.get("heartbeat_enabled", False),
+        "heartbeat_interval": config.get("heartbeat_interval", 60)
     }
 
 @app.post("/api/settings")
 async def update_settings(config_update: ConfigUpdate):
     """Update JSON config and set env vars dynamically."""
     config = load_config()
-    env_file = ".env"
+    env_file = get_data_path(".env")
     if not os.path.exists(env_file):
         open(env_file, 'a').close()
 
@@ -144,6 +164,8 @@ async def update_settings(config_update: ConfigUpdate):
         config["disabled_skills"] = config_update.disabled_skills
         config["sandbox_mode"] = config_update.sandbox_mode
         config["sandbox_dir"] = os.path.abspath(config_update.sandbox_dir) if config_update.sandbox_dir else os.path.abspath(os.path.join(os.getcwd(), "workspace"))
+        config["heartbeat_enabled"] = config_update.heartbeat_enabled
+        config["heartbeat_interval"] = config_update.heartbeat_interval
         
         set_key(env_file, "DEFAULT_MODEL", config_update.default_model)
         os.environ["DEFAULT_MODEL"] = config_update.default_model
@@ -334,124 +356,151 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"Failed to load chat history: {e}")
         session_history = []
     last_query = ""  # Track last query for retry
+    agent_is_running = False
     
-    async def run_agent_with_progress(query: str, model: str = None):
+    async def run_agent_with_progress(query: str, model: str = None, is_heartbeat: bool = False):
         """Run agent in a thread and push progress to WebSocket via a Queue."""
-        nonlocal session_history, last_query
-        last_query = query
-        
-        progress_queue = asyncio.Queue()
-        
-        def progress_callback(event: dict):
-            """Thread-safe: put progress events into the async queue."""
-            progress_queue.put_nowait(event)
-        
-        current_model = model or os.getenv("DEFAULT_MODEL", "gpt-4o")
-        agent = OpenAGCAgent(model=current_model)
-        
-        # Inject previous session history
-        if session_history:
-            agent.messages.extend(session_history)
-        
-        loop = asyncio.get_event_loop()
-        
-        # Start agent in background thread
-        import concurrent.futures
-        agent_future = loop.run_in_executor(
-            None, 
-            lambda: agent.run_turn(query, False, progress_callback)
-        )
-        
-        receive_task = asyncio.create_task(websocket.receive_text())
-        progress_task = asyncio.create_task(progress_queue.get())
-        
-        # Poll for progress events while simultaneously listening for interrupt messages
-        while not agent_future.done():
-            done, pending = await asyncio.wait(
-                [receive_task, progress_task],
-                timeout=0.2,
-                return_when=asyncio.FIRST_COMPLETED
+        nonlocal session_history, last_query, agent_is_running
+        if not is_heartbeat:
+            last_query = query
+            
+        if agent_is_running:
+            return "BUSY"
+            
+        agent_is_running = True
+        try:
+            progress_queue = asyncio.Queue()
+            has_taken_action = False
+            
+            def progress_callback(event: dict):
+                nonlocal has_taken_action
+                """Thread-safe: put progress events into the async queue."""
+                if is_heartbeat:
+                    if event.get("event") == "tool_start":
+                        has_taken_action = True
+                    # If heartbeat and no tool action taken yet, suppress UI
+                    if not has_taken_action and event.get("event") in ["thinking", "model_switched"]:
+                        return
+                progress_queue.put_nowait(event)
+            
+            current_model = model or os.getenv("DEFAULT_MODEL", "gpt-4o")
+            agent = OpenAGCAgent(model=current_model)
+            
+            # Inject previous session history
+            if session_history:
+                agent.messages.extend(session_history)
+            
+            loop = asyncio.get_event_loop()
+            
+            import concurrent.futures
+            agent_future = loop.run_in_executor(
+                None, 
+                lambda: agent.run_turn(query, False, progress_callback)
             )
             
-            if receive_task in done:
+            receive_task = asyncio.create_task(websocket.receive_text())
+            progress_task = asyncio.create_task(progress_queue.get())
+            
+            while not agent_future.done():
+                done, pending = await asyncio.wait(
+                    [receive_task, progress_task],
+                    timeout=0.2,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                if receive_task in done:
+                    try:
+                        data = receive_task.result()
+                        user_msg = json.loads(data)
+                        if user_msg.get("type") == "interrupt":
+                            agent.is_interrupted = True
+                        receive_task = asyncio.create_task(websocket.receive_text())
+                    except Exception:
+                        receive_task = asyncio.create_task(asyncio.sleep(3600))
+                        
+                if progress_task in done:
+                    try:
+                        event = progress_task.result()
+                        await websocket.send_json({
+                            "type": "progress",
+                            **event
+                        })
+                        progress_task = asyncio.create_task(progress_queue.get())
+                    except Exception:
+                        progress_task = asyncio.create_task(asyncio.sleep(3600))
+            
+            receive_task.cancel()
+            progress_task.cancel()
+            
+            while not progress_queue.empty():
                 try:
-                    data = receive_task.result()
-                    user_msg = json.loads(data)
-                    if user_msg.get("type") == "interrupt":
-                        agent.is_interrupted = True
-                    receive_task = asyncio.create_task(websocket.receive_text())
-                except Exception:
-                    # Connection might be closed, stop waiting for it
-                    receive_task = asyncio.create_task(asyncio.sleep(3600))
-                    
-            if progress_task in done:
-                try:
-                    event = progress_task.result()
+                    event = progress_queue.get_nowait()
                     await websocket.send_json({
                         "type": "progress",
                         **event
                     })
-                    progress_task = asyncio.create_task(progress_queue.get())
                 except Exception:
-                    progress_task = asyncio.create_task(asyncio.sleep(3600))
-        
-        # Cleanup pending tasks
-        receive_task.cancel()
-        progress_task.cancel()
-        
-        # Drain remaining progress events
-        while not progress_queue.empty():
-            try:
-                event = progress_queue.get_nowait()
-                await websocket.send_json({
-                    "type": "progress",
-                    **event
-                })
-            except Exception:
-                break
-        
-        # Get the result
-        response = await agent_future
-        
-        # Update session history
-        session_history = agent.messages[1:]
-        
-        return response
+                    break
+            
+            response = await agent_future
+            session_history = agent.messages[1:]
+            return response
+        finally:
+            agent_is_running = False
 
     try:
         while True:
-            # Wait for user message
-            data = await websocket.receive_text()
-            user_msg = json.loads(data)
-            msg_type = user_msg.get("type", "query")
-            
-            if msg_type == "retry":
-                # Retry: re-send the last query (optionally with a different model)
-                query = user_msg.get("query", last_query)
-                retry_model = user_msg.get("model", None)
-                
-                if not query.strip():
-                    continue
-            else:
-                # Normal query
-                query = user_msg.get("query", "")
-                retry_model = None
-                
-                if not query.strip():
-                    continue
-                    
-                # Save user message to DB
-                save_message("user", query)
-
-            # Send immediate acknowledgment
-            await websocket.send_json({
-                "type": "status",
-                "message": "Agent is thinking..."
-            })
+            config = load_config()
+            heartbeat_enabled = config.get("heartbeat_enabled", False)
+            heartbeat_interval = config.get("heartbeat_interval", 60)
             
             try:
-                response = await run_agent_with_progress(query, retry_model)
+                # Wait for user message with timeout for heartbeat
+                timeout = heartbeat_interval if heartbeat_enabled else None
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=timeout)
+                user_msg = json.loads(data)
+                msg_type = user_msg.get("type", "query")
                 
+                if msg_type == "retry":
+                    query = user_msg.get("query", last_query)
+                    retry_model = user_msg.get("model", None)
+                    if not query.strip():
+                        continue
+                else:
+                    query = user_msg.get("query", "")
+                    retry_model = None
+                    if not query.strip():
+                        continue
+                        
+                    # Save user message to DB
+                    save_message("user", query)
+
+                is_heartbeat = False
+            except asyncio.TimeoutError:
+                if not heartbeat_enabled or agent_is_running:
+                    continue
+                # Trigger Heartbeat
+                query = "【系统指令】后台巡视时间已到。请检查系统状态、后台任务或之前的计划是否需要继续。如果一切正常无需操作，请且仅回复 'HEARTBEAT_OK'。"
+                retry_model = None
+                is_heartbeat = True
+
+            if not is_heartbeat:
+                # Send immediate acknowledgment
+                await websocket.send_json({
+                    "type": "status",
+                    "message": "Agent is thinking..."
+                })
+            
+            try:
+                response = await run_agent_with_progress(query, retry_model, is_heartbeat=is_heartbeat)
+                
+                if response == "BUSY":
+                    continue
+                    
+                if is_heartbeat and response and response.strip() == "HEARTBEAT_OK":
+                    # Silent heartbeat, do nothing
+                    continue
+                    
                 # Save agent response to DB
                 save_message("agent", response)
 
@@ -468,7 +517,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_json({
                     "type": "error",
                     "content": error_msg,
-                    "original_query": query
+                    "original_query": query if not is_heartbeat else ""
                 })
                 
     except WebSocketDisconnect:
