@@ -44,3 +44,6 @@ MANIFEST
 .vscode/
 *.swp
 *.swo
+
+# Sandbox
+workspace/
