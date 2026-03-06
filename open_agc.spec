@@ -45,7 +45,7 @@ datas += litellm_datas
 datas += openai_datas
 
 a = Analysis(
-    ['launcher.py'],
+    ['gui_app.py'],
     pathex=[],
     binaries=[],
     datas=datas,
@@ -92,6 +92,10 @@ a = Analysis(
         'tools.memory',
         'tools.web_search',
         'tools.system_mac',
+        'webview',
+        'webview.platforms.cocoa',
+        'webview.platforms.winforms',
+        'webview.platforms.qt',
     ] + litellm_submodules,
     hookspath=[],
     hooksconfig={},

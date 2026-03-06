@@ -55,7 +55,10 @@ WARNING_PATTERNS = [
 class SkillManager:
     """Manages skill lifecycle: import, validate, learn, optimize."""
     
-    def __init__(self, skills_dir: str = "skills"):
+    def __init__(self, skills_dir: str = None):
+        if skills_dir is None:
+            from core.paths import get_skills_dir
+            skills_dir = get_skills_dir()
         self.skills_dir = skills_dir
         os.makedirs(skills_dir, exist_ok=True)
     

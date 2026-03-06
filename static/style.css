@@ -541,6 +541,16 @@ textarea {
     transform: none;
 }
 
+.stop-btn {
+    background: var(--error);
+    color: #fff;
+}
+
+.stop-btn:hover {
+    background: #dc2626;
+    transform: scale(1.05);
+}
+
 /* Modal / Settings Panel */
 .modal-overlay {
     position: fixed;

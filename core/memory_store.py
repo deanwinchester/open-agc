@@ -83,7 +83,10 @@ class MemoryStore:
     Supports memory hierarchy: core, working, episode.
     """
 
-    def __init__(self, db_path: str = "data/memory.db"):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            from core.paths import get_data_path
+            db_path = get_data_path("memory.db")
         os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else ".", exist_ok=True)
         self.db_path = db_path
         self._init_db()

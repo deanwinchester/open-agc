@@ -1,5 +1,6 @@
 import os
 from core.memory_store import MemoryStore, migrate_from_markdown
+from core.paths import get_data_path
 
 
 class MemoryTool:
@@ -8,11 +9,13 @@ class MemoryTool:
     支持记忆层次：core（核心事实）、working（工作记忆）、episode（事件记录）。
     """
 
-    def __init__(self, db_path: str = "data/memory.db"):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            db_path = get_data_path("memory.db")
         self.store = MemoryStore(db_path=db_path)
 
         # Migrate from old markdown format if it exists
-        old_md_path = "data/memory.md"
+        old_md_path = get_data_path("memory.md")
         if os.path.exists(old_md_path):
             migrate_from_markdown(old_md_path, self.store)
 

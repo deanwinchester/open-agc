@@ -26,10 +26,31 @@ class ReadFileTool(BaseTool):
         }
 
     def execute(self, **kwargs) -> str:
+        import json
+        from core.paths import get_data_path
+        
         path = kwargs.get("path")
         if not path:
             return "Error: No file path provided."
             
+        # Sandbox Mode Enforcement
+        config_path = get_data_path("config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                
+                if config.get("sandbox_mode", True):
+                    sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+                    os.makedirs(sandbox_dir, exist_ok=True)
+                    abs_path = os.path.abspath(path)
+                    
+                    # Ensure path is within sandbox_dir
+                    if os.path.commonpath([sandbox_dir, abs_path]) != sandbox_dir:
+                        return f"Sandbox Security Error: Access to path '{path}' is denied. It is outside the permitted sandbox directory ({sandbox_dir})."
+            except Exception as e:
+                print(f"[ReadFileTool] Warning checking sandbox config: {e}")
+                
         try:
             with open(path, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -65,11 +86,32 @@ class WriteFileTool(BaseTool):
         }
 
     def execute(self, **kwargs) -> str:
+        import json
+        from core.paths import get_data_path
+        
         path = kwargs.get("path")
         content = kwargs.get("content", "")
         if not path:
             return "Error: No file path provided."
             
+        # Sandbox Mode Enforcement
+        config_path = get_data_path("config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                
+                if config.get("sandbox_mode", True):
+                    sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+                    os.makedirs(sandbox_dir, exist_ok=True)
+                    abs_path = os.path.abspath(path)
+                    
+                    # Ensure path is within sandbox_dir
+                    if os.path.commonpath([sandbox_dir, abs_path]) != sandbox_dir:
+                        return f"Sandbox Security Error: Write access to path '{path}' is denied. It is outside the permitted sandbox directory ({sandbox_dir})."
+            except Exception as e:
+                print(f"[WriteFileTool] Warning checking sandbox config: {e}")
+                
         try:
             # Ensure directory exists
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)

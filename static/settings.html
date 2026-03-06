@@ -127,7 +127,24 @@
     <!-- Sticky Save Bar -->
     <footer class="save-bar">
         <div class="save-bar-inner">
-            <div id="save-status" class="save-status"></div>
+            <div id="save-status" class="save-status">
+                <div class="settings-section">
+                    <h3><span class="icon">📁</span> Sandbox Security</h3>
+                    <div class="form-group checkbox-group">
+                        <label>
+                            <input type="checkbox" id="sandbox-mode-toggle" checked>
+                            Enable Sandbox Mode (Isolate file access to a specific directory)
+                        </label>
+                    </div>
+                    <div class="form-group" id="sandbox-dir-group">
+                        <label for="sandbox-dir-input">Sandbox Directory Path</label>
+                        <input type="text" id="sandbox-dir-input" class="form-control"
+                            placeholder="/Absolute/path/to/workspace">
+                        <div class="setting-hint">Agent will only be able to read/write files and execute commands
+                            within this directory.</div>
+                    </div>
+                </div>
+            </div>
             <button id="save-settings-btn" class="btn-save">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
@@ -152,6 +169,21 @@
             <div class="modal-actions">
                 <button class="btn-secondary" id="perm-modal-close">关闭</button>
                 <button class="btn-primary" id="perm-modal-copy">复制命令</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Skill Dialog -->
+    <div class="modal-overlay" id="edit-skill-modal">
+        <div class="modal-box" style="max-width: 600px; width: 90%;">
+            <h3>✏️ 编辑技能: <span id="edit-skill-filename"></span></h3>
+            <div class="field" style="margin-top: 1rem;">
+                <textarea id="edit-skill-content" class="input-styled"
+                    style="height: 300px; font-family: monospace; resize: vertical;" spellcheck="false"></textarea>
+            </div>
+            <div class="modal-actions" style="margin-top: 1rem;">
+                <button class="btn-secondary" id="edit-skill-close">取消</button>
+                <button class="btn-primary" id="edit-skill-save">保存更改</button>
             </div>
         </div>
     </div>

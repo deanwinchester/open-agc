@@ -7,7 +7,8 @@ from typing import List, Dict, Any, Optional, Tuple
 # litellm.set_verbose = True
 
 def load_config() -> dict:
-    config_path = "data/config.json"
+    from core.paths import get_data_path
+    config_path = get_data_path("config.json")
     if os.path.exists(config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as f:

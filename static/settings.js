@@ -43,6 +43,9 @@ document.addEventListener("DOMContentLoaded", () => {
             buildModelSelection(data);
             loadSkillsConfig(data.disabled_skills || []);
 
+            document.getElementById("sandbox-mode-toggle").checked = data.sandbox_mode ?? true;
+            document.getElementById("sandbox-dir-input").value = data.sandbox_dir || "";
+
         } catch (err) {
             console.error("Failed to load config:", err);
         }
@@ -155,19 +158,30 @@ document.addEventListener("DOMContentLoaded", () => {
             data.skills.forEach(s => {
                 const isChecked = s.enabled ? "checked" : "";
                 const icon = s.type === "md" ? "📄" : "🐍";
+                const displayName = s.name && s.name !== "undefined" ? s.name : (s.filename || "Undefined Skill");
+                const skillLabel = s.type === 'md' ? 'Markdown Prompt' : '大模型技能';
+
                 const div = document.createElement("div");
                 div.className = "skill-row";
                 div.innerHTML = `
                     <div class="skill-info">
-                        <strong>${icon} ${s.name}</strong>
-                        <small>${s.type === 'md' ? 'Markdown Skill' : 'Python Plugin'}</small>
+                        <strong>${icon} ${displayName}</strong>
+                        <small>${skillLabel}</small>
                     </div>
-                    <label class="switch">
-                        <input type="checkbox" class="skill-toggle" data-name="${s.name}" ${isChecked}>
-                        <span class="slider"></span>
-                    </label>
+                    <div class="skill-actions" style="display:flex; align-items:center; gap: 0.8rem;">
+                        <button class="btn-secondary btn-edit-skill" style="padding: 0.2rem 0.6rem; font-size: 0.85rem;" data-filename="${s.filename}">编辑</button>
+                        <label class="switch">
+                            <input type="checkbox" class="skill-toggle" data-name="${s.filename || s.name}" ${isChecked}>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
                 `;
                 container.appendChild(div);
+            });
+
+            // Bind edit buttons
+            container.querySelectorAll('.btn-edit-skill').forEach(btn => {
+                btn.addEventListener('click', () => openEditSkillModal(btn.dataset.filename));
             });
         } catch (e) {
             container.innerHTML = '<p style="color:#ef4444;text-align:center;padding:2rem;">加载技能列表失败</p>';
@@ -184,7 +198,9 @@ document.addEventListener("DOMContentLoaded", () => {
             default_model: document.getElementById("model-name-select").value || "gpt-4o",
             fallback_models: document.getElementById("fallback-models-input").value
                 .split(",").map(s => s.trim()).filter(s => s.length > 0),
-            disabled_skills: []
+            disabled_skills: [],
+            sandbox_mode: document.getElementById("sandbox-mode-toggle").checked,
+            sandbox_dir: document.getElementById("sandbox-dir-input").value.trim()
         };
 
         providers.forEach(p => {
@@ -229,6 +245,71 @@ document.addEventListener("DOMContentLoaded", () => {
             statusEl.className = "save-status error";
         } finally {
             saveBtn.disabled = false;
+        }
+    });
+
+    // ── Edit Skill Modal ──
+    const editSkillModal = document.getElementById("edit-skill-modal");
+    const editSkillFilename = document.getElementById("edit-skill-filename");
+    const editSkillContent = document.getElementById("edit-skill-content");
+    const editSkillClose = document.getElementById("edit-skill-close");
+    const editSkillSave = document.getElementById("edit-skill-save");
+
+    async function openEditSkillModal(filename) {
+        if (!filename) return;
+        editSkillFilename.textContent = filename;
+        editSkillContent.value = "正在读取内容...";
+        editSkillModal.classList.add("show");
+
+        try {
+            const res = await fetch(`/api/skills/${encodeURIComponent(filename)}`);
+            if (res.ok) {
+                const data = await res.json();
+                editSkillContent.value = data.content || "";
+            } else {
+                editSkillContent.value = "读取技能内容失败。";
+            }
+        } catch (err) {
+            editSkillContent.value = "读取技能内容发生网络错误。";
+        }
+    }
+
+    editSkillClose.addEventListener("click", () => {
+        editSkillModal.classList.remove("show");
+    });
+
+    editSkillSave.addEventListener("click", async () => {
+        const filename = editSkillFilename.textContent;
+        const content = editSkillContent.value;
+        const ogText = editSkillSave.textContent;
+
+        editSkillSave.textContent = "保存中...";
+        editSkillSave.disabled = true;
+
+        try {
+            const res = await fetch("/api/skills/import", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ filename, content, force: true })
+            });
+            const data = await res.json();
+
+            if (data.success) {
+                editSkillSave.textContent = "✓ 已保存";
+                setTimeout(() => {
+                    editSkillModal.classList.remove("show");
+                    editSkillSave.textContent = ogText;
+                    editSkillSave.disabled = false;
+                }, 1000);
+            } else {
+                alert("保存失败: " + data.message);
+                editSkillSave.textContent = ogText;
+                editSkillSave.disabled = false;
+            }
+        } catch (e) {
+            alert("保存时发生网络错误");
+            editSkillSave.textContent = ogText;
+            editSkillSave.disabled = false;
         }
     });
 

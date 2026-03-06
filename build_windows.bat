@@ -28,6 +28,7 @@ call build_venv\Scripts\activate.bat
 pip install --upgrade pip -q
 pip install pyinstaller -q
 pip install -r requirements.txt -q
+pip install pywebview -q
 
 REM ---- 2. Build with PyInstaller ----
 echo [2/4] Building with PyInstaller...
@@ -38,6 +39,7 @@ pyinstaller ^
     --noconsole ^
     --noconfirm ^
     --clean ^
+    --icon "static\icon.ico" ^
     --add-data "static;static" ^
     --add-data "data;data" ^
     --add-data "skills;skills" ^
@@ -82,7 +84,9 @@ pyinstaller ^
     --hidden-import tools.memory ^
     --hidden-import tools.web_search ^
     --hidden-import tools.system_mac ^
-    launcher.py
+    --hidden-import webview ^
+    --hidden-import webview.platforms.winforms ^
+    gui_app.py
 
 if errorlevel 1 (
     echo ERROR: PyInstaller build failed!

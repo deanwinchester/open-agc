@@ -18,7 +18,8 @@ from agent.agent import OpenAGCAgent
 app = FastAPI(title="Open-AGC UI Server")
 
 # Initialize Database
-DB_PATH = "data/chat_history.db"
+from core.paths import get_data_path, get_skills_dir
+DB_PATH = get_data_path("chat_history.db")
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -52,7 +53,7 @@ async def read_index():
     return FileResponse("static/index.html")
 
 # --- Configuration System ---
-CONFIG_PATH = "data/config.json"
+CONFIG_PATH = get_data_path("config.json")
 
 def load_config() -> dict:
     if os.path.exists(CONFIG_PATH):
@@ -65,7 +66,9 @@ def load_config() -> dict:
         "api_keys": {},
         "default_model": "gpt-4o",
         "fallback_models": [],
-        "disabled_skills": []
+        "disabled_skills": [],
+        "sandbox_mode": True,
+        "sandbox_dir": os.path.abspath(os.path.join(os.getcwd(), "workspace"))
     }
 
 class ConfigUpdate(BaseModel):
@@ -73,6 +76,8 @@ class ConfigUpdate(BaseModel):
     default_model: str
     fallback_models: List[str]
     disabled_skills: List[str]
+    sandbox_mode: bool
+    sandbox_dir: str
 
 @app.get("/api/settings")
 async def get_settings():
@@ -91,7 +96,9 @@ async def get_settings():
         "api_keys_masked": masked_keys,
         "default_model": config.get("default_model", "gpt-4o"),
         "fallback_models": config.get("fallback_models", []),
-        "disabled_skills": config.get("disabled_skills", [])
+        "disabled_skills": config.get("disabled_skills", []),
+        "sandbox_mode": config.get("sandbox_mode", True),
+        "sandbox_dir": config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
     }
 
 @app.post("/api/settings")
@@ -135,6 +142,8 @@ async def update_settings(config_update: ConfigUpdate):
         config["default_model"] = config_update.default_model
         config["fallback_models"] = config_update.fallback_models
         config["disabled_skills"] = config_update.disabled_skills
+        config["sandbox_mode"] = config_update.sandbox_mode
+        config["sandbox_dir"] = os.path.abspath(config_update.sandbox_dir) if config_update.sandbox_dir else os.path.abspath(os.path.join(os.getcwd(), "workspace"))
         
         set_key(env_file, "DEFAULT_MODEL", config_update.default_model)
         os.environ["DEFAULT_MODEL"] = config_update.default_model
@@ -246,7 +255,7 @@ async def validate_skill(data: dict):
 @app.get("/api/skills/{filename}")
 async def get_skill_content(filename: str):
     """Get the content of a specific skill."""
-    filepath = os.path.join("skills", filename)
+    filepath = os.path.join(get_skills_dir(), filename)
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="Skill not found")
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -267,7 +276,7 @@ async def delete_skill(filename: str):
 async def get_memories(category: str = None, query: str = None):
     """Search or list memories."""
     from core.memory_store import MemoryStore
-    store = MemoryStore(db_path="data/memory.db")
+    store = MemoryStore(db_path=get_data_path("memory.db"))
     
     if query:
         results = store.search_memories(query, top_k=10, category=category)
@@ -281,7 +290,7 @@ async def get_memories(category: str = None, query: str = None):
 async def get_memory_categories():
     """Get memory category summary."""
     from core.memory_store import MemoryStore
-    store = MemoryStore(db_path="data/memory.db")
+    store = MemoryStore(db_path=get_data_path("memory.db"))
     return {"categories": store.get_categories_summary()}
 
 @app.get("/api/history")
@@ -304,7 +313,26 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     
     # We will maintain conversation history for this session here
-    session_history = []
+    # Load recent chat history from DB instead of starting empty
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        # Load the last 20 messages for working context
+        cursor.execute("SELECT role, content FROM (SELECT * FROM messages ORDER BY id DESC LIMIT 20) ORDER BY id ASC")
+        rows = cursor.fetchall()
+        conn.close()
+        
+        # LLMs strict require 'assistant' not 'agent'
+        session_history = []
+        for row in rows:
+            role = row["role"]
+            if role == "agent":
+                role = "assistant"
+            session_history.append({"role": role, "content": row["content"]})
+    except Exception as e:
+        print(f"Failed to load chat history: {e}")
+        session_history = []
     last_query = ""  # Track last query for retry
     
     async def run_agent_with_progress(query: str, model: str = None):
@@ -334,19 +362,42 @@ async def websocket_endpoint(websocket: WebSocket):
             lambda: agent.run_turn(query, False, progress_callback)
         )
         
-        # Poll for progress events while agent is running
+        receive_task = asyncio.create_task(websocket.receive_text())
+        progress_task = asyncio.create_task(progress_queue.get())
+        
+        # Poll for progress events while simultaneously listening for interrupt messages
         while not agent_future.done():
-            try:
-                event = await asyncio.wait_for(progress_queue.get(), timeout=0.2)
-                # Forward progress to client
-                await websocket.send_json({
-                    "type": "progress",
-                    **event
-                })
-            except asyncio.TimeoutError:
-                continue
-            except Exception:
-                break
+            done, pending = await asyncio.wait(
+                [receive_task, progress_task],
+                timeout=0.2,
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            
+            if receive_task in done:
+                try:
+                    data = receive_task.result()
+                    user_msg = json.loads(data)
+                    if user_msg.get("type") == "interrupt":
+                        agent.is_interrupted = True
+                    receive_task = asyncio.create_task(websocket.receive_text())
+                except Exception:
+                    # Connection might be closed, stop waiting for it
+                    receive_task = asyncio.create_task(asyncio.sleep(3600))
+                    
+            if progress_task in done:
+                try:
+                    event = progress_task.result()
+                    await websocket.send_json({
+                        "type": "progress",
+                        **event
+                    })
+                    progress_task = asyncio.create_task(progress_queue.get())
+                except Exception:
+                    progress_task = asyncio.create_task(asyncio.sleep(3600))
+        
+        # Cleanup pending tasks
+        receive_task.cancel()
+        progress_task.cancel()
         
         # Drain remaining progress events
         while not progress_queue.empty():

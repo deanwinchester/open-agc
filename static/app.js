@@ -3,12 +3,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const chatContainer = document.getElementById('chat-container');
     const messageInput = document.getElementById('message-input');
     const sendBtn = document.getElementById('send-btn');
+    const stopBtn = document.getElementById('stop-btn');
     const themeToggle = document.getElementById('theme-toggle');
     const htmlElement = document.documentElement;
     const currentModelBadge = document.getElementById('current-model-badge');
-
-    // Skills Elements
-    const skillsContainer = document.getElementById('skills-container');
 
     // Settings Page Transition
     const settingsBtn = document.getElementById('settings-btn');
@@ -95,24 +93,6 @@ document.addEventListener('DOMContentLoaded', () => {
             if (settingsRes.ok) {
                 const data = await settingsRes.json();
                 currentModelBadge.textContent = data.default_model || 'gpt-4o';
-            }
-
-            // Fetch Skills
-            const skillsRes = await fetch('/api/skills');
-            if (skillsRes.ok) {
-                const data = await skillsRes.json();
-                skillsContainer.innerHTML = '';
-                if (data.skills && data.skills.length > 0) {
-                    data.skills.forEach(skill => {
-                        const icon = skill.type === 'md' ? '📄' : '🐍';
-                        const el = document.createElement('div');
-                        el.className = 'skill-item';
-                        el.innerHTML = `<span>${icon}</span> <span>${skill.name}</span>`;
-                        skillsContainer.appendChild(el);
-                    });
-                } else {
-                    skillsContainer.innerHTML = `<div class="skill-item" style="color:var(--text-secondary);justify-content:center;">${currentLang === 'zh-CN' ? '暂无加载技能' : 'No skills loaded'}</div>`;
-                }
             }
 
             // Fetch Chat History
@@ -496,8 +476,16 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateInputState() {
         if (isAgentThinking) {
             messageInput.disabled = true;
+            sendBtn.style.display = 'none';
+            if (stopBtn) {
+                stopBtn.style.display = 'flex';
+                stopBtn.disabled = false;
+                stopBtn.style.opacity = '1';
+            }
         } else {
             messageInput.disabled = false;
+            sendBtn.style.display = 'flex';
+            if (stopBtn) stopBtn.style.display = 'none';
             if (isConnected) messageInput.focus();
         }
         sendBtn.disabled = !isConnected || messageInput.value.trim() === '';
@@ -588,6 +576,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Core Event Listeners
     sendBtn.addEventListener('click', handleSend);
+
+    if (stopBtn) {
+        stopBtn.addEventListener('click', () => {
+            if (ws && isConnected && isAgentThinking) {
+                ws.send(JSON.stringify({ type: "interrupt" }));
+                stopBtn.disabled = true;
+                stopBtn.style.opacity = '0.5';
+            }
+        });
+    }
 
     messageInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {

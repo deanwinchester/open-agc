@@ -1,6 +1,9 @@
 import json
 import threading
+import hashlib
 from typing import List, Dict, Any, Optional, Callable
+
+from core.paths import get_data_path, get_skills_dir
 
 from core.llm_client import LLMClient
 from core.memory_store import MemoryStore
@@ -11,6 +14,8 @@ from tools.computer import ComputerTool
 from tools.memory import MemoryTool
 from tools.web_search import WebSearchTool
 from tools.system_mac import MacSystemTool
+from tools.save_skill import SaveSkillTool
+from tools.browser import BrowserAutomationTool
 
 class OpenAGCAgent:
     """
@@ -22,7 +27,7 @@ class OpenAGCAgent:
         self.llm = LLMClient(default_model=model)
         # Load config to check disabled skills
         disabled_skills = []
-        config_path = "data/config.json"
+        config_path = get_data_path("config.json")
         import os
         if os.path.exists(config_path):
             try:
@@ -34,7 +39,7 @@ class OpenAGCAgent:
 
         # Load skills from the skills directory
         skills_text = ""
-        skills_dir = "skills"
+        skills_dir = get_skills_dir()
         if os.path.exists(skills_dir):
             for filename in os.listdir(skills_dir):
                 if filename in disabled_skills:
@@ -52,7 +57,18 @@ class OpenAGCAgent:
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         current_date = datetime.now().strftime("%Y年%m月%d日")
 
-        system_prompt = (
+        # Store config for later use
+        self.sandbox_dir = None
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    if config.get("sandbox_mode", True):
+                        self.sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+            except Exception: pass
+
+        self.skills_text = skills_text
+        self.system_prompt_base = (
             f"你是 Open-AGC，一个强大的 AI 智能体，能够执行终端命令、运行 Python 代码、"
             f"操作文件系统，以及物理控制电脑的鼠标和键盘。"
             f"始终使用你的工具来明确验证假设，不要凭空猜测。\n"
@@ -67,23 +83,22 @@ class OpenAGCAgent:
             f"相关记忆。你也可以使用 manage_memory 工具主动管理记忆："
             f"action='add' 保存重要事实、用户偏好和学到的知识；"
             f"action='search' 搜索过去的特定记忆。\n"
+            f"\n--- 技能学习系统 ---\n"
+            f"当你成功完成了一项之前未完成过的复杂任务，并且得到了用户的正面反馈（例如表扬、感谢等）时，你必须主动询问用户：'是否需要将这次完成任务的过程整理成一项新技能保存下来？'。如果用户明确同意，请使用 `save_learned_skill` 工具将过程整理成 Markdown 格式的技能并保存。\n"
         )
-        if skills_text:
-            system_prompt += f"\n以下是你已学会的技能，请遵循执行：\n{skills_text}"
-
+        
         # Initialize smart memory store (replaces old memory.md)
-        self.memory_store = MemoryStore(db_path="data/memory.db")
+        self.memory_store = MemoryStore(db_path=get_data_path("memory.db"))
 
-        self.system_prompt = system_prompt
         self.messages: List[Dict[str, Any]] = [
             {
                 "role": "system",
-                "content": system_prompt
+                "content": self._build_system_prompt()
             }
         ]
         
         # Instantiate tools (MemoryTool shares the same store)
-        memory_tool = MemoryTool(db_path="data/memory.db")
+        memory_tool = MemoryTool(db_path=get_data_path("memory.db"))
         self.available_tools = {
             "execute_shell": ShellTool(),
             "read_file": ReadFileTool(),
@@ -92,7 +107,9 @@ class OpenAGCAgent:
             "computer_control": ComputerTool(),
             "manage_memory": memory_tool,
             "search_web": WebSearchTool(),
-            "mac_system_action": MacSystemTool()
+            "mac_system_action": MacSystemTool(),
+            "save_learned_skill": SaveSkillTool(),
+            "browser_automation": BrowserAutomationTool(headless=False)
         }
 
         # Tool display names (Chinese-friendly)
@@ -104,11 +121,43 @@ class OpenAGCAgent:
             "computer_control": "操控电脑",
             "manage_memory": "管理记忆",
             "search_web": "搜索网页",
-            "mac_system_action": "系统操作"
+            "mac_system_action": "系统操作",
+            "save_learned_skill": "保存技能",
+            "browser_automation": "虚拟浏览器控制"
         }
         
         # Prepare OpenAI format tool schema
         self.tool_schemas = [tool.get_openai_schema() for tool in self.available_tools.values()]
+
+    def _build_system_prompt(self, memory_context: str = "") -> str:
+        # Inject current date/time so the LLM knows "today"
+        from datetime import datetime
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        current_date = datetime.now().strftime("%Y年%m月%d日")
+        
+        prompt = self.system_prompt_base.replace("{current_time}", current_time).replace("{current_date}", current_date)
+        
+        # Inject Episodic Memory Context
+        if memory_context:
+            prompt += f"\n--- 历史记忆回溯 (Episodic Memory) ---\n{memory_context}\n"
+            
+        # Optional: Inject MEMORY.md (Highest priority global rules)
+        import os
+        if self.sandbox_dir:
+            memory_file_path = os.path.join(self.sandbox_dir, "MEMORY.md")
+            if os.path.exists(memory_file_path):
+                try:
+                    with open(memory_file_path, "r", encoding="utf-8") as f:
+                        content = f.read().strip()
+                        if content:
+                            prompt += f"\n--- 全局核心设定与事实库 (MEMORY.md) ---\n{content}\n(注意：这是最高优先级的持久化记忆。当用户想传授新规定、修改基础偏好时，请使用 write_file 覆写沙箱目录下的 MEMORY.md)\n"
+                except Exception as e:
+                    print(f"Failed to read MEMORY.md: {e}")
+
+        if self.skills_text:
+            prompt += f"\n以下是你已学会的技能，请遵循执行：\n{self.skills_text}"
+            
+        return prompt
 
     def _auto_save_memories(self, user_input: str, assistant_reply: str):
         """
@@ -121,7 +170,7 @@ class OpenAGCAgent:
 
         extraction_prompt = (
             "你是一个记忆提取助手。根据以下对话内容，判断是否有值得记住的信息以供未来对话使用。\n"
-            "值得记住的：用户偏好、项目名称/细节、技术决策、个人事实、重要指令、学到的知识。\n"
+            "值得记住的：用户偏好、项目细节、个人事实、重要指令、过往完成的任务/创作的产出物(如写过的文章、做过的图表、历史分析)、学到的知识。\n"
             "不值得记住的：打招呼、关于通用知识的简单问答、闲聊。\n\n"
             f"用户：{user_input[:500]}\n\n"
             f"助手：{assistant_reply[:500]}\n\n"
@@ -195,31 +244,50 @@ class OpenAGCAgent:
                   {"event": "tool_done", "step": 1, "tool": "...", "result_preview": "..."}
                   {"event": "model_switched", "from": "...", "to": "..."}
         """
+        self.is_interrupted = False
         self.messages.append({"role": "user", "content": user_input})
         
         # Auto-retrieve relevant memories for this query
+        recent_context = "\n".join([m["content"] for m in self.messages[-3:] if m["role"] == "user"])
+        memory_context = ""
         try:
-            relevant_memories = self.memory_store.search_memories(user_input, top_k=3)
-            if relevant_memories:
-                memory_context = "\n".join(
-                    f"- [{m['category']}] {m['content']}" for m in relevant_memories
-                )
-                # Inject as a system message so the LLM sees it
-                self.messages.append({
-                    "role": "system",
-                    "content": f"--- RELEVANT MEMORIES ---\n{memory_context}"
-                })
+            results = self.memory_store.search(recent_context, top_k=3)
+            if results:
+                memory_context = "\n".join([f"- {r['content']} (Type: {r['memory_type']})" for r in results])
         except Exception as e:
-            print(f"[Agent] Memory retrieval error: {e}")
+            if verbose: print(f"Memory retrieval error: {e}")
+
+        # Ensure System Prompt is always fresh and has the latest MEMORY.md and episodic context
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = self._build_system_prompt(memory_context=memory_context)
+            
+        step = 1
         
-        max_iterations = 15
+        # Read agent config for limits
+        max_iterations = 30
+        config_path = get_data_path("config.json")
+        try:
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    max_iterations = config.get("max_iterations", 30)
+        except Exception:
+            pass
+
         current_iter = 0
         step_counter = 0
+
+        # Tool loop detection state
+        recent_tool_calls = []
+        MAX_REPEATED_TOOL_CALLS = 3
         
         while current_iter < max_iterations:
+            if self.is_interrupted:
+                return "Task interrupted by user."
+
             current_iter += 1
             if verbose:
-                print(f"[Agent Loop Iteration {current_iter}] Calling LLM...")
+                print(f"[Agent Loop Iteration {current_iter}/{max_iterations}] Calling LLM...")
             
             # Notify: thinking
             if progress_callback:
@@ -276,16 +344,47 @@ class OpenAGCAgent:
                         print(f"\n[Tool Execution] {function_name}({function_args})")
                     
                     tool_instance = self.available_tools.get(function_name)
-                    if tool_instance:
-                        try:
-                            result = tool_instance.execute(**function_args)
-                        except Exception as e:
-                            result = f"Error executing tool: {str(e)}"
+                    
+                    # Tool Loop Detection Check
+                    call_signature = f"{function_name}:{function_args}"
+                    call_hash = hashlib.md5(call_signature.encode('utf-8')).hexdigest()
+                    recent_tool_calls.append(call_hash)
+                    
+                    # Keep only the last 10 calls in the memory window
+                    if len(recent_tool_calls) > 10:
+                        recent_tool_calls.pop(0)
+                        
+                    # Check if the exact same tool with the exact same args was called too many times recently
+                    # This often happens when the agent gets stuck in an error loop
+                    loop_count = recent_tool_calls.count(call_hash)
+                    
+                    if loop_count >= MAX_REPEATED_TOOL_CALLS:
+                        result = (f"System Guard: Blocked due to critical loop. "
+                                  f"You have called `{function_name}` with these exact arguments {loop_count} times recently. "
+                                  f"You are likely stuck in a loop. YOU MUST change your approach or use different parameters.")
+                        if verbose:
+                            print(f"[Tool Loop Detected] Blocked {function_name}")
                     else:
-                        result = f"Error: Tool {function_name} not found."
+                        if tool_instance:
+                            try:
+                                result = tool_instance.execute(**function_args)
+                            except Exception as e:
+                                result = f"Error executing tool: {str(e)}"
+                        else:
+                            result = f"Error: Tool {function_name} not found."
                     
                     result_str = str(result)
                     
+                    # Telemetry & Context Compaction Logic
+                    # If the result is extremely long (e.g. reading a massive file), truncate it to save context window.
+                    MAX_RESULT_LENGTH = 15000
+                    if len(result_str) > MAX_RESULT_LENGTH:
+                        half_len = MAX_RESULT_LENGTH // 2
+                        result_str = (result_str[:half_len] + 
+                                      f"\n\n...[System Guard: Output truncated due to excessive length ({len(result_str)} chars). "
+                                      "Please use tools to filter or paginate the results (e.g., grep or head)]...\n\n" + 
+                                      result_str[-half_len:])
+
                     # Notify: tool done
                     if progress_callback:
                         # Truncate result for preview
@@ -296,7 +395,7 @@ class OpenAGCAgent:
                             "tool": function_name,
                             "tool_label": tool_label,
                             "result_preview": preview,
-                            "success": not result_str.startswith("Error")
+                            "success": not result_str.startswith("Error") and not result_str.startswith("System Guard")
                         })
                     
                     if verbose:
