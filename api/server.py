@@ -17,6 +17,9 @@ env_file = get_data_path(".env")
 load_dotenv(env_file)
 
 from agent.agent import OpenAGCAgent
+import litellm
+#litellm._turn_on_debug()
+#litellm.set_verbose = True  # Double down on verbosity for terminal logs
 
 app = FastAPI(title="Open-AGC UI Server")
 
@@ -393,10 +396,11 @@ async def websocket_endpoint(websocket: WebSocket):
         session_history = []
     last_query = ""  # Track last query for retry
     agent_is_running = False
+    receive_task = None # Persistent receive_task to avoid concurrency issues
     
     async def run_agent_with_progress(query: str, model: str = None, agent_profile_name: str = None, is_heartbeat: bool = False):
         """Run agent in a thread and push progress to WebSocket via a Queue."""
-        nonlocal session_history, last_query, agent_is_running
+        nonlocal session_history, last_query, agent_is_running, receive_task
         if not is_heartbeat:
             last_query = query
             
@@ -450,10 +454,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 lambda: agent.run_turn(query, False, progress_callback)
             )
             
-            receive_task = asyncio.create_task(websocket.receive_text())
             progress_task = asyncio.create_task(progress_queue.get())
             
+            # Handle agent progress and check for interruption
             while not agent_future.done():
+                if receive_task is None:
+                    receive_task = asyncio.create_task(websocket.receive_text())
+                
                 done, pending = await asyncio.wait(
                     [receive_task, progress_task],
                     timeout=0.2,
@@ -466,9 +473,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         user_msg = json.loads(data)
                         if user_msg.get("type") == "interrupt":
                             agent.is_interrupted = True
-                        receive_task = asyncio.create_task(websocket.receive_text())
+                        # Reset receive_task to None so it's recreated in next iteration
+                        receive_task = None
                     except Exception:
-                        receive_task = asyncio.create_task(asyncio.sleep(3600))
+                        receive_task = None
                         
                 if progress_task in done:
                     try:
@@ -479,9 +487,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
                         progress_task = asyncio.create_task(progress_queue.get())
                     except Exception:
+                        # Fallback to prevent infinite loop or dead task
                         progress_task = asyncio.create_task(asyncio.sleep(3600))
             
-            receive_task.cancel()
+            # Note: We do NOT cancel receive_task here if it's still pending
+            # as it will be reused in the outer loop.
             progress_task.cancel()
             
             while not progress_queue.empty():
@@ -508,8 +518,23 @@ async def websocket_endpoint(websocket: WebSocket):
             
             try:
                 # Wait for user message with timeout for heartbeat
+                if receive_task is None:
+                    receive_task = asyncio.create_task(websocket.receive_text())
+                
                 timeout = heartbeat_interval if heartbeat_enabled else None
-                data = await asyncio.wait_for(websocket.receive_text(), timeout=timeout)
+                
+                # Check if we already have a finished receive_task result from a previous agent run_turn interrupt
+                if receive_task.done():
+                    data = receive_task.result()
+                    receive_task = None 
+                else:
+                    done, pending = await asyncio.wait([receive_task], timeout=timeout)
+                    if receive_task in done:
+                        data = receive_task.result()
+                        receive_task = None
+                    else:
+                        raise asyncio.TimeoutError()
+                
                 user_msg = json.loads(data)
                 msg_type = user_msg.get("type", "query")
                 

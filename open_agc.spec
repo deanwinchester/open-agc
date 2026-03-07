@@ -15,6 +15,12 @@ block_cipher = None
 litellm_datas = collect_data_files('litellm', include_py_files=True)
 openai_datas = collect_data_files('openai', include_py_files=False)
 litellm_submodules = collect_submodules('litellm')
+tiktoken_datas = collect_data_files('tiktoken')
+tiktoken_submodules = collect_submodules('tiktoken')
+httpx_submodules = collect_submodules('httpx')
+httpcore_submodules = collect_submodules('httpcore')
+anyio_submodules = collect_submodules('anyio')
+aiohttp_submodules = collect_submodules('aiohttp')
 
 # ---- Collect data files selectively ----
 datas = [
@@ -43,6 +49,7 @@ if os.path.exists('.env.example'):
 # Merge package data files
 datas += litellm_datas
 datas += openai_datas
+datas += tiktoken_datas
 
 a = Analysis(
     ['gui_app.py'],
@@ -96,7 +103,7 @@ a = Analysis(
         'webview.platforms.cocoa',
         'webview.platforms.winforms',
         'webview.platforms.qt',
-    ] + litellm_submodules,
+    ] + litellm_submodules + tiktoken_submodules + httpx_submodules + httpcore_submodules + anyio_submodules + aiohttp_submodules + ['tiktoken_ext.openai_public'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

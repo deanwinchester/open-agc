@@ -15,7 +15,7 @@ def find_free_port():
         s.bind(('', 0))
         return s.getsockname()[1]
 
-def start_server(port=8000):
+def start_server(port):
     """Start the uvicorn server in a background thread."""
     import uvicorn
     import sys
@@ -58,7 +58,7 @@ def check_server_and_load(window, port):
     except Exception:
         pass
 
-def create_window(port=8000):
+def create_window(port):
     """Create a native window with the web UI embedded."""
     try:
         import webview

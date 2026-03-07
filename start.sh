@@ -30,5 +30,20 @@ if [ -f "requirements.txt" ]; then
 fi
 
 # Start the server
-echo "Starting the API server on http://localhost:8000 ..."
-python -m uvicorn api.server:app --host 0.0.0.0 --port 8000
+if [ -z "$PORT" ]; then
+    # Default to 8000, if occupied, find a free one
+    if lsof -Pi :8000 -sTCP:LISTEN -t >/dev/null ; then
+        echo "Port 8000 is occupied, finding a free port..."
+        PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()")
+    else
+        PORT=8000
+    fi
+fi
+
+echo "==================================="
+echo "Open-AGC is running at:"
+echo "http://localhost:$PORT"
+echo "==================================="
+
+# Use python3 consistently
+python3 -m uvicorn api.server:app --host 0.0.0.0 --port "$PORT"

@@ -25,7 +25,22 @@ if exist "requirements.txt" (
 )
 
 :: Start the server
-echo Starting the API server on http://localhost:8000 ...
-call python -m uvicorn api.server:app --host 0.0.0.0 --port 8000
+if "%PORT%"=="" (
+    :: Default to 8000, if occupied (approximated check via python), find a free one
+    call python -c "import socket; s=socket.socket(); s.bind(('', 8000)); s.close()" >nul 2>&1
+    if errorlevel 1 (
+        echo Port 8000 is occupied, finding a free port...
+        for /f %%i in ('python -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()"') do set PORT=%%i
+    ) else (
+        set PORT=8000
+    )
+)
+
+echo ===================================
+echo Open-AGC is running at:
+echo http://localhost:%PORT%
+echo ===================================
+
+call python -m uvicorn api.server:app --host 0.0.0.0 --port %PORT%
 
 pause
