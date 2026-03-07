@@ -72,6 +72,9 @@ pyinstaller ^
     --hidden-import duckduckgo_search ^
     --hidden-import requests ^
     --hidden-import bs4 ^
+    --collect-data litellm ^
+    --collect-data openai ^
+    --collect-submodules litellm ^
     --hidden-import httptools ^
     --hidden-import websockets ^
     --hidden-import api.server ^
