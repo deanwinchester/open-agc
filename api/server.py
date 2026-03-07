@@ -78,13 +78,19 @@ def load_config() -> dict:
             pass
     return {
         "api_keys": {},
-        "default_model": "gpt-4o",
+        "default_model": "moonshot/kimi-latest",
         "fallback_models": [],
         "disabled_skills": [],
         "sandbox_mode": True,
         "sandbox_dir": os.path.abspath(os.path.join(os.getcwd(), "workspace")),
         "heartbeat_enabled": False,
-        "heartbeat_interval": 60
+        "heartbeat_interval": 60,
+        "email_listener_enabled": False,
+        "email_account": "",
+        "email_password": "",
+        "email_imap_server": "",
+        "email_smtp_server": "",
+        "owner_email": ""
     }
 
 class ConfigUpdate(BaseModel):
@@ -96,6 +102,12 @@ class ConfigUpdate(BaseModel):
     sandbox_dir: str
     heartbeat_enabled: bool
     heartbeat_interval: int
+    email_listener_enabled: bool
+    email_account: str
+    email_password: str
+    email_imap_server: str
+    email_smtp_server: str
+    owner_email: str
 
 @app.get("/api/settings")
 async def get_settings():
@@ -112,13 +124,19 @@ async def get_settings():
             
     return {
         "api_keys_masked": masked_keys,
-        "default_model": config.get("default_model", "gpt-4o"),
+        "default_model": config.get("default_model", "moonshot/kimi-latest"),
         "fallback_models": config.get("fallback_models", []),
         "disabled_skills": config.get("disabled_skills", []),
         "sandbox_mode": config.get("sandbox_mode", True),
         "sandbox_dir": config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace"))),
         "heartbeat_enabled": config.get("heartbeat_enabled", False),
-        "heartbeat_interval": config.get("heartbeat_interval", 60)
+        "heartbeat_interval": config.get("heartbeat_interval", 60),
+        "email_listener_enabled": config.get("email_listener_enabled", False),
+        "email_account": config.get("email_account", ""),
+        "email_password": ("***" if config.get("email_password") else ""),
+        "email_imap_server": config.get("email_imap_server", ""),
+        "email_smtp_server": config.get("email_smtp_server", ""),
+        "owner_email": config.get("owner_email", "")
     }
 
 @app.post("/api/settings")
@@ -137,7 +155,8 @@ async def update_settings(config_update: ConfigUpdate):
         "deepseek": "DEEPSEEK_API_KEY",
         "kimi": "MOONSHOT_API_KEY",
         "glm": "ZAI_API_KEY",
-        "minimax": "MINIMAX_API_KEY"
+        "minimax": "MINIMAX_API_KEY",
+        "ollama": "OLLAMA_API_BASE"
     }
 
     try:
@@ -166,6 +185,13 @@ async def update_settings(config_update: ConfigUpdate):
         config["sandbox_dir"] = os.path.abspath(config_update.sandbox_dir) if config_update.sandbox_dir else os.path.abspath(os.path.join(os.getcwd(), "workspace"))
         config["heartbeat_enabled"] = config_update.heartbeat_enabled
         config["heartbeat_interval"] = config_update.heartbeat_interval
+        config["email_listener_enabled"] = config_update.email_listener_enabled
+        config["email_account"] = config_update.email_account
+        if config_update.email_password != "***":
+            config["email_password"] = config_update.email_password
+        config["email_imap_server"] = config_update.email_imap_server
+        config["email_smtp_server"] = config_update.email_smtp_server
+        config["owner_email"] = config_update.owner_email
         
         set_key(env_file, "DEFAULT_MODEL", config_update.default_model)
         os.environ["DEFAULT_MODEL"] = config_update.default_model
@@ -214,6 +240,15 @@ async def get_provider_models(provider: str):
                 if res.status_code == 200:
                     models = [f"deepseek/{m['id']}" for m in res.json().get("data", [])]
             except Exception: pass
+    elif provider == "ollama":
+        base_url = api_keys.get("ollama", "http://localhost:11434")
+        if not base_url.startswith("http"):
+            base_url = "http://" + base_url
+        try:
+            res = requests.get(f"{base_url.rstrip('/')}/api/tags", timeout=5)
+            if res.status_code == 200:
+                models = [f"ollama/{m['name']}" for m in res.json().get("models", [])]
+        except Exception: pass
 
     # Fallback default models if API call fails or key not set
     # Model names include litellm provider prefix as required by litellm.completion()
@@ -225,7 +260,8 @@ async def get_provider_models(provider: str):
             'gemini': ['gemini/gemini-1.5-pro', 'gemini/gemini-2.5-pro-preview-05-06'],
             'kimi': ['moonshot/kimi-k2.5', 'moonshot/kimi-latest', 'moonshot/moonshot-v1-8k', 'moonshot/moonshot-v1-32k', 'moonshot/moonshot-v1-128k'],
             'glm': ['zai/glm-4.7', 'zai/glm-4.5', 'zai/glm-4.5-flash', 'zai/glm-4.5-air'],
-            'minimax': ['minimax/MiniMax-M2.1']
+            'minimax': ['minimax/MiniMax-M2.1'],
+            'ollama': ['ollama/qwen2.5:7b', 'ollama/llama3.1:8b', 'ollama/deepseek-r1:8b', 'ollama/llama3.3:70b']
         }
         models = defaults.get(provider, [])
         
@@ -358,7 +394,7 @@ async def websocket_endpoint(websocket: WebSocket):
     last_query = ""  # Track last query for retry
     agent_is_running = False
     
-    async def run_agent_with_progress(query: str, model: str = None, is_heartbeat: bool = False):
+    async def run_agent_with_progress(query: str, model: str = None, agent_profile_name: str = None, is_heartbeat: bool = False):
         """Run agent in a thread and push progress to WebSocket via a Queue."""
         nonlocal session_history, last_query, agent_is_running
         if not is_heartbeat:
@@ -383,8 +419,24 @@ async def websocket_endpoint(websocket: WebSocket):
                         return
                 progress_queue.put_nowait(event)
             
-            current_model = model or os.getenv("DEFAULT_MODEL", "gpt-4o")
+            current_model = model or os.getenv("DEFAULT_MODEL", "moonshot/kimi-latest")
             agent = OpenAGCAgent(model=current_model)
+            
+            # Inject custom agent profile prompt if specified
+            if agent_profile_name and agent_profile_name != "default":
+                config = load_config()
+                profiles_raw = config.get("agent_profiles", [])
+                try:
+                    profiles = json.loads(profiles_raw) if isinstance(profiles_raw, str) else profiles_raw
+                    for p in profiles:
+                        if isinstance(p, dict) and p.get("name") == agent_profile_name and p.get("prompt"):
+                            agent.system_prompt_base = f"【角色设定: {p['name']}】\n{p['prompt']}\n\n---\n" + agent.system_prompt_base
+                            # Optionally override the model if the profile specifies one
+                            if p.get("model"):
+                                agent.llm.default_model = p["model"]
+                            break
+                except Exception as e:
+                    print(f"Failed to load agent profile {agent_profile_name}: {e}")
             
             # Inject previous session history
             if session_history:
@@ -464,11 +516,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 if msg_type == "retry":
                     query = user_msg.get("query", last_query)
                     retry_model = user_msg.get("model", None)
+                    agent_profile_name = user_msg.get("agent_name", None)
                     if not query.strip():
                         continue
                 else:
                     query = user_msg.get("query", "")
                     retry_model = None
+                    agent_profile_name = user_msg.get("agent_name", None)
                     if not query.strip():
                         continue
                         
@@ -482,6 +536,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Trigger Heartbeat
                 query = "【系统指令】后台巡视时间已到。请检查系统状态、后台任务或之前的计划是否需要继续。如果一切正常无需操作，请且仅回复 'HEARTBEAT_OK'。"
                 retry_model = None
+                agent_profile_name = None
                 is_heartbeat = True
 
             if not is_heartbeat:
@@ -492,7 +547,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
             
             try:
-                response = await run_agent_with_progress(query, retry_model, is_heartbeat=is_heartbeat)
+                response = await run_agent_with_progress(query, retry_model, agent_profile_name, is_heartbeat=is_heartbeat)
                 
                 if response == "BUSY":
                     continue
@@ -529,3 +584,57 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"WebSocket error: {e}")
 
+import threading
+import time
+
+def start_email_listener():
+    def email_listener_loop():
+        from core.email_service import fetch_emails, send_email
+        from agent.agent import OpenAGCAgent
+        while True:
+            try:
+                config = load_config()
+                if config.get("email_listener_enabled") and config.get("email_account") and config.get("email_password") and config.get("email_imap_server"):
+                    owner = config.get("owner_email", "")
+                    if owner:
+                        criteria = f'UNSEEN FROM "{owner}"'
+                        emails = fetch_emails(
+                            config["email_imap_server"],
+                            config["email_account"],
+                            config["email_password"],
+                            criteria=criteria,
+                            limit=5,
+                            mark_seen=True
+                        )
+                        for e in emails:
+                            print(f"[Email Listener] Found new command from owner: {e['subject']}")
+                            save_message("system", f"🔔 已收到来自主人 ({owner}) 的新邮件指令:\n主题: {e['subject']}")
+                            
+                            agent = OpenAGCAgent(model=config.get("default_model", "gpt-4o"))
+                            prompt = f"I received a new email instruction from my owner ({owner}).\nSubject: {e['subject']}\nBody: {e['body']}\nPlease execute this instruction, and then I will automatically email them the result."
+                            
+                            try:
+                                response = agent.run_turn(prompt)
+                            except Exception as ex:
+                                response = f"Failed to execute instructions: {ex}"
+                                
+                            success = send_email(
+                                config["email_smtp_server"],
+                                config["email_account"],
+                                config["email_password"],
+                                owner,
+                                f"Re: {e['subject']} - Task Completed",
+                                f"Task Summary:\n\n{response}"
+                            )
+                            if success:
+                                save_message("system", f"📧 已将执行结果回传至主人邮箱: {owner}")
+                            else:
+                                save_message("system", f"⚠️ 邮件回复发送失败，请检查 SMTP 配置。")
+            except Exception as e:
+                print(f"Email listener error: {e}")
+            time.sleep(60)
+
+    threading.Thread(target=email_listener_loop, daemon=True).start()
+
+# Start background listeners
+start_email_listener()

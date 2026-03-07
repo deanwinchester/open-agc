@@ -25,7 +25,7 @@ def main():
     # By default, use litellm's routing. 
     # E.g., model="gpt-4o" requires OPENAI_API_KEY
     # You can change model="claude-3-5-sonnet-20240620" for Anthropic.
-    default_model = os.getenv("DEFAULT_MODEL", "gpt-4o")
+    default_model = os.getenv("DEFAULT_MODEL", "moonshot/kimi-latest")
     agent = OpenAGCAgent(model=default_model)
     
     while True:

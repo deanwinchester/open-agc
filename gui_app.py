@@ -9,11 +9,54 @@ import time
 import signal
 
 
+def find_free_port():
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        return s.getsockname()[1]
+
 def start_server(port=8000):
     """Start the uvicorn server in a background thread."""
     import uvicorn
-    uvicorn.run("api.server:app", host="0.0.0.0", port=port, log_level="warning")
+    import sys
+    import os
+    
+    # Strictly prevent printing errors in noconsole mode
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+        
+    try:
+        from api.server import app
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    except Exception as e:
+        with open("server_crash.log", "a") as f:
+            f.write(f"Server crash: {e}\n")
 
+
+def check_server_and_load(window, port):
+    import requests
+    import time
+    for _ in range(60):
+        try:
+            resp = requests.get(f"http://localhost:{port}/static/index.html", timeout=1)
+            if resp.status_code == 200:
+                window.load_url(f"http://localhost:{port}")
+                return
+        except:
+            time.sleep(0.5)
+            
+    # Timeout reached without success
+    try:
+        window.evaluate_js("""
+            document.querySelector('.loader').style.display = 'none';
+            document.querySelector('h2').innerText = '启动失败 (Startup Failed)';
+            document.querySelector('h2').style.color = '#ef4444';
+            document.querySelector('p').innerHTML = '后台服务未能正常启动，可能是端口被占用或内部错误。<br>请尝试查看 server_crash.log。';
+        """)
+    except Exception:
+        pass
 
 def create_window(port=8000):
     """Create a native window with the web UI embedded."""
@@ -26,20 +69,35 @@ def create_window(port=8000):
         webbrowser.open(f"http://localhost:{port}")
         return False
 
-    # Wait for server to be ready
-    import requests
-    for _ in range(30):
-        try:
-            resp = requests.get(f"http://localhost:{port}/static/index.html", timeout=1)
-            if resp.status_code == 200:
-                break
-        except:
-            time.sleep(0.5)
+    loading_html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Loading...</title>
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f7f9fa; color: #333; }
+            .container { text-align: center; }
+            .loader { border: 4px solid #e2e8f0; border-top: 4px solid #3b82f6; border-radius: 50%; width: 48px; height: 48px; animation: spin 1s linear infinite; margin: 0 auto 20px auto; }
+            @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+            h2 { margin: 0; font-weight: 500; font-size: 20px; color: #475569; }
+            p { color: #94a3b8; font-size: 14px; margin-top: 8px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="loader"></div>
+            <h2>Starting Open-AGC Panda...</h2>
+            <p>Loading core components...</p>
+        </div>
+    </body>
+    </html>
+    """
 
     # Create native window
     window = webview.create_window(
         title="🐼 Open-AGC Panda",
-        url=f"http://localhost:{port}",
+        html=loading_html,
         width=1200,
         height=800,
         min_size=(800, 600),
@@ -54,6 +112,10 @@ def create_window(port=8000):
 
     window.events.closing += on_closing
 
+    import threading
+    t = threading.Thread(target=check_server_and_load, args=(window, port), daemon=True)
+    t.start()
+
     webview.start(
         debug=False,
         gui=None,  # Auto-detect best backend
@@ -62,10 +124,30 @@ def create_window(port=8000):
 
 
 def main():
-    port = int(os.environ.get("PORT", 8000))
+    # Attempt to find a free port instead of hardcoding 8765
+    try:
+        port = int(os.environ.get("PORT", find_free_port()))
+    except:
+        port = 8765
 
     # Handle PyInstaller frozen mode
     if getattr(sys, 'frozen', False):
+        if sys.stdout is None:
+            sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        else:
+            try:
+                sys.stdout.reconfigure(encoding='utf-8')
+            except Exception:
+                pass
+                
+        if sys.stderr is None:
+            sys.stderr = open(os.devnull, "w", encoding="utf-8")
+        else:
+            try:
+                sys.stderr.reconfigure(encoding='utf-8')
+            except Exception:
+                pass
+            
         base_dir = sys._MEIPASS
         os.chdir(base_dir)
 
@@ -86,10 +168,16 @@ def main():
                     if not os.path.exists(dst):
                         shutil.copy2(src, dst)
 
-    print("=" * 40)
-    print("  🐼 Open-AGC Panda is starting...")
-    print(f"  http://localhost:{port}")
-    print("=" * 40)
+    def safe_print(msg):
+        try:
+            print(msg)
+        except UnicodeEncodeError:
+            print(msg.encode('ascii', 'replace').decode('ascii'))
+
+    safe_print("=" * 40)
+    safe_print("  [*] Open-AGC Panda is starting...")
+    safe_print(f"  http://localhost:{port}")
+    safe_print("=" * 40)
 
     # Start server in background thread
     server_thread = threading.Thread(target=start_server, args=(port,), daemon=True)
@@ -102,7 +190,7 @@ def main():
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
-            print("\n🐼 Shutting down...")
+            safe_print("\n[*] Shutting down...")
             sys.exit(0)
 
 

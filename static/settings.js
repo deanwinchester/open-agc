@@ -24,11 +24,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // ── Constants ──
     const providers = [
+        { key: "kimi", label: "Kimi (Moonshot)" },
+        { key: "ollama", label: "Ollama (本地/Local)" },
         { key: "openai", label: "OpenAI" },
         { key: "anthropic", label: "Anthropic" },
         { key: "gemini", label: "Google Gemini" },
         { key: "deepseek", label: "DeepSeek" },
-        { key: "kimi", label: "Kimi (Moonshot)" },
         { key: "glm", label: "GLM (智谱)" },
         { key: "minimax", label: "MiniMax" }
     ];
@@ -46,6 +47,22 @@ document.addEventListener("DOMContentLoaded", () => {
             document.getElementById("sandbox-mode-toggle").checked = data.sandbox_mode ?? true;
             document.getElementById("sandbox-dir-input").value = data.sandbox_dir || "";
             document.getElementById("heartbeat-toggle").checked = data.heartbeat_enabled ?? false;
+
+            // Email Configs
+            document.getElementById("email-listener-toggle").checked = data.email_listener_enabled ?? false;
+            document.getElementById("owner-email-input").value = data.owner_email || "";
+            document.getElementById("email-account-input").value = data.email_account || "";
+            document.getElementById("email-password-input").placeholder = data.email_password ? "***" : "密码或独立应用授权码";
+            document.getElementById("email-imap-input").value = data.email_imap_server || "";
+            document.getElementById("email-smtp-input").value = data.email_smtp_server || "";
+
+            // Agents and MCP Configs
+            if (data.agent_profiles) {
+                document.getElementById("agents-config-input").value = typeof data.agent_profiles === "string" ? data.agent_profiles : JSON.stringify(data.agent_profiles, null, 2);
+            }
+            if (data.mcp_servers) {
+                document.getElementById("mcp-config-input").value = typeof data.mcp_servers === "string" ? data.mcp_servers : JSON.stringify(data.mcp_servers, null, 2);
+            }
 
         } catch (err) {
             console.error("Failed to load config:", err);
@@ -94,14 +111,16 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // ── Model Selection ──
     async function buildModelSelection(data) {
-        let selectedProvider = "openai";
+        let selectedProvider = "kimi";
         const dm = data.default_model || "";
         if (dm.startsWith("moonshot/")) selectedProvider = "kimi";
+        else if (dm.startsWith("ollama/")) selectedProvider = "ollama";
         else if (dm.startsWith("zai/")) selectedProvider = "glm";
         else if (dm.startsWith("minimax/")) selectedProvider = "minimax";
         else if (dm.startsWith("gemini/")) selectedProvider = "gemini";
         else if (dm.startsWith("deepseek/")) selectedProvider = "deepseek";
         else if (dm.includes("claude")) selectedProvider = "anthropic";
+        else if (dm.startsWith("gpt")) selectedProvider = "openai";
 
         document.getElementById("provider-select").value = selectedProvider;
 
@@ -196,14 +215,22 @@ document.addEventListener("DOMContentLoaded", () => {
 
         const payload = {
             api_keys: {},
-            default_model: document.getElementById("model-name-select").value || "gpt-4o",
+            default_model: document.getElementById("model-name-select").value || "moonshot/kimi-latest",
             fallback_models: document.getElementById("fallback-models-input").value
                 .split(",").map(s => s.trim()).filter(s => s.length > 0),
             disabled_skills: [],
             sandbox_mode: document.getElementById("sandbox-mode-toggle").checked,
             sandbox_dir: document.getElementById("sandbox-dir-input").value.trim(),
             heartbeat_enabled: document.getElementById("heartbeat-toggle").checked,
-            heartbeat_interval: 60
+            heartbeat_interval: 60,
+            email_listener_enabled: document.getElementById("email-listener-toggle").checked,
+            email_account: document.getElementById("email-account-input").value.trim(),
+            email_password: document.getElementById("email-password-input").value || (document.getElementById("email-password-input").placeholder === "***" ? "***" : ""),
+            email_imap_server: document.getElementById("email-imap-input").value.trim(),
+            email_smtp_server: document.getElementById("email-smtp-input").value.trim(),
+            owner_email: document.getElementById("owner-email-input").value.trim(),
+            agent_profiles: document.getElementById("agents-config-input").value.trim() || "[]",
+            mcp_servers: document.getElementById("mcp-config-input").value.trim() || "{}"
         };
 
         providers.forEach(p => {

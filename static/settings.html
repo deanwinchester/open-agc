@@ -46,6 +46,14 @@
             </svg>
             技能管理
         </button>
+        <button class="tab" data-target="mcp-pane">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2a10 10 0 1 0 10 10H12V2z"></path>
+                <path d="M12 12 2.1 7.1"></path>
+                <path d="M12 12l9.9 4.9"></path>
+            </svg>
+            Agents & MCP
+        </button>
     </div>
 
     <!-- Main Content -->
@@ -75,11 +83,12 @@
                     <label>默认厂商 & 模型</label>
                     <div class="model-row">
                         <select id="provider-select" class="select-styled">
+                            <option value="kimi">Kimi (Moonshot)</option>
+                            <option value="ollama">Ollama (本地/Local)</option>
                             <option value="openai">OpenAI</option>
                             <option value="anthropic">Anthropic</option>
                             <option value="gemini">Google Gemini</option>
                             <option value="deepseek">DeepSeek</option>
-                            <option value="kimi">Kimi (Moonshot)</option>
                             <option value="glm">GLM (智谱)</option>
                             <option value="minimax">MiniMax</option>
                         </select>
@@ -134,9 +143,49 @@
                 </div>
                 <div class="field" id="sandbox-dir-group">
                     <label for="sandbox-dir-input">沙箱目录路径</label>
-                    <input type="text" id="sandbox-dir-input" class="input-styled"
-                        placeholder="/填写/你的/沙箱/绝对路径">
+                    <input type="text" id="sandbox-dir-input" class="input-styled" placeholder="/填写/你的/沙箱/绝对路径">
                     <small class="field-hint">智能体将只能在该目录下读取/写入文件以及执行命令行指令。</small>
+                </div>
+            </section>
+
+            <!-- Email Listener Card -->
+            <section class="card">
+                <div class="card-header">
+                    <h2>📧 邮件监听与助手 (Email Listener)</h2>
+                    <p class="card-desc">配置智能体邮箱，允许它接收主人指令并代发邮件、总结邮件等。</p>
+                </div>
+                <div class="field">
+                    <label class="toggle-container">
+                        <input type="checkbox" id="email-listener-toggle">
+                        <span class="toggle-label">开启邮件监听 (后台定期检查主人发来的新邮件)</span>
+                    </label>
+                </div>
+
+                <div class="field">
+                    <label>主人邮箱</label>
+                    <input type="email" id="owner-email-input" class="input-styled"
+                        placeholder="你的主要邮箱地址 (智能体只听取此邮箱的指令)">
+                </div>
+
+                <div class="field">
+                    <label>智能体邮箱账号</label>
+                    <input type="email" id="email-account-input" class="input-styled" placeholder="分配给智能体的邮箱地址">
+                </div>
+
+                <div class="field">
+                    <label>智能体邮箱密码 / 授权码</label>
+                    <input type="password" id="email-password-input" class="input-styled" placeholder="密码或独立应用授权码">
+                </div>
+
+                <div class="model-row">
+                    <div class="field" style="flex: 1;">
+                        <label>IMAP 服务器 (接收)</label>
+                        <input type="text" id="email-imap-input" class="input-styled" placeholder="例: imap.qq.com">
+                    </div>
+                    <div class="field" style="flex: 1;">
+                        <label>SMTP 服务器 (发送)</label>
+                        <input type="text" id="email-smtp-input" class="input-styled" placeholder="例: smtp.qq.com">
+                    </div>
                 </div>
             </section>
         </div>
@@ -154,8 +203,41 @@
                         <span>加载中...</span>
                     </div>
                 </div>
+                <!-- 技能列表将由 JS 动态生成 -->
             </section>
         </div>
+
+        <!-- Agents & MCP Pane -->
+        <div class="pane" id="mcp-pane">
+            <section class="card">
+                <div class="card-header">
+                    <h2>🎭 多智能体配置 (Multi-Agent Profiles)</h2>
+                    <p class="card-desc">配置不同的智能体角色，可以分配不同的系统提示词。</p>
+                </div>
+                <div class="field">
+                    <label>Agent Profiles (JSON Array)</label>
+                    <textarea id="agents-config-input" class="input-styled" rows="6"
+                        placeholder='[{"name": "默认助手", "prompt": "You are a helpful assistant."}]'></textarea>
+                </div>
+            </section>
+
+            <section class="card">
+                <div class="card-header">
+                    <h2>🔌 Model Context Protocol (MCP)</h2>
+                    <p class="card-desc">配置外部 MCP Server。请填写标准的 JSON 配置 (兼容 Claude Desktop)。重启应用后生效。</p>
+                </div>
+                <div class="field">
+                    <label>MCP Servers Config (JSON)</label>
+                    <textarea id="mcp-config-input" class="input-styled" rows="8" placeholder='{
+  "sqlite": {
+    "command": "uvx",
+    "args": ["mcp-server-sqlite", "--db-path", "~/test.db"]
+  }
+}'></textarea>
+                </div>
+            </section>
+        </div>
+
         <!-- Global Save Actions -->
         <div class="global-actions">
             <div id="save-status" class="save-status">
@@ -195,7 +277,8 @@
             <h3>✏️ 编辑技能: <span id="edit-skill-filename"></span></h3>
             <div class="field" style="margin-top: 1rem;">
                 <textarea id="edit-skill-content" class="input-styled"
-                    style="width: 100%; height: 300px; font-family: monospace; resize: vertical; box-sizing: border-box;" spellcheck="false"></textarea>
+                    style="width: 100%; height: 300px; font-family: monospace; resize: vertical; box-sizing: border-box;"
+                    spellcheck="false"></textarea>
             </div>
             <div class="modal-actions" style="margin-top: 1rem;">
                 <button class="btn-secondary" id="edit-skill-close">取消</button>

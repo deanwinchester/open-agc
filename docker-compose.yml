@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  open-agc:
+    build: .
+    image: open-agc:latest
+    container_name: open-agc
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./workspace:/app/workspace
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      # - OPENAI_API_KEY=your_key_here
+      # - DEFAULT_MODEL=moonshot/kimi-latest

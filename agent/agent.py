@@ -17,6 +17,7 @@ from tools.web_search import WebSearchTool
 from tools.system_mac import MacSystemTool
 from tools.save_skill import SaveSkillTool
 from tools.browser import BrowserAutomationTool
+from tools.email_tool import SearchEmailTool, SendEmailTool
 
 class OpenAGCAgent:
     """
@@ -113,7 +114,9 @@ class OpenAGCAgent:
             "search_web": WebSearchTool(),
             "mac_system_action": MacSystemTool(),
             "save_learned_skill": SaveSkillTool(),
-            "browser_automation": BrowserAutomationTool(headless=False)
+            "browser_automation": BrowserAutomationTool(headless=False),
+            "search_emails": SearchEmailTool(),
+            "send_email": SendEmailTool()
         }
 
         # Tool display names (Chinese-friendly)
@@ -127,7 +130,9 @@ class OpenAGCAgent:
             "search_web": "搜索网页",
             "mac_system_action": "系统操作",
             "save_learned_skill": "保存技能",
-            "browser_automation": "虚拟浏览器控制"
+            "browser_automation": "虚拟浏览器控制",
+            "search_emails": "搜索邮件",
+            "send_email": "发送邮件"
         }
         
         # Prepare OpenAI format tool schema

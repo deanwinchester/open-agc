@@ -71,7 +71,13 @@
         <!-- Main Chat Area -->
         <main class="chat-main glass-panel">
             <header class="chat-header">
-                <h2 data-i18n="workspace">Panda Workspace</h2>
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <h2 data-i18n="workspace">Workspace</h2>
+                    <select id="agent-selector" class="input-styled"
+                        style="padding: 4px 8px; font-size: 13px; width: auto; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px;">
+                        <option value="default">默认智能体</option>
+                    </select>
+                </div>
                 <div class="model-badge" id="current-model-badge">加载中...</div>
             </header>
 
