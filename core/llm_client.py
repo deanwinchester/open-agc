@@ -1,7 +1,9 @@
 import os
 import json
+import uuid
 import litellm
 from typing import List, Dict, Any, Optional, Tuple
+from litellm.llms.ollama.completion.transformation import OllamaConfig
 
 # Optional logging or debugging controls for litellm
 # litellm.set_verbose = True
@@ -16,6 +18,70 @@ def load_config() -> dict:
         except Exception:
             return {}
     return {}
+
+# Patch LiteLLM's OllamaConfig to support the 'thinking' field (e.g. Qwen3.5)
+# This is done here at runtime to avoid modifying venv directly.
+class PatchedOllamaConfig(OllamaConfig):
+    def transform_response(self, *args, **kwargs):
+        # Call original transform first
+        resp = super().transform_response(*args, **kwargs)
+        
+        # Access raw_response from args (model, raw_response, model_response, ...)
+        raw_response = args[1] if len(args) > 1 else kwargs.get("raw_response")
+        if not raw_response:
+            return resp
+            
+        try:
+            response_json = raw_response.json()
+            thinking_text = response_json.get("thinking", "")
+            response_text = response_json.get("response", "")
+            
+            # If primary response is empty but thinking has content,
+            # treat thinking as the actual output
+            if (not response_text or not response_text.strip()) and thinking_text:
+                # 1. Check if thinking contains a tool call JSON
+                msg = resp.choices[0].message
+                if not msg.tool_calls and \
+                   thinking_text.strip().startswith("{") and \
+                   "\"name\"" in thinking_text and \
+                   "\"arguments\"" in thinking_text:
+                    try:
+                        tool_data = json.loads(thinking_text)
+                        if isinstance(tool_data, dict) and "name" in tool_data:
+                            msg.content = None
+                            msg.tool_calls = [
+                                {
+                                    "id": f"call_{str(uuid.uuid4())}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_data["name"],
+                                        "arguments": json.dumps(
+                                            tool_data["arguments"]
+                                        )
+                                    }
+                                }
+                            ]
+                            resp.choices[0].finish_reason = "tool_calls"
+                    except Exception:
+                        pass
+                
+                # 2. If it wasn't a tool call, treat thinking as content
+                if not msg.tool_calls:
+                    if not msg.content or not msg.content.strip():
+                        msg.content = thinking_text
+                    else:
+                        msg.reasoning_content = thinking_text
+                        
+        except Exception as e:
+            # Silent failure for patch
+            print(f"[LLMClient] Ollama patch warning: {str(e)}")
+            
+        return resp
+
+# Apply the monkeypatch to LiteLLM's internal registry
+import litellm.llms.ollama.completion.transformation as transformation
+transformation.OllamaConfig = PatchedOllamaConfig
+
 
 class LLMClient:
     """
@@ -52,7 +118,21 @@ class LLMClient:
             os.environ.setdefault("MINIMAX_API_BASE", "https://api.minimax.io/v1")
 
         # Default Ollama API base and proxy bypass for local connections
-        os.environ.setdefault("OLLAMA_API_BASE", "http://localhost:11434")
+        ollama_base = config.get("api_keys", {}).get("ollama", "http://localhost:11434")
+        
+        # Sanitize Ollama URL: LiteLLM expects the base host/port, not the full endpoint.
+        # If it ends with /api/generate, /api/chat, etc., strip it.
+        # We also handle optional trailing slashes for robustness.
+        ollama_base = ollama_base.rstrip("/")
+        suffixes_to_strip = ["/api/generate", "/api/chat", "/api/show", "/api/tags"]
+        for suffix in suffixes_to_strip:
+            if ollama_base.endswith(suffix):
+                ollama_base = ollama_base[:-len(suffix)]
+                break
+        
+        # Keep clean OLLAMA_API_BASE in env and as an instance variable for explicit passing
+        self.ollama_api_base = ollama_base
+        os.environ["OLLAMA_API_BASE"] = ollama_base
         
         # Ensure local connections bypass proxy (important for Ollama on Windows)
         for var in ["no_proxy", "NO_PROXY"]:
@@ -88,6 +168,11 @@ class LLMClient:
             }
             if tools:
                 kwargs["tools"] = tools
+            
+            # For Ollama models, explicitly pass api_base to bypass LiteLLM's internal miscalculations
+            # that sometimes lead to 404 errors (appending /api/generate/api/show)
+            if "ollama" in attempt_model:
+                kwargs["api_base"] = self.ollama_api_base
                 
             try:
                 response = litellm.completion(**kwargs)
