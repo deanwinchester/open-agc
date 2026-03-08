@@ -305,6 +305,16 @@ class OpenAGCAgent:
             response, actual_model = self.llm.chat(messages=self.messages, tools=self.tool_schemas)
             message = response.choices[0].message
             
+            # Detect empty response (no content and no tool calls)
+            # This can happen with some models like Ollama's Qwen when they malfunction or refuse to answer.
+            if not message.content and not message.tool_calls:
+                error_msg = f"[Agent] Model {actual_model} returned an empty response (no content and no tool calls). Breaking loop."
+                if verbose:
+                    print(error_msg)
+                # Save as a system message to history to explain why it stopped
+                self.messages.append({"role": "assistant", "content": "Error: Empty response from model. Please check the model logs or try a different model."})
+                return "Agent stopped: Received an empty response from the model. This usually indicates a model failure or refusal."
+            
             # Notify if model was switched
             if progress_callback and actual_model != self.llm.default_model:
                 progress_callback({
