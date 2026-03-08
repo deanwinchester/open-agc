@@ -1,6 +1,9 @@
 import os
 import json
 import litellm
+# Fix for PyInstaller bundling issue with tiktoken
+litellm.num_tokens_logging = False 
+litellm.supports_token_counter = False
 from typing import List, Dict, Any, Optional, Tuple
 
 # Optional logging or debugging controls for litellm

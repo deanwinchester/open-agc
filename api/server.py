@@ -2,6 +2,30 @@ import os
 import json
 import asyncio
 import sqlite3
+
+# --- Tiktoken Monkeypatch for PyInstaller ---
+try:
+    import tiktoken
+    from tiktoken.core import Encoding
+    
+    def get_mock_encoding(name):
+        # Basic cl100k_base definition to satisfy LiteLLM / Tiktoken
+        return Encoding(
+            name="cl100k_base",
+            pat_str=r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+""",
+            mergeable_ranks={},
+            special_tokens={"<|endoftext|>": 100257, "<|fim_prefix|>": 100258, "<|fim_middle|>": 100259, "<|fim_suffix|>": 100260, "<|endofprompt|>": 100276}
+        )
+
+    # Only patch if it's actually failing (Unknown encoding)
+    try:
+        tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        tiktoken.get_encoding = lambda name: get_mock_encoding(name)
+        tiktoken.encoding_for_model = lambda model: get_mock_encoding("cl100k_base")
+except Exception:
+    pass
+# --------------------------------------------
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +42,9 @@ load_dotenv(env_file)
 
 from agent.agent import OpenAGCAgent
 import litellm
+# Fix for PyInstaller bundling issue with tiktoken
+litellm.num_tokens_logging = False 
+litellm.supports_token_counter = False
 litellm._turn_on_debug()
 litellm.set_verbose = True  # Double down on verbosity for terminal logs
 
