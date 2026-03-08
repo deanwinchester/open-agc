@@ -2,6 +2,9 @@ import os
 import json
 import uuid
 import litellm
+# Fix for PyInstaller bundling issue with tiktoken
+litellm.num_tokens_logging = False 
+litellm.supports_token_counter = False
 from typing import List, Dict, Any, Optional, Tuple
 from litellm.llms.ollama.completion.transformation import OllamaConfig
 

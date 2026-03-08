@@ -72,11 +72,18 @@ pyinstaller ^
     --hidden-import duckduckgo_search ^
     --hidden-import requests ^
     --hidden-import bs4 ^
-    --collect-data litellm ^
-    --collect-data openai ^
-    --collect-submodules litellm ^
     --hidden-import httptools ^
     --hidden-import websockets ^
+    --hidden-import tiktoken ^
+    --hidden-import tiktoken_ext ^
+    --hidden-import tiktoken_ext.openai_public ^
+    --collect-all litellm ^
+    --collect-all tiktoken ^
+    --collect-all openai ^
+    --copy-metadata litellm ^
+    --copy-metadata tiktoken ^
+    --collect-submodules tiktoken ^
+    --collect-submodules tiktoken_ext ^
     --hidden-import api.server ^
     --hidden-import agent.agent ^
     --hidden-import core.llm_client ^

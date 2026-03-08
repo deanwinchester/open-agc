@@ -8,6 +8,28 @@ import threading
 import time
 import signal
 
+# --- Tiktoken Monkeypatch for PyInstaller ---
+try:
+    import tiktoken
+    from tiktoken.core import Encoding
+    
+    def get_mock_encoding(name):
+        return Encoding(
+            name="cl100k_base",
+            pat_str=r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+""",
+            mergeable_ranks={},
+            special_tokens={"<|endoftext|>": 100257, "<|fim_prefix|>": 100258, "<|fim_middle|>": 100259, "<|fim_suffix|>": 100260, "<|endofprompt|>": 100276}
+        )
+
+    try:
+        tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        tiktoken.get_encoding = lambda name: get_mock_encoding(name)
+        tiktoken.encoding_for_model = lambda model: get_mock_encoding("cl100k_base")
+except Exception:
+    pass
+# --------------------------------------------
+
 
 def find_free_port():
     import socket
