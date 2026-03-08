@@ -18,8 +18,17 @@ load_dotenv(env_file)
 
 from agent.agent import OpenAGCAgent
 import litellm
-#litellm._turn_on_debug()
-#litellm.set_verbose = True  # Double down on verbosity for terminal logs
+litellm._turn_on_debug()
+litellm.set_verbose = True  # Double down on verbosity for terminal logs
+
+# Ensure local connections bypass proxy (important for Ollama on Windows)
+for var in ["no_proxy", "NO_PROXY"]:
+    current = os.environ.get(var, "")
+    local_hosts = "localhost,127.0.0.1"
+    if not current:
+        os.environ[var] = local_hosts
+    elif "localhost" not in current or "127.0.0.1" not in current:
+        os.environ[var] = f"{current.rstrip(',')},{local_hosts}"
 
 app = FastAPI(title="Open-AGC UI Server")
 

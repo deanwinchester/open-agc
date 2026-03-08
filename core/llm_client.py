@@ -37,7 +37,8 @@ class LLMClient:
             "deepseek": "DEEPSEEK_API_KEY",
             "kimi": "MOONSHOT_API_KEY",
             "glm": "ZAI_API_KEY",
-            "minimax": "MINIMAX_API_KEY"
+            "minimax": "MINIMAX_API_KEY",
+            "ollama": "OLLAMA_API_BASE"
         }
         for provider, env_var in PROVIDER_ENV_MAP.items():
             key = config.get("api_keys", {}).get(provider, "")
@@ -49,6 +50,18 @@ class LLMClient:
             os.environ.setdefault("MOONSHOT_API_BASE", "https://api.moonshot.cn/v1")
         if config.get("api_keys", {}).get("minimax"):
             os.environ.setdefault("MINIMAX_API_BASE", "https://api.minimax.io/v1")
+
+        # Default Ollama API base and proxy bypass for local connections
+        os.environ.setdefault("OLLAMA_API_BASE", "http://localhost:11434")
+        
+        # Ensure local connections bypass proxy (important for Ollama on Windows)
+        for var in ["no_proxy", "NO_PROXY"]:
+            current = os.environ.get(var, "")
+            local_hosts = "localhost,127.0.0.1"
+            if not current:
+                os.environ[var] = local_hosts
+            elif "localhost" not in current or "127.0.0.1" not in current:
+                os.environ[var] = f"{current.rstrip(',')},{local_hosts}"
 
     def chat(self, messages: List[Dict[str, Any]], model: Optional[str] = None,
              tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[Any, str]:

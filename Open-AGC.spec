@@ -6,14 +6,7 @@ datas = [('static', 'static'), ('data', 'data'), ('skills', 'skills'), ('agent',
 hiddenimports = ['uvicorn', 'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto', 'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.websockets', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan', 'uvicorn.lifespan.on', 'fastapi', 'starlette', 'starlette.routing', 'starlette.middleware', 'starlette.responses', 'starlette.staticfiles', 'starlette.websockets', 'litellm', 'pydantic', 'dotenv', 'rich', 'duckduckgo_search', 'requests', 'bs4', 'httptools', 'websockets', 'api.server', 'agent.agent', 'core.llm_client', 'tools.shell', 'tools.filesystem', 'tools.python_repl', 'tools.computer', 'tools.memory', 'tools.web_search', 'tools.system_mac', 'webview', 'webview.platforms.winforms']
 datas += collect_data_files('litellm')
 datas += collect_data_files('openai')
-datas += collect_data_files('tiktoken')
 hiddenimports += collect_submodules('litellm')
-hiddenimports += collect_submodules('tiktoken')
-hiddenimports += collect_submodules('httpx')
-hiddenimports += collect_submodules('httpcore')
-hiddenimports += collect_submodules('anyio')
-hiddenimports += collect_submodules('aiohttp')
-hiddenimports += ['tiktoken_ext.openai_public']
 
 
 a = Analysis(

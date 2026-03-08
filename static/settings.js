@@ -77,6 +77,7 @@ document.addEventListener("DOMContentLoaded", () => {
         providers.forEach(p => {
             const mask = maskedKeys[p.key] || "";
             const hasSaved = mask.length > 0;
+            const placeholder = p.key === "ollama" ? "默认 http://localhost:11434" : "请输入密钥...";
 
             const wrapper = document.createElement("div");
             wrapper.className = "key-field";
@@ -85,7 +86,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 <div class="key-input-wrapper">
                     <input type="password"
                            id="key-${p.key}"
-                           placeholder="${hasSaved ? mask : '请输入密钥...'}"
+                           placeholder="${hasSaved ? mask : placeholder}"
                            autocomplete="new-password"
                            spellcheck="false">
                     <button type="button" class="toggle-visibility" data-target="key-${p.key}" title="显示/隐藏">
