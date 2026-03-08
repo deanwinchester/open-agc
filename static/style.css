@@ -941,6 +941,17 @@ textarea {
     background: rgba(245, 158, 11, 0.06);
 }
 
+.progress-step.thinking-process {
+    border-left-color: var(--theme-color);
+    background: rgba(74, 222, 128, 0.02);
+    font-style: italic;
+}
+
+.progress-step.thinking-process .step-detail {
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+}
+
 .step-icon {
     flex-shrink: 0;
     width: 20px;

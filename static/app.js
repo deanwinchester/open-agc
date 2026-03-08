@@ -268,8 +268,31 @@ document.addEventListener('DOMContentLoaded', () => {
         const event = data.event;
 
         if (event === 'thinking') {
-            const thinkMsg = currentLang === 'zh-CN' ? '熊猫正在思考对策...' : 'Thinking...';
-            showThinkingStatus(thinkMsg);
+            if (data.content) {
+                ensureProgressContainer();
+                const stepsEl = progressContainer.querySelector('.progress-steps');
+                // Check if we already have a thinking step for this iteration
+                let thinkEl = document.getElementById(`progress-thought-${data.iteration || 0}`);
+                if (!thinkEl) {
+                    thinkEl = document.createElement('div');
+                    thinkEl.className = 'progress-step thinking-process';
+                    thinkEl.id = `progress-thought-${data.iteration || 0}`;
+                    thinkEl.innerHTML = `
+                        <span class="step-icon">🧠</span>
+                        <div class="step-body">
+                            <span class="step-label">${currentLang === 'zh-CN' ? '思考过程' : 'Reasoning'}</span>
+                            <span class="step-detail">${escapeHtml(data.content)}</span>
+                        </div>
+                    `;
+                    stepsEl.appendChild(thinkEl);
+                } else {
+                    const detailEl = thinkEl.querySelector('.step-detail');
+                    if (detailEl) detailEl.textContent = data.content;
+                }
+            } else {
+                const thinkMsg = currentLang === 'zh-CN' ? '熊猫正在思考对策...' : 'Thinking...';
+                showThinkingStatus(thinkMsg);
+            }
             return;
         }
 

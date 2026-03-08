@@ -316,12 +316,22 @@ class OpenAGCAgent:
                 return "Agent stopped: Received an empty response from the model. This usually indicates a model failure or refusal."
             
             # Notify if model was switched
-            if progress_callback and actual_model != self.llm.default_model:
-                progress_callback({
-                    "event": "model_switched",
-                    "from": self.llm.default_model,
-                    "to": actual_model
-                })
+            if progress_callback:
+                if actual_model != self.llm.default_model:
+                    progress_callback({
+                        "event": "model_switched",
+                        "from": self.llm.default_model,
+                        "to": actual_model
+                    })
+                
+                # Check for reasoning_content (Thinking process)
+                reasoning = getattr(message, 'reasoning_content', None)
+                if reasoning:
+                    progress_callback({
+                        "event": "thinking",
+                        "iteration": current_iter,
+                        "content": reasoning
+                    })
             
             # Append model's response to history
             message_dict = message.model_dump()
