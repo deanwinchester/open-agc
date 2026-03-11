@@ -14,3 +14,4 @@ pyautogui
 Pillow
 opencv-python
 httptools
+vllm

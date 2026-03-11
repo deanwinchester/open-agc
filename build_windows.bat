@@ -30,10 +30,17 @@ pip install pyinstaller -q
 pip install -r requirements.txt -q
 pip install pywebview -q
 
+REM ---- 1.5 Prepare clean data for bundling ----
+echo [1.5/4] Preparing clean data for bundling...
+if exist "build_data" rd /s /q "build_data"
+mkdir build_data
+copy "data\config.json.template" "build_data\config.json"
+if exist "data\browser_profile" xcopy "data\browser_profile" "build_data\browser_profile" /E /I /Y
+
 REM ---- 2. Build with PyInstaller ----
 echo [2/4] Building with PyInstaller...
 
-REM Create a Windows-specific spec on the fly (no BUNDLE for macOS)
+REM Create a Windows-specific spec on the fly
 pyinstaller ^
     --name "%APP_NAME%" ^
     --noconsole ^
@@ -41,7 +48,7 @@ pyinstaller ^
     --clean ^
     --icon "static\icon.ico" ^
     --add-data "static;static" ^
-    --add-data "data;data" ^
+    --add-data "build_data;data" ^
     --add-data "skills;skills" ^
     --add-data "agent;agent" ^
     --add-data "core;core" ^
@@ -77,16 +84,22 @@ pyinstaller ^
     --hidden-import tiktoken ^
     --hidden-import tiktoken_ext ^
     --hidden-import tiktoken_ext.openai_public ^
+    --hidden-import vllm ^
+    --hidden-import vllm.entrypoints.openai.api_server ^
     --collect-all litellm ^
     --collect-all tiktoken ^
     --collect-all openai ^
+    --collect-all vllm ^
     --copy-metadata litellm ^
     --copy-metadata tiktoken ^
+    --copy-metadata vllm ^
     --collect-submodules tiktoken ^
     --collect-submodules tiktoken_ext ^
+    --collect-submodules vllm ^
     --hidden-import api.server ^
     --hidden-import agent.agent ^
     --hidden-import core.llm_client ^
+    --hidden-import core.vllm_manager ^
     --hidden-import tools.shell ^
     --hidden-import tools.filesystem ^
     --hidden-import tools.python_repl ^

@@ -201,6 +201,17 @@ def main():
     safe_print(f"  http://localhost:{port}")
     safe_print("=" * 40)
 
+    # Start vLLM background service if available
+    try:
+        from core.vllm_manager import get_vllm_manager
+        vllm = get_vllm_manager()
+        # Default as requested: Qwen3.5-9B-Instruct on port 8009
+        vllm.model = "Qwen/Qwen3.5-9B-Instruct" 
+        vllm.port = 8009
+        threading.Thread(target=vllm.start, daemon=True).start()
+    except Exception as e:
+        safe_print(f"  [!] Failed to initialize vLLM: {e}")
+
     # Start server in background thread
     server_thread = threading.Thread(target=start_server, args=(port,), daemon=True)
     server_thread.start()

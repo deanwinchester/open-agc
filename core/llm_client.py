@@ -231,7 +231,8 @@ class LLMClient:
             "kimi": "MOONSHOT_API_KEY",
             "glm": "ZAI_API_KEY",
             "minimax": "MINIMAX_API_KEY",
-            "ollama": "OLLAMA_API_BASE"
+            "ollama": "OLLAMA_API_BASE",
+            "vllm": "VLLM_API_BASE"
         }
         for provider, env_var in PROVIDER_ENV_MAP.items():
             key = config.get("api_keys", {}).get(provider, "")
@@ -261,6 +262,10 @@ class LLMClient:
         self.ollama_api_base = ollama_base
         os.environ["OLLAMA_API_BASE"] = ollama_base
         
+        # vLLM API base
+        self.vllm_api_base = config.get("api_keys", {}).get("vllm", "http://localhost:8009/v1")
+        os.environ["VLLM_API_BASE"] = self.vllm_api_base
+
         # Ensure local connections bypass proxy (important for Ollama on Windows)
         for var in ["no_proxy", "NO_PROXY"]:
             current = os.environ.get(var, "")
@@ -300,6 +305,8 @@ class LLMClient:
             # that sometimes lead to 404 errors (appending /api/generate/api/show)
             if "ollama" in attempt_model:
                 kwargs["api_base"] = self.ollama_api_base
+            if "vllm" in attempt_model:
+                kwargs["api_base"] = self.vllm_api_base
                 
             try:
                 response = litellm.completion(**kwargs)
@@ -329,6 +336,12 @@ class LLMClient:
         
         if tools:
             kwargs["tools"] = tools
+            
+        # For local models, explicitly pass api_base to bypass LiteLLM's internal miscalculations
+        if "ollama" in target_model:
+            kwargs["api_base"] = self.ollama_api_base
+        if "vllm" in target_model:
+            kwargs["api_base"] = self.vllm_api_base
             
         try:
             response = litellm.completion(**kwargs)
