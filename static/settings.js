@@ -26,6 +26,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const providers = [
         { key: "kimi", label: "Kimi (Moonshot)" },
         { key: "ollama", label: "Ollama (本地/Local)" },
+        { key: "vllm", label: "vLLM / SGLang (本地/Local)" },
         { key: "openai", label: "OpenAI" },
         { key: "anthropic", label: "Anthropic" },
         { key: "gemini", label: "Google Gemini" },
@@ -77,7 +78,9 @@ document.addEventListener("DOMContentLoaded", () => {
         providers.forEach(p => {
             const mask = maskedKeys[p.key] || "";
             const hasSaved = mask.length > 0;
-            const placeholder = p.key === "ollama" ? "默认 http://localhost:11434" : "请输入密钥...";
+            let placeholder = "请输入密钥...";
+            if (p.key === "ollama") placeholder = "默认 http://localhost:11434";
+            if (p.key === "vllm") placeholder = "默认 http://localhost:8009/v1";
 
             const wrapper = document.createElement("div");
             wrapper.className = "key-field";

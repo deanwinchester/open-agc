@@ -1,0 +1,26 @@
+{
+    "api_keys": {
+        "kimi": "",
+        "ollama": "http://localhost:11434",
+        "vllm": "http://localhost:8009/v1",
+        "openai": "",
+        "anthropic": "",
+        "gemini": "",
+        "deepseek": "",
+        "glm": "",
+        "minimax": ""
+    },
+    "default_model": "vllm/Qwen/Qwen3.5-9B-Instruct",
+    "fallback_models": ["ollama/qwen3.5:9b"],
+    "disabled_skills": [],
+    "sandbox_mode": true,
+    "sandbox_dir": "./workspace",
+    "heartbeat_enabled": false,
+    "heartbeat_interval": 60,
+    "email_listener_enabled": false,
+    "email_account": "",
+    "email_password": "",
+    "email_imap_server": "",
+    "email_smtp_server": "",
+    "owner_email": ""
+}

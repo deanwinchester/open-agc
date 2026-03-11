@@ -116,9 +116,12 @@ def load_config() -> dict:
         except Exception:
             pass
     return {
-        "api_keys": {},
-        "default_model": "moonshot/kimi-latest",
-        "fallback_models": [],
+        "api_keys": {
+            "ollama": "http://localhost:11434",
+            "vllm": "http://localhost:8009/v1"
+        },
+        "default_model": "vllm/Qwen/Qwen3.5-9B-Instruct",
+        "fallback_models": ["ollama/qwen3.5:9b"],
         "disabled_skills": [],
         "sandbox_mode": True,
         "sandbox_dir": os.path.abspath(os.path.join(os.getcwd(), "workspace")),
@@ -288,6 +291,16 @@ async def get_provider_models(provider: str):
             if res.status_code == 200:
                 models = [f"ollama/{m['name']}" for m in res.json().get("models", [])]
         except Exception: pass
+    elif provider == "vllm":
+        base_url = api_keys.get("vllm", "http://localhost:8009/v1")
+        if not base_url.startswith("http"):
+            base_url = "http://" + base_url
+        try:
+            # vLLM/SGLang usually have an OpenAI-compatible /models endpoint
+            res = requests.get(f"{base_url.rstrip('/')}/models", timeout=5)
+            if res.status_code == 200:
+                models = [f"vllm/{m['id']}" for m in res.json().get("data", [])]
+        except Exception: pass
 
     # Fallback default models if API call fails or key not set
     # Model names include litellm provider prefix as required by litellm.completion()
@@ -300,7 +313,8 @@ async def get_provider_models(provider: str):
             'kimi': ['moonshot/kimi-k2.5', 'moonshot/kimi-latest', 'moonshot/moonshot-v1-8k', 'moonshot/moonshot-v1-32k', 'moonshot/moonshot-v1-128k'],
             'glm': ['zai/glm-4.7', 'zai/glm-4.5', 'zai/glm-4.5-flash', 'zai/glm-4.5-air'],
             'minimax': ['minimax/MiniMax-M2.1'],
-            'ollama': ['ollama/qwen2.5:7b', 'ollama/llama3.1:8b', 'ollama/deepseek-r1:8b', 'ollama/llama3.3:70b']
+            'ollama': ['ollama/qwen2.5:7b', 'ollama/llama3.1:8b', 'ollama/deepseek-r1:8b', 'ollama/llama3.3:70b'],
+            'vllm': ['vllm/Qwen/Qwen3.5-9B-Instruct', 'vllm/Qwen/Qwen2.5-7B-Instruct']
         }
         models = defaults.get(provider, [])
         
