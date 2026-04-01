@@ -2,7 +2,8 @@
     "api_keys": {
         "kimi": "",
         "ollama": "http://localhost:11434",
-        "vllm": "http://localhost:8009/v1",
+        "sglang": "http://localhost:8009/v1",
+        "vllm": "http://localhost:8000/v1",
         "openai": "",
         "anthropic": "",
         "gemini": "",
@@ -10,7 +11,7 @@
         "glm": "",
         "minimax": ""
     },
-    "default_model": "vllm/Qwen/Qwen3.5-9B-Instruct",
+    "default_model": "sglang/Qwen/Qwen3.5-9B-Instruct",
     "fallback_models": ["ollama/qwen3.5:9b"],
     "disabled_skills": [],
     "sandbox_mode": true,

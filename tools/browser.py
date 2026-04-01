@@ -2,12 +2,20 @@ from playwright.sync_api import sync_playwright, TimeoutError
 import time
 import threading
 import queue
+import os
+import glob
 
 class BrowserAutomationTool:
     """
     基于 Playwright 的隔离沙盒浏览器控制工具。
     允许大模型在前台或后台打开网页，通过 CSS Selector 精准操作 DOM。
     使用独立后台线程运行 Playwright 以避免与 FastAPI/Asyncio 发生冲突。
+
+    修复要点：
+    - 启动前自动清理浏览器 profile 锁文件，防止上次异常退出导致启动失败
+    - 初始化增加超时保护，防止永久阻塞
+    - Singleton 崩溃后可自动恢复
+    - 持久模式失败时自动降级为非持久模式
     """
     _instance = None
     
@@ -25,36 +33,87 @@ class BrowserAutomationTool:
         self.res_queue = queue.Queue()
         self.thread = None
         self._initialized = True
+
+    def _clean_lock_files(self, user_data_dir: str):
+        """清理浏览器 profile 目录中的锁文件，防止启动冲突。"""
+        lock_patterns = [
+            "SingletonLock", "SingletonSocket", "SingletonCookie",
+            "lockfile", "*.lock"
+        ]
+        for pattern in lock_patterns:
+            for f in glob.glob(os.path.join(user_data_dir, pattern)):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
         
     def _start_browser_thread(self):
-        if self.thread is None or not self.thread.is_alive():
-            self.thread = threading.Thread(target=self._browser_loop, daemon=True)
-            self.thread.start()
-            # Wait for initialization
-            res = self.res_queue.get()
+        if self.thread is not None and self.thread.is_alive():
+            return  # 线程仍然存活，无需重启
+
+        # 如果旧线程已死，清理状态
+        self.thread = None
+        # 清空队列中的残留数据
+        while not self.res_queue.empty():
+            try:
+                self.res_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        self.thread = threading.Thread(target=self._browser_loop, daemon=True)
+        self.thread.start()
+
+        # 带超时的初始化等待
+        try:
+            res = self.res_queue.get(timeout=20)
             if res.get("status") == "error":
+                self.thread = None  # 允许重试
                 raise RuntimeError(f"Playwright 初始化失败: {res.get('message')}")
+        except queue.Empty:
+            self.thread = None  # 超时，允许重试
+            raise RuntimeError("Playwright 初始化超时 (20秒)。请确认 Chromium 浏览器已正确安装。")
 
     def _browser_loop(self):
         """运行在独立线程中的 Playwright 事件循环"""
         try:
             with sync_playwright() as p:
-                import os
                 user_data_dir = os.path.join(os.getcwd(), "data", "browser_profile")
                 os.makedirs(user_data_dir, exist_ok=True)
-                
-                context = p.chromium.launch_persistent_context(
-                    user_data_dir=user_data_dir,
-                    headless=self.headless,
-                    viewport={'width': 1280, 'height': 800},
-                    user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    no_viewport=False
-                )
-                
-                if len(context.pages) > 0:
-                    page = context.pages[0]
-                else:
-                    page = context.new_page()
+
+                # 清理可能残留的锁文件
+                self._clean_lock_files(user_data_dir)
+
+                context = None
+                page = None
+                use_persistent = True
+
+                # 尝试持久模式，失败则降级
+                try:
+                    context = p.chromium.launch_persistent_context(
+                        user_data_dir=user_data_dir,
+                        headless=self.headless,
+                        viewport={'width': 1280, 'height': 800},
+                        user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        no_viewport=False,
+                        timeout=15000
+                    )
+                    page = context.pages[0] if len(context.pages) > 0 else context.new_page()
+                except Exception as e:
+                    print(f"[Browser] 持久模式启动失败 ({e})，降级为非持久模式...")
+                    use_persistent = False
+                    try:
+                        browser = p.chromium.launch(
+                            headless=self.headless,
+                            timeout=15000
+                        )
+                        context = browser.new_context(
+                            viewport={'width': 1280, 'height': 800},
+                            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                        )
+                        page = context.new_page()
+                    except Exception as e2:
+                        self.res_queue.put({"status": "error", "message": f"浏览器启动完全失败: {str(e2)}"})
+                        return
                 
                 # Signal successful init
                 self.res_queue.put({"status": "success", "message": "init ok"})

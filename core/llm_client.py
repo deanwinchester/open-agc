@@ -232,6 +232,7 @@ class LLMClient:
             "glm": "ZAI_API_KEY",
             "minimax": "MINIMAX_API_KEY",
             "ollama": "OLLAMA_API_BASE",
+            "sglang": "SGLANG_API_BASE",
             "vllm": "VLLM_API_BASE"
         }
         for provider, env_var in PROVIDER_ENV_MAP.items():
@@ -262,8 +263,12 @@ class LLMClient:
         self.ollama_api_base = ollama_base
         os.environ["OLLAMA_API_BASE"] = ollama_base
         
+        # SGLang API base
+        self.sglang_api_base = config.get("api_keys", {}).get("sglang", "http://localhost:8009/v1")
+        os.environ["SGLANG_API_BASE"] = self.sglang_api_base
+
         # vLLM API base
-        self.vllm_api_base = config.get("api_keys", {}).get("vllm", "http://localhost:8009/v1")
+        self.vllm_api_base = config.get("api_keys", {}).get("vllm", "http://localhost:8000/v1")
         os.environ["VLLM_API_BASE"] = self.vllm_api_base
 
         # Ensure local connections bypass proxy (important for Ollama on Windows)
@@ -305,6 +310,8 @@ class LLMClient:
             # that sometimes lead to 404 errors (appending /api/generate/api/show)
             if "ollama" in attempt_model:
                 kwargs["api_base"] = self.ollama_api_base
+            if "sglang" in attempt_model:
+                kwargs["api_base"] = self.sglang_api_base
             if "vllm" in attempt_model:
                 kwargs["api_base"] = self.vllm_api_base
                 
@@ -340,6 +347,8 @@ class LLMClient:
         # For local models, explicitly pass api_base to bypass LiteLLM's internal miscalculations
         if "ollama" in target_model:
             kwargs["api_base"] = self.ollama_api_base
+        if "sglang" in target_model:
+            kwargs["api_base"] = self.sglang_api_base
         if "vllm" in target_model:
             kwargs["api_base"] = self.vllm_api_base
             

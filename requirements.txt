@@ -14,4 +14,4 @@ pyautogui
 Pillow
 opencv-python
 httptools
-vllm
+croniter>=2.0.0
