@@ -6,8 +6,8 @@ import time
 import requests
 from typing import Optional
 
-class VLLMManager:
-    """Manages the vLLM background process."""
+class SGLangManager:
+    """Manages the SGLang background process."""
     def __init__(self, model: str = "Qwen/Qwen3.5-9B-Instruct", port: int = 8009):
         self.model = model
         self.port = port
@@ -15,7 +15,7 @@ class VLLMManager:
         self._stop_event = threading.Event()
 
     def is_running(self) -> bool:
-        """Check if vLLM is already responding on the specified port."""
+        """Check if SGLang is already responding on the specified port."""
         try:
             resp = requests.get(f"http://localhost:{self.port}/v1/models", timeout=2)
             return resp.status_code == 200
@@ -23,22 +23,18 @@ class VLLMManager:
             return False
 
     def start(self):
-        """Start vLLM server in a background process."""
+        """Start SGLang server in a background process."""
         if self.is_running():
-            print(f"[vLLM] Already running on port {self.port}")
+            print(f"[SGLang] Already running on port {self.port}")
             return
 
-        print(f"[vLLM] Starting vLLM with model {self.model} on port {self.port}...")
+        print(f"[SGLang] Starting SGLang with model {self.model} on port {self.port}...")
         
-        # Command to start vLLM
-        # We use --tool-call-parser qwen35_coder as requested for Qwen 3.5
+        # Command to start SGLang
         cmd = [
-            sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-            "--model", self.model,
-            "--port", str(self.port),
-            "--tool-call-parser", "qwen35_coder",
-            "--reasoning-parser", "qwen3",
-            "--gpu-memory-utilization", "0.8" 
+            sys.executable, "-m", "sglang.launch_server",
+            "--model-path", self.model,
+            "--port", str(self.port)
         ]
 
         try:
@@ -66,17 +62,17 @@ class VLLMManager:
             threading.Thread(target=log_output, daemon=True).start()
             proc = self.process
             if proc:
-                print(f"[vLLM] Process started with PID {proc.pid}")
+                print(f"[SGLang] Process started with PID {proc.pid}")
 
         except Exception as e:
-            print(f"[vLLM] Failed to start: {e}")
+            print(f"[SGLang] Failed to start: {e}")
 
     def stop(self):
-        """Stop the vLLM process."""
+        """Stop the SGLang process."""
         self._stop_event.set()
         proc = self.process
         if proc:
-            print(f"[vLLM] Stopping process {proc.pid}...")
+            print(f"[SGLang] Stopping process {proc.pid}...")
             proc.terminate()
             try:
                 proc.wait(timeout=5)
@@ -85,10 +81,10 @@ class VLLMManager:
             self.process = None
 
 # Singleton instance
-_vllm_manager: Optional[VLLMManager] = None
+_sglang_manager: Optional[SGLangManager] = None
 
-def get_vllm_manager() -> VLLMManager:
-    global _vllm_manager
-    if _vllm_manager is None:
-        _vllm_manager = VLLMManager()
-    return _vllm_manager
+def get_sglang_manager() -> SGLangManager:
+    global _sglang_manager
+    if _sglang_manager is None:
+        _sglang_manager = SGLangManager()
+    return _sglang_manager

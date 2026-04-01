@@ -92,6 +92,7 @@ a = Analysis(
         'api.server',
         'agent.agent',
         'core.llm_client',
+        'core.sglang_manager',
         'tools.shell',
         'tools.filesystem',
         'tools.python_repl',

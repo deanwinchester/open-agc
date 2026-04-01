@@ -453,4 +453,4 @@ class OpenAGCAgent:
                 thread.start()
                 return final_answer
                 
-        return "Agent stopped: Reached maximum iterations without a final answer."
+        return "[MAX_ITERATIONS_REACHED] Agent stopped: Reached maximum iterations without a final answer. The task may be incomplete."

@@ -84,22 +84,22 @@ pyinstaller ^
     --hidden-import tiktoken ^
     --hidden-import tiktoken_ext ^
     --hidden-import tiktoken_ext.openai_public ^
-    --hidden-import vllm ^
-    --hidden-import vllm.entrypoints.openai.api_server ^
+    --hidden-import sglang ^
+    --hidden-import sglang.launch_server ^
     --collect-all litellm ^
     --collect-all tiktoken ^
     --collect-all openai ^
-    --collect-all vllm ^
+    --collect-all sglang ^
     --copy-metadata litellm ^
     --copy-metadata tiktoken ^
-    --copy-metadata vllm ^
+    --copy-metadata sglang ^
     --collect-submodules tiktoken ^
     --collect-submodules tiktoken_ext ^
-    --collect-submodules vllm ^
+    --collect-submodules sglang ^
     --hidden-import api.server ^
     --hidden-import agent.agent ^
     --hidden-import core.llm_client ^
-    --hidden-import core.vllm_manager ^
+    --hidden-import core.sglang_manager ^
     --hidden-import tools.shell ^
     --hidden-import tools.filesystem ^
     --hidden-import tools.python_repl ^

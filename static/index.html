@@ -1,15 +1,14 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="zh-CN" data-theme="light">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title data-i18n="title">Open-AGC Panda 🐼</title>
-    <!-- Modern Font: Inter -->
+    <title>Open-AGC Panda 🐼</title>
+    <meta name="description" content="Open-AGC - 开源 AI 智能体控制台，可执行命令、管理文件、运行代码">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
         rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
-    <!-- Highlight.js for Code Blocks -->
     <link rel="stylesheet"
         href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
 </head>
@@ -17,20 +16,17 @@
 <body>
     <div class="app-container">
         <!-- Sidebar Navigation -->
-        <aside class="sidebar glass-panel">
+        <aside class="sidebar glass-panel" id="sidebar">
             <div class="sidebar-header">
                 <div class="logo">
                     <svg class="logo-svg" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
                         <circle cx="50" cy="50" r="45" fill="#f4f6f5" stroke="#1a1c1e" stroke-width="8" />
-                        <!-- Ears -->
                         <circle cx="25" cy="25" r="16" fill="#1a1c1e" />
                         <circle cx="75" cy="25" r="16" fill="#1a1c1e" />
-                        <!-- Eyes -->
                         <circle cx="35" cy="45" r="12" fill="#1a1c1e" />
                         <circle cx="65" cy="45" r="12" fill="#1a1c1e" />
                         <circle cx="35" cy="42" r="4" fill="#ffffff" />
                         <circle cx="65" cy="42" r="4" fill="#ffffff" />
-                        <!-- Nose -->
                         <ellipse cx="50" cy="62" rx="6" ry="4" fill="#1a1c1e" />
                         <path d="M44 70 C 50 75, 50 75, 56 70" stroke="#1a1c1e" stroke-width="4"
                             stroke-linecap="round" />
@@ -38,104 +34,441 @@
                     <span>Open-AGC</span>
                 </div>
                 <div class="header-actions">
-                    <button class="icon-btn" id="theme-toggle" title="Toggle Theme">
+                    <button class="icon-btn" id="theme-toggle" title="切换主题">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                             stroke-width="2">
                             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
                         </svg>
                     </button>
-                    <button class="icon-btn" id="settings-btn" title="Settings">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <circle cx="12" cy="12" r="3"></circle>
-                            <path
-                                d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">
-                            </path>
-                        </svg>
-                    </button>
                 </div>
             </div>
 
-            <button class="new-chat-btn" id="new-chat-btn">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="12" y1="5" x2="12" y2="19"></line>
-                    <line x1="5" y1="12" x2="19" y2="12"></line>
-                </svg>
-                <span data-i18n="new_session">New Session</span>
-            </button>
+            <div class="sidebar-content">
+                <!-- 会话 Section -->
+                <div class="sidebar-section">
+                    <div class="sidebar-section-header" data-section="sessions">
+                        <div class="section-icon-title">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                            </svg>
+                            <span>会话</span>
+                        </div>
+                        <button class="nav-action-btn" id="new-chat-btn" title="新会话">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                <line x1="12" y1="5" x2="12" y2="19"></line>
+                                <line x1="5" y1="12" x2="19" y2="12"></line>
+                            </svg>
+                        </button>
+                    </div>
+                    <nav class="nav-item active" data-view="chat" id="nav-chat">
+                        <span class="nav-dot"></span>
+                        <span>当前会话</span>
+                    </nav>
+                </div>
 
-            <div class="sidebar-content" style="flex: 1; overflow-y: auto;">
+                <!-- 任务 Section -->
+                <div class="sidebar-section">
+                    <div class="sidebar-section-header" data-section="tasks">
+                        <div class="section-icon-title">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M9 11l3 3L22 4"></path>
+                                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+                            </svg>
+                            <span>任务</span>
+                        </div>
+                        <span class="task-count-badge" id="task-count-badge" style="display:none;">0</span>
+                    </div>
+                    <nav class="nav-item" data-view="tasks" id="nav-tasks">
+                        <span class="nav-dot"></span>
+                        <span>全部任务</span>
+                    </nav>
+                </div>
+
+                <div class="sidebar-divider"></div>
+
+                <!-- 系统配置 -->
+                <nav class="nav-item" data-view="settings-models" id="nav-settings-models">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                    </svg>
+                    <span>系统配置</span>
+                </nav>
+
+                <!-- 技能管理 -->
+                <nav class="nav-item" data-view="settings-skills" id="nav-settings-skills">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
+                    </svg>
+                    <span>技能管理</span>
+                </nav>
+
+                <!-- Agents & MCP -->
+                <nav class="nav-item" data-view="settings-mcp" id="nav-settings-mcp">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2a10 10 0 1 0 10 10H12V2z"></path>
+                        <path d="M12 12 2.1 7.1"></path>
+                        <path d="M12 12l9.9 4.9"></path>
+                    </svg>
+                    <span>Agents & MCP</span>
+                </nav>
             </div>
         </aside>
 
-        <!-- Main Chat Area -->
-        <main class="chat-main glass-panel">
-            <header class="chat-header">
-                <div style="display: flex; align-items: center; gap: 12px;">
-                    <h2 data-i18n="workspace">Workspace</h2>
-                    <select id="agent-selector" class="input-styled"
-                        style="padding: 4px 8px; font-size: 13px; width: auto; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px;">
-                        <option value="default">默认智能体</option>
-                    </select>
-                </div>
-                <div class="model-badge" id="current-model-badge">加载中...</div>
-            </header>
-
-            <div class="chat-history" id="chat-container">
-                <div class="message system">
-                    <div class="avatar">
-                        <svg width="20" height="20" viewBox="0 0 100 100" fill="none"
-                            xmlns="http://www.w3.org/2000/svg">
-                            <circle cx="50" cy="50" r="45" fill="#f4f6f5" stroke="#1a1c1e" stroke-width="6" />
-                            <circle cx="25" cy="25" r="14" fill="#1a1c1e" />
-                            <circle cx="75" cy="25" r="14" fill="#1a1c1e" />
-                            <circle cx="35" cy="45" r="10" fill="#1a1c1e" />
-                            <circle cx="65" cy="45" r="10" fill="#1a1c1e" />
-                            <circle cx="35" cy="43" r="3.5" fill="#fff" />
-                            <circle cx="65" cy="43" r="3.5" fill="#fff" />
-                            <ellipse cx="50" cy="62" rx="5" ry="3.5" fill="#1a1c1e" />
-                            <path d="M44 68 C 50 73, 50 73, 56 68" stroke="#1a1c1e" stroke-width="3"
-                                stroke-linecap="round" />
-                        </svg>
+        <!-- Main Content Area -->
+        <main class="main-content glass-panel" id="main-content">
+            <!-- ============ View: Chat ============ -->
+            <div class="view active" id="view-chat">
+                <header class="chat-header">
+                    <div style="display: flex; align-items: center; gap: 12px;">
+                        <h1 style="font-size: 1.1rem; font-weight: 600;">控制台</h1>
+                        <select id="agent-selector" class="input-styled"
+                            style="padding: 4px 8px; font-size: 13px; width: auto; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px;">
+                            <option value="default">默认智能体</option>
+                        </select>
                     </div>
-                    <div class="content" id="welcome-msg">
-                        Hello! I am Panda, your Agentic Computer Assistant.
-                        I can execute commands, manage files, and run code. How can I help you today?
+                    <div class="model-badge" id="current-model-badge">加载中...</div>
+                </header>
+
+                <div class="chat-body" id="chat-body">
+                    <div class="chat-history" id="chat-container">
+                        <div class="message system">
+                            <div class="avatar">
+                                <svg width="20" height="20" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <circle cx="50" cy="50" r="45" fill="#f4f6f5" stroke="#1a1c1e" stroke-width="6" />
+                                    <circle cx="25" cy="25" r="14" fill="#1a1c1e" />
+                                    <circle cx="75" cy="25" r="14" fill="#1a1c1e" />
+                                    <circle cx="35" cy="45" r="10" fill="#1a1c1e" />
+                                    <circle cx="65" cy="45" r="10" fill="#1a1c1e" />
+                                    <circle cx="35" cy="43" r="3.5" fill="#fff" />
+                                    <circle cx="65" cy="43" r="3.5" fill="#fff" />
+                                    <ellipse cx="50" cy="62" rx="5" ry="3.5" fill="#1a1c1e" />
+                                    <path d="M44 68 C 50 73, 50 73, 56 68" stroke="#1a1c1e" stroke-width="3" stroke-linecap="round" />
+                                </svg>
+                            </div>
+                            <div class="content" id="welcome-msg">
+                                你好！我是熊猫，你的专属电脑控制智能体。我可以帮你执行命令行、管理文件或运行代码。今天需要我做什么？
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Detail Panel (hidden by default, shown on step click) -->
+                    <div class="detail-panel" id="detail-panel" style="display: none;">
+                        <div class="detail-panel-header">
+                            <h3 id="detail-panel-title">步骤详情</h3>
+                            <button class="icon-btn" id="detail-panel-close" title="关闭">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="detail-panel-body" id="detail-panel-body">
+                            <!-- Dynamic content -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Input Area -->
+                <div class="input-container">
+                    <div class="input-box glass-panel-inner">
+                        <textarea id="message-input" placeholder="告诉熊猫，你想在电脑上做什么..." rows="1" autofocus></textarea>
+                        <div class="input-actions">
+                            <button class="action-btn mic-btn" id="mic-btn" title="语音输入">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                    <line x1="12" x2="12" y1="19" y2="22"></line>
+                                </svg>
+                            </button>
+                            <button class="action-btn send-btn" id="send-btn">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                                </svg>
+                            </button>
+                            <button class="action-btn stop-btn" id="stop-btn" style="display: none;" title="停止任务">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                    <rect x="6" y="6" width="12" height="12"></rect>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="footer-text">Open-AGC 的操作可能会出现失误。请在危急时移动鼠标到边角强制停止。</div>
+                </div>
+            </div>
+
+            <!-- ============ View: Tasks ============ -->
+            <div class="view" id="view-tasks">
+                <header class="view-header">
+                    <h1>📋 任务管理</h1>
+                    <p class="view-desc">查看 Agent 执行过的所有任务及其详情</p>
+                </header>
+                <div class="view-toolbar">
+                    <div class="search-box">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <input type="text" id="task-search-input" placeholder="搜索任务..." class="input-styled">
+                    </div>
+                <div class="filter-pills">
+                        <button class="filter-pill active" data-filter="all">全部</button>
+                        <button class="filter-pill" data-filter="running">进行中</button>
+                        <button class="filter-pill" data-filter="scheduled">定时</button>
+                        <button class="filter-pill" data-filter="completed">已完成</button>
+                        <button class="filter-pill" data-filter="failed">失败</button>
+                    </div>
+                    <button class="btn-primary" id="create-schedule-btn" style="padding: 6px 14px; font-size: 0.85rem; gap: 4px; margin-left: auto;">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <polyline points="12 6 12 12 16 14"></polyline>
+                        </svg>
+                        创建定时任务
+                    </button>
+                </div>
+                <div class="task-list" id="task-list-container">
+                    <div class="empty-state">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
+                            <path d="M9 11l3 3L22 4"></path>
+                            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+                        </svg>
+                        <p>暂无任务记录</p>
+                        <small>当 Agent 在会话中执行工具操作时，任务将自动记录在此</small>
                     </div>
                 </div>
             </div>
 
-            <!-- Input Area -->
-            <div class="input-container">
-                <div class="input-box glass-panel-inner">
-                    <textarea id="message-input" data-i18n-prop="placeholder" data-i18n="placeholder"
-                        placeholder="Ask Panda to do something on this computer..." rows="1" autofocus></textarea>
-                    <div class="input-actions">
-                        <button class="action-btn mic-btn" id="mic-btn" title="Toggle Voice Input">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
-                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-                                <line x1="12" x2="12" y1="19" y2="22"></line>
+            <!-- ============ View: Task Detail ============ -->
+            <div class="view" id="view-task-detail">
+                <header class="view-header">
+                    <button class="back-btn" id="task-detail-back">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="15 18 9 12 15 6"></polyline>
+                        </svg>
+                        返回任务列表
+                    </button>
+                    <h1 id="task-detail-title">任务详情</h1>
+                </header>
+                <div class="task-detail-content" id="task-detail-content">
+                    <!-- Dynamic content -->
+                </div>
+            </div>
+
+            <!-- ============ View: Settings - Models ============ -->
+            <div class="view" id="view-settings-models">
+                <header class="view-header">
+                    <h1>⚙ 系统配置</h1>
+                    <p class="view-desc">配置 AI 模型、安全沙箱与后台服务</p>
+                </header>
+                <div class="settings-body" id="settings-models-body">
+                    <!-- API Keys Card -->
+                    <section class="card">
+                        <div class="card-header">
+                            <h2>🔑 API 密钥</h2>
+                            <p class="card-desc">配置各厂商的 API Key，未填写的厂商将不可用。</p>
+                        </div>
+                        <div class="api-keys-grid" id="api-keys-container"></div>
+                    </section>
+
+                    <!-- Model Selection Card -->
+                    <section class="card">
+                        <div class="card-header">
+                            <h2>🤖 默认模型</h2>
+                            <p class="card-desc">选择主力模型，以及在主力不可用时的备选回退顺序。</p>
+                        </div>
+                        <div class="field">
+                            <label>默认厂商 & 模型</label>
+                            <div class="model-row">
+                                <select id="provider-select" class="select-styled">
+                                    <option value="kimi">Kimi (Moonshot)</option>
+                                    <option value="ollama">Ollama (本地/Local)</option>
+                                    <option value="sglang">SGLang (本地/Local)</option>
+                                    <option value="vllm">vLLM (本地/Local)</option>
+                                    <option value="openai">OpenAI</option>
+                                    <option value="anthropic">Anthropic</option>
+                                    <option value="gemini">Google Gemini</option>
+                                    <option value="deepseek">DeepSeek</option>
+                                    <option value="glm">GLM (智谱)</option>
+                                    <option value="minimax">MiniMax</option>
+                                </select>
+                                <select id="model-name-select" class="select-styled">
+                                    <option value="gpt-4o">gpt-4o</option>
+                                </select>
+                                <button id="fetch-models-btn" class="btn-icon" title="刷新模型列表">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="23 4 23 10 17 10"></polyline>
+                                        <polyline points="1 20 1 14 7 14"></polyline>
+                                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label>回退模型（逗号分隔）</label>
+                            <input type="text" id="fallback-models-input" class="input-styled" placeholder="如：gpt-3.5-turbo, claude-3-haiku-20240307">
+                            <small class="field-hint">当默认模型不可用时，将按此顺序依次尝试。</small>
+                        </div>
+                        <div class="field" id="pull-model-group" style="display: none; border-top: 1px solid var(--border-color); padding-top: 1rem; margin-top: 1rem;">
+                            <label>📥 一键拉取本地模型</label>
+                            <div class="model-row">
+                                <input type="text" id="pull-model-input" class="input-styled" placeholder="如 Qwen/Qwen2.5-7B-Instruct">
+                                <select id="pull-tool-select" class="select-styled" style="width: auto;">
+                                    <option value="huggingface">HuggingFace</option>
+                                    <option value="modelscope">ModelScope</option>
+                                </select>
+                                <button id="pull-model-btn" class="btn-secondary" style="white-space: nowrap;">拉取模型</button>
+                            </div>
+                            <small class="field-hint" id="pull-model-status">拉取过程将在后台进行。</small>
+                        </div>
+                    </section>
+
+                    <!-- Heartbeat -->
+                    <section class="card">
+                        <div class="card-header">
+                            <h2>✨ 后台巡视</h2>
+                            <p class="card-desc">开启后，智能体会定期在后台自动检查系统状态。</p>
+                        </div>
+                        <div class="field">
+                            <label class="toggle-container">
+                                <input type="checkbox" id="heartbeat-toggle">
+                                <span class="toggle-label">启用长驻看守模式</span>
+                            </label>
+                        </div>
+                    </section>
+
+                    <!-- Sandbox -->
+                    <section class="card">
+                        <div class="card-header">
+                            <h2>📁 沙箱安全</h2>
+                            <p class="card-desc">将智能体的文件访问和执行权限限制在特定目录内。</p>
+                        </div>
+                        <div class="field">
+                            <label class="toggle-container">
+                                <input type="checkbox" id="sandbox-mode-toggle" checked>
+                                <span class="toggle-label">开启沙箱模式</span>
+                            </label>
+                        </div>
+                        <div class="field" id="sandbox-dir-group">
+                            <label>沙箱目录路径</label>
+                            <input type="text" id="sandbox-dir-input" class="input-styled" placeholder="/填写/你的/沙箱/绝对路径">
+                            <small class="field-hint">智能体将只能在该目录下读取/写入文件。</small>
+                        </div>
+                    </section>
+
+                    <!-- Email -->
+                    <section class="card">
+                        <div class="card-header">
+                            <h2>📧 邮件监听</h2>
+                            <p class="card-desc">配置智能体邮箱，允许它接收主人指令并代发邮件。</p>
+                        </div>
+                        <div class="field">
+                            <label class="toggle-container">
+                                <input type="checkbox" id="email-listener-toggle">
+                                <span class="toggle-label">开启邮件监听</span>
+                            </label>
+                        </div>
+                        <div class="field">
+                            <label>主人邮箱</label>
+                            <input type="email" id="owner-email-input" class="input-styled" placeholder="你的主要邮箱地址">
+                        </div>
+                        <div class="field">
+                            <label>智能体邮箱账号</label>
+                            <input type="email" id="email-account-input" class="input-styled" placeholder="分配给智能体的邮箱地址">
+                        </div>
+                        <div class="field">
+                            <label>智能体邮箱密码 / 授权码</label>
+                            <input type="password" id="email-password-input" class="input-styled" placeholder="密码或授权码">
+                        </div>
+                        <div class="model-row">
+                            <div class="field" style="flex: 1;">
+                                <label>IMAP 服务器</label>
+                                <input type="text" id="email-imap-input" class="input-styled" placeholder="例: imap.qq.com">
+                            </div>
+                            <div class="field" style="flex: 1;">
+                                <label>SMTP 服务器</label>
+                                <input type="text" id="email-smtp-input" class="input-styled" placeholder="例: smtp.qq.com">
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Global Save -->
+                    <div class="global-actions">
+                        <div id="save-status" class="save-status"></div>
+                        <button id="save-settings-btn" class="btn-save">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                                <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                                <polyline points="7 3 7 8 15 8"></polyline>
                             </svg>
-                        </button>
-                        <button class="action-btn send-btn" id="send-btn">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="2.5">
-                                <line x1="22" y1="2" x2="11" y2="13"></line>
-                                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                            </svg>
-                        </button>
-                        <button class="action-btn stop-btn" id="stop-btn" style="display: none;" title="Stop Task">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="2.5">
-                                <rect x="6" y="6" width="12" height="12"></rect>
-                            </svg>
+                            保存设置
                         </button>
                     </div>
                 </div>
-                <div class="footer-text" data-i18n="footer_warning">Open-AGC AI can make mistakes. Verify critical
-                    actions before permitting.</div>
+            </div>
+
+            <!-- ============ View: Settings - Skills ============ -->
+            <div class="view" id="view-settings-skills">
+                <header class="view-header">
+                    <h1>🛠 技能管理</h1>
+                    <p class="view-desc">控制 Agent 可调用的技能开关，关闭的技能不会被加载。</p>
+                </header>
+                <div class="settings-body">
+                    <section class="card">
+                        <div class="skills-list" id="skills-config-container">
+                            <div class="loading-indicator">
+                                <div class="spinner"></div>
+                                <span>加载中...</span>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+
+            <!-- ============ View: Settings - MCP ============ -->
+            <div class="view" id="view-settings-mcp">
+                <header class="view-header">
+                    <h1>🔌 Agents & MCP</h1>
+                    <p class="view-desc">配置多智能体角色与 Model Context Protocol 外部服务。</p>
+                </header>
+                <div class="settings-body">
+                    <section class="card">
+                        <div class="card-header">
+                            <h2>🎭 多智能体配置</h2>
+                            <p class="card-desc">配置不同的智能体角色，可以分配不同的系统提示词。</p>
+                        </div>
+                        <div class="field">
+                            <label>Agent Profiles (JSON Array)</label>
+                            <textarea id="agents-config-input" class="input-styled" rows="6"
+                                placeholder='[{"name": "默认助手", "prompt": "You are a helpful assistant."}]'></textarea>
+                        </div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header">
+                            <h2>🔌 Model Context Protocol (MCP)</h2>
+                            <p class="card-desc">配置外部 MCP Server。填写标准 JSON 配置（兼容 Claude Desktop）。</p>
+                        </div>
+                        <div class="field">
+                            <label>MCP Servers Config (JSON)</label>
+                            <textarea id="mcp-config-input" class="input-styled" rows="8" placeholder='{
+  "sqlite": {
+    "command": "uvx",
+    "args": ["mcp-server-sqlite", "--db-path", "~/test.db"]
+  }
+}'></textarea>
+                        </div>
+                    </section>
+                    <div class="global-actions">
+                        <button id="save-mcp-btn" class="btn-save">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                                <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                                <polyline points="7 3 7 8 15 8"></polyline>
+                            </svg>
+                            保存设置
+                        </button>
+                    </div>
+                </div>
             </div>
         </main>
     </div>
@@ -144,12 +477,8 @@
     <div class="modal-overlay" id="permission-modal">
         <div class="modal-box">
             <h3>⚠️ 需要系统权限</h3>
-            <p class="modal-desc" id="perm-modal-desc">
-                该操作需要额外的系统权限。请在终端中执行以下命令授权：
-            </p>
-            <div class="modal-code" id="perm-modal-code">
-                <!-- Dynamic content -->
-            </div>
+            <p class="modal-desc" id="perm-modal-desc">该操作需要额外的系统权限。</p>
+            <div class="modal-code" id="perm-modal-code"></div>
             <div class="modal-actions">
                 <button class="btn-secondary" id="perm-modal-close">关闭</button>
                 <button class="btn-primary" id="perm-modal-copy">复制命令</button>
@@ -157,9 +486,64 @@
         </div>
     </div>
 
+    <!-- Edit Skill Dialog -->
+    <div class="modal-overlay" id="edit-skill-modal">
+        <div class="modal-box" style="max-width: 600px; width: 90%;">
+            <h3>✏️ 编辑技能: <span id="edit-skill-filename"></span></h3>
+            <div class="field" style="margin-top: 1rem;">
+                <textarea id="edit-skill-content" class="input-styled"
+                    style="width: 100%; height: 300px; font-family: monospace; resize: vertical; box-sizing: border-box;"
+                    spellcheck="false"></textarea>
+            </div>
+            <div class="modal-actions" style="margin-top: 1rem;">
+                <button class="btn-secondary" id="edit-skill-close">取消</button>
+                <button class="btn-primary" id="edit-skill-save">保存更改</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <!-- ============ Schedule Task Modal ============ -->
+    <div class="modal-overlay" id="schedule-modal">
+        <div class="modal-box" style="max-width: 520px; width: 90%;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem;">
+                <h3 style="margin: 0;">⏰ 创建定时任务</h3>
+                <button class="icon-btn" id="schedule-modal-close" title="关闭" style="margin-top: -4px; margin-right: -8px;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-desc">配置 Agent 定期在后台自动执行的任务，将在设定的时间触发。</div>
+            
+            <div class="field" style="margin-top: 1.2rem;">
+                <label class="field-label">任务名称</label>
+                <input type="text" id="schedule-title" class="input-styled" placeholder="如：每小时汇报新闻" style="width: 100%; box-sizing: border-box;">
+            </div>
+            <div class="field" style="margin-top: 1rem;">
+                <label class="field-label">执行指令</label>
+                <textarea id="schedule-query" class="input-styled" rows="3" placeholder="告诉 Agent 应该做什么..." style="width: 100%; box-sizing: border-box; resize: vertical;"></textarea>
+            </div>
+            <div class="field" style="margin-top: 1rem;">
+                <label class="field-label">Cron 表达式</label>
+                <input type="text" id="schedule-cron" class="input-styled" placeholder="如：0 * * * * （每小时整点）" style="width: 100%; box-sizing: border-box;">
+                <div class="cron-help">
+                    <small>常用: <code>*/30 * * * *</code> 每30分 | <code>0 * * * *</code> 每小时 | <code>0 9 * * *</code> 每天9点 | <code>0 9 * * 1</code> 每周一9点</small>
+                </div>
+            </div>
+            
+            <div id="schedule-save-status" style="font-size: 0.85rem; text-align: left; margin-top: 1rem; min-height: 20px;"></div>
+            
+            <div class="modal-actions" style="margin-top: 1rem;">
+                <button class="btn-secondary" id="schedule-modal-cancel">取消</button>
+                <button class="btn-primary" id="schedule-modal-save">创建任务</button>
+            </div>
+        </div>
+    </div>
+
     <script src="/static/app.js"></script>
 </body>
 
