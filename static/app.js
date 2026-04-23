@@ -1256,7 +1256,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     badge.style.display = 'none';
                 }
             })
-            .catch(() => {});
+            .catch(() => { });
     }
 
     function formatTimeAgo(isoStr) {
@@ -1303,7 +1303,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Schedule Modal
     // ==========================================
     const scheduleModal = document.getElementById('schedule-modal');
-    
+
     document.getElementById('create-schedule-btn')?.addEventListener('click', () => {
         scheduleModal?.classList.add('active');
     });
@@ -1368,7 +1368,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 ws.send(JSON.stringify({ type: "interrupt" }));
                 // Also try to interrupt current task
                 if (currentTaskId) {
-                    fetch(`/api/tasks/${currentTaskId}/interrupt`, { method: 'POST' }).catch(() => {});
+                    fetch(`/api/tasks/${currentTaskId}/interrupt`, { method: 'POST' }).catch(() => { });
                 }
                 stopBtn.disabled = true;
                 stopBtn.style.opacity = '0.5';

@@ -22,69 +22,81 @@ def load_config() -> dict:
             return {}
     return {}
 
-# Patch LiteLLM's OllamaConfig to support the 'thinking' field (e.g. Qwen3.5)
-# This is done here at runtime to avoid modifying venv directly.
-class PatchedOllamaConfig(OllamaConfig):
-    def _clean_text(self, text: str) -> str:
-        if not text:
-            return text
+def clean_llm_text(text: str) -> str:
+    """Utility to strip thinking tags and JSON artifacts from LLM responses."""
+    if not text:
+        return text
+    
+    import re
+    
+    # 1. Handle JSON hallucinations
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            data = json.loads(stripped)
+            if isinstance(data, dict):
+                # Specifically look for keys that hold the actual assistant reply or reasoning
+                for key in ["Model", "assistant", "content", "response", "message", "thought", "reasoning", "action"]:
+                    if key in data and isinstance(data[key], str):
+                        # Skip if it's just a generic "message" action indicator
+                        if key == "action" and data[key].lower() == "message":
+                            continue
+                        text = data[key]
+                        break
+        except Exception: pass
         
-        # 1. Handle JSON hallucinations (e.g. { "User": "...", "Model": "..." })
-        # This often happens when models are confused by memory extraction prompts
-        stripped = text.strip()
-        if stripped.startswith("{") and stripped.endswith("}"):
-            try:
-                data = json.loads(stripped)
-                if isinstance(data, dict):
-                    # Specifically look for keys that hold the actual assistant reply
-                    for key in ["Model", "assistant", "content", "response", "message"]:
-                        if key in data and isinstance(data[key], str):
-                            text = data[key]
-                            break
-            except Exception: pass
-            
-        # 2. Strip reasoning and template tags/artifacts
-        # Some Ollama models bleed through their internal markers
-        artifacts = [
-            "<thought>", "</thought>", "<think>", "</think>",
-            "<|im_start|>", "<|im_end|>", "<|endoftext|>",
-            "assistant\n", "user\n", "system\n"
-        ]
-        for art in artifacts:
-            text = text.replace(art, "")
-            
-        return text.strip()
+    # 2. Strip reasoning and template tags using regex for better coverage (including multiline)
+    patterns = [
+        r"<thought>.*?</thought>",
+        r"<think>.*?</think>",
+        r"<thought>.*", # Unclosed tags
+        r"<think>.*",   
+        r".*?</thought>",
+        r".*?</think>",
+        r"<\|im_start\|>", r"<\|im_end\|>", r"<\|endoftext\|>",
+        r"assistant\n", r"user\n", r"system\n"
+    ]
+    
+    for pattern in patterns:
+        text = re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE)
+        
+    return text.strip()
+
+# Patch LiteLLM's OllamaConfig to support the 'thinking' field and robust tool rescue
+class PatchedOllamaConfig(OllamaConfig):
+    # No longer needed as we use clean_llm_text globally
+
 
     def _rescue_tool_call(self, text: str) -> Optional[Dict[str, Any]]:
         """Attempt to extract a tool call and optional reasoning from a raw JSON string."""
         if not text:
             return None
         
-        stripped = text.strip()
-        # Strip potential markdown fences
-        if stripped.startswith("```"):
-            lines = stripped.split("\n")
-            if lines[0].startswith("```"):
-                content_lines = lines[1:]
-                if content_lines and content_lines[-1].strip() == "```":
-                    content_lines = content_lines[:-1]
-                stripped = "\n".join(content_lines).strip()
-
-        if not (stripped.startswith("{") and stripped.endswith("}")):
+        # Find potential JSON block in the text
+        # Handles cases where the model wraps JSON in text or markdown
+        content = text.strip()
+        
+        # Try to find the first '{' and corresponding last '}'
+        start_idx = content.find('{')
+        end_idx = content.rfind('}')
+        
+        if start_idx == -1 or end_idx == -1 or end_idx < start_idx:
             return None
             
+        json_str = content[start_idx:end_idx+1]
+        
         try:
-            data = json.loads(stripped)
+            data = json.loads(json_str)
             if not isinstance(data, dict):
                 return None
             
             result = None
             
-            # Format 1: Action/Parameters {"action": "...", "parameters": {...}}
-            if "action" in data and "parameters" in data:
+            # Format 1: Action/Parameters {"action": "...", "parameters": {...}} or {"action": "...", "action_input": {...}}
+            if "action" in data and ("parameters" in data or "action_input" in data):
                 result = {
                     "name": data["action"],
-                    "arguments": data.get("parameters")
+                    "arguments": data.get("parameters") or data.get("action_input")
                 }
             
             # Format 2: OpenAI-like but in content {"name": "...", "arguments": {...}}
@@ -102,7 +114,6 @@ class PatchedOllamaConfig(OllamaConfig):
                 }
             
             # Format 4: Execution Plan {"execution": {"action_type": "...", ...}}
-            # Common in Qwen 3.5 / GLM 4 when they hallucinate a plan
             elif "execution" in data and isinstance(data["execution"], dict):
                 exec_data = data["execution"]
                 action = exec_data.get("action_type")
@@ -117,7 +128,6 @@ class PatchedOllamaConfig(OllamaConfig):
                         "name": "execute_shell",
                         "arguments": {"command": exec_data.get("command") or exec_data.get("code_content") or ""}
                     }
-                # Fallback: if it just has name/args inside execution
                 elif "name" in exec_data and ("arguments" in exec_data or "parameters" in exec_data):
                     result = {
                         "name": exec_data["name"],
@@ -125,7 +135,7 @@ class PatchedOllamaConfig(OllamaConfig):
                     }
 
             if result:
-                # Capture reasoning if present in the same JSON (common in Plan formats)
+                # Capture reasoning if present in the same JSON
                 reasoning = data.get("thought") or data.get("reasoning") or data.get("description")
                 if reasoning:
                     result["reasoning"] = reasoning
@@ -137,8 +147,16 @@ class PatchedOllamaConfig(OllamaConfig):
 
     def transform_response(self, *args, **kwargs):
         # Call original transform first
-        resp = super().transform_response(*args, **kwargs)
-        
+        try:
+            resp = super().transform_response(*args, **kwargs)
+        except Exception as e:
+            # If transform fails, create a skeleton response to try to rescue content
+            print(f"[LLMClient] Ollama transform error: {str(e)}")
+            return None # Fail safely or handle if possible
+            
+        if not resp or not resp.choices:
+            return resp
+
         # Access raw_response from args (model, raw_response, model_response, ...)
         raw_response = args[1] if len(args) > 1 else kwargs.get("raw_response")
         if not raw_response:
@@ -147,17 +165,16 @@ class PatchedOllamaConfig(OllamaConfig):
         try:
             response_json = raw_response.json()
             thinking_text = response_json.get("thinking", "")
-            response_text = response_json.get("response", "")
+            response_text = response_json.get("response", "") or response_json.get("message", {}).get("content", "")
             
             msg = resp.choices[0].message
             
             # 1. Always preserve thinking as reasoning_content if it exists
-            # Use getattr/setattr to avoid AttributeError on older LiteLLM Message objects
             if thinking_text and not getattr(msg, 'reasoning_content', None):
                 setattr(msg, 'reasoning_content', thinking_text)
             
             # 2. Rescue tool calls if native tool_calls is empty
-            if not msg.tool_calls:
+            if not getattr(msg, 'tool_calls', None):
                 rescued = None
                 # Try response first (primary output)
                 if response_text:
@@ -181,26 +198,23 @@ class PatchedOllamaConfig(OllamaConfig):
                     ]
                     resp.choices[0].finish_reason = "tool_calls"
                     
-                    # If the rescued JSON contained a 'thought' field, pull it into reasoning_content
                     if rescued.get("reasoning") and not getattr(msg, 'reasoning_content', None):
                         setattr(msg, 'reasoning_content', rescued["reasoning"])
             
             # 3. Handle fallback if primary response is empty but thinking has content
-            # (And it wasn't a tool call)
-            if not msg.tool_calls and (not response_text or not response_text.strip()):
+            if (not getattr(msg, 'tool_calls', None)) and (not response_text or not response_text.strip()):
                 if thinking_text and (not msg.content or not msg.content.strip()):
                     msg.content = thinking_text
                     
             # Final cleanup for both content and reasoning
             if msg.content:
-                msg.content = self._clean_text(msg.content)
+                msg.content = clean_llm_text(msg.content)
             
             reasoning = getattr(msg, 'reasoning_content', None)
             if reasoning:
-                setattr(msg, 'reasoning_content', self._clean_text(reasoning))
+                setattr(msg, 'reasoning_content', clean_llm_text(reasoning))
                 
         except Exception as e:
-            # Silent failure for patch
             print(f"[LLMClient] Ollama patch warning: {str(e)}")
             
         return resp
@@ -208,6 +222,8 @@ class PatchedOllamaConfig(OllamaConfig):
 # Apply the monkeypatch to LiteLLM's internal registry
 import litellm.llms.ollama.completion.transformation as transformation
 transformation.OllamaConfig = PatchedOllamaConfig
+transformation.OllamaChatConfig = PatchedOllamaConfig # Patch Chat config too
+
 
 
 class LLMClient:
@@ -247,19 +263,20 @@ class LLMClient:
             os.environ.setdefault("MINIMAX_API_BASE", "https://api.minimax.io/v1")
 
         # Default Ollama API base and proxy bypass for local connections
-        ollama_base = config.get("api_keys", {}).get("ollama", "http://localhost:11434")
+        ollama_base = config.get("api_keys", {}).get("ollama", "http://127.0.0.1:11434")
         
-        # Sanitize Ollama URL: LiteLLM expects the base host/port, not the full endpoint.
-        # If it ends with /api/generate, /api/chat, etc., strip it.
-        # We also handle optional trailing slashes for robustness.
+        # Resolve localhost to 127.0.0.1 for stability on Windows
+        ollama_base = ollama_base.replace("://localhost", "://127.0.0.1")
+        
+        # Sanitize Ollama URL
         ollama_base = ollama_base.rstrip("/")
-        suffixes_to_strip = ["/api/generate", "/api/chat", "/api/show", "/api/tags"]
+        suffixes_to_strip = ["/api/generate", "/api/chat", "/api/show", "/api/tags", "/v1"]
         for suffix in suffixes_to_strip:
             if ollama_base.endswith(suffix):
                 ollama_base = ollama_base[:-len(suffix)]
                 break
         
-        # Keep clean OLLAMA_API_BASE in env and as an instance variable for explicit passing
+        # Keep clean OLLAMA_API_BASE in env and as an instance variable
         self.ollama_api_base = ollama_base
         os.environ["OLLAMA_API_BASE"] = ollama_base
         
@@ -331,7 +348,7 @@ class LLMClient:
     def chat_stream(self, messages: List[Dict[str, Any]], model: Optional[str] = None,
                     tools: Optional[List[Dict[str, Any]]] = None):
         """
-        Send a streaming chat completion request.
+        Send a streaming chat completion request with thought tag filtering.
         """
         target_model = model or self.default_model
         
@@ -354,7 +371,35 @@ class LLMClient:
             
         try:
             response = litellm.completion(**kwargs)
+            
+            # Stateful filtering for streaming thought tags
+            in_thought_block = False
+            
             for chunk in response:
+                content = chunk.choices[0].delta.content
+                if content:
+                    # Simple state machine to skip content between tags
+                    lower_content = content.lower()
+                    if "<think" in lower_content or "<thought" in lower_content:
+                        in_thought_block = True
+                        # If the chunk contains both start and end, we might need more complex splitting
+                        # but for simple chunk-based streaming, this heuristic often works.
+                        if "/think" in lower_content or "/thought" in lower_content:
+                            in_thought_block = False
+                        continue
+                        
+                    if "/think" in lower_content or "/thought" in lower_content:
+                        in_thought_block = False
+                        continue
+                    
+                    if in_thought_block:
+                        continue
+                        
+                    # Clean the content just in case any markers remain
+                    chunk.choices[0].delta.content = clean_llm_text(content)
+                    if not chunk.choices[0].delta.content:
+                        continue
+                        
                 yield chunk
         except Exception as e:
             print(f"Error calling LLM stream ({target_model}): {str(e)}")
