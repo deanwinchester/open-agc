@@ -1,0 +1,19 @@
+[92m15:21:13 - LiteLLM:WARNING[0m: utils.py:761 - `litellm.set_verbose` is deprecated. Please set `os.environ['LITELLM_LOG'] = 'DEBUG'` for debug logs.
+[92m15:21:14 - LiteLLM:WARNING[0m: utils.py:761 - `litellm.set_verbose` is deprecated. Please set `os.environ['LITELLM_LOG'] = 'DEBUG'` for debug logs.
+--- Testing with ollama/qwen3.5:9b ---
+SYNC kwargs[caching]: False; litellm.cache: None; kwargs.get('cache')['no-cache']: False
+Final returned optional params: {'format': 'json', 'functions_unsupported_model': [{'type': 'function', 'function': {'name': 'get_weather', 'description': 'Get weather for a location', 'parameters': {'type': 'object', 'properties': {'location': {'type': 'string'}}, 'required': ['location']}}}]}
+
+[1;31mGive Feedback / Get Help: https://github.com/BerriAI/litellm/issues/new[0m
+LiteLLM.Info: If you need to debug this error, use `litellm._turn_on_debug()'.
+
+Error (ollama/): litellm.APIConnectionError: OllamaException - 
+
+--- Testing with ollama_chat/qwen3.5:9b ---
+SYNC kwargs[caching]: False; litellm.cache: None; kwargs.get('cache')['no-cache']: False
+Final returned optional params: {'tools': [{'type': 'function', 'function': {'name': 'get_weather', 'description': 'Get weather for a location', 'parameters': {'type': 'object', 'properties': {'location': {'type': 'string'}}, 'required': ['location']}}}]}
+
+[1;31mGive Feedback / Get Help: https://github.com/BerriAI/litellm/issues/new[0m
+LiteLLM.Info: If you need to debug this error, use `litellm._turn_on_debug()'.
+
+Error (ollama_chat/): litellm.APIConnectionError: Ollama_chatException - 
