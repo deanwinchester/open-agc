@@ -37,6 +37,7 @@ from typing import List, Dict, Optional
 from dotenv import load_dotenv, set_key
 
 from core.paths import get_data_path, get_skills_dir
+from core.llamacpp_manager import get_llamacpp_manager
 
 # Load environment variables
 env_file = get_data_path(".env")
@@ -449,6 +450,11 @@ async def get_provider_models(provider: str):
                 if res.status_code == 200:
                     models = [m["id"] for m in res.json().get("data", []) if "gpt" in m["id"]]
             except Exception: pass
+    elif provider == "llamacpp":
+        manager = get_llamacpp_manager()
+        models = [f"llamacpp/{m}" for m in manager.list_models()]
+        if not models:
+            models = ["llamacpp/local-model (Not Installed)"]
     elif provider == "deepseek":
         key = api_keys.get("deepseek")
         if key:
@@ -529,6 +535,69 @@ async def pull_model(req: PullRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/llamacpp/status")
+async def get_llamacpp_status():
+    """Get the status of the local llama-server."""
+    manager = get_llamacpp_manager()
+    return {
+        "installed": manager.is_binary_installed(),
+        "running": manager.is_running(),
+        "models": manager.list_models(),
+        "port": manager.port
+    }
+
+@app.post("/api/llamacpp/setup")
+async def setup_llamacpp():
+    """Download and install the llama-server binary."""
+    manager = get_llamacpp_manager()
+    success = manager.download_binary()
+    if success:
+        return {"status": "success", "message": "llama-server installed successfully"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to download llama-server binary")
+
+class ModelDownloadRequest(BaseModel):
+    url: str
+    filename: str
+
+@app.post("/api/llamacpp/download-model")
+async def download_llamacpp_model(req: ModelDownloadRequest):
+    """Download a GGUF model."""
+    manager = get_llamacpp_manager()
+    success = manager.download_model(req.url, req.filename)
+    if success:
+        return {"status": "success", "message": f"Model {req.filename} downloaded successfully"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to download model")
+
+class LlamaControlRequest(BaseModel):
+    action: str
+    model: Optional[str] = None
+
+@app.post("/api/llamacpp/control")
+async def control_llamacpp(req: LlamaControlRequest):
+    """Control the llama-server process."""
+    import time
+    manager = get_llamacpp_manager()
+    if req.action == "start":
+        if not req.model:
+            raise HTTPException(status_code=400, detail="Model filename required to start")
+        success = manager.start(req.model)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to start llama-server process")
+        return {"status": "success", "message": "Server start command issued"}
+    elif req.action == "stop":
+        manager.stop()
+        return {"status": "success", "message": "Server stop command issued"}
+    elif req.action == "restart":
+        manager.stop()
+        time.sleep(1)
+        if req.model:
+            manager.start(req.model)
+        return {"status": "success", "message": "Server restart command issued"}
+    else:
+        raise HTTPException(status_code=400, detail="Invalid action")
+
 @app.get("/api/skills")
 async def get_skills():
     """List available skills with details."""
@@ -565,7 +634,9 @@ async def import_skill(data: dict):
 @app.post("/api/skills/validate")
 async def validate_skill(data: dict):
     """Validate a skill for security without importing."""
-    from core.skill_manager import SkillManager
+    from core.memory_store import get_memory_store, LongTermMemory
+    from core.skill_manager import get_skill_manager
+    from core.llamacpp_manager import get_llamacpp_manager
     manager = SkillManager()
     content = data.get("content", "")
     return manager.validate_skill(content)
