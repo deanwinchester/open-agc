@@ -133,6 +133,13 @@ class PatchedOllamaConfig(OllamaConfig):
                         "name": exec_data["name"],
                         "arguments": exec_data.get("arguments") or exec_data.get("parameters")
                     }
+            
+            # Format 5: Qwen-style internal reasoning {"tool_selection": "..."}
+            elif "tool_selection" in data:
+                result = {
+                    "name": data["tool_selection"],
+                    "arguments": data.get("tool_arguments") or data.get("arguments") or data.get("parameters") or {}
+                }
 
             if result:
                 # Capture reasoning if present in the same JSON
@@ -165,6 +172,7 @@ class PatchedOllamaConfig(OllamaConfig):
         try:
             response_json = raw_response.json()
             thinking_text = response_json.get("thinking", "")
+
             response_text = response_json.get("response", "") or response_json.get("message", {}).get("content", "")
             
             msg = resp.choices[0].message
@@ -249,7 +257,8 @@ class LLMClient:
             "minimax": "MINIMAX_API_KEY",
             "ollama": "OLLAMA_API_BASE",
             "sglang": "SGLANG_API_BASE",
-            "vllm": "VLLM_API_BASE"
+            "vllm": "VLLM_API_BASE",
+            "llamacpp": "LLAMACPP_API_BASE"
         }
         for provider, env_var in PROVIDER_ENV_MAP.items():
             key = config.get("api_keys", {}).get(provider, "")
@@ -287,6 +296,10 @@ class LLMClient:
         # vLLM API base
         self.vllm_api_base = config.get("api_keys", {}).get("vllm", "http://localhost:8000/v1")
         os.environ["VLLM_API_BASE"] = self.vllm_api_base
+
+        # llama.cpp API base
+        self.llamacpp_api_base = config.get("api_keys", {}).get("llamacpp", "http://localhost:8080/v1")
+        os.environ["LLAMACPP_API_BASE"] = self.llamacpp_api_base
 
         # Ensure local connections bypass proxy (important for Ollama on Windows)
         for var in ["no_proxy", "NO_PROXY"]:
@@ -364,10 +377,17 @@ class LLMClient:
         # For local models, explicitly pass api_base to bypass LiteLLM's internal miscalculations
         if "ollama" in target_model:
             kwargs["api_base"] = self.ollama_api_base
-        if "sglang" in target_model:
+        if "sglang/" in target_model:
             kwargs["api_base"] = self.sglang_api_base
-        if "vllm" in target_model:
+        elif "vllm/" in target_model:
             kwargs["api_base"] = self.vllm_api_base
+        elif "llamacpp/" in target_model:
+            kwargs["api_base"] = self.llamacpp_api_base
+            # LiteLLM needs 'openai/' prefix to use the OpenAI-compatible logic for llama-server
+            if not target_model.startswith("openai/"):
+                kwargs["model"] = f"openai/{target_model.replace('llamacpp/', '')}"
+            if "api_key" not in kwargs:
+                kwargs["api_key"] = "sk-no-key-required"
             
         try:
             response = litellm.completion(**kwargs)

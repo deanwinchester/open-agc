@@ -1416,10 +1416,165 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================
     // Initialization
     // ==========================================
+    // ==========================================
+    // Llama.cpp Management
+    // ==========================================
+    async function refreshLlamaStatus() {
+        try {
+            const res = await fetch('/api/llamacpp/status');
+            const status = await res.json();
+
+            const binDot = document.getElementById('llama-bin-status-dot');
+            const binText = document.getElementById('llama-bin-status-text');
+            const runDot = document.getElementById('llama-run-status-dot');
+            const runText = document.getElementById('llama-run-status-text');
+            const startBtn = document.getElementById('llama-start-btn');
+            const stopBtnLlama = document.getElementById('llama-stop-btn');
+            const modelSelect = document.getElementById('llama-model-select');
+
+            if (status.installed) {
+                binDot.style.background = 'var(--success)';
+                binText.textContent = '已安装';
+                startBtn.disabled = status.running;
+            } else {
+                binDot.style.background = 'var(--error)';
+                binText.textContent = '未安装';
+                startBtn.disabled = true;
+            }
+
+            if (status.running) {
+                runDot.style.background = 'var(--success)';
+                runText.textContent = '运行中 (端口: ' + status.port + ')';
+                stopBtnLlama.disabled = false;
+            } else {
+                runDot.style.background = 'var(--text-secondary)';
+                runText.textContent = '已停止';
+                stopBtnLlama.disabled = true;
+            }
+
+            // Update model list
+            const currentVal = modelSelect.value;
+            modelSelect.innerHTML = '<option value="">-- 请选择本地模型 --</option>';
+            (status.models || []).forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m;
+                opt.textContent = m;
+                modelSelect.appendChild(opt);
+            });
+            if (status.models.includes(currentVal)) {
+                modelSelect.value = currentVal;
+            }
+        } catch (e) {
+            console.error('Failed to fetch llama status', e);
+        }
+    }
+
+    function initLlamaListeners() {
+        document.getElementById('llama-setup-btn')?.addEventListener('click', async () => {
+            const btn = document.getElementById('llama-setup-btn');
+            const originalText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = '正在安装...';
+            try {
+                const res = await fetch('/api/llamacpp/setup', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showStatus('✅ Llama 安装成功', 'success');
+                } else {
+                    showStatus('❌ 安装失败: ' + (data.detail || '未知错误'), 'error');
+                }
+            } catch (e) {
+                showStatus('❌ 网络错误', 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = originalText;
+                refreshLlamaStatus();
+            }
+        });
+
+        document.getElementById('llama-download-btn')?.addEventListener('click', async () => {
+            const url = document.getElementById('llama-download-url').value.trim();
+            const name = document.getElementById('llama-download-name').value.trim();
+            const progress = document.getElementById('llama-download-progress');
+
+            if (!url || !name) {
+                showStatus('⚠️ 请填写模型 URL 和文件名', 'error');
+                return;
+            }
+
+            const btn = document.getElementById('llama-download-btn');
+            btn.disabled = true;
+            progress.style.display = 'block';
+            progress.textContent = '正在下载模型 (大文件可能较慢)...';
+
+            try {
+                const res = await fetch('/api/llamacpp/download-model', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, filename: name })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showStatus('✅ 模型已下载', 'success');
+                } else {
+                    showStatus('❌ 下载失败: ' + (data.detail || '未知错误'), 'error');
+                }
+            } catch (e) {
+                showStatus('❌ 网络错误', 'error');
+            } finally {
+                btn.disabled = false;
+                progress.style.display = 'none';
+                refreshLlamaStatus();
+            }
+        });
+
+        document.getElementById('llama-start-btn')?.addEventListener('click', async () => {
+            const model = document.getElementById('llama-model-select').value;
+            if (!model) {
+                showStatus('⚠️ 请先选择一个模型', 'error');
+                return;
+            }
+            try {
+                await fetch('/api/llamacpp/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'start', model: model })
+                });
+                showStatus('🚀 正在启动服务...', 'success');
+                setTimeout(refreshLlamaStatus, 2000);
+            } catch (e) {
+                showStatus('❌ 启动失败', 'error');
+            }
+        });
+
+        document.getElementById('llama-stop-btn')?.addEventListener('click', async () => {
+            try {
+                await fetch('/api/llamacpp/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'stop' })
+                });
+                showStatus('⏹ 服务正停止', 'success');
+                setTimeout(refreshLlamaStatus, 1000);
+            } catch (e) {
+                showStatus('❌ 停止失败', 'error');
+            }
+        });
+    }
+
+    // Polling llama status when in settings view
+    setInterval(() => {
+        if (document.getElementById('view-settings')?.classList.contains('active')) {
+            refreshLlamaStatus();
+        }
+    }, 10000);
+
     initI18n();
     initSettingsListeners();
+    initLlamaListeners();
     fetchInitialData();
     connectWebSocket();
     updateInputState();
     updateTaskBadge();
+    refreshLlamaStatus();
 });

@@ -54,3 +54,14 @@ def get_skills_dir() -> str:
 
     return dir_path
 
+def get_bin_dir() -> str:
+    """Get the directory for storing binary executables."""
+    dir_path = os.path.join(get_base_dir(), "bin")
+    os.makedirs(dir_path, exist_ok=True)
+    return dir_path
+
+def get_models_dir() -> str:
+    """Get the directory for storing LLM models."""
+    dir_path = os.path.join(get_base_dir(), "models")
+    os.makedirs(dir_path, exist_ok=True)
+    return dir_path

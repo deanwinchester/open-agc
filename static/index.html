@@ -301,6 +301,7 @@
                                 <select id="provider-select" class="select-styled">
                                     <option value="kimi">Kimi (Moonshot)</option>
                                     <option value="ollama">Ollama (本地/Local)</option>
+                                    <option value="llamacpp">Llama.cpp (本地/Local)</option>
                                     <option value="sglang">SGLang (本地/Local)</option>
                                     <option value="vllm">vLLM (本地/Local)</option>
                                     <option value="openai">OpenAI</option>
@@ -344,6 +345,53 @@
                                     style="white-space: nowrap;">拉取模型</button>
                             </div>
                             <small class="field-hint" id="pull-model-status">拉取过程将在后台进行。</small>
+                        </div>
+                    </section>
+
+                    <!-- Local Llama Management -->
+                    <section class="card">
+                        <div class="card-header">
+                            <h2>🦙 本地 Llama 管理</h2>
+                            <p class="card-desc">集成调用 llama.cpp，支持本地模型的安装、配置与进程控制。</p>
+                        </div>
+                        <div class="field">
+                            <div class="status-indicator">
+                                <span class="indicator-dot" id="llama-bin-status-dot"></span>
+                                <span>二进制文件: <strong id="llama-bin-status-text">检查中...</strong></span>
+                            </div>
+                            <div class="status-indicator">
+                                <span class="indicator-dot" id="llama-run-status-dot"></span>
+                                <span>服务状态: <strong id="llama-run-status-text">检查中...</strong></span>
+                            </div>
+                        </div>
+
+                        <div class="field" style="margin-top: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                            <button id="llama-setup-btn" class="btn-secondary">安装/更新 Llama</button>
+                            <button id="llama-start-btn" class="btn-primary" disabled>启动服务</button>
+                            <button id="llama-stop-btn" class="btn-secondary" style="color:var(--error-color);"
+                                disabled>停止服务</button>
+                        </div>
+
+                        <div class="field" id="llama-model-group"
+                            style="border-top: 1px solid var(--border-color); padding-top: 1rem; margin-top: 1rem;">
+                            <label>模型管理</label>
+                            <div class="model-row">
+                                <select id="llama-model-select" class="select-styled">
+                                    <option value="">-- 请选择本地模型 --</option>
+                                </select>
+                            </div>
+                            <div style="margin-top: 1rem;">
+                                <label><small>📥 自动下载 GGUF 模型</small></label>
+                                <div class="model-row" style="margin-top: 0.5rem;">
+                                    <input type="text" id="llama-download-url" class="input-styled"
+                                        placeholder="HuggingFace GGUF URL">
+                                    <input type="text" id="llama-download-name" class="input-styled"
+                                        placeholder="文件名 (例: qwen.gguf)" style="width: 150px;">
+                                    <button id="llama-download-btn" class="btn-secondary">下载</button>
+                                </div>
+                                <div id="llama-download-progress" class="field-hint"
+                                    style="margin-top:0.5rem; display:none;">正在下载...</div>
+                            </div>
                         </div>
                     </section>
 
