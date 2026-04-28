@@ -4,6 +4,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================
     const chatContainer = document.getElementById('chat-container');
     const messageInput = document.getElementById('message-input');
+    const imageFileInput = document.getElementById('image-file-input');
+    const imageBtn = document.getElementById('image-btn');
+    const imagePreviewBar = document.getElementById('image-preview-bar');
+    let pendingImages = [];  // Array of base64 data URLs
     const sendBtn = document.getElementById('send-btn');
     const stopBtn = document.getElementById('stop-btn');
     const themeToggle = document.getElementById('theme-toggle');
@@ -709,11 +713,87 @@ document.addEventListener('DOMContentLoaded', () => {
         sendBtn.disabled = !isConnected || messageInput.value.trim() === '';
     }
 
+    // ==========================================
+    // Image Upload / Paste
+    // ==========================================
+    function addPendingImage(dataUrl) {
+        if (pendingImages.length >= 5) { showStatus('⚠️ 最多添加 5 张图片', 'error'); return; }
+        pendingImages.push(dataUrl);
+        renderImagePreviews();
+    }
+
+    function removePendingImage(index) {
+        pendingImages.splice(index, 1);
+        renderImagePreviews();
+    }
+
+    function renderImagePreviews() {
+        if (!imagePreviewBar) return;
+        if (pendingImages.length === 0) {
+            imagePreviewBar.style.display = 'none';
+            imagePreviewBar.innerHTML = '';
+            return;
+        }
+        imagePreviewBar.style.display = 'flex';
+        imagePreviewBar.innerHTML = pendingImages.map((url, i) => `
+            <div style="position:relative; width:48px; height:48px; border-radius:6px; overflow:hidden; border:1px solid var(--border-color); flex-shrink:0;">
+                <img src="${url}" style="width:100%; height:100%; object-fit:cover;">
+                <button onclick="removePendingImage(${i})" style="position:absolute; top:0; right:0; background:rgba(0,0,0,0.5); color:#fff; border:none; width:16px; height:16px; font-size:10px; line-height:16px; cursor:pointer; padding:0; border-radius:0 0 0 4px;">&times;</button>
+            </div>
+        `).join('');
+    }
+
+    // Expose removePendingImage globally for inline onclick
+    window.removePendingImage = removePendingImage;
+
+    function handleImageFiles(files) {
+        for (const file of files) {
+            if (!file.type.startsWith('image/')) continue;
+            const reader = new FileReader();
+            reader.onload = () => addPendingImage(reader.result);
+            reader.readAsDataURL(file);
+        }
+    }
+
+    // Paste handler — extract images from clipboard
+    messageInput.addEventListener('paste', (e) => {
+        const items = e.clipboardData?.items;
+        if (!items) return;
+        for (const item of items) {
+            if (item.type.startsWith('image/')) {
+                e.preventDefault();
+                const file = item.getAsFile();
+                const reader = new FileReader();
+                reader.onload = () => addPendingImage(reader.result);
+                reader.readAsDataURL(file);
+            }
+        }
+    });
+
+    // Image button triggers file input
+    if (imageBtn) {
+        imageBtn.addEventListener('click', () => imageFileInput.click());
+    }
+
+    // File input change handler
+    if (imageFileInput) {
+        imageFileInput.addEventListener('change', () => {
+            handleImageFiles(imageFileInput.files);
+            imageFileInput.value = '';
+        });
+    }
+
     function handleSend() {
         const text = messageInput.value.trim();
-        if (!text || !isConnected || isAgentThinking) return;
-        appendMessage(text, 'user');
-        ws.send(JSON.stringify({ query: text }));
+        if ((!text && pendingImages.length === 0) || !isConnected || isAgentThinking) return;
+        appendMessage(text || '[图片]', 'user');
+        const msg = { query: text || '请分析这张图片' };
+        if (pendingImages.length > 0) {
+            msg.images = [...pendingImages];
+            pendingImages = [];
+            renderImagePreviews();
+        }
+        ws.send(JSON.stringify(msg));
         messageInput.value = '';
         messageInput.style.height = 'auto';
         isAgentThinking = true;

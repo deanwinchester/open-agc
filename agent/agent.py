@@ -6,7 +6,7 @@ import os
 
 from core.paths import get_data_path, get_skills_dir
 
-from core.llm_client import LLMClient
+from core.llm_client import LLMClient, build_user_message, extract_screenshot_data
 from core.memory_store import MemoryStore
 from tools.shell import ShellTool
 from tools.filesystem import ReadFileTool, WriteFileTool
@@ -243,25 +243,28 @@ class OpenAGCAgent:
             print(f"[Agent] Auto-save memories error: {e}")
 
     def run_turn(self, user_input: str, verbose: bool = False,
-                 progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> str:
+                 progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+                 images: Optional[List[str]] = None) -> str:
         """
         Run a single conversational turn. Will loop until the LLM returns a final text message.
-        
+
         Args:
             user_input: The user's message.
             verbose: If true, print debug info.
             progress_callback: Optional callback for real-time progress updates.
-                Called with dicts like:
-                  {"event": "thinking", "model": "..."}
-                  {"event": "tool_start", "step": 1, "tool": "...", "tool_label": "...", "args_preview": "..."}
-                  {"event": "tool_done", "step": 1, "tool": "...", "result_preview": "..."}
-                  {"event": "model_switched", "from": "...", "to": "..."}
+            images: Optional list of image file paths or data URLs to include as vision input.
         """
         self.is_interrupted = False
-        self.messages.append({"role": "user", "content": user_input})
-        
+        self.messages.append(build_user_message(user_input, images))
+
         # Auto-retrieve relevant memories for this query
-        recent_context = "\n".join([m["content"] for m in self.messages[-3:] if m["role"] == "user"])
+        def _msg_text(m):
+            c = m.get("content", "")
+            if isinstance(c, list):
+                return " ".join(p.get("text", "") for p in c if p.get("type") == "text")
+            return c
+
+        recent_context = "\n".join([_msg_text(m) for m in self.messages[-3:] if m["role"] == "user"])
         memory_context = ""
         try:
             results = self.memory_store.search(recent_context, top_k=3)
@@ -344,6 +347,7 @@ class OpenAGCAgent:
             # 1. Check if model decided to use tools
             tool_calls = message.tool_calls
             if tool_calls:
+                screenshot_urls = []
                 for tool_call in tool_calls:
                     function_name = tool_call.function.name
                     function_args = json.loads(tool_call.function.arguments)
@@ -441,7 +445,22 @@ class OpenAGCAgent:
                         "name": function_name,
                         "content": result_str
                     })
-                
+
+                    # Collect screenshot data for vision injection
+                    url = extract_screenshot_data(result_str)
+                    if url:
+                        screenshot_urls.append(url)
+
+                # After all tool results in this iteration, inject screenshot vision observations
+                for url in screenshot_urls:
+                    self.messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "[工具执行截图 — 请根据此截图内容继续后续操作]"},
+                            {"type": "image_url", "image_url": {"url": url}}
+                        ]
+                    })
+
                 # After appending all tool results, the loop continues to send them back to LLM
                 continue
                 
