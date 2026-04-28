@@ -381,14 +381,18 @@
                                 </select>
                             </div>
                             <div style="margin-top: 1rem;">
-                                <label><small>📥 自动下载 GGUF 模型</small></label>
+                                <label><small>📥 搜索并下载 GGUF 模型</small></label>
                                 <div class="model-row" style="margin-top: 0.5rem;">
-                                    <input type="text" id="llama-download-url" class="input-styled"
-                                        placeholder="HuggingFace GGUF URL">
-                                    <input type="text" id="llama-download-name" class="input-styled"
-                                        placeholder="文件名 (例: qwen.gguf)" style="width: 150px;">
-                                    <button id="llama-download-btn" class="btn-secondary">下载</button>
+                                    <select id="llama-source-select" class="select-styled" style="width:140px;">
+                                        <option value="huggingface">HuggingFace</option>
+                                        <option value="modelscope">ModelScope (国内)</option>
+                                    </select>
+                                    <input type="text" id="llama-search-input" class="input-styled"
+                                        placeholder="输入模型名称搜索 (例: qwen, llama, mistral)" style="flex:1;">
+                                    <button id="llama-search-btn" class="btn-primary" style="width: auto;">搜索</button>
                                 </div>
+                                <div id="llama-search-results" style="margin-top: 0.75rem;"></div>
+                                <div id="llama-model-files" style="margin-top: 0.5rem;"></div>
                                 <div id="llama-download-progress" class="field-hint"
                                     style="margin-top:0.5rem; display:none;">正在下载...</div>
                             </div>

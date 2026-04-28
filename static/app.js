@@ -23,6 +23,25 @@ document.addEventListener('DOMContentLoaded', () => {
     let wasVoiceQuery = false;
     let currentTaskId = null; // Track current task from WebSocket
 
+    function showStatus(message, type) {
+        let el = document.getElementById('global-status-toast');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'global-status-toast';
+            el.style.cssText = 'position:fixed; top:1rem; left:50%; transform:translateX(-50%); z-index:9999;'
+                + 'padding:0.6rem 1.2rem; border-radius:8px; font-size:0.85rem; font-weight:500;'
+                + 'pointer-events:none; transition:opacity 0.3s; white-space:nowrap;';
+            document.body.appendChild(el);
+        }
+        el.textContent = message;
+        el.style.background = type === 'success' ? 'var(--success)' : type === 'error' ? 'var(--error)' : 'var(--surface)';
+        el.style.color = type === 'success' || type === 'error' ? '#fff' : 'var(--text-primary)';
+        el.style.border = type === 'success' || type === 'error' ? 'none' : '1px solid var(--border-color)';
+        el.style.opacity = '1';
+        clearTimeout(el._timeout);
+        el._timeout = setTimeout(() => { el.style.opacity = '0'; }, 3000);
+    }
+
     // ==========================================
     // Navigation System
     // ==========================================
@@ -1492,39 +1511,42 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
 
-        document.getElementById('llama-download-btn')?.addEventListener('click', async () => {
-            const url = document.getElementById('llama-download-url').value.trim();
-            const name = document.getElementById('llama-download-name').value.trim();
-            const progress = document.getElementById('llama-download-progress');
+        // Search for GGUF models
+        document.getElementById('llama-search-btn')?.addEventListener('click', async () => {
+            const query = document.getElementById('llama-search-input').value.trim();
+            const source = document.getElementById('llama-source-select')?.value || 'huggingface';
+            const resultsDiv = document.getElementById('llama-search-results');
+            const filesDiv = document.getElementById('llama-model-files');
 
-            if (!url || !name) {
-                showStatus('⚠️ 请填写模型 URL 和文件名', 'error');
+            if (!query) {
+                showStatus('⚠️ 请输入模型名称搜索', 'error');
                 return;
             }
 
-            const btn = document.getElementById('llama-download-btn');
-            btn.disabled = true;
-            progress.style.display = 'block';
-            progress.textContent = '正在下载模型 (大文件可能较慢)...';
+            filesDiv.innerHTML = '';
+            resultsDiv.innerHTML = '<span class="field-hint">搜索中...</span>';
 
             try {
-                const res = await fetch('/api/llamacpp/download-model', {
+                const res = await fetch('/api/llamacpp/search-models', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url, filename: name })
+                    body: JSON.stringify({ query, source })
                 });
                 const data = await res.json();
-                if (data.status === 'success') {
-                    showStatus('✅ 模型已下载', 'success');
-                } else {
-                    showStatus('❌ 下载失败: ' + (data.detail || '未知错误'), 'error');
+                if (data.status !== 'success' || !data.models.length) {
+                    resultsDiv.innerHTML = '<span class="field-hint">未找到匹配的模型</span>';
+                    return;
                 }
+                renderSearchResults(data.models, resultsDiv, filesDiv);
             } catch (e) {
-                showStatus('❌ 网络错误', 'error');
-            } finally {
-                btn.disabled = false;
-                progress.style.display = 'none';
-                refreshLlamaStatus();
+                resultsDiv.innerHTML = '<span class="field-hint">搜索失败，请重试</span>';
+            }
+        });
+
+        // Allow Enter key in search input
+        document.getElementById('llama-search-input')?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                document.getElementById('llama-search-btn')?.click();
             }
         });
 
@@ -1568,6 +1590,112 @@ document.addEventListener('DOMContentLoaded', () => {
             refreshLlamaStatus();
         }
     }, 10000);
+
+    function renderSearchResults(models, container, filesDiv) {
+        let html = '';
+        models.forEach(m => {
+            const dl = (m.downloads || 0).toLocaleString();
+            html += `
+                <div class="search-result-item" style="padding:0.5rem; border:1px solid var(--border-color);
+                    border-radius:6px; margin-bottom:0.4rem; cursor:pointer; transition: background 0.2s;"
+                    onmouseenter="this.style.background='var(--surface-hover)'"
+                    onmouseleave="this.style.background=''"
+                    data-repo="${m.repo_id}">
+                    <div style="font-weight:600; font-size:0.9rem;">${m.repo_id}</div>
+                    <div style="font-size:0.75rem; color:var(--text-secondary); margin-top:0.15rem;">
+                        作者: ${m.author || '未知'} | ⬇ ${dl} | 👍 ${m.likes || 0}
+                    </div>
+                </div>`;
+        });
+        container.innerHTML = html;
+
+        // Bind click on each result
+        container.querySelectorAll('.search-result-item').forEach(item => {
+            item.addEventListener('click', async () => {
+                const repoId = item.dataset.repo;
+                filesDiv.innerHTML = '<span class="field-hint">加载文件列表中...</span>';
+
+                // Highlight selected
+                container.querySelectorAll('.search-result-item').forEach(el => {
+                    el.style.background = '';
+                    el.style.borderColor = 'var(--border-color)';
+                });
+                item.style.background = 'var(--surface-hover)';
+                item.style.borderColor = 'var(--primary-color)';
+
+                const source = document.getElementById('llama-source-select')?.value || 'huggingface';
+                try {
+                    const res = await fetch('/api/llamacpp/model-files', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ repo_id: repoId, source })
+                    });
+                    const data = await res.json();
+                    if (data.status !== 'success' || !data.files.length) {
+                        filesDiv.innerHTML = '<span class="field-hint">该仓库没有 GGUF 文件</span>';
+                        return;
+                    }
+                    renderModelFiles(data.files, repoId, filesDiv);
+                } catch (e) {
+                    filesDiv.innerHTML = '<span class="field-hint">加载失败</span>';
+                }
+            });
+        });
+    }
+
+    function renderModelFiles(files, repoId, container) {
+        let html = '<div style="font-weight:600; font-size:0.85rem; margin-bottom:0.35rem;">GGUF 文件:</div>';
+        files.forEach(f => {
+            const shortName = f.filename.split('/').pop();
+            html += `
+                <div style="display:flex; align-items:center; justify-content:space-between;
+                    padding:0.35rem 0.5rem; border:1px solid var(--border-color);
+                    border-radius:6px; margin-bottom:0.25rem; font-size:0.8rem;">
+                    <span style="flex:1; word-break:break-all;">${shortName}</span>
+                    <span style="margin:0 0.75rem; color:var(--text-secondary); white-space:nowrap;">${f.size}</span>
+                    <button class="btn-secondary" style="padding:0.2rem 0.6rem; font-size:0.75rem; white-space:nowrap;"
+                        data-repo="${repoId}" data-file="${f.filename}">下载</button>
+                </div>`;
+        });
+        container.innerHTML = html;
+
+        // Bind download buttons
+        container.querySelectorAll('button').forEach(btn => {
+            btn.addEventListener('click', async function() {
+                const repo = this.dataset.repo;
+                const file = this.dataset.file;
+                const progress = document.getElementById('llama-download-progress');
+                const shortName = file.split('/').pop();
+
+                this.disabled = true;
+                this.textContent = '下载中...';
+                progress.style.display = 'block';
+                progress.textContent = `正在下载 ${shortName} (大文件可能较慢)...`;
+
+                const source = document.getElementById('llama-source-select')?.value || 'huggingface';
+                try {
+                    const res = await fetch('/api/llamacpp/download-from-hf', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ repo_id: repo, filename: file, source })
+                    });
+                    const data = await res.json();
+                    if (data.status === 'success') {
+                        showStatus('✅ 模型已下载: ' + shortName, 'success');
+                    } else {
+                        showStatus('❌ 下载失败: ' + (data.detail || '未知错误'), 'error');
+                    }
+                } catch (e) {
+                    showStatus('❌ 网络错误', 'error');
+                } finally {
+                    this.disabled = false;
+                    this.textContent = '下载';
+                    progress.style.display = 'none';
+                    refreshLlamaStatus();
+                }
+            });
+        });
+    }
 
     initI18n();
     initSettingsListeners();

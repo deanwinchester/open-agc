@@ -570,6 +570,52 @@ async def download_llamacpp_model(req: ModelDownloadRequest):
     else:
         raise HTTPException(status_code=500, detail="Failed to download model")
 
+class ModelSearchRequest(BaseModel):
+    query: str
+    source: str = "huggingface"  # "huggingface" or "modelscope"
+
+@app.post("/api/llamacpp/search-models")
+async def search_llamacpp_models(req: ModelSearchRequest):
+    """Search for GGUF models by name from HuggingFace or ModelScope."""
+    manager = get_llamacpp_manager()
+    if req.source == "modelscope":
+        results = manager.search_ms_models(req.query)
+    else:
+        results = manager.search_hf_models(req.query)
+    return {"status": "success", "models": results}
+
+class ModelFilesRequest(BaseModel):
+    repo_id: str
+    source: str = "huggingface"
+
+@app.post("/api/llamacpp/model-files")
+async def get_llamacpp_model_files(req: ModelFilesRequest):
+    """List GGUF files in a model repository (HF or ModelScope)."""
+    manager = get_llamacpp_manager()
+    if req.source == "modelscope":
+        files = manager.get_ms_model_files(req.repo_id)
+    else:
+        files = manager.get_hf_model_files(req.repo_id)
+    return {"status": "success", "files": files}
+
+class ModelDownloadHFRequest(BaseModel):
+    repo_id: str
+    filename: str
+    source: str = "huggingface"
+
+@app.post("/api/llamacpp/download-from-hf")
+async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
+    """Download a GGUF model from HuggingFace or ModelScope."""
+    manager = get_llamacpp_manager()
+    if req.source == "modelscope":
+        success = manager.download_model_from_ms(req.repo_id, req.filename)
+    else:
+        success = manager.download_model_from_hf(req.repo_id, req.filename)
+    if success:
+        return {"status": "success", "message": f"Downloaded {req.filename}"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to download model")
+
 class LlamaControlRequest(BaseModel):
     action: str
     model: Optional[str] = None
@@ -958,18 +1004,19 @@ async def websocket_endpoint(websocket: WebSocket):
         task_has_tools = False  # Only create task if tools are called
         
         try:
-            progress_queue = asyncio.Queue()
+            import queue as thread_queue
+            progress_queue = thread_queue.Queue()
             has_taken_action = False
-            
+
             def progress_callback(event: dict):
                 nonlocal has_taken_action, ws_task_id, task_has_tools
-                """Thread-safe: put progress events into the async queue."""
+                """Thread-safe: push progress events from thread pool into queue."""
                 if is_heartbeat:
                     if event.get("event") == "tool_start":
                         has_taken_action = True
                     if not has_taken_action and event.get("event") in ["thinking", "model_switched"]:
                         return
-                
+
                 # Auto-create task on first tool_start
                 if event.get("event") == "tool_start" and not task_has_tools and not is_heartbeat:
                     task_has_tools = True
@@ -978,7 +1025,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         ws_task_id = create_task(title, query)
                     except Exception as e:
                         print(f"[Task] Failed to create task: {e}")
-                
+
                 # Record task steps
                 if ws_task_id and event.get("event") == "tool_start":
                     try:
@@ -991,7 +1038,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     except Exception as e:
                         print(f"[Task] Failed to add step: {e}")
-                
+
                 if ws_task_id and event.get("event") == "tool_done":
                     try:
                         # Update the step with result
@@ -1006,14 +1053,41 @@ async def websocket_endpoint(websocket: WebSocket):
                         conn.close()
                     except Exception as e:
                         print(f"[Task] Failed to update step: {e}")
-                
+
                 # Attach task_id to the event so frontend can track it
                 if ws_task_id:
                     event["task_id"] = ws_task_id
-                
-                progress_queue.put_nowait(event)
+
+                progress_queue.put(event)
             
             current_model = model or os.getenv("DEFAULT_MODEL", "moonshot/kimi-latest")
+
+            # Auto-start llama-server if using a llamacpp model
+            if "llamacpp/" in current_model:
+                lm = get_llamacpp_manager()
+                if not lm.is_running():
+                    model_filename = current_model.replace("llamacpp/", "")
+                    await websocket.send_json({
+                        "type": "status",
+                        "message": f"正在启动 llama-server 并加载 {model_filename}..."
+                    })
+                    lm.start(model_filename)
+                    for i in range(120):
+                        await asyncio.sleep(0.5)
+                        if lm.is_running():
+                            await websocket.send_json({
+                                "type": "status",
+                                "message": "llama-server 就绪，开始处理..."
+                            })
+                            break
+                    else:
+                        await websocket.send_json({
+                            "type": "status",
+                            "message": "llama-server 启动失败，请检查模型文件"
+                        })
+                        agent_is_running = False
+                        continue
+
             agent = OpenAGCAgent(model=current_model)
             
             # Inject custom agent profile prompt if specified
@@ -1043,19 +1117,17 @@ async def websocket_endpoint(websocket: WebSocket):
                 lambda: agent.run_turn(query, False, progress_callback)
             )
             
-            progress_task = asyncio.create_task(progress_queue.get())
-            
             # Handle agent progress and check for interruption
             while not agent_future.done():
                 if receive_task is None:
                     receive_task = asyncio.create_task(websocket.receive_text())
-                
+
                 done, pending = await asyncio.wait(
-                    [receive_task, progress_task],
-                    timeout=0.2,
+                    [receive_task],
+                    timeout=0.15,
                     return_when=asyncio.FIRST_COMPLETED
                 )
-                
+
                 if receive_task in done:
                     try:
                         data = receive_task.result()
@@ -1067,19 +1139,17 @@ async def websocket_endpoint(websocket: WebSocket):
                         receive_task = None
                     except Exception:
                         receive_task = None
-                        
-                if progress_task in done:
+
+                # Drain the thread-safe queue (no cross-thread race)
+                while True:
                     try:
-                        event = progress_task.result()
+                        event = progress_queue.get_nowait()
                         await websocket.send_json({
                             "type": "progress",
                             **event
                         })
-                        progress_task = asyncio.create_task(progress_queue.get())
-                    except Exception:
-                        progress_task = asyncio.create_task(asyncio.sleep(3600))
-            
-            progress_task.cancel()
+                    except thread_queue.Empty:
+                        break
             
             while not progress_queue.empty():
                 try:

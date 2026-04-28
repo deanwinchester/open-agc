@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import uuid
 import litellm
 # Fix for PyInstaller bundling issue with tiktoken
@@ -310,6 +311,56 @@ class LLMClient:
             elif "localhost" not in current or "127.0.0.1" not in current:
                 os.environ[var] = f"{current.rstrip(',')},{local_hosts}"
 
+    def _sanitize_for_llamacpp(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Make messages compatible with strict GGUF chat templates.
+
+        Many GGUF models (Qwen, etc.) require system message at position 0 and
+        may not handle 'tool' role messages from prior turns correctly.
+        We merge the system prompt into the first user message and strip
+        orphaned tool calls from previous conversation rounds.
+        """
+        sanitized = []
+        system_content = None
+
+        for msg in messages:
+            role = msg.get("role", "")
+            if role == "system":
+                system_content = msg.get("content", "")
+                continue
+
+            if role == "tool":
+                # Keep tool results only if the previous message was an assistant
+                # with tool_calls (i.e., same turn). Otherwise skip orphaned ones.
+                if sanitized and sanitized[-1].get("role") == "assistant" and sanitized[-1].get("tool_calls"):
+                    sanitized.append(msg)
+                continue
+
+            sanitized.append(msg)
+
+        # If there was a system message, prepend it to the first user message
+        if system_content:
+            for i, msg in enumerate(sanitized):
+                if msg.get("role") == "user":
+                    sanitized[i] = {
+                        **msg,
+                        "content": f"{system_content}\n\n---\n\n{msg['content']}"
+                    }
+                    break
+
+        # Remove assistant messages that have tool_calls but no subsequent tool results
+        # (these were orphaned when we stripped tool results above)
+        cleaned = []
+        for i, msg in enumerate(sanitized):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                # Check if next message is a tool result
+                if i + 1 < len(sanitized) and sanitized[i + 1].get("role") == "tool":
+                    cleaned.append(msg)
+                # else: skip orphaned tool call message
+            else:
+                cleaned.append(msg)
+
+        return cleaned
+
     def chat(self, messages: List[Dict[str, Any]], model: Optional[str] = None,
              tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[Any, str]:
         """
@@ -344,7 +395,16 @@ class LLMClient:
                 kwargs["api_base"] = self.sglang_api_base
             if "vllm" in attempt_model:
                 kwargs["api_base"] = self.vllm_api_base
-                
+            if "llamacpp/" in attempt_model:
+                kwargs["api_base"] = self.llamacpp_api_base
+                if not attempt_model.startswith("openai/"):
+                    kwargs["model"] = f"openai/{attempt_model.replace('llamacpp/', '')}"
+                if "api_key" not in kwargs:
+                    kwargs["api_key"] = "sk-no-key-required"
+                kwargs["messages"] = self._sanitize_for_llamacpp(messages)
+                # Increase timeout for local models (loading + inference)
+                kwargs["timeout"] = 600
+
             try:
                 response = litellm.completion(**kwargs)
                 return response, attempt_model
