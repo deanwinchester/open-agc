@@ -2,15 +2,68 @@ import os
 import json
 import re
 import uuid
+import base64
 import litellm
 # Fix for PyInstaller bundling issue with tiktoken
-litellm.num_tokens_logging = False 
+litellm.num_tokens_logging = False
 litellm.supports_token_counter = False
 from typing import List, Dict, Any, Optional, Tuple
 from litellm.llms.ollama.completion.transformation import OllamaConfig
 
 # Optional logging or debugging controls for litellm
 # litellm.set_verbose = True
+
+# ==========================================
+# Multimodal image utilities
+# ==========================================
+
+MIME_TYPES = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "bmp": "image/bmp",
+}
+
+SCREENSHOT_MARKER = "[SCREENSHOT_DATA:"
+
+
+def encode_image_to_data_url(file_path: str) -> str:
+    """Read an image file and return a base64 data URL."""
+    ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+    mime = MIME_TYPES.get(ext, "image/png")
+    with open(file_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+def build_user_message(text: str, images: list = None) -> dict:
+    """Build a user message dict. Uses multimodal content blocks when images are present."""
+    if not images:
+        return {"role": "user", "content": text}
+    content = [{"type": "text", "text": text}]
+    for img in images:
+        if img.startswith("data:"):
+            url = img
+        elif os.path.exists(img):
+            url = encode_image_to_data_url(img)
+        else:
+            continue
+        content.append({"type": "image_url", "image_url": {"url": url}})
+    return {"role": "user", "content": content}
+
+
+def extract_screenshot_data(text: str) -> Optional[str]:
+    """Extract base64 screenshot data from a tool result string. Returns None if not found."""
+    if SCREENSHOT_MARKER not in text:
+        return None
+    try:
+        start = text.index(SCREENSHOT_MARKER) + len(SCREENSHOT_MARKER)
+        end = text.index("]", start)
+        return text[start:end]
+    except (ValueError, IndexError):
+        return None
 
 def load_config() -> dict:
     from core.paths import get_data_path

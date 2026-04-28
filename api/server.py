@@ -1152,7 +1152,7 @@ async def websocket_endpoint(websocket: WebSocket):
     agent_is_running = False
     receive_task = None # Persistent receive_task to avoid concurrency issues
     
-    async def run_agent_with_progress(query: str, model: str = None, agent_profile_name: str = None, is_heartbeat: bool = False):
+    async def run_agent_with_progress(query: str, model: str = None, agent_profile_name: str = None, is_heartbeat: bool = False, images: list = None):
         """Run agent in a thread and push progress to WebSocket via a Queue."""
         nonlocal session_history, last_query, agent_is_running, receive_task
         if not is_heartbeat:
@@ -1276,7 +1276,7 @@ async def websocket_endpoint(websocket: WebSocket):
             import concurrent.futures
             agent_future = loop.run_in_executor(
                 None, 
-                lambda: agent.run_turn(query, False, progress_callback)
+                lambda: agent.run_turn(query, False, progress_callback, images=images)
             )
             
             # Handle agent progress and check for interruption
@@ -1389,15 +1389,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     query = user_msg.get("query", last_query)
                     retry_model = user_msg.get("model", None)
                     agent_profile_name = user_msg.get("agent_name", None)
+                    ws_images = user_msg.get("images", None)
                     if not query.strip():
                         continue
                 else:
                     query = user_msg.get("query", "")
                     retry_model = None
                     agent_profile_name = user_msg.get("agent_name", None)
+                    ws_images = user_msg.get("images", None)
                     if not query.strip():
                         continue
-                        
+
                     # Save user message to DB
                     save_message("user", query)
 
@@ -1409,6 +1411,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 query = "【系统指令】后台巡视时间已到。请检查系统状态、后台任务或之前的计划是否需要继续。如果一切正常无需操作，请且仅回复 'HEARTBEAT_OK'。"
                 retry_model = None
                 agent_profile_name = None
+                ws_images = None
                 is_heartbeat = True
 
             if not is_heartbeat:
@@ -1419,7 +1422,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
             
             try:
-                response = await run_agent_with_progress(query, retry_model, agent_profile_name, is_heartbeat=is_heartbeat)
+                response = await run_agent_with_progress(query, retry_model, agent_profile_name, is_heartbeat=is_heartbeat, images=ws_images)
                 
                 if response == "BUSY":
                     continue

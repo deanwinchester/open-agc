@@ -106,10 +106,20 @@ class ComputerTool(BaseTool):
                 return f"Pressed hotkey: {'+'.join(keys)}"
                 
             elif action == 'screenshot':
-                # Save screenshot to a default location for now
                 screenshot_path = os.path.abspath("screenshot.png")
                 pyautogui.screenshot(screenshot_path)
-                return f"Screenshot saved to {screenshot_path}"
+                # Encode as base64 for LLM vision feedback
+                import base64
+                try:
+                    with open(screenshot_path, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("ascii")
+                    img_url = f"data:image/png;base64,{b64}"
+                    return (
+                        f"Screenshot saved to {screenshot_path}\n"
+                        f"[SCREENSHOT_DATA:{img_url}]"
+                    )
+                except Exception:
+                    return f"Screenshot saved to {screenshot_path}"
                 
             else:
                 return f"Error: Unknown action '{action}'"
