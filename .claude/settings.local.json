@@ -11,7 +11,13 @@
       "Bash(curl -s -X POST http://localhost:8000/api/llamacpp/search-models -H 'Content-Type: application/json' -d '{\"query\":\"qwen\"}')",
       "WebFetch(domain:modelscope.cn)",
       "WebSearch",
-      "Bash(/mnt/d/GitHub/open-agc/venv/bin/python -c ' *)"
+      "Bash(/mnt/d/GitHub/open-agc/venv/bin/python -c ' *)",
+      "Bash(lsof -Pi :8000 -sTCP:LISTEN)",
+      "Bash(curl -s http://localhost:8000/)",
+      "Bash(curl *)",
+      "Bash(rm -f /Users/lhh/workspace/open-agc/models/*.partial)",
+      "Bash(lsof -Pi :8001 -sTCP:LISTEN -t)",
+      "Bash(xargs kill *)"
     ]
   }
 }

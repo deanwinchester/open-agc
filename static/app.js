@@ -161,7 +161,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const isBackground = data.background === true;
 
         // Auto-switch to chat view when receiving non-background messages
-        if (!isBackground && document.querySelector('.view.active')?.id !== 'view-chat') {
+        // Don't auto-switch for download progress — user may be managing downloads in settings
+        if (!isBackground && data.type !== 'llamacpp_download'
+            && document.querySelector('.view.active')?.id !== 'view-chat') {
             switchView('chat');
         }
 
@@ -206,7 +208,104 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             updateTaskBadge();
         }
+        else if (data.type === 'llamacpp_download') {
+            handleLlamaDownloadProgress(data);
+        }
     }
+
+    // ==========================================
+    // Llama Download Progress
+    // ==========================================
+    // Download file path for resume support (set when download begins)
+    let downloadResumeInfo = null;
+
+    function handleLlamaDownloadProgress(data) {
+        // --- Settings panel progress bar ---
+        const progressDiv = document.getElementById('llama-download-progress');
+        const label = document.getElementById('llama-download-label');
+        const pct = document.getElementById('llama-download-pct');
+        const bar = document.getElementById('llama-download-bar');
+
+        // --- Global banner ---
+        const banner = document.getElementById('global-download-banner');
+        const bannerLabel = document.getElementById('global-download-label');
+        const bannerPct = document.getElementById('global-download-pct');
+        const bannerBar = document.getElementById('global-download-bar');
+        const bannerIcon = document.getElementById('global-download-icon');
+
+        if (data.stage === 'complete') {
+            if (progressDiv) {
+                progressDiv.style.display = 'block';
+                label.textContent = data.label || '完成';
+                pct.textContent = '100%';
+                bar.style.width = '100%';
+                bar.style.background = 'var(--theme-color)';
+            }
+            if (banner) {
+                banner.style.display = 'block';
+                bannerIcon.textContent = '✅';
+                bannerLabel.textContent = data.label || '下载完成';
+                bannerPct.textContent = '100%';
+                bannerBar.style.width = '100%';
+                bannerBar.style.background = 'var(--success)';
+            }
+            downloadResumeInfo = null;
+            showStatus('✅ ' + (data.label || '下载完成'), 'success');
+            setTimeout(() => {
+                if (progressDiv) progressDiv.style.display = 'none';
+                if (banner) banner.style.display = 'none';
+            }, 4000);
+            refreshLlamaStatus();
+        } else if (data.stage === 'error') {
+            if (progressDiv) {
+                progressDiv.style.display = 'block';
+                label.textContent = data.error || data.label || '下载失败';
+                pct.textContent = '✗';
+                bar.style.width = '0%';
+                bar.style.background = 'var(--error)';
+            }
+            if (banner) {
+                banner.style.display = 'block';
+                bannerIcon.textContent = '❌';
+                bannerLabel.textContent = data.error || data.label || '下载失败';
+                bannerPct.textContent = '✗';
+                bannerBar.style.width = '0%';
+                bannerBar.style.background = 'var(--error)';
+            }
+            if (downloadResumeInfo) {
+                showStatus('❌ 下载中断，已保存进度，可重新点击下载按钮续传', 'error');
+            } else {
+                showStatus('❌ ' + (data.error || '下载失败'), 'error');
+            }
+            setTimeout(() => {
+                if (bar) bar.style.background = 'var(--theme-color)';
+                if (bannerBar) bannerBar.style.background = 'var(--theme-color)';
+            }, 8000);
+        } else {
+            // Downloading or extracting
+            if (progressDiv) {
+                progressDiv.style.display = 'block';
+                label.textContent = data.label || '下载中...';
+            }
+            if (banner) {
+                banner.style.display = 'block';
+                bannerIcon.textContent = data.stage === 'extracting' ? '📦' : '📥';
+                bannerLabel.textContent = data.label || '下载中...';
+            }
+            const ratio = data.progress || 0;
+            const pctText = Math.round(ratio * 100) + '%';
+            if (pct) pct.textContent = pctText;
+            if (bar) { bar.style.width = (ratio * 100) + '%'; bar.style.background = 'var(--theme-color)'; }
+            if (bannerPct) bannerPct.textContent = pctText;
+            if (bannerBar) { bannerBar.style.width = (ratio * 100) + '%'; bannerBar.style.background = 'var(--theme-color)'; }
+        }
+    }
+
+    // Close button for global download banner
+    document.getElementById('global-download-close')?.addEventListener('click', () => {
+        const banner = document.getElementById('global-download-banner');
+        if (banner) banner.style.display = 'none';
+    });
 
     // ==========================================
     // Retry Bar
@@ -1483,6 +1582,17 @@ document.addEventListener('DOMContentLoaded', () => {
             if (status.models.includes(currentVal)) {
                 modelSelect.value = currentVal;
             }
+
+            // Sync download progress (fallback for when WebSocket message is missed)
+            if (status.download && status.download.active) {
+                handleLlamaDownloadProgress({
+                    task: status.download.type,
+                    label: status.download.label,
+                    progress: status.download.progress,
+                    stage: status.download.stage,
+                    error: status.download.error
+                });
+            }
         } catch (e) {
             console.error('Failed to fetch llama status', e);
         }
@@ -1493,11 +1603,23 @@ document.addEventListener('DOMContentLoaded', () => {
             const btn = document.getElementById('llama-setup-btn');
             const originalText = btn.textContent;
             btn.disabled = true;
-            btn.textContent = '正在安装...';
+            btn.textContent = '正在启动下载...';
             try {
                 const res = await fetch('/api/llamacpp/setup', { method: 'POST' });
                 const data = await res.json();
-                if (data.status === 'success') {
+                if (data.status === 'started') {
+                    // Progress will come via WebSocket; show the progress bar
+                    const progressDiv = document.getElementById('llama-download-progress');
+                    const bar = document.getElementById('llama-download-bar');
+                    const label = document.getElementById('llama-download-label');
+                    const pct = document.getElementById('llama-download-pct');
+                    if (progressDiv) {
+                        progressDiv.style.display = 'block';
+                        if (bar) { bar.style.width = '0%'; bar.style.background = 'var(--theme-color)'; }
+                        if (label) label.textContent = '正在下载 llama.cpp 二进制文件...';
+                        if (pct) pct.textContent = '0%';
+                    }
+                } else if (data.status === 'success') {
                     showStatus('✅ Llama 安装成功', 'success');
                 } else {
                     showStatus('❌ 安装失败: ' + (data.detail || '未知错误'), 'error');
@@ -1514,7 +1636,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Search for GGUF models
         document.getElementById('llama-search-btn')?.addEventListener('click', async () => {
             const query = document.getElementById('llama-search-input').value.trim();
-            const source = document.getElementById('llama-source-select')?.value || 'huggingface';
+            const source = document.getElementById('llama-source-select')?.value || 'modelscope';
             const resultsDiv = document.getElementById('llama-search-results');
             const filesDiv = document.getElementById('llama-model-files');
 
@@ -1534,7 +1656,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
                 const data = await res.json();
                 if (data.status !== 'success' || !data.models.length) {
-                    resultsDiv.innerHTML = '<span class="field-hint">未找到匹配的模型</span>';
+                    if (source === 'huggingface') {
+                        resultsDiv.innerHTML = '<span class="field-hint">未找到模型（HuggingFace 可能无法访问，请尝试切换到 ModelScope）</span>';
+                    } else {
+                        resultsDiv.innerHTML = '<span class="field-hint">未找到匹配的模型</span>';
+                    }
                     return;
                 }
                 renderSearchResults(data.models, resultsDiv, filesDiv);
@@ -1623,7 +1749,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 item.style.background = 'var(--surface-hover)';
                 item.style.borderColor = 'var(--primary-color)';
 
-                const source = document.getElementById('llama-source-select')?.value || 'huggingface';
+                const source = document.getElementById('llama-source-select')?.value || 'modelscope';
                 try {
                     const res = await fetch('/api/llamacpp/model-files', {
                         method: 'POST',
@@ -1668,11 +1794,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 const shortName = file.split('/').pop();
 
                 this.disabled = true;
-                this.textContent = '下载中...';
+                this.textContent = '启动中...';
                 progress.style.display = 'block';
-                progress.textContent = `正在下载 ${shortName} (大文件可能较慢)...`;
+                const bar = document.getElementById('llama-download-bar');
+                const label = document.getElementById('llama-download-label');
+                const pct = document.getElementById('llama-download-pct');
+                if (bar) { bar.style.width = '0%'; bar.style.background = 'var(--theme-color)'; }
+                if (label) label.textContent = `正在下载 ${shortName} (大文件可能较慢)...`;
+                if (pct) pct.textContent = '0%';
 
-                const source = document.getElementById('llama-source-select')?.value || 'huggingface';
+                const source = document.getElementById('llama-source-select')?.value || 'modelscope';
                 try {
                     const res = await fetch('/api/llamacpp/download-from-hf', {
                         method: 'POST',
@@ -1680,17 +1811,21 @@ document.addEventListener('DOMContentLoaded', () => {
                         body: JSON.stringify({ repo_id: repo, filename: file, source })
                     });
                     const data = await res.json();
-                    if (data.status === 'success') {
+                    if (data.status === 'started') {
+                        // Progress will come via WebSocket
+                    } else if (data.status === 'success') {
                         showStatus('✅ 模型已下载: ' + shortName, 'success');
+                        progress.style.display = 'none';
                     } else {
                         showStatus('❌ 下载失败: ' + (data.detail || '未知错误'), 'error');
+                        progress.style.display = 'none';
                     }
                 } catch (e) {
                     showStatus('❌ 网络错误', 'error');
+                    progress.style.display = 'none';
                 } finally {
                     this.disabled = false;
                     this.textContent = '下载';
-                    progress.style.display = 'none';
                     refreshLlamaStatus();
                 }
             });

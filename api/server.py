@@ -62,6 +62,14 @@ for var in ["no_proxy", "NO_PROXY"]:
 
 app = FastAPI(title="Open-AGC UI Server")
 
+# Store the main event loop for cross-thread WebSocket broadcasts
+_main_event_loop: asyncio.AbstractEventLoop = None
+
+@app.on_event("startup")
+async def _capture_event_loop():
+    global _main_event_loop
+    _main_event_loop = asyncio.get_event_loop()
+
 # Initialize Database
 DB_PATH = get_data_path("chat_history.db")
 
@@ -254,6 +262,18 @@ def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: st
 # Connected WebSocket clients (for background task push)
 # ==========================================
 connected_websockets: list = []  # List of active WebSocket connections
+
+# ==========================================
+# Llama download progress tracking
+# ==========================================
+_llamacpp_download_state = {
+    "active": False,
+    "type": "",      # "binary" or "model"
+    "label": "",     # human-readable label
+    "progress": 0.0, # 0.0 .. 1.0
+    "stage": "",     # "downloading", "extracting", "complete", "error"
+    "error": ""      # error message if stage == "error"
+}
 
 def save_message(role: str, content: str):
     conn = sqlite3.connect(DB_PATH)
@@ -537,24 +557,91 @@ async def pull_model(req: PullRequest):
 
 @app.get("/api/llamacpp/status")
 async def get_llamacpp_status():
-    """Get the status of the local llama-server."""
+    """Get the status of the local llama-server (includes download progress)."""
     manager = get_llamacpp_manager()
     return {
         "installed": manager.is_binary_installed(),
         "running": manager.is_running(),
         "models": manager.list_models(),
-        "port": manager.port
+        "port": manager.port,
+        "download": _llamacpp_download_state
     }
 
 @app.post("/api/llamacpp/setup")
 async def setup_llamacpp():
-    """Download and install the llama-server binary."""
-    manager = get_llamacpp_manager()
-    success = manager.download_binary()
-    if success:
-        return {"status": "success", "message": "llama-server installed successfully"}
-    else:
-        raise HTTPException(status_code=500, detail="Failed to download llama-server binary")
+    """Download and install the llama-server binary (runs in background with progress)."""
+    global _llamacpp_download_state
+
+    if _llamacpp_download_state["active"]:
+        raise HTTPException(status_code=409, detail="下载任务正在进行中")
+
+    _llamacpp_download_state = {
+        "active": True,
+        "type": "binary",
+        "label": "正在下载 llama.cpp 二进制文件...",
+        "progress": 0.0,
+        "stage": "downloading",
+        "error": ""
+    }
+
+    def run_download():
+        global _llamacpp_download_state
+        try:
+            def progress_cb(ratio):
+                _llamacpp_download_state["progress"] = ratio
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": "binary",
+                    "label": "正在下载 llama.cpp 二进制文件...",
+                    "progress": ratio,
+                    "stage": "downloading"
+                })
+
+            manager = get_llamacpp_manager()
+            _llamacpp_download_state["stage"] = "extracting"
+            _llamacpp_download_state["label"] = "正在解压..."
+            _broadcast_to_websockets({
+                "type": "llamacpp_download",
+                "task": "binary",
+                "label": "正在解压 llama.cpp...",
+                "progress": 1.0,
+                "stage": "extracting"
+            })
+
+            success = manager.download_binary(progress_callback=progress_cb)
+            if success:
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "complete", "progress": 1.0}
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": "binary",
+                    "label": "llama.cpp 安装完成",
+                    "progress": 1.0,
+                    "stage": "complete"
+                })
+            else:
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载失败"}
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": "binary",
+                    "label": "安装失败",
+                    "progress": 0.0,
+                    "stage": "error",
+                    "error": "下载失败"
+                })
+        except Exception as e:
+            _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
+            _broadcast_to_websockets({
+                "type": "llamacpp_download",
+                "task": "binary",
+                "label": f"安装失败: {e}",
+                "progress": 0.0,
+                "stage": "error",
+                "error": str(e)
+            })
+
+    thread = threading.Thread(target=run_download, daemon=True)
+    thread.start()
+    return {"status": "started", "message": "开始下载安装 llama.cpp"}
 
 class ModelDownloadRequest(BaseModel):
     url: str
@@ -605,16 +692,91 @@ class ModelDownloadHFRequest(BaseModel):
 
 @app.post("/api/llamacpp/download-from-hf")
 async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
-    """Download a GGUF model from HuggingFace or ModelScope."""
+    """Download a GGUF model from HuggingFace or ModelScope (runs in background with progress, supports resume)."""
+    global _llamacpp_download_state
+
+    if _llamacpp_download_state["active"]:
+        # If there was a prior failed download with the same file, allow restarting (resume)
+        raise HTTPException(status_code=409, detail="下载任务正在进行中")
+
+    short_name = req.filename.split("/")[-1]
+    source_label = "ModelScope" if req.source == "modelscope" else "HuggingFace"
+
+    # Check for existing partial file to report initial progress
     manager = get_llamacpp_manager()
-    if req.source == "modelscope":
-        success = manager.download_model_from_ms(req.repo_id, req.filename)
+    partial_path = os.path.join(manager.models_dir, short_name + ".partial")
+    resume_offset = 0
+    if os.path.exists(partial_path):
+        resume_offset = os.path.getsize(partial_path)
+        initial_label = f"续传 {short_name} (已下载 {resume_offset / 1024**2:.0f} MB)..."
     else:
-        success = manager.download_model_from_hf(req.repo_id, req.filename)
-    if success:
-        return {"status": "success", "message": f"Downloaded {req.filename}"}
-    else:
-        raise HTTPException(status_code=500, detail="Failed to download model")
+        initial_label = f"正在从 {source_label} 下载 {short_name}..."
+
+    _llamacpp_download_state = {
+        "active": True,
+        "type": "model",
+        "label": initial_label,
+        "progress": 0.0,
+        "stage": "downloading",
+        "error": "",
+        "repo_id": req.repo_id,
+        "filename": req.filename,
+        "source": req.source,
+        "resume_offset": resume_offset
+    }
+
+    def run_download():
+        global _llamacpp_download_state
+        try:
+            def progress_cb(ratio):
+                _llamacpp_download_state["progress"] = ratio
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": "model",
+                    "label": f"正在下载 {short_name}...",
+                    "progress": ratio,
+                    "stage": "downloading"
+                })
+
+            manager2 = get_llamacpp_manager()
+            if req.source == "modelscope":
+                success = manager2.download_model_from_ms(req.repo_id, req.filename, progress_callback=progress_cb)
+            else:
+                success = manager2.download_model_from_hf(req.repo_id, req.filename, progress_callback=progress_cb)
+
+            if success:
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "complete", "progress": 1.0}
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": "model",
+                    "label": f"{short_name} 下载完成",
+                    "progress": 1.0,
+                    "stage": "complete"
+                })
+            else:
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载中断，可重新下载自动续传"}
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": "model",
+                    "label": f"{short_name} 下载中断 (已保存进度，可重新下载续传)",
+                    "progress": 0.0,
+                    "stage": "error",
+                    "error": "下载中断，可重新下载自动续传"
+                })
+        except Exception as e:
+            _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
+            _broadcast_to_websockets({
+                "type": "llamacpp_download",
+                "task": "model",
+                "label": f"下载失败: {e}",
+                "progress": 0.0,
+                "stage": "error",
+                "error": str(e)
+            })
+
+    thread = threading.Thread(target=run_download, daemon=True)
+    thread.start()
+    return {"status": "started", "message": f"开始从 {source_label} 下载 {short_name}", "resume_offset": resume_offset}
 
 class LlamaControlRequest(BaseModel):
     action: str
@@ -1086,7 +1248,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             "message": "llama-server 启动失败，请检查模型文件"
                         })
                         agent_is_running = False
-                        continue
+                        return
 
             agent = OpenAGCAgent(model=current_model)
             
@@ -1352,11 +1514,13 @@ def start_email_listener():
 # ==========================================
 
 def _broadcast_to_websockets(message: dict):
-    """Send a message to all connected WebSocket clients (best-effort)."""
+    """Send a message to all connected WebSocket clients (best-effort). Thread-safe."""
+    global _main_event_loop
+    loop = _main_event_loop
+    if loop is None:
+        return
     for ws in list(connected_websockets):
         try:
-            # Use asyncio to send from sync context
-            loop = asyncio.get_event_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(ws.send_json(message), loop)
         except Exception:

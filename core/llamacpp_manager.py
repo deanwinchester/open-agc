@@ -105,30 +105,61 @@ class LlamaCppManager:
             return []
         return [f for f in os.listdir(self.models_dir) if f.endswith(".gguf")]
 
-    def download_model(self, url: str, filename: str, progress_callback=None) -> bool:
-        """Download a GGUF model from a URL."""
+    def download_model(self, url: str, filename: str, progress_callback=None, resume: bool = True) -> bool:
+        """Download a GGUF model from a URL. Supports HTTP Range resume when resume=True."""
         if not filename.endswith(".gguf"):
             filename += ".gguf"
-        
+
         target_path = os.path.join(self.models_dir, filename)
+        partial_path = target_path + ".partial"
+
         try:
+            headers = {}
+            resume_offset = 0
+            total_size = 0
+
+            if resume and os.path.exists(partial_path):
+                resume_offset = os.path.getsize(partial_path)
+                headers["Range"] = f"bytes={resume_offset}-"
+                print(f"[LlamaCPP] Resuming download from byte {resume_offset}...")
+
             print(f"[LlamaCPP] Downloading model to {target_path}...")
-            resp = requests.get(url, stream=True)
+            resp = requests.get(url, stream=True, headers=headers, timeout=30)
             resp.raise_for_status()
-            
-            total_size = int(resp.headers.get('content-length', 0))
-            downloaded = 0
-            
-            with open(target_path, "wb") as f:
+
+            # Determine total size and whether resume was accepted
+            if resp.status_code == 206:
+                # Server accepted range request
+                content_range = resp.headers.get("Content-Range", "")
+                if "/" in content_range:
+                    total_size = int(content_range.split("/")[-1])
+                if total_size == 0:
+                    total_size = int(resp.headers.get("content-length", 0)) + resume_offset
+                mode = "ab"
+                downloaded = resume_offset
+            else:
+                # Server doesn't support range or no partial file; fresh download
+                total_size = int(resp.headers.get("content-length", 0))
+                resume_offset = 0
+                mode = "wb"
+                downloaded = 0
+
+            with open(partial_path, mode) as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
                         if progress_callback and total_size > 0:
                             progress_callback(downloaded / total_size)
+
+            # Download complete — rename partial to final
+            if os.path.exists(target_path):
+                os.remove(target_path)
+            os.rename(partial_path, target_path)
             return True
         except Exception as e:
             print(f"[LlamaCPP] Model download failed: {e}")
+            # Keep .partial file for future resume
             return False
 
     def search_hf_models(self, query: str, limit: int = 20) -> List[dict]:
@@ -184,11 +215,11 @@ class LlamaCppManager:
             print(f"[LlamaCPP] HF model files failed: {e}")
             return []
 
-    def download_model_from_hf(self, repo_id: str, filename: str, progress_callback=None) -> bool:
+    def download_model_from_hf(self, repo_id: str, filename: str, progress_callback=None, resume: bool = True) -> bool:
         """Download a GGUF model from HuggingFace by repo_id and filename."""
         url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
         local_name = filename.split("/")[-1]
-        return self.download_model(url, local_name, progress_callback)
+        return self.download_model(url, local_name, progress_callback, resume=resume)
 
     # ---- ModelScope (modelscope.cn) integration ----
 
@@ -197,9 +228,9 @@ class LlamaCppManager:
     def search_ms_models(self, query: str, limit: int = 20) -> List[dict]:
         """Search ModelScope for GGUF models by name."""
         try:
-            url = f"{self.MS_API_BASE}/api/v1/models/"
+            url = f"{self.MS_API_BASE}/api/v1/models"
             body = {
-                "Path": query,
+                "Name": query,
                 "PageNumber": 1,
                 "PageSize": limit
             }
@@ -212,9 +243,12 @@ class LlamaCppManager:
             if not models and isinstance(data.get("Data"), list):
                 models = data["Data"]
             for item in models:
+                path = item.get("Path", "")
+                name = item.get("Name", "")
+                repo_id = f"{path}/{name}" if path and name else (path or name)
                 results.append({
-                    "repo_id": item.get("Path", "") or item.get("Name", ""),
-                    "author": item.get("Author", "") or item.get("Owner", {}).get("Name", ""),
+                    "repo_id": repo_id,
+                    "author": path or item.get("Author", "") or item.get("Owner", {}).get("Name", ""),
                     "downloads": item.get("Downloads", 0) or item.get("DownloadCount", 0),
                     "likes": item.get("Likes", 0) or item.get("LikeCount", 0),
                     "description": (item.get("Description", "") or "")[:200]
@@ -251,11 +285,11 @@ class LlamaCppManager:
             print(f"[LlamaCPP] ModelScope file listing failed: {e}")
             return []
 
-    def download_model_from_ms(self, repo_id: str, filename: str, progress_callback=None) -> bool:
+    def download_model_from_ms(self, repo_id: str, filename: str, progress_callback=None, resume: bool = True) -> bool:
         """Download a GGUF model from ModelScope by repo_id and filename."""
         url = f"{self.MS_API_BASE}/models/{repo_id}/resolve/master/{filename}"
         local_name = filename.split("/")[-1]
-        return self.download_model(url, local_name, progress_callback)
+        return self.download_model(url, local_name, progress_callback, resume=resume)
 
     def is_running(self) -> bool:
         """Check if llama-server is already responding."""
