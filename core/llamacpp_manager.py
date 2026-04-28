@@ -131,6 +131,132 @@ class LlamaCppManager:
             print(f"[LlamaCPP] Model download failed: {e}")
             return False
 
+    def search_hf_models(self, query: str, limit: int = 20) -> List[dict]:
+        """Search HuggingFace Hub for GGUF models by name."""
+        try:
+            url = "https://huggingface.co/api/models"
+            params = {
+                "search": query,
+                "filter": "gguf",
+                "sort": "downloads",
+                "limit": limit,
+                "full": "false"
+            }
+            resp = requests.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            results = []
+            for item in resp.json():
+                results.append({
+                    "repo_id": item.get("id", ""),
+                    "author": item.get("author", ""),
+                    "downloads": item.get("downloads", 0),
+                    "likes": item.get("likes", 0),
+                    "description": (item.get("description") or "")[:200]
+                })
+            return results
+        except Exception as e:
+            print(f"[LlamaCPP] HF search failed: {e}")
+            return []
+
+    def get_hf_model_files(self, repo_id: str) -> List[dict]:
+        """List GGUF files in a HuggingFace model repo."""
+        try:
+            url = f"https://huggingface.co/api/models/{repo_id}"
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            files = []
+            for sibling in data.get("siblings", []):
+                fname = sibling.get("rfilename", "")
+                if fname.endswith(".gguf"):
+                    size_bytes = sibling.get("size", 0)
+                    if size_bytes >= 1024**3:
+                        size_str = f"{size_bytes / 1024**3:.2f} GB"
+                    elif size_bytes >= 1024**2:
+                        size_str = f"{size_bytes / 1024**2:.1f} MB"
+                    elif size_bytes >= 1024:
+                        size_str = f"{size_bytes / 1024:.1f} KB"
+                    else:
+                        size_str = f"{size_bytes} B"
+                    files.append({"filename": fname, "size": size_str})
+            return files
+        except Exception as e:
+            print(f"[LlamaCPP] HF model files failed: {e}")
+            return []
+
+    def download_model_from_hf(self, repo_id: str, filename: str, progress_callback=None) -> bool:
+        """Download a GGUF model from HuggingFace by repo_id and filename."""
+        url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
+        local_name = filename.split("/")[-1]
+        return self.download_model(url, local_name, progress_callback)
+
+    # ---- ModelScope (modelscope.cn) integration ----
+
+    MS_API_BASE = "https://modelscope.cn"
+
+    def search_ms_models(self, query: str, limit: int = 20) -> List[dict]:
+        """Search ModelScope for GGUF models by name."""
+        try:
+            url = f"{self.MS_API_BASE}/api/v1/models/"
+            body = {
+                "Path": query,
+                "PageNumber": 1,
+                "PageSize": limit
+            }
+            resp = requests.put(url, json=body, timeout=15,
+                               headers={"Content-Type": "application/json"})
+            resp.raise_for_status()
+            data = resp.json()
+            results = []
+            models = data.get("Data", {}).get("Models", [])
+            if not models and isinstance(data.get("Data"), list):
+                models = data["Data"]
+            for item in models:
+                results.append({
+                    "repo_id": item.get("Path", "") or item.get("Name", ""),
+                    "author": item.get("Author", "") or item.get("Owner", {}).get("Name", ""),
+                    "downloads": item.get("Downloads", 0) or item.get("DownloadCount", 0),
+                    "likes": item.get("Likes", 0) or item.get("LikeCount", 0),
+                    "description": (item.get("Description", "") or "")[:200]
+                })
+            return results
+        except Exception as e:
+            print(f"[LlamaCPP] ModelScope search failed: {e}")
+            return []
+
+    def get_ms_model_files(self, repo_id: str) -> List[dict]:
+        """List GGUF files in a ModelScope model repo."""
+        try:
+            url = f"{self.MS_API_BASE}/api/v1/models/{repo_id}/repo/files"
+            params = {"Revision": "master", "Recursive": "false"}
+            resp = requests.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            files = []
+            for f in data.get("Data", {}).get("Files", []):
+                fname = f.get("Name", "")
+                if fname.endswith(".gguf"):
+                    size_bytes = f.get("Size", 0)
+                    if size_bytes >= 1024**3:
+                        size_str = f"{size_bytes / 1024**3:.2f} GB"
+                    elif size_bytes >= 1024**2:
+                        size_str = f"{size_bytes / 1024**2:.1f} MB"
+                    elif size_bytes >= 1024:
+                        size_str = f"{size_bytes / 1024:.1f} KB"
+                    else:
+                        size_str = f"{size_bytes} B"
+                    files.append({"filename": fname, "size": size_str})
+            return files
+        except Exception as e:
+            print(f"[LlamaCPP] ModelScope file listing failed: {e}")
+            return []
+
+    def download_model_from_ms(self, repo_id: str, filename: str, progress_callback=None) -> bool:
+        """Download a GGUF model from ModelScope by repo_id and filename."""
+        url = f"{self.MS_API_BASE}/models/{repo_id}/resolve/master/{filename}"
+        local_name = filename.split("/")[-1]
+        return self.download_model(url, local_name, progress_callback)
+
     def is_running(self) -> bool:
         """Check if llama-server is already responding."""
         try:

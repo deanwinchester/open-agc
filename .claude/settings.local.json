@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(read -r -d '' _)",
+      "Bash(python3 *)",
+      "Bash(node --check static/app.js)",
+      "Bash(node -e \"require\\('fs'\\).readFileSync\\('static/app.js','utf8'\\); console.log\\('JS file readable'\\)\")",
+      "Bash(node *)",
+      "Bash(python3 api/server.py)",
+      "Bash(echo \"Server PID: $!\")",
+      "Bash(curl -s -X POST http://localhost:8000/api/llamacpp/search-models -H 'Content-Type: application/json' -d '{\"query\":\"qwen\"}')",
+      "WebFetch(domain:modelscope.cn)",
+      "WebSearch",
+      "Bash(/mnt/d/GitHub/open-agc/venv/bin/python -c ' *)"
+    ]
+  }
+}
