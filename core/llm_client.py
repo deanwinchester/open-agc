@@ -354,6 +354,7 @@ class LLMClient:
         # llama.cpp API base
         self.llamacpp_api_base = config.get("api_keys", {}).get("llamacpp", "http://localhost:8080/v1")
         os.environ["LLAMACPP_API_BASE"] = self.llamacpp_api_base
+        self.llamacpp_ctx_size = config.get("llamacpp_ctx_size", 32768)
 
         # Ensure local connections bypass proxy (important for Ollama on Windows)
         for var in ["no_proxy", "NO_PROXY"]:
@@ -363,6 +364,55 @@ class LLMClient:
                 os.environ[var] = local_hosts
             elif "localhost" not in current or "127.0.0.1" not in current:
                 os.environ[var] = f"{current.rstrip(',')},{local_hosts}"
+
+    def _estimate_tokens(self, messages: List[Dict[str, Any]]) -> int:
+        """Rough token count estimate. ~3 chars per token for mixed Chinese/English."""
+        total = 0
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                total += len(content) // 3
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        total += len(part.get("text", "")) // 3
+        return total
+
+    def _truncate_for_context(self, messages: List[Dict[str, Any]],
+                               max_tokens: int = 4096) -> List[Dict[str, Any]]:
+        """Truncate message history to fit within the context window.
+
+        Keeps system messages and the most recent turns that fit.
+        Drops oldest messages first.
+        """
+        if not messages:
+            return messages
+
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        other_msgs = [m for m in messages if m.get("role") != "system"]
+
+        sys_tokens = self._estimate_tokens(system_msgs)
+        available = max(max_tokens - sys_tokens, max_tokens // 4)
+
+        # Keep messages from newest to oldest until we run out of budget
+        kept = []
+        used = 0
+        for msg in reversed(other_msgs):
+            msg_tokens = self._estimate_tokens([msg])
+            if used + msg_tokens > available:
+                # Truncate this message's content to fit the remaining budget
+                if used < available and msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        truncated_len = (available - used) * 3
+                        msg = {**msg, "content": content[:truncated_len] + "..."}
+                        kept.append(msg)
+                break
+            kept.append(msg)
+            used += msg_tokens
+
+        kept.reverse()
+        return system_msgs + kept
 
     def _sanitize_for_llamacpp(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Make messages compatible with strict GGUF chat templates.
@@ -454,8 +504,9 @@ class LLMClient:
                     kwargs["model"] = f"openai/{attempt_model.replace('llamacpp/', '')}"
                 if "api_key" not in kwargs:
                     kwargs["api_key"] = "sk-no-key-required"
-                kwargs["messages"] = self._sanitize_for_llamacpp(messages)
-                # Increase timeout for local models (loading + inference)
+                # Truncate to fit context window, then sanitize for GGUF chat template
+                truncated = self._truncate_for_context(messages, max_tokens=self.llamacpp_ctx_size)
+                kwargs["messages"] = self._sanitize_for_llamacpp(truncated)
                 kwargs["timeout"] = 600
 
             try:
@@ -496,11 +547,12 @@ class LLMClient:
             kwargs["api_base"] = self.vllm_api_base
         elif "llamacpp/" in target_model:
             kwargs["api_base"] = self.llamacpp_api_base
-            # LiteLLM needs 'openai/' prefix to use the OpenAI-compatible logic for llama-server
             if not target_model.startswith("openai/"):
                 kwargs["model"] = f"openai/{target_model.replace('llamacpp/', '')}"
             if "api_key" not in kwargs:
                 kwargs["api_key"] = "sk-no-key-required"
+            truncated = self._truncate_for_context(messages, max_tokens=self.llamacpp_ctx_size)
+            kwargs["messages"] = self._sanitize_for_llamacpp(truncated)
             
         try:
             response = litellm.completion(**kwargs)

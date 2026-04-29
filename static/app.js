@@ -67,6 +67,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (viewId === 'settings-skills') loadSkillsConfig();
         if (viewId === 'settings-mcp') loadMcpConfig();
         if (viewId === 'tasks') loadTasks();
+        if (viewId === 'training-designer') { loadModelConfigs(); checkAndOfferTrainingInstall(); }
+        if (viewId === 'training-datasets') { loadDatasets(); checkAndOfferTrainingInstall(); }
+        if (viewId === 'training-finetune') { loadBaseModels(); loadDatasets(); checkAndOfferTrainingInstall(); }
+        if (viewId === 'training-history') { loadTrainingRuns(); checkAndOfferTrainingInstall(); }
+        if (viewId === 'training-monitor') { initTrainingMonitor(); checkAndOfferTrainingInstall(); }
+        if (viewId === 'training-benchmark') { loadBenchmarkView(); checkAndOfferTrainingInstall(); }
     }
 
     navItems.forEach(item => {
@@ -169,7 +175,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Auto-switch to chat view when receiving non-background messages
         // Don't auto-switch for download progress — user may be managing downloads in settings
-        if (!isBackground && data.type !== 'llamacpp_download'
+        if (!isBackground && data.type !== 'llamacpp_download' && data.type !== 'training_install_progress'
+            && data.type !== 'benchmark_progress' && data.type !== 'benchmark_complete'
             && document.querySelector('.view.active')?.id !== 'view-chat') {
             switchView('chat');
         }
@@ -217,6 +224,29 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         else if (data.type === 'llamacpp_download') {
             handleLlamaDownloadProgress(data);
+        }
+        else if (data.type === 'training_progress') {
+            handleTrainingProgress(data);
+        }
+        else if (data.type === 'training_step_paused') {
+            handleTrainingStepPaused(data);
+        }
+        else if (data.type === 'training_complete') {
+            handleTrainingComplete(data);
+            loadTrainingRuns();
+        }
+        else if (data.type === 'training_error') {
+            handleTrainingError(data);
+            loadTrainingRuns();
+        }
+        else if (data.type === 'training_install_progress') {
+            handleInstallProgress(data);
+        }
+        else if (data.type === 'benchmark_progress') {
+            handleBenchmarkProgress(data);
+        }
+        else if (data.type === 'benchmark_complete') {
+            handleBenchmarkComplete(data);
         }
     }
 
@@ -268,6 +298,8 @@ document.addEventListener('DOMContentLoaded', () => {
             setTimeout(() => { if (banner) banner.style.display = 'none'; }, 4000);
             refreshLlamaStatus();
             loadDownloadHistory();
+            datasetsLoaded = false;
+            if (document.getElementById('view-training-datasets')?.classList.contains('active')) loadDatasets();
         } else if (data.stage === 'error') {
             if (banner) {
                 banner.style.display = 'block';
@@ -855,6 +887,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const providers = [
         { key: "kimi", label: "Kimi (Moonshot)" },
         { key: "ollama", label: "Ollama (本地/Local)" },
+        { key: "llamacpp", label: "Llama.cpp (本地/Local)" },
         { key: "sglang", label: "SGLang (本地/Local)" },
         { key: "vllm", label: "vLLM (本地/Local)" },
         { key: "openai", label: "OpenAI" },
@@ -878,6 +911,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             document.getElementById('sandbox-mode-toggle').checked = data.sandbox_mode ?? true;
             document.getElementById('sandbox-dir-input').value = data.sandbox_dir || '';
+            document.getElementById('llamacpp-ctx-size').value = data.llamacpp_ctx_size || 32768;
             document.getElementById('heartbeat-toggle').checked = data.heartbeat_enabled ?? false;
 
             document.getElementById('email-listener-toggle').checked = data.email_listener_enabled ?? false;
@@ -936,6 +970,7 @@ document.addEventListener('DOMContentLoaded', () => {
         let selectedProvider = 'kimi';
         const dm = data.default_model || '';
         if (dm.startsWith('moonshot/')) selectedProvider = 'kimi';
+        else if (dm.startsWith('llamacpp/')) selectedProvider = 'llamacpp';
         else if (dm.startsWith('ollama/')) selectedProvider = 'ollama';
         else if (dm.startsWith('sglang/')) selectedProvider = 'sglang';
         else if (dm.startsWith('vllm/')) selectedProvider = 'vllm';
@@ -1032,6 +1067,7 @@ document.addEventListener('DOMContentLoaded', () => {
             disabled_skills: [],
             sandbox_mode: document.getElementById('sandbox-mode-toggle')?.checked ?? true,
             sandbox_dir: document.getElementById('sandbox-dir-input')?.value?.trim() || '',
+            llamacpp_ctx_size: parseInt(document.getElementById('llamacpp-ctx-size')?.value) || 32768,
             heartbeat_enabled: document.getElementById('heartbeat-toggle')?.checked ?? false,
             heartbeat_interval: 60,
             email_listener_enabled: document.getElementById('email-listener-toggle')?.checked ?? false,
@@ -1699,6 +1735,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     'failed': '❌'
                 };
                 const icon = iconMap[dl.status] || '📋';
+                const isDataset = dl.type === 'dataset' || (dl.label && dl.label.startsWith('数据集:'));
                 const statusText = {
                     'downloading': '下载中',
                     'paused': '已暂停',
@@ -1717,7 +1754,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 item.className = 'download-item';
                 item.id = `download-item-${dl.id}`;
                 item.innerHTML = `
-                    <div class="download-item-icon">${icon}</div>
+                    <div class="download-item-icon">${isDataset ? (dl.status === 'completed' ? '📊' : icon) : icon}</div>
                     <div class="download-item-body">
                         <div class="download-item-title">${escapeHtml(dl.label || dl.filename || 'Unknown')}</div>
                         <div class="download-item-meta">
@@ -2016,6 +2053,966 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         });
     }
+
+    // ==========================================
+    // Training Functions
+    // ==========================================
+    let modelConfigLoaded = false;
+    let datasetsLoaded = false;
+    let baseModelsLoaded = false;
+    let trainingHistoryLoaded = false;
+    let lossData = [];
+    let currentSelectedArch = 'gpt_decoder';
+    let currentTrainingRunId = null;
+
+    // --- Architecture Selector ---
+    let fineTuneScope = 'all';
+
+    function initArchSelector() {
+        document.querySelectorAll('.arch-option').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.arch-option').forEach(b => b.classList.remove('selected'));
+                btn.classList.add('selected');
+                currentSelectedArch = btn.dataset.arch;
+                updateArchFieldVisibility();
+            });
+        });
+        // GQA KV heads visibility
+        const attnSelect = document.getElementById('hp-attention-type');
+        const gqaField = document.getElementById('gqa-kv-field');
+        if (attnSelect && gqaField) {
+            attnSelect.addEventListener('change', () => {
+                gqaField.style.display = attnSelect.value === 'gqa' ? '' : 'none';
+            });
+        }
+    }
+
+    function updateArchFieldVisibility() {
+        const moeFields = document.getElementById('moe-fields');
+        if (moeFields) moeFields.style.display = currentSelectedArch === 'moe' ? 'flex' : 'none';
+    }
+
+    function getModelConfigFromForm() {
+        return JSON.stringify({
+            num_layers: parseInt(document.getElementById('hp-num-layers').value) || 12,
+            hidden_size: parseInt(document.getElementById('hp-hidden-size').value) || 768,
+            num_attention_heads: parseInt(document.getElementById('hp-num-heads').value) || 12,
+            intermediate_size: parseInt(document.getElementById('hp-intermediate').value) || 3072,
+            vocab_size: parseInt(document.getElementById('hp-vocab-size').value) || 50000,
+            max_seq_length: parseInt(document.getElementById('hp-max-seq').value) || 2048,
+            num_experts: currentSelectedArch === 'moe' ? (parseInt(document.getElementById('hp-num-experts').value) || 8) : undefined,
+            active_experts: currentSelectedArch === 'moe' ? (parseInt(document.getElementById('hp-active-experts').value) || 2) : undefined,
+            attention_type: document.getElementById('hp-attention-type')?.value || 'scaled_dot',
+            kv_heads: document.getElementById('hp-kv-heads')?.value || 4,
+            norm_position: document.getElementById('hp-norm-position')?.value || 'pre_norm',
+            norm_type: document.getElementById('hp-norm-type')?.value || 'layer_norm',
+            pos_encoding: document.getElementById('hp-pos-encoding')?.value || 'rope',
+            activation: document.getElementById('hp-activation')?.value || 'gelu',
+            attn_dropout: parseFloat(document.getElementById('hp-attn-dropout')?.value) || 0.1,
+            resid_dropout: parseFloat(document.getElementById('hp-resid-dropout')?.value) || 0.1,
+            embd_dropout: parseFloat(document.getElementById('hp-embd-dropout')?.value) || 0.1
+        });
+    }
+
+    // --- Fine-tune Scope Selection ---
+
+    window.onBaseModelSelected = function() {
+        const sel = document.getElementById('finetune-base-model');
+        const modelId = sel?.value;
+        const card = document.getElementById('model-structure-card');
+        if (!modelId || !card) {
+            if (card) card.style.display = 'none';
+            return;
+        }
+        card.style.display = '';
+        const info = document.getElementById('model-structure-info');
+        if (modelId.endsWith('.gguf')) {
+            info.textContent = 'GGUF 格式模型 — 无法解析结构';
+            document.getElementById('model-structure-viz').innerHTML = '<span class="field-hint">GGUF 模型不支持结构可视化，微调时需先转换为 HuggingFace 格式</span>';
+        } else {
+            info.textContent = modelId + ' — 典型结构预览';
+            showTypicalStructure(modelId);
+        }
+        updateFineTuneScope();
+    };
+
+    function showTypicalStructure(modelId) {
+        const viz = document.getElementById('model-structure-viz');
+        const layers = [
+            {name: 'Embedding', type: 'embed'},
+            {name: 'LayerNorm (Pre)', type: 'norm'},
+        ];
+        for (let i = 0; i < 8; i++) {
+            layers.push({name: `Block[${i}].SelfAttn`, type: 'attn'});
+            layers.push({name: `Block[${i}].LayerNorm`, type: 'norm'});
+            layers.push({name: `Block[${i}].FFN`, type: 'ffn'});
+        }
+        layers.push({name: 'LayerNorm (Final)', type: 'norm'});
+        layers.push({name: 'LM Head', type: 'head'});
+
+        const scope = document.querySelector('.arch-option.selected[data-finetune-scope]')?.dataset.finetuneScope || 'all';
+        let html = '<div style="max-height:300px; overflow-y:auto;">';
+        layers.forEach((l, i) => {
+            const isFrozen = (scope === 'lora_attn' && l.type !== 'attn') ||
+                             (scope === 'lora_custom' && l.type === 'head');
+            html += `<div class="model-structure-layer" style="${isFrozen ? 'opacity:0.45;' : ''}">
+                <span style="flex:0 0 30px; font-size:0.65rem; color:var(--text-secondary);">${i+1}</span>
+                <span class="model-structure-tag ${l.type}">${l.type.toUpperCase()}</span>
+                <span style="flex:1;">${l.name}</span>
+                ${isFrozen ? '<span style="font-size:0.65rem; color:var(--text-secondary);">❄ 冻结</span>' : '<span style="font-size:0.65rem; color:var(--success);">🔥 训练</span>'}
+            </div>`;
+        });
+        html += '</div>';
+        viz.innerHTML = html;
+    }
+
+    function updateFineTuneScope() {
+        document.querySelectorAll('[data-finetune-scope]').forEach(btn => {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('[data-finetune-scope]').forEach(b => b.classList.remove('selected'));
+                this.classList.add('selected');
+                fineTuneScope = this.dataset.finetuneScope;
+                const modelId = document.getElementById('finetune-base-model')?.value;
+                if (modelId) showTypicalStructure(modelId);
+                document.getElementById('custom-finetune-modules').style.display = fineTuneScope === 'lora_custom' ? '' : 'none';
+                if (fineTuneScope === 'lora_custom') renderCustomModuleSelector();
+                if (fineTuneScope === 'lora_attn') {
+                    document.getElementById('lora-targets').value = 'q_proj, k_proj, v_proj, o_proj';
+                } else if (fineTuneScope === 'lora_all') {
+                    document.getElementById('lora-targets').value = 'q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj';
+                }
+            });
+        });
+    }
+
+    function renderCustomModuleSelector() {
+        const container = document.getElementById('custom-finetune-modules');
+        if (!container) return;
+        const modules = [
+            {id:'q_proj', name:'Query 投影', checked:true},
+            {id:'k_proj', name:'Key 投影', checked:true},
+            {id:'v_proj', name:'Value 投影', checked:true},
+            {id:'o_proj', name:'Output 投影', checked:true},
+            {id:'gate_proj', name:'Gate 投影 (SwiGLU)', checked:false},
+            {id:'up_proj', name:'Up 投影 (FFN)', checked:false},
+            {id:'down_proj', name:'Down 投影 (FFN)', checked:false},
+            {id:'embed_tokens', name:'嵌入层', checked:false},
+            {id:'lm_head', name:'输出头', checked:false},
+        ];
+        container.innerHTML = `<div style="font-size:0.75rem; color:var(--text-secondary); margin-bottom:0.3rem;">选择要微调的模块:</div>` +
+            modules.map(m => `<label class="finetune-module-check"><input type="checkbox" value="${m.id}" ${m.checked?'checked':''} onchange="updateLoraTargets()"> ${m.name}</label>`).join('');
+    }
+
+    window.updateLoraTargets = function() {
+        const checked = [...document.querySelectorAll('#custom-finetune-modules input:checked')].map(cb => cb.value);
+        document.getElementById('lora-targets').value = checked.join(', ');
+    };
+
+    // --- Model Designer ---
+    async function loadModelConfigs() {
+        if (modelConfigLoaded) return;
+        modelConfigLoaded = true;
+        initArchSelector();
+        try {
+            const res = await fetch('/api/training/model-configs');
+            const data = await res.json();
+            renderSavedConfigs(data.configs || []);
+        } catch (e) { console.error('loadModelConfigs:', e); }
+    }
+
+    function renderSavedConfigs(configs) {
+        const container = document.getElementById('saved-configs-list');
+        if (!container) return;
+        if (!configs.length) {
+            container.innerHTML = '<div class="empty-state"><p>暂无保存的配置</p></div>';
+            return;
+        }
+        container.innerHTML = configs.map(c => {
+            const cfg = JSON.parse(c.config_json || '{}');
+            const params = c.param_count_estimate;
+            const paramsStr = params > 1e9 ? (params/1e9).toFixed(2)+'B' : (params/1e6).toFixed(1)+'M';
+            return `<div class="config-item" data-id="${c.id}">
+                <div class="config-item-body">
+                    <div class="config-item-title">${escapeHtml(c.name)}</div>
+                    <div class="config-item-meta">${c.architecture} | ${paramsStr} 参数</div>
+                </div>
+                <button class="download-action-btn delete" data-id="${c.id}" title="删除">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                </button>
+            </div>`;
+        }).join('');
+        container.querySelectorAll('.config-item').forEach(el => {
+            el.addEventListener('click', async () => {
+                const id = el.dataset.id;
+                const res = await fetch(`/api/training/model-configs/${id}`);
+                const cfg = await res.json();
+                fillConfigForm(cfg);
+            });
+        });
+        container.querySelectorAll('.download-action-btn.delete').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                await fetch(`/api/training/model-configs/${btn.dataset.id}`, { method: 'DELETE' });
+                modelConfigLoaded = false;
+                loadModelConfigs();
+            });
+        });
+    }
+
+    function fillConfigForm(cfg) {
+        const c = JSON.parse(cfg.config_json || '{}');
+        document.getElementById('hp-num-layers').value = c.num_layers || 12;
+        document.getElementById('hp-hidden-size').value = c.hidden_size || 768;
+        document.getElementById('hp-num-heads').value = c.num_attention_heads || 12;
+        document.getElementById('hp-intermediate').value = c.intermediate_size || 3072;
+        document.getElementById('hp-vocab-size').value = c.vocab_size || 50000;
+        document.getElementById('hp-max-seq').value = c.max_seq_length || 2048;
+        if (c.num_experts) document.getElementById('hp-num-experts').value = c.num_experts;
+        if (c.active_experts) document.getElementById('hp-active-experts').value = c.active_experts;
+        if (c.activation) document.getElementById('hp-activation').value = c.activation;
+        currentSelectedArch = cfg.architecture;
+        document.querySelectorAll('.arch-option').forEach(b => {
+            b.classList.toggle('selected', b.dataset.arch === cfg.architecture);
+        });
+        updateArchFieldVisibility();
+    }
+
+    async function estimateModel() {
+        const configJson = getModelConfigFromForm();
+        const res = await fetch('/api/training/model-configs/estimate', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ architecture: currentSelectedArch, config_json: configJson })
+        });
+        const data = await res.json();
+        const preview = document.getElementById('model-preview-content');
+        if (preview) {
+            preview.innerHTML = `<div class="model-preview">
+                <div class="preview-item"><label>总参数量</label><span>${data.total_params_formatted}</span></div>
+                <div class="preview-item"><label>层数</label><span>${data.num_layers}</span></div>
+                <div class="preview-item"><label>每层参数量</label><span>${(data.per_layer_params/1e6).toFixed(1)}M</span></div>
+                <div class="preview-item"><label>嵌入参数量</label><span>${(data.embed_params/1e6).toFixed(1)}M</span></div>
+                <div class="preview-item"><label>每Token FLOPs</label><span>${(data.flops_per_forward/1e6).toFixed(1)}M</span></div>
+                <div class="preview-item"><label>架构</label><span>${data.architecture}</span></div>
+            </div>`;
+        }
+    }
+
+    async function saveModelConfig() {
+        const name = prompt('配置名称:');
+        if (!name) return;
+        const configJson = getModelConfigFromForm();
+        const est = await fetch('/api/training/model-configs/estimate', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ architecture: currentSelectedArch, config_json: configJson })
+        });
+        const estData = await est.json();
+        await fetch('/api/training/model-configs', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ name, architecture: currentSelectedArch, config_json: configJson, param_count_estimate: estData.total_params })
+        });
+        showStatus('✅ 配置已保存', 'success');
+        modelConfigLoaded = false;
+        loadModelConfigs();
+    }
+
+    setTimeout(() => {
+        initArchSelector();
+        document.getElementById('estimate-model-btn')?.addEventListener('click', estimateModel);
+        document.getElementById('save-model-config-btn')?.addEventListener('click', saveModelConfig);
+        document.getElementById('ds-upload-btn')?.addEventListener('click', uploadDataset);
+        document.getElementById('ds-hf-import-btn')?.addEventListener('click', importHFDataset);
+        document.getElementById('start-training-btn')?.addEventListener('click', startTraining);
+        initDatasetEditor();
+
+        document.getElementById('monitor-pause-btn')?.addEventListener('click', () => trainingControl('pause'));
+        document.getElementById('monitor-resume-btn')?.addEventListener('click', () => trainingControl('resume'));
+        document.getElementById('monitor-step-btn')?.addEventListener('click', () => trainingControl('step'));
+        document.getElementById('monitor-abort-btn')?.addEventListener('click', () => trainingControl('abort'));
+
+        // Collapsible sidebar section toggle
+        document.querySelectorAll('.sidebar-section-header.collapsible').forEach(header => {
+            header.addEventListener('click', () => {
+                const section = header.closest('.sidebar-section');
+                const subnav = section?.querySelector('.sidebar-subnav');
+                const isCollapsed = header.classList.contains('collapsed');
+                if (isCollapsed) {
+                    header.classList.remove('collapsed');
+                    if (subnav) subnav.style.display = '';
+                } else {
+                    header.classList.add('collapsed');
+                    if (subnav) subnav.style.display = 'none';
+                }
+            });
+        });
+
+        // Auto-install training deps if not available
+        checkAndOfferTrainingInstall();
+    }, 200);
+
+    // Training deps install — uses static HTML cards in each training view
+    async function startTrainingInstall() {
+        document.querySelectorAll('.training-deps-missing').forEach(card => {
+            card.style.display = '';
+            card.querySelector('.training-deps-progress').style.display = '';
+            card.querySelector('.training-deps-label').textContent = '正在启动安装...';
+            card.querySelector('.training-deps-bar').style.width = '0%';
+            card.querySelector('.training-deps-install').style.display = 'none';
+        });
+        try {
+            const ir = await fetch('/api/training/install-deps', { method: 'POST' });
+            if (ir.status === 409) { showStatus('⚠️ 安装已在进行中', 'error'); return; }
+            const data = await ir.json();
+            showStatus('📦 ' + (data.message || '正在安装...'), 'success');
+        } catch (e) { showStatus('❌ 安装请求失败', 'error'); }
+    }
+
+    function handleInstallProgress(data) {
+        const pct = Math.round((data.progress || 0) * 100);
+        document.querySelectorAll('.training-deps-missing').forEach(card => {
+            card.style.display = '';
+            card.querySelector('.training-deps-progress').style.display = '';
+            card.querySelector('.training-deps-label').textContent = data.label || '';
+            card.querySelector('.training-deps-bar').style.width = pct + '%';
+            card.querySelector('.training-deps-install').style.display = 'none';
+        });
+        if (data.stage === 'complete') setTimeout(() => location.reload(), 2000);
+        if (data.stage === 'error') {
+            document.querySelectorAll('.training-deps-missing').forEach(card => {
+                card.querySelector('.training-deps-msg').textContent = '错误: ' + (data.error || '');
+                card.querySelector('.training-deps-install').style.display = '';
+                card.querySelector('.training-deps-progress').style.display = 'none';
+            });
+        }
+    }
+
+    async function checkAndOfferTrainingInstall() {
+        try {
+            const res = await fetch('/api/training/status');
+            const data = await res.json();
+            if (!data.available || data.install_state?.active) {
+                const state = data.install_state || {};
+                document.querySelectorAll('.training-deps-missing').forEach(card => {
+                    card.style.display = '';
+                    card.querySelector('.training-deps-msg').textContent = data.import_error || '';
+                    if (state.active) {
+                        card.querySelector('.training-deps-install').style.display = 'none';
+                        card.querySelector('.training-deps-progress').style.display = '';
+                        card.querySelector('.training-deps-label').textContent = state.label || '安装中...';
+                        card.querySelector('.training-deps-bar').style.width = Math.round((state.progress||0)*100) + '%';
+                    } else {
+                        card.querySelector('.training-deps-install').style.display = '';
+                        card.querySelector('.training-deps-progress').style.display = 'none';
+                    }
+                });
+                document.querySelectorAll('.training-deps-install').forEach(btn => {
+                    btn.onclick = () => startTrainingInstall();
+                });
+            } else {
+                document.querySelectorAll('.training-deps-missing').forEach(card => { card.style.display = 'none'; });
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    // --- Dataset Manager ---
+    async function loadDatasets() {
+        if (datasetsLoaded) return;
+        datasetsLoaded = true;
+        try {
+            const res = await fetch('/api/training/datasets');
+            const data = await res.json();
+            renderDatasetList(data.datasets || []);
+        } catch (e) { console.error('loadDatasets:', e); }
+        loadRecommendedDatasets();
+    }
+
+    // --- Recommended Datasets ---
+
+    async function loadRecommendedDatasets() {
+        try {
+            const res = await fetch('/api/training/recommended-datasets');
+            const data = await res.json();
+            renderRecommendedDatasets(data.datasets || []);
+        } catch (e) { console.error('loadRecommended:', e); }
+    }
+
+    function renderRecommendedDatasets(datasets) {
+        const grid = document.getElementById('recommended-datasets-grid');
+        if (!grid) return;
+        grid.innerHTML = datasets.map(d => `
+            <div class="rec-ds-card">
+                <div class="rec-ds-name">📦 ${escapeHtml(d.name)}</div>
+                <div class="rec-ds-desc">${escapeHtml(d.desc)}</div>
+                <div class="rec-ds-meta">${d.size} · ${(d.splits||[]).join(', ')}</div>
+                <button class="btn-secondary rec-ds-dl-btn" data-repo="${d.repo_id}" data-name="${d.name}" data-config="${d.config||''}" style="margin-top:0.4rem; width:100%;">一键下载</button>
+            </div>
+        `).join('');
+        grid.querySelectorAll('.rec-ds-dl-btn').forEach(btn => {
+            btn.addEventListener('click', async function() {
+                this.disabled = true;
+                this.textContent = '启动中...';
+                try {
+                    const res = await fetch('/api/downloads/dataset', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ repo_id: this.dataset.repo, name: this.dataset.name, config: this.dataset.config || null })
+                    });
+                    const d = await res.json();
+                    if (d.status === 'started') {
+                        showStatus('📥 ' + d.message, 'success');
+                        if (document.getElementById('view-settings-models')?.classList.contains('active') ||
+                            document.getElementById('view-settings')?.classList.contains('active')) {
+                            loadDownloadHistory();
+                        }
+                    } else {
+                        showStatus('❌ ' + (d.detail || '启动失败'), 'error');
+                        this.disabled = false;
+                        this.textContent = '一键下载';
+                    }
+                } catch (e) {
+                    showStatus('❌ 网络错误', 'error');
+                    this.disabled = false;
+                    this.textContent = '一键下载';
+                }
+            });
+        });
+    }
+
+    function renderDatasetList(datasets) {
+        const container = document.getElementById('dataset-list-container');
+        if (!container) return;
+        if (!datasets.length) {
+            container.innerHTML = '<div class="empty-state"><p>暂无数据集</p></div>';
+            return;
+        }
+        container.innerHTML = datasets.map(d => {
+            const size = d.sample_count || 0;
+            return `<div class="download-item">
+                <div class="download-item-icon">📊</div>
+                <div class="download-item-body">
+                    <div class="download-item-title">${escapeHtml(d.name)}</div>
+                    <div class="download-item-meta">
+                        <span>${d.format}</span><span>${size} 条</span><span>${d.source}</span>
+                    </div>
+                </div>
+                <div class="download-item-actions">
+                    <button class="download-action-btn" data-id="${d.id}" data-action="preview" title="预览">👁</button>
+                    <button class="download-action-btn" data-id="${d.id}" data-action="edit" title="编辑">✏️</button>
+                    <button class="download-action-btn delete" data-id="${d.id}" title="删除">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                    </button>
+                </div>
+            </div>`;
+        }).join('');
+        container.querySelectorAll('[data-action="preview"]').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const id = btn.dataset.id;
+                const res = await fetch(`/api/training/datasets/${id}/preview?n=5`);
+                const data = await res.json();
+                showStatus(`预览: ${(data.samples||[]).length} 条`, 'success');
+            });
+        });
+        container.querySelectorAll('[data-action="edit"]').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const id = btn.dataset.id;
+                const res = await fetch(`/api/training/datasets/${id}`);
+                const ds = await res.json();
+                if (ds.storage_path) {
+                    const contentRes = await fetch(`/api/training/datasets/${id}/preview?n=9999`);
+                    const contentData = await contentRes.json();
+                    document.getElementById('ds-editor-name').value = ds.name;
+                    document.getElementById('ds-editor-content').value = (contentData.samples||[]).map(s => JSON.stringify(s)).join('\n');
+                    document.getElementById('ds-editor-save').textContent = '更新数据集';
+                    document.getElementById('ds-editor-save').dataset.editId = id;
+                    document.getElementById('ds-editor-status').textContent = `正在编辑: ${ds.name} (${ds.sample_count} 条)`;
+                }
+            });
+        });
+        container.querySelectorAll('.download-action-btn.delete').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                if (!confirm('确定删除此数据集？')) return;
+                await fetch(`/api/training/datasets/${btn.dataset.id}`, { method: 'DELETE' });
+                datasetsLoaded = false;
+                loadDatasets();
+            });
+        });
+    }
+
+    async function uploadDataset() {
+        const name = document.getElementById('ds-upload-name').value.trim();
+        const fileInput = document.getElementById('ds-file-input');
+        if (!fileInput.files.length) { showStatus('⚠️ 请选择文件', 'error'); return; }
+        const formData = new FormData();
+        formData.append('file', fileInput.files[0]);
+        formData.append('name', name || fileInput.files[0].name);
+        try {
+            const res = await fetch('/api/training/datasets/upload', { method: 'POST', body: formData });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showStatus(`✅ 数据集已上传 (${data.sample_count} 条)`, 'success');
+                datasetsLoaded = false;
+                loadDatasets();
+            } else { showStatus('❌ 上传失败', 'error'); }
+        } catch (e) { showStatus('❌ 网络错误', 'error'); }
+    }
+
+    async function importHFDataset() {
+        const repo = document.getElementById('ds-hf-custom').value.trim();
+        if (!repo) { showStatus('⚠️ 请输入仓库ID', 'error'); return; }
+        try {
+            const res = await fetch('/api/downloads/dataset', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ repo_id: repo, name: repo })
+            });
+            const data = await res.json();
+            if (data.status === 'started') {
+                showStatus('📥 ' + data.message, 'success');
+            } else {
+                showStatus('❌ ' + (data.detail || '下载失败'), 'error');
+            }
+        } catch (e) { showStatus('❌ 网络错误', 'error'); }
+    }
+
+    // --- Dataset Editor ---
+
+    function initDatasetEditor() {
+        document.getElementById('ds-editor-add-sample')?.addEventListener('click', () => {
+            const ta = document.getElementById('ds-editor-content');
+            ta.value += (ta.value ? '\n' : '') + '{"instruction": "", "input": "", "output": ""}';
+        });
+        document.getElementById('ds-editor-validate')?.addEventListener('click', () => {
+            const content = document.getElementById('ds-editor-content').value.trim();
+            if (!content) { showStatus('⚠️ 内容为空', 'error'); return; }
+            let errors = 0;
+            content.split('\n').forEach((line, i) => {
+                if (!line.trim()) return;
+                try { JSON.parse(line); } catch (e) { errors++; }
+            });
+            const status = document.getElementById('ds-editor-status');
+            if (errors) { status.textContent = `❌ ${errors} 行 JSON 格式错误`; status.style.color = 'var(--error)'; }
+            else { status.textContent = `✅ JSON 格式正确 (${content.split('\n').filter(l => l.trim()).length} 条)`; status.style.color = 'var(--success)'; }
+        });
+        document.getElementById('ds-editor-save')?.addEventListener('click', async () => {
+            const name = document.getElementById('ds-editor-name').value.trim();
+            const content = document.getElementById('ds-editor-content').value.trim();
+            if (!name) { showStatus('⚠️ 请输入数据集名称', 'error'); return; }
+            if (!content) { showStatus('⚠️ 内容为空', 'error'); return; }
+            const status = document.getElementById('ds-editor-status');
+            const editId = document.getElementById('ds-editor-save').dataset.editId;
+            try {
+                const url = editId ? `/api/training/datasets/${editId}` : '/api/training/datasets/create';
+                const method = editId ? 'PUT' : 'POST';
+                const res = await fetch(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ name, samples: content }) });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showStatus(`✅ 数据集已${editId ? '更新' : '创建'} (${data.sample_count} 条)`, 'success');
+                    document.getElementById('ds-editor-name').value = '';
+                    document.getElementById('ds-editor-content').value = '';
+                    document.getElementById('ds-editor-save').textContent = '保存数据集';
+                    delete document.getElementById('ds-editor-save').dataset.editId;
+                    status.textContent = '';
+                    datasetsLoaded = false;
+                    loadDatasets();
+                } else { status.textContent = '❌ ' + (data.detail || '失败'); status.style.color = 'var(--error)'; }
+            } catch (e) { status.textContent = '❌ 网络错误'; status.style.color = 'var(--error)'; }
+        });
+    }
+
+    // --- Fine-tuning ---
+    async function loadBaseModels() {
+        if (baseModelsLoaded) return;
+        baseModelsLoaded = true;
+        try {
+            const res = await fetch('/api/training/base-models');
+            const data = await res.json();
+            const sel = document.getElementById('finetune-base-model');
+            if (sel) {
+                sel.innerHTML = '<option value="">-- 选择模型 --</option>' +
+                    (data.models || []).map(m => `<option value="${m.id}">${m.name} (${m.source})</option>`).join('');
+            }
+        } catch (e) { console.error('loadBaseModels:', e); }
+        try {
+            const dsRes = await fetch('/api/training/datasets');
+            const dsData = await dsRes.json();
+            const sel = document.getElementById('finetune-dataset');
+            if (sel) {
+                sel.innerHTML = '<option value="">-- 选择数据集 --</option>' +
+                    (dsData.datasets || []).map(d => `<option value="${d.id}">${d.name} (${d.sample_count}条)</option>`).join('');
+            }
+        } catch (e) { console.error('loadDatasets for finetune:', e); }
+    }
+
+    async function startTraining() {
+        const baseModel = document.getElementById('finetune-base-model')?.value;
+        const datasetId = parseInt(document.getElementById('finetune-dataset')?.value) || null;
+        if (!baseModel) { showStatus('⚠️ 请选择基座模型', 'error'); return; }
+
+        const params = {
+            lora: {
+                rank: parseInt(document.getElementById('lora-rank')?.value) || 8,
+                alpha: parseInt(document.getElementById('lora-alpha')?.value) || 16,
+                dropout: parseFloat(document.getElementById('lora-dropout')?.value) || 0.05,
+                target_modules: (document.getElementById('lora-targets')?.value || 'q_proj,v_proj').split(',').map(s => s.trim()).filter(Boolean)
+            },
+            learning_rate: parseFloat(document.getElementById('train-lr')?.value) || 2e-4,
+            epochs: parseInt(document.getElementById('train-epochs')?.value) || 3,
+            batch_size: parseInt(document.getElementById('train-batch')?.value) || 4,
+            gradient_accumulation: parseInt(document.getElementById('train-grad-accum')?.value) || 1,
+            max_steps: parseInt(document.getElementById('train-max-steps')?.value) || -1
+        };
+
+        try {
+            const res = await fetch('/api/training/runs', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    name: `${baseModel.split('/').pop()} 微调`,
+                    dataset_id: datasetId,
+                    base_model_id: baseModel,
+                    base_model_source: 'huggingface',
+                    training_params_json: JSON.stringify(params)
+                })
+            });
+            const data = await res.json();
+            if (data.status === 'started') {
+                currentTrainingRunId = data.run_id;
+                showStatus('🚀 训练已启动', 'success');
+                switchView('training-monitor');
+            } else {
+                showStatus('❌ 启动失败: ' + (data.detail || ''), 'error');
+            }
+        } catch (e) { showStatus('❌ 网络错误', 'error'); }
+    }
+
+    // --- Training Monitor ---
+    function initTrainingMonitor() {
+        const canvas = document.getElementById('loss-chart-canvas');
+        if (canvas) {
+            const ctx = canvas.getContext('2d');
+            canvas.width = canvas.parentElement.clientWidth;
+            canvas.height = 280;
+        }
+    }
+
+    function drawLossChart() {
+        const canvas = document.getElementById('loss-chart-canvas');
+        if (!canvas || !lossData.length) return;
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width, h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
+
+        const margin = { top: 20, right: 20, bottom: 30, left: 50 };
+        const pw = w - margin.left - margin.right;
+        const ph = h - margin.top - margin.bottom;
+
+        const maxLoss = Math.max(...lossData.map(d => d.loss)) * 1.1 || 1;
+        const maxStep = Math.max(...lossData.map(d => d.step)) || 1;
+
+        ctx.strokeStyle = 'var(--border-color)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(margin.left, margin.top);
+        ctx.lineTo(margin.left, margin.top + ph);
+        ctx.lineTo(margin.left + pw, margin.top + ph);
+        ctx.stroke();
+
+        ctx.strokeStyle = 'var(--theme-color)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        lossData.forEach((d, i) => {
+            const x = margin.left + (d.step / maxStep) * pw;
+            const y = margin.top + ph - (d.loss / maxLoss) * ph;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+
+        const legend = document.getElementById('loss-chart-legend');
+        if (legend && lossData.length > 0) {
+            const last = lossData[lossData.length - 1];
+            legend.textContent = `Step: ${last.step} | Loss: ${last.loss}`;
+        }
+    }
+
+    function handleTrainingProgress(data) {
+        if (data.status === 'initializing' || data.status === 'loading_model') {
+            document.getElementById('monitor-run-name').textContent = data.status === 'initializing' ? '正在初始化...' : '正在加载模型...';
+            return;
+        }
+        currentTrainingRunId = data.run_id;
+        document.getElementById('monitor-run-name').textContent = `运行 #${data.run_id} — 训练中`;
+        document.getElementById('monitor-loss').textContent = data.loss != null ? data.loss.toFixed(4) : '--';
+        document.getElementById('monitor-grad-norm').textContent = data.grad_norm != null ? data.grad_norm.toFixed(4) : '--';
+        document.getElementById('monitor-lr').textContent = data.learning_rate != null ? data.learning_rate.toExponential(2) : '--';
+        document.getElementById('monitor-epoch').textContent = data.epoch != null ? data.epoch : '--';
+        document.getElementById('monitor-step').textContent = data.global_step != null ? data.global_step : '--';
+        document.getElementById('monitor-status-badge').textContent = '训练中';
+        document.getElementById('monitor-status-badge').className = 'task-type-badge';
+
+        if (data.loss != null) {
+            lossData.push({ step: data.global_step || lossData.length, loss: data.loss });
+            if (lossData.length > 200) lossData.shift();
+            drawLossChart();
+        }
+    }
+
+    function handleTrainingStepPaused(data) {
+        document.getElementById('monitor-status-badge').textContent = '已暂停 (单步)';
+        document.getElementById('monitor-status-badge').className = 'task-type-badge scheduled';
+        document.getElementById('monitor-pause-btn').style.display = 'none';
+        document.getElementById('monitor-resume-btn').style.display = 'inline-flex';
+        document.getElementById('monitor-loss').textContent = data.loss != null ? data.loss.toFixed(4) : '--';
+        document.getElementById('monitor-grad-norm').textContent = data.grad_norm != null ? data.grad_norm.toFixed(4) : '--';
+
+        const actStats = data.act_stats;
+        const container = document.getElementById('activation-stats-container');
+        if (container && actStats) {
+            container.innerHTML = `<div style="font-size:0.8rem; margin-bottom:0.5rem;">
+                <span>均值: ${actStats.mean != null ? actStats.mean.toFixed(4) : 'N/A'}</span>
+                <span style="margin-left:1rem;">标准差: ${actStats.std != null ? actStats.std.toFixed(4) : 'N/A'}</span>
+            </div>`;
+            (actStats.per_layer || []).forEach(l => {
+                const maxVal = Math.max(Math.abs(l.mean || 0), Math.abs(l.std || 0), 0.1);
+                const row = document.createElement('div');
+                row.className = 'layer-stat-row';
+                row.innerHTML = `
+                    <span class="layer-stat-name" title="${l.name}">${l.name.split('.').slice(-2).join('.')}</span>
+                    <div class="layer-stat-bar"><div class="layer-stat-bar-fill" style="width:${Math.min(Math.abs(l.mean||0)/maxVal*100, 100)}%"></div></div>
+                    <span class="layer-stat-values">μ=${(l.mean||0).toFixed(3)} σ=${(l.std||0).toFixed(3)}</span>
+                `;
+                container.appendChild(row);
+            });
+        }
+    }
+
+    function handleTrainingComplete(data) {
+        const badge = document.getElementById('monitor-status-badge');
+        badge.textContent = data.aborted ? '已中止' : '已完成';
+        badge.className = data.aborted ? 'task-type-badge longrun' : 'task-type-badge oneshot';
+        document.getElementById('monitor-pause-btn').style.display = 'none';
+        document.getElementById('monitor-resume-btn').style.display = 'none';
+        document.getElementById('monitor-step-btn').style.display = 'none';
+        document.getElementById('monitor-run-name').textContent = `运行 #${data.run_id} — ${data.aborted ? '已中止' : '已完成'}`;
+        showStatus(data.aborted ? '⏹ 训练已中止' : `✅ 训练完成! 最佳Loss: ${data.best_loss}`, data.aborted ? 'error' : 'success');
+        drawLossChart();
+    }
+
+    function handleTrainingError(data) {
+        document.getElementById('monitor-status-badge').textContent = '错误';
+        document.getElementById('monitor-status-badge').className = 'task-type-badge longrun';
+        document.getElementById('monitor-run-name').textContent = `运行 #${data.run_id} — 错误`;
+        showStatus('❌ 训练错误: ' + (data.error || '未知'), 'error');
+    }
+
+    async function trainingControl(action) {
+        if (!currentTrainingRunId) return;
+        try {
+            const res = await fetch(`/api/training/runs/${currentTrainingRunId}/${action}`, { method: 'POST' });
+            const data = await res.json();
+            if (data.status === 'paused') {
+                document.getElementById('monitor-pause-btn').style.display = 'none';
+                document.getElementById('monitor-resume-btn').style.display = 'inline-flex';
+                document.getElementById('monitor-status-badge').textContent = '已暂停';
+                document.getElementById('monitor-status-badge').className = 'task-type-badge scheduled';
+            } else if (data.status === 'resumed' || data.status === 'stepping') {
+                document.getElementById('monitor-pause-btn').style.display = 'inline-flex';
+                document.getElementById('monitor-resume-btn').style.display = 'none';
+                document.getElementById('monitor-status-badge').textContent = '训练中';
+                document.getElementById('monitor-status-badge').className = 'task-type-badge';
+            } else if (data.status === 'aborted') {
+                document.getElementById('monitor-pause-btn').style.display = 'none';
+                document.getElementById('monitor-resume-btn').style.display = 'none';
+            }
+        } catch (e) { showStatus('❌ 操作失败', 'error'); }
+    }
+
+    // --- Training History ---
+    async function loadTrainingRuns() {
+        if (trainingHistoryLoaded) return;
+        trainingHistoryLoaded = true;
+        try {
+            const res = await fetch('/api/training/runs');
+            const data = await res.json();
+            renderTrainingRuns(data.runs || []);
+        } catch (e) { console.error('loadTrainingRuns:', e); }
+    }
+
+    function renderTrainingRuns(runs) {
+        const container = document.getElementById('training-runs-list');
+        if (!container) return;
+        if (!runs.length) {
+            container.innerHTML = '<div class="empty-state"><p>暂无训练记录</p></div>';
+            return;
+        }
+        const statusIcon = { running: '⏳', paused: '⏸️', completed: '✅', failed: '❌', aborted: '⏹' };
+        const statusText = { running: '训练中', paused: '已暂停', completed: '已完成', failed: '失败', aborted: '已中止' };
+        container.innerHTML = runs.map(r => `
+            <div class="config-item" data-id="${r.id}">
+                <div class="config-item-body">
+                    <div class="config-item-title">${statusIcon[r.status]||'📋'} ${escapeHtml(r.name)}</div>
+                    <div class="config-item-meta">
+                        <span>${r.base_model_id}</span>
+                        <span>${statusText[r.status]||r.status}</span>
+                        <span>${r.current_epoch.toFixed(1)} epoch</span>
+                        <span>${formatTimeAgo(r.created_at)}</span>
+                    </div>
+                </div>
+                <button class="download-action-btn delete" data-id="${r.id}" title="删除">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                </button>
+            </div>
+        `).join('');
+        container.querySelectorAll('.download-action-btn.delete').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                if (!confirm('确定删除此训练记录？')) return;
+                await fetch(`/api/training/runs/${btn.dataset.id}`, { method: 'DELETE' });
+                trainingHistoryLoaded = false;
+                loadTrainingRuns();
+            });
+        });
+    }
+
+    // ==========================================
+    // Benchmark Functions
+    // ==========================================
+    let benchmarkRunning = false;
+    let benchmarkResults = null;
+
+    async function loadBenchmarkView() {
+        const sel = document.getElementById('bench-model-select');
+        if (!sel) return;
+        sel.innerHTML = '<option value="">加载中...</option>';
+        try {
+            const res = await fetch('/api/training/all-models');
+            const data = await res.json();
+            const online = (data.models || []).filter(m => m.source === 'online');
+            const local = (data.models || []).filter(m => m.source === 'local');
+            let html = online.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
+            if (local.length) {
+                html += '<option disabled>── 本地模型 ──</option>';
+                html += local.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
+            }
+            sel.innerHTML = html;
+        } catch (e) { console.error(e); }
+        loadBenchmarkHistory();
+    }
+
+    async function runBenchmark() {
+        if (benchmarkRunning) return;
+        const modelId = document.getElementById('bench-model-select')?.value;
+        if (!modelId) { showStatus('⚠️ 请选择模型', 'error'); return; }
+
+        const types = [...document.querySelectorAll('#view-training-benchmark input[type=checkbox]:checked')].map(cb => cb.value);
+        if (!types.length) { showStatus('⚠️ 请选择测评类型', 'error'); return; }
+
+        benchmarkRunning = true;
+        document.getElementById('run-benchmark-btn').disabled = true;
+        document.getElementById('run-benchmark-btn').textContent = '测评中...';
+        document.getElementById('benchmark-progress-card').style.display = '';
+        document.getElementById('benchmark-results-card').style.display = 'none';
+        document.getElementById('benchmark-progress-container').innerHTML = '<div class="field-hint">正在测评...</div>';
+
+        try {
+            const res = await fetch('/api/training/benchmark', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ model_id: modelId, model_source: 'online', benchmark_types: types })
+            });
+            const data = await res.json();
+            displayBenchmarkResults(data);
+        } catch (e) { showStatus('❌ 测评失败', 'error'); }
+        benchmarkRunning = false;
+        document.getElementById('run-benchmark-btn').disabled = false;
+        document.getElementById('run-benchmark-btn').textContent = '开始测评';
+    }
+
+    function handleBenchmarkProgress(data) {
+        const container = document.getElementById('benchmark-progress-container');
+        if (container) {
+            container.innerHTML = `<div style="display:flex; align-items:center; gap:0.5rem;">
+                <span>📝</span><span>${escapeHtml(data.task)}: ${escapeHtml(data.question || '')}</span>
+                <div style="flex:1; height:4px; background:var(--border-color); border-radius:2px;"><div style="width:${(data.progress||0)*100}%; height:100%; background:var(--theme-color); border-radius:2px;"></div></div>
+            </div>`;
+        }
+    }
+
+    function handleBenchmarkComplete(data) {
+        showStatus(`✅ ${data.model_id} 测评完成`, 'success');
+        loadBenchmarkHistory();
+    }
+
+    function displayBenchmarkResults(data) {
+        const card = document.getElementById('benchmark-results-card');
+        const content = document.getElementById('benchmark-results-content');
+        if (!card || !content) return;
+        card.style.display = '';
+
+        const results = data.results || [];
+        let html = `<div class="model-preview" style="margin-bottom:1rem;">
+            <div class="preview-item"><label>模型</label><span>${escapeHtml(data.model_id||'')}</span></div>
+            <div class="preview-item"><label>平均延迟</label><span>${(data.avg_latency_ms||0).toFixed(0)} ms</span></div>
+            <div class="preview-item"><label>Token/秒</label><span>${(data.tokens_per_second||0).toFixed(1)}</span></div>
+            <div class="preview-item"><label>总题数</label><span>${data.total_questions||0}</span></div>
+        </div>`;
+
+        results.forEach(r => {
+            html += `<div style="margin-bottom:1rem;">
+                <div style="font-weight:700; margin-bottom:0.3rem;">${escapeHtml(r.name)} — 准确率: ${(r.accuracy*100).toFixed(0)}% (${r.correct}/${r.num_questions})</div>`;
+            (r.details || []).forEach(d => {
+                const bg = d.score >= 0.6 ? 'rgba(16,185,129,0.08)' : d.error ? 'rgba(239,68,68,0.08)' : 'rgba(245,158,11,0.08)';
+                const border = d.score >= 0.6 ? 'rgba(16,185,129,0.3)' : d.error ? 'rgba(239,68,68,0.3)' : 'rgba(245,158,11,0.3)';
+                html += `<div style="padding:0.4rem 0.6rem; margin-bottom:0.25rem; background:${bg}; border:1px solid ${border}; border-radius:6px; font-size:0.78rem;">
+                    <div style="font-weight:600;">Q: ${escapeHtml(d.question || '')}${d.error ? ' <span style="color:var(--error);">⚠ '+escapeHtml(d.error)+'</span>' : ''}</div>
+                    <div style="color:var(--text-secondary); margin-top:0.15rem;">得分: ${d.score} | 延迟: ${d.latency_ms}ms | Tokens: ${d.tokens} | ${escapeHtml((d.answer_preview||'').substring(0, 100))}</div>
+                </div>`;
+            });
+            html += '</div>';
+        });
+        content.innerHTML = html;
+    }
+
+    async function loadBenchmarkHistory() {
+        try {
+            const res = await fetch('/api/training/benchmarks');
+            const data = await res.json();
+            const container = document.getElementById('benchmark-history-list');
+            if (!container) return;
+            const benchmarks = data.benchmarks || [];
+            if (!benchmarks.length) {
+                container.innerHTML = '<div class="empty-state"><p>暂无测评记录</p></div>';
+                return;
+            }
+            container.innerHTML = benchmarks.map(b => {
+                const metrics = typeof b.metrics_json === 'string' ? JSON.parse(b.metrics_json) : (b.metrics_json || []);
+                let accStr = '';
+                metrics.forEach(m => { accStr += `${m.name}: ${(m.accuracy*100).toFixed(0)}% `; });
+                return `<div class="download-item">
+                    <div class="download-item-icon">📊</div>
+                    <div class="download-item-body">
+                        <div class="download-item-title">${escapeHtml(b.model_id)}</div>
+                        <div class="download-item-meta">
+                            <span>${accStr}</span><span>${b.avg_latency_ms}ms</span><span>${b.tokens_per_second} tok/s</span><span>${formatTimeAgo(b.created_at)}</span>
+                        </div>
+                    </div>
+                    <button class="download-action-btn delete" data-id="${b.id}" title="删除">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                    </button>
+                </div>`;
+            }).join('');
+            container.querySelectorAll('.download-action-btn.delete').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    await fetch(`/api/training/benchmarks/${btn.dataset.id}`, { method: 'DELETE' });
+                    loadBenchmarkHistory();
+                });
+            });
+        } catch (e) { console.error('loadBenchmarkHistory:', e); }
+    }
+
+    // Wire benchmark button
+    setTimeout(() => {
+        document.getElementById('run-benchmark-btn')?.addEventListener('click', runBenchmark);
+    }, 300);
 
     initI18n();
     initSettingsListeners();
