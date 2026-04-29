@@ -1257,6 +1257,7 @@ async def delete_download(download_id: int):
 @app.get("/api/training/status")
 async def get_training_status():
     """Check if training dependencies are available and return engine state."""
+    global _training_available
     engine = get_training_engine()
     # Re-check imports dynamically each time (not just cached module-level value)
     available = _training_available

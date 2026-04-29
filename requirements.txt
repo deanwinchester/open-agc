@@ -26,3 +26,4 @@ bitsandbytes>=0.41.0
 sentencepiece>=0.1.99
 scikit-learn>=1.0.0
 pyyaml>=6.0.0
+python-multipart>=0.0.18
