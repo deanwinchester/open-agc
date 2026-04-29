@@ -2249,77 +2249,294 @@ async def delete_training_run(run_id: int):
 # Model Benchmark API
 # ==========================================
 
-BENCHMARK_TASKS = {
+BENCHMARK_REGISTRY = {
     "mmlu": {
-        "name": "MMLU (多任务语言理解)",
-        "desc": "57个学科的多选题，评估模型的知识广度",
-        "questions": [
-            {"q": "In quantum mechanics, the wave function ψ satisfies the Schrödinger equation. If ψ₁ and ψ₂ are solutions, which principle guarantees that c₁ψ₁ + c₂ψ₂ is also a solution?\nA) Pauli exclusion  B) Superposition  C) Heisenberg uncertainty  D) Correspondence",
-             "answer": "B", "keywords": ["superposition"]},
-            {"q": "Which of the following best describes the capital asset pricing model (CAPM)?\nA) E(R) = Rf + β(E(Rm)-Rf)  B) P = D/(r-g)  C) NPV = Σ CF/(1+r)^t  D) F = ma",
-             "answer": "A", "keywords": ["CAPM", "beta"]},
-            {"q": "In computer science, what is the time complexity of searching in a balanced binary search tree?\nA) O(1)  B) O(n)  C) O(log n)  D) O(n²)",
-             "answer": "C", "keywords": ["log", "logarithmic"]},
-            {"q": "Which constitutional amendment abolished slavery in the United States?\nA) 13th  B) 14th  C) 15th  D) 19th",
-             "answer": "A", "keywords": ["13th"]},
-            {"q": "What is the primary function of mitochondria in eukaryotic cells?\nA) Protein synthesis  B) ATP production  C) Cell division  D) DNA replication",
-             "answer": "B", "keywords": ["ATP", "energy", "respiration"]},
-            {"q": "In linear algebra, a square matrix A is diagonalizable if it has n linearly independent ___.\nA) rows  B) columns  C) eigenvectors  D) singular values",
-             "answer": "C", "keywords": ["eigenvector"]},
-            {"q": "The Turing test, proposed by Alan Turing in 1950, is a test of a machine's ability to exhibit what?\nA) Creativity  B) Intelligent behavior indistinguishable from a human  C) Mathematical ability  D) Physical dexterity",
-             "answer": "B", "keywords": ["intelligent", "human", "indistinguishable"]},
-            {"q": "Which layer of the OSI model is responsible for end-to-end reliable data transfer?\nA) Network  B) Data Link  C) Transport  D) Session",
-             "answer": "C", "keywords": ["transport", "TCP"]},
-        ]
+        "name": "MMLU (Massive Multitask Language Understanding)",
+        "desc": "57学科×100+题，多选，评估知识广度。数据集: cais/mmlu, ~14K题",
+        "hf_repo": "cais/mmlu",
+        "hf_config": "all",
+        "sample_size": 100,
+        "scoring": "multiple_choice",
+        "subjects": ["abstract_algebra","anatomy","astronomy","business_ethics","clinical_knowledge",
+                     "college_biology","college_chemistry","college_computer_science","college_mathematics",
+                     "college_physics","computer_security","conceptual_physics","econometrics",
+                     "electrical_engineering","elementary_mathematics","high_school_biology",
+                     "high_school_chemistry","high_school_computer_science","high_school_mathematics",
+                     "high_school_physics","human_sexuality","international_law","jurisprudence",
+                     "logical_fallacies","machine_learning","management","marketing","medical_genetics",
+                     "miscellaneous","moral_disputes","philosophy","prehistory","professional_accounting",
+                     "professional_psychology","public_relations","security_studies","sociology",
+                     "us_foreign_policy","virology","world_religions"],
     },
     "hellaswag": {
-        "name": "HellaSwag (常识推理)",
-        "desc": "选取最佳后续句子的常识推理测试",
-        "questions": [
-            {"q": "A person is playing a guitar on stage. They begin to strum a chord and then...\nA) take a bow  B) start singing the lyrics  C) put the guitar away  D) leave the stage",
-             "answer": "B", "keywords": ["singing", "lyrics"]},
-            {"q": "Someone is cooking pasta in a pot of boiling water. They take a strainer and...\nA) throw it away  B) drain the water from the pasta  C) add more water  D) put it in the fridge",
-             "answer": "B", "keywords": ["drain", "strain"]},
-            {"q": "A student opens their textbook to study for an exam. They read the first chapter and then...\nA) close the book and go to sleep  B) take notes on the key concepts  C) throw the book away  D) watch TV",
-             "answer": "B", "keywords": ["notes", "concepts"]},
-            {"q": "A driver approaches a red traffic light. They should...\nA) speed up  B) slow down and stop  C) honk the horn  D) close their eyes",
-             "answer": "B", "keywords": ["stop", "slow"]},
-            {"q": "A baker is making bread. After mixing the dough, they...\nA) eat it immediately  B) let it rise before baking  C) throw it in the trash  D) freeze it forever",
-             "answer": "B", "keywords": ["rise", "baking"]},
-        ]
+        "name": "HellaSwag (Commonsense NLI)",
+        "desc": "常识推理，选取最佳后续句。数据集: Rowan/hellaswag, ~10K题",
+        "hf_repo": "Rowan/hellaswag",
+        "sample_size": 50,
+        "scoring": "multiple_choice",
     },
     "hle": {
         "name": "HLE (Humanity's Last Exam)",
-        "desc": "高难度跨学科问题，测试模型极限推理能力",
-        "questions": [
-            {"q": "Prove that the alternating group A₅ is simple (has no non-trivial normal subgroups). Outline the key steps of the proof.", "keywords": ["conjugacy", "60", "order", "subgroup", "normal", "simple"]},
-            {"q": "A spacecraft of rest mass m₀ accelerates to 0.999c relative to Earth. Calculate the relativistic kinetic energy in terms of m₀c², and explain why infinite energy would be needed to reach exactly c.", "keywords": ["gamma", "lorentz", "7", "infinite", "limit"]},
-            {"q": "In Rust, explain how the borrow checker prevents data races at compile time. Provide an example where ownership and lifetimes interact non-trivially.", "keywords": ["borrow", "ownership", "lifetime", "mutable", "reference", "compile"]},
-            {"q": "Consider the Riemann zeta function ζ(s). Explain the significance of the critical strip 0 < Re(s) < 1 and state the Riemann Hypothesis. Why is it important for prime number distribution?", "keywords": ["critical", "1/2", "prime", "zeros", "distribution", "non-trivial"]},
-            {"q": "Design a lock-free concurrent queue using CAS (Compare-And-Swap) operations. Explain the ABA problem and how to solve it.", "keywords": ["CAS", "ABA", "atomic", "pointer", "tag", "concurrent"]},
-        ]
+        "desc": "高难度跨学科极限推理。数据集: cais/hle, ~3K题",
+        "hf_repo": "cais/hle",
+        "sample_size": 20,
+        "scoring": "keyword_match",
     },
     "swe_bench": {
-        "name": "SWE-bench (软件工程)",
-        "desc": "代码理解、调试与重构能力评估",
-        "questions": [
-            {"q": "The following Python code has a bug. Identify the issue and provide the corrected version:\n\n```python\ndef binary_search(arr, target):\n    left, right = 0, len(arr)\n    while left < right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            left = mid\n        else:\n            right = mid\n    return -1\n```", "keywords": ["infinite", "loop", "mid+1", "mid-1", "left", "right", "fixed"]},
-            {"q": "Refactor this React component to use modern hooks (useState, useEffect) instead of class component lifecycle methods. Show the complete refactored code:\n\n```javascript\nclass Timer extends React.Component {\n  state = { count: 0 };\n  componentDidMount() { this.interval = setInterval(() => this.setState(s => ({count: s.count+1})), 1000); }\n  componentWillUnmount() { clearInterval(this.interval); }\n  render() { return <div>{this.state.count}</div>; }\n}\n```", "keywords": ["useState", "useEffect", "cleanup", "return", "functional"]},
-            {"q": "A web application is leaking memory. The heap dump shows millions of undisposed EventListener objects. Propose a systematic approach to diagnose and fix the root cause.", "keywords": ["removeEventListener", "cleanup", "lifecycle", "weakref", "observer", "pattern"]},
-            {"q": "Write a SQL query to find the top 3 departments by average salary, but only include departments with more than 5 employees. The schema is: employees(id, name, salary, dept_id), departments(id, name).", "keywords": ["AVG", "GROUP BY", "HAVING", "COUNT", "JOIN", "LIMIT", "ORDER"]},
-            {"q": "Explain the trade-offs between microservices and a modular monolith. When would you choose each architecture? Provide concrete decision criteria.", "keywords": ["deployment", "complexity", "data", "consistency", "transaction", "team", "scale"]},
-        ]
+        "name": "SWE-bench (Software Engineering)",
+        "desc": "真实GitHub issue代码修复。数据集: princeton-nlp/SWE-bench, ~2K题",
+        "hf_repo": "princeton-nlp/SWE-bench_Verified",
+        "sample_size": 10,
+        "scoring": "keyword_match",
     },
     "latency": {
         "name": "延迟测试 (TTFT & TPS)",
         "desc": "测量首Token时间和每秒Token生成速度",
-        "questions": [
-            {"q": "1+1=?", "answer": "2", "keywords": ["2"]},
-            {"q": "What is the capital of France? Answer in one word.", "answer": "Paris", "keywords": ["Paris"]},
-            {"q": "Translate to English: 你好世界", "answer": "hello world", "keywords": ["hello", "world"]},
-        ]
+        "sample_size": 5,
+        "scoring": "latency_only",
     },
 }
+
+
+def _load_benchmark_dataset(benchmark_type: str, sample_size: int = None) -> list:
+    """Load benchmark questions from local cache or download from HF.
+
+    Returns a list of question dicts with keys: question, choices (list), answer, subject
+    """
+    import hashlib
+
+    info = BENCHMARK_REGISTRY.get(benchmark_type, {})
+    hf_repo = info.get("hf_repo", "")
+    n = sample_size or info.get("sample_size", 30)
+
+    bench_dir = os.path.join(os.path.dirname(DB_PATH), "benchmarks", benchmark_type)
+    os.makedirs(bench_dir, exist_ok=True)
+
+    # Check local cache first
+    cache_file = os.path.join(bench_dir, "questions.json")
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                questions = json.load(f)
+            if len(questions) >= n:
+                return questions[:n]
+        except Exception:
+            pass
+
+    # Download from HuggingFace
+    if not hf_repo:
+        # Latency test: built-in simple questions
+        questions = [
+            {"question": "1+1=?", "answer": "2", "subject": "latency"},
+            {"question": "Capital of France?", "answer": "Paris", "subject": "latency"},
+            {"question": "Translate: Hello World", "answer": "Hello World", "subject": "latency"},
+            {"question": "2^10 = ?", "answer": "1024", "subject": "latency"},
+            {"question": "What year is it?", "answer": "2026", "subject": "latency"},
+        ]
+        return questions[:n]
+
+    questions = []
+    try:
+        # Try getting dataset via HF API
+        api_url = f"https://huggingface.co/api/datasets/{hf_repo}"
+        resp = requests.get(api_url, timeout=15)
+        if resp.status_code != 200:
+            raise Exception(f"HF API returned {resp.status_code}")
+
+        ds_info = resp.json()
+
+        if benchmark_type == "mmlu":
+            questions = _download_mmlu_subset(bench_dir, n, info)
+        elif benchmark_type == "hellaswag":
+            questions = _download_hellaswag_subset(bench_dir, n, info)
+        elif benchmark_type == "hle":
+            questions = _download_hle_subset(bench_dir, n, info)
+        elif benchmark_type == "swe_bench":
+            questions = _download_swebench_subset(bench_dir, n, info)
+
+    except Exception as e:
+        print(f"[Benchmark] Download failed for {benchmark_type}: {e}, using fallback")
+
+    # Fallback: use built-in questions if download fails
+    if not questions:
+        questions = _get_fallback_questions(benchmark_type, n)
+
+    # Cache locally
+    try:
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(questions, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+    return questions[:n]
+
+
+def _download_mmlu_subset(bench_dir: str, n: int, info: dict) -> list:
+    """Download MMLU questions from HF. Each subject is a separate config."""
+    questions = []
+    subjects = info.get("subjects", [])
+    per_subject = max(n // max(len(subjects), 1), 1)
+
+    for subject in subjects[:min(len(subjects), 10)]:  # Limit to 10 subjects for speed
+        try:
+            url = f"https://huggingface.co/datasets/cais/mmlu/resolve/main/data/test/{subject}_test.csv"
+            resp = requests.get(url, timeout=30)
+            if resp.status_code == 200:
+                lines = resp.text.strip().split('\n')
+                import csv, io as _io
+                reader = csv.reader(_io.StringIO(resp.text))
+                header = next(reader, None)
+                for row in reader:
+                    if len(row) >= 6:
+                        questions.append({
+                            "question": row[0],
+                            "choices": [row[1], row[2], row[3], row[4]],
+                            "answer": row[5].strip(),
+                            "subject": subject,
+                        })
+                    if len(questions) >= n:
+                        break
+                if len(questions) >= n:
+                    break
+        except Exception as e:
+            print(f"[Benchmark] MMLU {subject} failed: {e}")
+            continue
+
+    return questions[:n]
+
+
+def _download_hellaswag_subset(bench_dir: str, n: int, info: dict) -> list:
+    """Download HellaSwag questions from HF."""
+    questions = []
+    try:
+        url = "https://huggingface.co/datasets/Rowan/hellaswag/resolve/main/data/hellaswag_val.jsonl"
+        resp = requests.get(url, stream=True, timeout=120)
+        if resp.status_code == 200:
+            import random as _random
+            lines = []
+            for line in resp.iter_lines(decode_unicode=True):
+                if line and line.strip():
+                    lines.append(line)
+            _random.shuffle(lines)
+            for line in lines[:n]:
+                data = json.loads(line)
+                questions.append({
+                    "question": data.get("ctx", ""),
+                    "choices": data.get("endings", []),
+                    "answer": str(data.get("label", 0)),
+                    "subject": "commonsense",
+                })
+    except Exception as e:
+        print(f"[Benchmark] HellaSwag download failed: {e}")
+    return questions[:n]
+
+
+def _download_hle_subset(bench_dir: str, n: int, info: dict) -> list:
+    """Download HLE questions from HF."""
+    questions = []
+    try:
+        url = "https://huggingface.co/datasets/cais/hle/resolve/main/data/test/hle_test.jsonl"
+        resp = requests.get(url, stream=True, timeout=120)
+        if resp.status_code == 200:
+            import random as _random
+            lines = []
+            for line in resp.iter_lines(decode_unicode=True):
+                if line and line.strip():
+                    lines.append(line)
+            _random.shuffle(lines)
+            for line in lines[:n]:
+                data = json.loads(line)
+                questions.append({
+                    "question": data.get("question", data.get("prompt", "")),
+                    "answer": data.get("answer", data.get("solution", "")),
+                    "subject": data.get("subject", "general"),
+                })
+    except Exception as e:
+        print(f"[Benchmark] HLE download failed: {e}")
+    return questions[:n]
+
+
+def _download_swebench_subset(bench_dir: str, n: int, info: dict) -> list:
+    """Download SWE-bench questions from HF."""
+    questions = []
+    try:
+        url = "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified/resolve/main/data/test-00000-of-00001.parquet"
+        resp = requests.get(url, timeout=120)
+        if resp.status_code == 200:
+            try:
+                import pyarrow.parquet as pq
+                import io as _io
+                table = pq.read_table(_io.BytesIO(resp.content))
+                import random as _random
+                indices = list(range(len(table)))
+                _random.shuffle(indices)
+                for i in indices[:n]:
+                    row = table.column("problem_statement")[i].as_py()
+                    patch = table.column("patch")[i].as_py() if "patch" in table.column_names else ""
+                    questions.append({
+                        "question": str(row)[:2000],
+                        "answer": str(patch)[:500],
+                        "subject": "software_engineering",
+                    })
+            except ImportError:
+                pass
+    except Exception as e:
+        print(f"[Benchmark] SWE-bench download failed: {e}")
+    return questions[:n]
+
+
+def _get_fallback_questions(benchmark_type: str, n: int) -> list:
+    """Built-in fallback questions when HF download fails."""
+    fallbacks = {
+        "mmlu": [
+            {"question": "In quantum mechanics, superposition means that a system can exist in multiple states simultaneously until:\nA) Observed  B) Calculated  C) Energized  D) Stabilized",
+             "choices": ["A", "B", "C", "D"], "answer": "A", "subject": "physics"},
+            {"question": "The capital asset pricing model formula is:\nA) E(R)=Rf+β(E(Rm)-Rf)  B) P=D/(r-g)  C) F=ma  D) E=mc²",
+             "choices": ["A", "B", "C", "D"], "answer": "A", "subject": "finance"},
+            {"question": "Binary search tree search complexity:\nA) O(1)  B) O(n)  C) O(log n)  D) O(n²)",
+             "choices": ["A", "B", "C", "D"], "answer": "C", "subject": "computer_science"},
+            {"question": "Amendment abolishing slavery:\nA) 13th  B) 14th  C) 15th  D) 19th",
+             "choices": ["A", "B", "C", "D"], "answer": "A", "subject": "history"},
+            {"question": "Mitochondria primary function:\nA) Protein synthesis  B) ATP production  C) Cell division  D) DNA replication",
+             "choices": ["A", "B", "C", "D"], "answer": "B", "subject": "biology"},
+            {"question": "Diagonalizable matrix requires n linearly independent:\nA) rows  B) columns  C) eigenvectors  D) singular values",
+             "choices": ["A", "B", "C", "D"], "answer": "C", "subject": "mathematics"},
+            {"question": "Turing test evaluates:\nA) Creativity  B) Human-like intelligence  C) Math ability  D) Speed",
+             "choices": ["A", "B", "C", "D"], "answer": "B", "subject": "computer_science"},
+            {"question": "OSI layer for end-to-end reliable transfer:\nA) Network  B) Data Link  C) Transport  D) Session",
+             "choices": ["A", "B", "C", "D"], "answer": "C", "subject": "computer_science"},
+            {"question": "Chemical formula for water:\nA) CO2  B) H2O  C) NaCl  D) O2",
+             "choices": ["A", "B", "C", "D"], "answer": "B", "subject": "chemistry"},
+            {"question": "Largest planet in solar system:\nA) Earth  B) Mars  C) Jupiter  D) Saturn",
+             "choices": ["A", "B", "C", "D"], "answer": "C", "subject": "astronomy"},
+        ],
+        "hellaswag": [
+            {"question": "A person is playing guitar on stage. They strum a chord and then...",
+             "choices": ["take a bow", "start singing the lyrics", "put the guitar away", "leave the stage"], "answer": "1", "subject": "commonsense"},
+            {"question": "Someone is cooking pasta in boiling water. They take a strainer and...",
+             "choices": ["throw it away", "drain the water from the pasta", "add more water", "put it in the fridge"], "answer": "1", "subject": "commonsense"},
+            {"question": "A student opens their textbook to study. They read chapter one and...",
+             "choices": ["close it and sleep", "take notes on key concepts", "throw the book away", "watch TV"], "answer": "1", "subject": "commonsense"},
+            {"question": "A driver approaches a red light and...",
+             "choices": ["speeds up", "slows down and stops", "honks the horn", "closes their eyes"], "answer": "1", "subject": "commonsense"},
+            {"question": "A baker mixes bread dough, then...",
+             "choices": ["eats it immediately", "lets it rise before baking", "throws it away", "freezes it"], "answer": "1", "subject": "commonsense"},
+        ],
+        "hle": [
+            {"question": "Prove that the alternating group A₅ is simple.", "answer": "conjugacy classes of orders 1,12,12,15,20", "subject": "mathematics"},
+            {"question": "Calculate relativistic kinetic energy at 0.999c in terms of m₀c².", "answer": "γ=22.4, K≈21.4", "subject": "physics"},
+            {"question": "Explain Rust borrow checker and data race prevention.", "answer": "ownership, borrowing, lifetimes", "subject": "computer_science"},
+        ],
+        "swe_bench": [
+            {"question": "Fix infinite loop in binary search: left=mid causes infinite loop when target not found.", "answer": "Use mid+1 and mid-1", "subject": "debugging"},
+            {"question": "Refactor React class component to hooks (useState, useEffect).", "answer": "useState for count, useEffect for interval", "subject": "frontend"},
+            {"question": "Diagnose memory leak from undisposed EventListeners.", "answer": "removeEventListener in cleanup, WeakRef pattern", "subject": "debugging"},
+        ],
+    }
+    result = fallbacks.get(benchmark_type, [{"question": "1+1=?", "answer": "2", "subject": "general"}])
+    while len(result) < n:
+        result.append({"question": f"Sample question {len(result)+1}", "answer": f"answer {len(result)+1}", "subject": "general"})
+    return result[:n]
 
 
 class BenchmarkRequest(BaseModel):
@@ -2330,7 +2547,7 @@ class BenchmarkRequest(BaseModel):
 
 @app.post("/api/training/benchmark")
 async def run_benchmark(req: BenchmarkRequest):
-    """Run benchmark tasks against a model and return results."""
+    """Run benchmark tasks against a model (in background thread for real-time progress)."""
     global _llamacpp_download_state
     engine = get_training_engine()
 
@@ -2353,116 +2570,189 @@ async def run_benchmark(req: BenchmarkRequest):
             if not lm.is_running():
                 raise HTTPException(status_code=500, detail="llama-server 启动失败")
 
-    results = []
-    total_questions = 0
-    total_time = 0.0
-    total_tokens = 0
-
+    # Load all benchmark questions upfront
+    all_questions = []
     for btype in req.benchmark_types:
-        task = BENCHMARK_TASKS.get(btype)
-        if not task:
-            continue
+        info = BENCHMARK_REGISTRY.get(btype, {})
+        if info:
+            questions = _load_benchmark_dataset(btype)
+            all_questions.append((btype, info, questions))
+            _broadcast_to_websockets({
+                "type": "benchmark_progress",
+                "task": btype,
+                "stage": "loaded",
+                "label": f"{info.get('name', btype)}: 已加载 {len(questions)} 题",
+                "progress": 0,
+                "active": True
+            })
 
-        correct = 0
-        task_results = []
-        for item in task["questions"]:
-            total_questions += 1
-            t0 = _time.time()
-            try:
-                from core.llm_client import LLMClient
-                client = LLMClient(default_model=req.model_id)
-                response, _ = client.chat(messages=[{"role": "user", "content": item["q"]}])
-                answer = response.choices[0].message.content if response else ""
-                elapsed = (_time.time() - t0) * 1000
-                usage = getattr(response, "usage", None)
-                tok_count = usage.total_tokens if usage else (len(answer) // 3)
-                total_time += elapsed
-                total_tokens += tok_count
+    if not all_questions:
+        raise HTTPException(status_code=400, detail="没有有效的测评类型")
 
-                # Scoring: prioritize exact answer match, then keyword matching
-                expected_answer = item.get("answer", "")
-                score = 0
-                if expected_answer and expected_answer.lower() in answer.lower():
-                    score = 0.8  # Strong partial match for exact answer
-                # Keyword-based scoring as supplement
-                kw_score = 0
-                for kw in item.get("keywords", []):
-                    if kw.lower() in answer.lower():
-                        kw_score += 1
-                if item.get("keywords"):
-                    kw_score = kw_score / max(len(item["keywords"]), 1)
-                score = max(score, kw_score * 0.7)
-                if score >= 0.4:
-                    correct += 1
+    # Run benchmark in background thread so WebSocket progress works
+    result_holder = {}
 
-                task_results.append({
-                    "question": item["q"][:80],
-                    "answer_preview": answer[:200],
-                    "score": round(score, 2),
-                    "latency_ms": round(elapsed, 1),
-                    "tokens": tok_count
-                })
+    def run_benchmark_thread():
+        results = []
+        total_questions = 0
+        total_time = 0.0
+        total_tokens = 0
+
+        for btype, info, questions in all_questions:
+            benchmark_name = info.get("name", btype)
+            scoring = info.get("scoring", "keyword_match")
+            total_q = len(questions)
+            correct = 0
+            task_results = []
+
+            for idx, item in enumerate(questions):
+                total_questions += 1
+                prompt = item.get("question", "")
+                choices = item.get("choices", [])
+                if choices:
+                    labels = ["A", "B", "C", "D", "E", "F"][:len(choices)]
+                    prompt += "\n" + "\n".join(f"{l}) {c}" for l, c in zip(labels, choices))
+                    prompt += "\nAnswer with the letter only."
+
+                t0 = _time.time()
+                try:
+                    from core.llm_client import LLMClient
+                    client = LLMClient(default_model=model_id)
+                    response, _ = client.chat(messages=[{"role": "user", "content": prompt}])
+                    answer = response.choices[0].message.content if response else ""
+                    elapsed = (_time.time() - t0) * 1000
+                    usage = getattr(response, "usage", None)
+                    tok_count = usage.total_tokens if usage else (len(answer) // 3)
+                    total_time += elapsed
+                    total_tokens += tok_count
+
+                    expected = str(item.get("answer", "")).strip()
+                    score = 0
+                    answer_clean = answer.strip().upper()
+
+                    if scoring == "multiple_choice":
+                        first_letter = answer_clean[0] if answer_clean else ""
+                        if first_letter == expected.upper():
+                            score = 1.0
+                        elif expected.upper() in answer_clean[:5]:
+                            score = 0.8
+                        correct += 1 if score >= 0.5 else 0
+                    elif scoring == "latency_only":
+                        score = 1.0
+                        correct += 1
+                    else:
+                        if expected and expected.lower() in answer.lower():
+                            score = 0.8
+                        kw_count = sum(1 for kw in expected.lower().split() if kw in answer.lower())
+                        if expected:
+                            score = max(score, min(kw_count / max(len(expected.split()), 1), 1.0) * 0.7)
+                        correct += 1 if score >= 0.4 else 0
+
+                    task_results.append({
+                        "question": prompt[:100],
+                        "answer_preview": answer[:200],
+                        "expected": expected[:100],
+                        "score": round(score, 2),
+                        "latency_ms": round(elapsed, 1),
+                        "tokens": tok_count,
+                        "subject": item.get("subject", "")
+                    })
+                except Exception as e:
+                    task_results.append({
+                        "question": prompt[:100],
+                        "error": str(e)[:200],
+                        "score": 0, "latency_ms": 0, "tokens": 0,
+                        "subject": item.get("subject", "")
+                    })
+
                 _broadcast_to_websockets({
                     "type": "benchmark_progress",
                     "task": btype,
-                    "question": item["q"][:60],
-                    "progress": len(task_results) / len(task["questions"]),
+                    "stage": "running",
+                    "label": f"{benchmark_name}: {idx+1}/{total_q} | {prompt[:80]}",
+                    "progress": (idx + 1) / total_q,
                     "active": True
                 })
 
-            except Exception as e:
-                task_results.append({
-                    "question": item["q"][:80],
-                    "error": str(e)[:200],
-                    "score": 0,
-                    "latency_ms": 0,
-                    "tokens": 0
-                })
+            accuracy = correct / max(total_q, 1)
+            subject_scores = {}
+            for r in task_results:
+                subj = r.get("subject", "general") or "general"
+                if subj not in subject_scores:
+                    subject_scores[subj] = {"correct": 0, "total": 0}
+                subject_scores[subj]["total"] += 1
+                if r.get("score", 0) >= 0.5:
+                    subject_scores[subj]["correct"] += 1
 
-        acc = correct / max(len(task["questions"]), 1)
-        results.append({
-            "type": btype,
-            "name": task["name"],
-            "accuracy": round(acc, 3),
-            "num_questions": len(task["questions"]),
-            "correct": correct,
-            "details": task_results
+            results.append({
+                "type": btype, "name": benchmark_name,
+                "accuracy": round(accuracy, 3),
+                "num_questions": total_q, "correct": correct,
+                "subjects": {k: {"accuracy": round(v["correct"]/max(v["total"],1), 2), "n": v["total"]}
+                             for k, v in sorted(subject_scores.items())},
+                "details": task_results[:10]
+            })
+
+        avg_latency = total_time / max(total_questions, 1)
+        tps = total_tokens / (total_time / 1000) if total_time > 0 else 0
+        result_holder["data"] = {
+            "model_id": model_id, "results": results,
+            "avg_latency_ms": round(avg_latency, 1),
+            "tokens_per_second": round(tps, 1),
+            "total_questions": total_questions
+        }
+
+        # Save to DB
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO benchmark_results (model_id, model_source, benchmark_type, metrics_json, num_questions, avg_latency_ms, tokens_per_second) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (model_id, model_source, ",".join(req.benchmark_types),
+                 json.dumps(results, ensure_ascii=False), total_questions,
+                 round(avg_latency, 1), round(tps, 1))
+            )
+            bench_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            result_holder["id"] = bench_id
+        except Exception:
+            pass
+
+        # Save results to a JSON file in benchmarks directory
+        try:
+            results_dir = os.path.join(os.path.dirname(DB_PATH), "benchmarks", "results")
+            os.makedirs(results_dir, exist_ok=True)
+            timestamp = _time.strftime("%Y%m%d_%H%M%S")
+            model_slug = model_id.replace("/", "_").replace("\\", "_")[:40]
+            result_file = os.path.join(results_dir, f"{timestamp}_{model_slug}.json")
+            with open(result_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "model_id": model_id,
+                    "timestamp": timestamp,
+                    "avg_latency_ms": round(avg_latency, 1),
+                    "tokens_per_second": round(tps, 1),
+                    "total_questions": total_questions,
+                    "results": results
+                }, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+        _broadcast_to_websockets({
+            "type": "benchmark_complete",
+            "benchmark_id": result_holder.get("id", 0),
+            "model_id": model_id,
+            "results": results,
+            "avg_latency_ms": round(avg_latency, 1),
+            "tokens_per_second": round(tps, 1),
+            "active": False
         })
 
-    avg_latency = total_time / max(total_questions, 1)
-    tps = total_tokens / (total_time / 1000) if total_time > 0 else 0
+    # Run in thread pool so WebSocket messages can be delivered
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, run_benchmark_thread)
 
-    # Save to DB
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO benchmark_results (model_id, model_source, benchmark_type, metrics_json, num_questions, avg_latency_ms, tokens_per_second) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (model_id, model_source, ",".join(req.benchmark_types),
-         json.dumps(results, ensure_ascii=False), total_questions,
-         round(avg_latency, 1), round(tps, 1))
-    )
-    bench_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-
-    _broadcast_to_websockets({
-        "type": "benchmark_complete",
-        "benchmark_id": bench_id,
-        "model_id": req.model_id,
-        "results": results,
-        "avg_latency_ms": round(avg_latency, 1),
-        "tokens_per_second": round(tps, 1),
-        "active": False
-    })
-
-    return {
-        "id": bench_id,
-        "model_id": req.model_id,
-        "results": results,
-        "avg_latency_ms": round(avg_latency, 1),
-        "tokens_per_second": round(tps, 1),
-        "total_questions": total_questions
-    }
+    return result_holder.get("data", {"error": "Benchmark failed to produce results"})
 
 
 @app.get("/api/training/benchmarks")
