@@ -16,7 +16,7 @@
 <body>
     <!-- Global download progress banner (visible on all views) -->
     <div id="global-download-banner" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9999;
-        background:var(--bg-primary); border-bottom:2px solid var(--accent-color);
+        background:var(--bg-panel); border-bottom:2px solid var(--theme-color);
         padding:0.6rem 1.2rem; box-shadow:0 4px 12px rgba(0,0,0,0.15);">
         <div style="display:flex; align-items:center; justify-content:space-between; max-width:1200px; margin:0 auto;">
             <div style="display:flex; align-items:center; gap:0.75rem; flex:1;">
@@ -420,15 +420,25 @@
                                 </div>
                                 <div id="llama-search-results" style="margin-top: 0.75rem;"></div>
                                 <div id="llama-model-files" style="margin-top: 0.5rem;"></div>
-                                <div id="llama-download-progress" style="margin-top:0.75rem; display:none;">
-                                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.25rem;">
-                                        <span id="llama-download-label" class="field-hint" style="margin:0;">准备下载...</span>
-                                        <span id="llama-download-pct" class="field-hint" style="margin:0;">0%</span>
-                                    </div>
-                                    <div style="width:100%; height:6px; background:var(--border-color); border-radius:3px; overflow:hidden;">
-                                        <div id="llama-download-bar" style="width:0%; height:100%; background:var(--theme-color); border-radius:3px; transition: width 0.2s ease;"></div>
-                                    </div>
-                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Download History -->
+                    <section class="card" id="download-history-section">
+                        <div class="card-header">
+                            <h2>📥 下载历史</h2>
+                            <p class="card-desc">查看所有下载记录，可续传中断的下载。</p>
+                        </div>
+                        <div id="download-history-container">
+                            <div class="empty-state" id="download-history-empty">
+                                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                    <polyline points="7 10 12 15 17 10"></polyline>
+                                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                                </svg>
+                                <p>暂无下载记录</p>
+                                <small>模型下载记录将在此显示</small>
                             </div>
                         </div>
                     </section>

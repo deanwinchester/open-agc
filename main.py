@@ -1,6 +1,19 @@
 import os
 import sys
 import argparse
+
+# Fix encoding on Windows (Chinese GBK locale) to prevent UnicodeEncodeError
+if sys.stdout.encoding != "utf-8":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr.encoding != "utf-8":
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
