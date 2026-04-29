@@ -66,6 +66,8 @@ class ShellTool(BaseTool):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=cwd,
                 timeout=timeout
             )

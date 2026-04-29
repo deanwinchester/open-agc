@@ -152,24 +152,25 @@ def main():
     except:
         port = 8765
 
+    # Fix encoding on Windows (Chinese GBK locale) to prevent UnicodeEncodeError
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    elif sys.stdout.encoding != "utf-8":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    elif sys.stderr.encoding != "utf-8":
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     # Handle PyInstaller frozen mode
     if getattr(sys, 'frozen', False):
-        if sys.stdout is None:
-            sys.stdout = open(os.devnull, "w", encoding="utf-8")
-        else:
-            try:
-                sys.stdout.reconfigure(encoding='utf-8')
-            except Exception:
-                pass
-                
-        if sys.stderr is None:
-            sys.stderr = open(os.devnull, "w", encoding="utf-8")
-        else:
-            try:
-                sys.stderr.reconfigure(encoding='utf-8')
-            except Exception:
-                pass
-            
         base_dir = sys._MEIPASS
         os.chdir(base_dir)
 

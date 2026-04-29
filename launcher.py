@@ -9,6 +9,18 @@ import webbrowser
 import threading
 import time
 
+# Fix encoding on Windows (Chinese GBK locale) to prevent UnicodeEncodeError
+if sys.stdout and sys.stdout.encoding != "utf-8":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and sys.stderr.encoding != "utf-8":
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 def get_base_dir():
     """Get the base directory (handles both dev and packaged modes)."""
     if getattr(sys, 'frozen', False):

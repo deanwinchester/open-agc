@@ -52,10 +52,12 @@ class MacSystemTool(BaseTool):
                 subprocess.run(['osascript', '-e', script], check=True)
                 return "Notification sent successfully."
             elif action == "read_clipboard":
-                result = subprocess.run(['pbpaste'], capture_output=True, text=True, check=True)
+                result = subprocess.run(['pbpaste'], capture_output=True, text=True,
+                                        encoding="utf-8", errors="replace", check=True)
                 return result.stdout
             elif action == "get_system_info":
-                result = subprocess.run(['sw_vers'], capture_output=True, text=True, check=True)
+                result = subprocess.run(['sw_vers'], capture_output=True, text=True,
+                                        encoding="utf-8", errors="replace", check=True)
                 return result.stdout
             else:
                 return f"Error: Unknown action {action}."

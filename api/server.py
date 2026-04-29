@@ -123,6 +123,26 @@ def init_db():
             FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS downloads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT NOT NULL DEFAULT 'model',
+            label TEXT NOT NULL DEFAULT '',
+            repo_id TEXT,
+            filename TEXT,
+            source TEXT DEFAULT 'huggingface',
+            url TEXT,
+            target_path TEXT NOT NULL DEFAULT '',
+            partial_path TEXT NOT NULL DEFAULT '',
+            total_size INTEGER DEFAULT 0,
+            downloaded_bytes INTEGER DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'downloading',
+            progress REAL DEFAULT 0.0,
+            error_message TEXT DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     # Migrate: add new columns if they don't exist yet
     try:
         cursor.execute("ALTER TABLE tasks ADD COLUMN task_type TEXT DEFAULT 'oneshot'")
@@ -168,6 +188,92 @@ def init_db():
     conn.close()
 
 init_db()
+
+def reconcile_downloads():
+    """On startup, scan .partial files and reconcile DB records."""
+    from core.llamacpp_manager import get_llamacpp_manager
+    manager = get_llamacpp_manager()
+    models_dir = manager.models_dir
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # 1. Find all .partial files
+    partial_files = {}
+    if os.path.exists(models_dir):
+        for f in os.listdir(models_dir):
+            if f.endswith(".partial"):
+                partial_path = os.path.join(models_dir, f)
+                gguf_path = partial_path[:-len(".partial")]
+                if os.path.exists(gguf_path):
+                    try:
+                        os.remove(partial_path)
+                    except OSError:
+                        pass
+                else:
+                    partial_files[f] = partial_path
+
+    # 2. Fetch existing DB records
+    cursor.execute("SELECT id, partial_path, target_path, status FROM downloads")
+    existing = {row[1]: {"id": row[0], "target_path": row[2], "status": row[3]}
+                for row in cursor.fetchall()}
+
+    # 3. Reconcile .partial files with DB
+    for partial_name, partial_path in partial_files.items():
+        file_size = os.path.getsize(partial_path)
+        if partial_path in existing:
+            rec = existing[partial_path]
+            if rec["status"] == "downloading":
+                cursor.execute(
+                    "UPDATE downloads SET status='paused', downloaded_bytes=?, "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (file_size, rec["id"])
+                )
+                cursor.execute(
+                    "UPDATE downloads SET progress="
+                    "CASE WHEN total_size > 0 THEN CAST(downloaded_bytes AS REAL) / total_size ELSE 0 END "
+                    "WHERE id=?", (rec["id"],)
+                )
+        else:
+            label = partial_name.replace(".partial", "")
+            target_path = os.path.join(models_dir, label)
+            cursor.execute(
+                '''INSERT INTO downloads (type, label, filename, target_path, partial_path,
+                   downloaded_bytes, progress, status, source)
+                   VALUES ('model', ?, ?, ?, ?, ?, 0.0, 'paused', 'huggingface')''',
+                (f"{label} (待恢复)", label, target_path, partial_path, file_size)
+            )
+            cursor.execute(
+                "UPDATE downloads SET progress="
+                "CASE WHEN total_size > 0 THEN CAST(downloaded_bytes AS REAL) / total_size ELSE 0 END "
+                "WHERE id=last_insert_rowid()"
+            )
+
+    # 4. Mark orphaned DB records
+    cursor.execute(
+        "SELECT id, partial_path, target_path, status FROM downloads "
+        "WHERE status IN ('downloading', 'paused')"
+    )
+    for row in cursor.fetchall():
+        rec_id, partial_path, target_path, status = row
+        if partial_path and not os.path.exists(partial_path):
+            if target_path and os.path.exists(target_path):
+                cursor.execute(
+                    "UPDATE downloads SET status='completed', progress=1.0, "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (rec_id,)
+                )
+            else:
+                cursor.execute(
+                    "UPDATE downloads SET status='failed', "
+                    "error_message='Server restart - partial file lost', "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (rec_id,)
+                )
+
+    conn.commit()
+    conn.close()
+
+reconcile_downloads()
 
 # Task helper functions
 def create_task(title: str, user_query: str, task_type: str = 'oneshot',
@@ -257,6 +363,84 @@ def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: st
     )
     conn.commit()
     conn.close()
+
+# ==========================================
+# Download record helpers
+# ==========================================
+
+def create_download_record(type_: str, label: str, repo_id: str = None,
+                           filename: str = None, source: str = "huggingface",
+                           url: str = None, target_path: str = "",
+                           partial_path: str = "", total_size: int = 0) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        '''INSERT INTO downloads (type, label, repo_id, filename, source, url,
+           target_path, partial_path, total_size, downloaded_bytes, status, progress)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'downloading', 0.0)''',
+        (type_, label, repo_id, filename, source, url, target_path, partial_path, total_size)
+    )
+    download_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return download_id
+
+
+def update_download_progress(download_id: int, progress: float,
+                              downloaded_bytes: int = None,
+                              status: str = None, error_message: str = None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    fields = ["progress=?", "updated_at=CURRENT_TIMESTAMP"]
+    params = [progress]
+    if downloaded_bytes is not None:
+        fields.append("downloaded_bytes=?")
+        params.append(downloaded_bytes)
+    if status is not None:
+        fields.append("status=?")
+        params.append(status)
+    if error_message is not None:
+        fields.append("error_message=?")
+        params.append(error_message)
+    params.append(download_id)
+    cursor.execute(f"UPDATE downloads SET {', '.join(fields)} WHERE id=?", params)
+    conn.commit()
+    conn.close()
+
+
+def get_download_record(download_id: int) -> Optional[Dict]:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM downloads WHERE id=?", (download_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return None
+
+
+def list_download_records(status_filter: str = None) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    if status_filter:
+        cursor.execute("SELECT * FROM downloads WHERE status=? ORDER BY created_at DESC",
+                       (status_filter,))
+    else:
+        cursor.execute("SELECT * FROM downloads ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_download_record(download_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM downloads WHERE id=?", (download_id,))
+    conn.commit()
+    conn.close()
+
 
 # ==========================================
 # Connected WebSocket clients (for background task push)
@@ -584,11 +768,24 @@ async def setup_llamacpp():
         "error": ""
     }
 
+    manager = get_llamacpp_manager()
+    bin_path = manager.exe_path
+    db_download_id = create_download_record(
+        type_="binary",
+        label="llama.cpp 二进制文件",
+        source="binary",
+        url="https://api.github.com/repos/ggerganov/llama.cpp/releases/latest",
+        target_path=bin_path
+    )
+    _llamacpp_download_state["download_id"] = db_download_id
+
     def run_download():
         global _llamacpp_download_state
+        dl_id = db_download_id
         try:
             def progress_cb(ratio):
                 _llamacpp_download_state["progress"] = ratio
+                update_download_progress(dl_id, ratio)
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": "binary",
@@ -597,7 +794,7 @@ async def setup_llamacpp():
                     "stage": "downloading"
                 })
 
-            manager = get_llamacpp_manager()
+            manager2 = get_llamacpp_manager()
             _llamacpp_download_state["stage"] = "extracting"
             _llamacpp_download_state["label"] = "正在解压..."
             _broadcast_to_websockets({
@@ -608,9 +805,10 @@ async def setup_llamacpp():
                 "stage": "extracting"
             })
 
-            success = manager.download_binary(progress_callback=progress_cb)
+            success = manager2.download_binary(progress_callback=progress_cb)
             if success:
                 _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "complete", "progress": 1.0}
+                update_download_progress(dl_id, 1.0, status="completed")
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": "binary",
@@ -620,6 +818,7 @@ async def setup_llamacpp():
                 })
             else:
                 _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载失败"}
+                update_download_progress(dl_id, 0.0, status="failed", error_message="下载失败")
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": "binary",
@@ -630,6 +829,7 @@ async def setup_llamacpp():
                 })
         except Exception as e:
             _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
+            update_download_progress(dl_id, 0.0, status="failed", error_message=str(e))
             _broadcast_to_websockets({
                 "type": "llamacpp_download",
                 "task": "binary",
@@ -696,7 +896,6 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
     global _llamacpp_download_state
 
     if _llamacpp_download_state["active"]:
-        # If there was a prior failed download with the same file, allow restarting (resume)
         raise HTTPException(status_code=409, detail="下载任务正在进行中")
 
     short_name = req.filename.split("/")[-1]
@@ -705,12 +904,37 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
     # Check for existing partial file to report initial progress
     manager = get_llamacpp_manager()
     partial_path = os.path.join(manager.models_dir, short_name + ".partial")
+    target_path = os.path.join(manager.models_dir, short_name)
     resume_offset = 0
     if os.path.exists(partial_path):
         resume_offset = os.path.getsize(partial_path)
         initial_label = f"续传 {short_name} (已下载 {resume_offset / 1024**2:.0f} MB)..."
     else:
         initial_label = f"正在从 {source_label} 下载 {short_name}..."
+
+    # Try to get total size via HEAD request before starting thread
+    total_size = 0
+    try:
+        if req.source == "modelscope":
+            head_url = f"{manager.MS_API_BASE}/models/{req.repo_id}/resolve/master/{req.filename}"
+        else:
+            head_url = f"https://huggingface.co/{req.repo_id}/resolve/main/{req.filename}"
+        head_resp = requests.head(head_url, timeout=10)
+        total_size = int(head_resp.headers.get("Content-Length", 0))
+    except Exception:
+        pass
+
+    # Create persistent DB record
+    db_download_id = create_download_record(
+        type_="model",
+        label=f"{short_name} ({source_label})",
+        repo_id=req.repo_id,
+        filename=req.filename,
+        source=req.source,
+        target_path=target_path,
+        partial_path=partial_path,
+        total_size=total_size
+    )
 
     _llamacpp_download_state = {
         "active": True,
@@ -722,14 +946,17 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
         "repo_id": req.repo_id,
         "filename": req.filename,
         "source": req.source,
-        "resume_offset": resume_offset
+        "resume_offset": resume_offset,
+        "download_id": db_download_id
     }
 
     def run_download():
         global _llamacpp_download_state
+        dl_id = db_download_id
         try:
             def progress_cb(ratio):
                 _llamacpp_download_state["progress"] = ratio
+                update_download_progress(dl_id, ratio)
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": "model",
@@ -746,6 +973,7 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
 
             if success:
                 _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "complete", "progress": 1.0}
+                update_download_progress(dl_id, 1.0, status="completed")
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": "model",
@@ -755,6 +983,7 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
                 })
             else:
                 _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载中断，可重新下载自动续传"}
+                update_download_progress(dl_id, 0.0, status="failed", error_message="下载中断，可重新下载自动续传")
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": "model",
@@ -765,6 +994,7 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
                 })
         except Exception as e:
             _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
+            update_download_progress(dl_id, 0.0, status="failed", error_message=str(e))
             _broadcast_to_websockets({
                 "type": "llamacpp_download",
                 "task": "model",
@@ -777,6 +1007,142 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
     thread = threading.Thread(target=run_download, daemon=True)
     thread.start()
     return {"status": "started", "message": f"开始从 {source_label} 下载 {short_name}", "resume_offset": resume_offset}
+
+# ==========================================
+# Download History API
+# ==========================================
+
+@app.get("/api/downloads")
+async def get_downloads(status: str = None):
+    """List all download records with optional status filter."""
+    records = list_download_records(status_filter=status)
+    return {"downloads": records}
+
+
+class ResumeDownloadResponse(BaseModel):
+    status: str
+    message: str
+    download_id: int = None
+
+
+@app.post("/api/downloads/{download_id}/resume")
+async def resume_download(download_id: int):
+    """Resume a paused or failed download."""
+    global _llamacpp_download_state
+
+    if _llamacpp_download_state["active"]:
+        raise HTTPException(status_code=409, detail="下载任务正在进行中")
+
+    record = get_download_record(download_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Download record not found")
+    if record["status"] not in ("paused", "failed"):
+        raise HTTPException(status_code=400, detail=f"Cannot resume download in status '{record['status']}'")
+
+    partial_path = record["partial_path"]
+    resume_offset = os.path.getsize(partial_path) if partial_path and os.path.exists(partial_path) else 0
+    short_name = (record["filename"] or record["label"] or "file").split("/")[-1]
+
+    _llamacpp_download_state = {
+        "active": True,
+        "type": record["type"],
+        "label": f"续传 {short_name}",
+        "progress": record["progress"] or 0.0,
+        "stage": "downloading",
+        "error": "",
+        "repo_id": record["repo_id"],
+        "filename": record["filename"],
+        "source": record["source"],
+        "resume_offset": resume_offset,
+        "download_id": download_id
+    }
+
+    update_download_progress(download_id, record["progress"] or 0.0,
+                             downloaded_bytes=resume_offset,
+                             status="downloading", error_message="")
+
+    def run_resume():
+        global _llamacpp_download_state
+        dl_id = download_id
+        try:
+            def progress_cb(ratio):
+                _llamacpp_download_state["progress"] = ratio
+                update_download_progress(dl_id, ratio)
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": record["type"],
+                    "label": f"续传 {short_name}...",
+                    "progress": ratio,
+                    "stage": "downloading"
+                })
+
+            manager = get_llamacpp_manager()
+            if record["type"] == "binary":
+                success = manager.download_binary(progress_callback=progress_cb)
+            elif record["source"] == "modelscope":
+                success = manager.download_model_from_ms(
+                    record["repo_id"], record["filename"], progress_callback=progress_cb
+                )
+            else:
+                success = manager.download_model_from_hf(
+                    record["repo_id"], record["filename"], progress_callback=progress_cb
+                )
+
+            if success:
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "complete", "progress": 1.0}
+                update_download_progress(dl_id, 1.0, status="completed")
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": record["type"],
+                    "label": f"{short_name} 下载完成",
+                    "progress": 1.0,
+                    "stage": "complete"
+                })
+            else:
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载失败"}
+                update_download_progress(dl_id, 0.0, status="failed", error_message="下载失败")
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": record["type"],
+                    "label": f"{short_name} 下载失败",
+                    "progress": 0.0,
+                    "stage": "error",
+                    "error": "下载失败"
+                })
+        except Exception as e:
+            _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
+            update_download_progress(dl_id, 0.0, status="failed", error_message=str(e))
+            _broadcast_to_websockets({
+                "type": "llamacpp_download",
+                "task": record["type"],
+                "label": f"续传失败: {e}",
+                "progress": 0.0,
+                "stage": "error",
+                "error": str(e)
+            })
+
+    thread = threading.Thread(target=run_resume, daemon=True)
+    thread.start()
+    return {"status": "started", "message": f"Resuming download of {short_name}", "download_id": download_id}
+
+
+@app.delete("/api/downloads/{download_id}")
+async def delete_download(download_id: int):
+    """Delete a download record and its associated .partial file."""
+    record = get_download_record(download_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Download record not found")
+
+    partial_path = record.get("partial_path", "")
+    if partial_path and os.path.exists(partial_path):
+        try:
+            os.remove(partial_path)
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"Failed to delete partial file: {e}")
+
+    delete_download_record(download_id)
+    return {"status": "success", "message": "Download record deleted"}
+
 
 class LlamaControlRequest(BaseModel):
     action: str
@@ -1126,7 +1492,31 @@ async def update_schedule(task_id: int, req: ScheduleTaskRequest):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_websockets.append(websocket)
-    
+
+    # Push current download state to the newly connected client
+    if _llamacpp_download_state.get("active"):
+        await websocket.send_json({
+            "type": "llamacpp_download",
+            "task": _llamacpp_download_state.get("type", ""),
+            "label": _llamacpp_download_state.get("label", ""),
+            "progress": _llamacpp_download_state.get("progress", 0.0),
+            "stage": _llamacpp_download_state.get("stage", ""),
+            "error": _llamacpp_download_state.get("error", "")
+        })
+
+    # Flag to track whether this connection is still alive
+    ws_alive = True
+
+    async def _safe_send(data: dict):
+        """Send JSON via WebSocket, silently ignore if connection is dead."""
+        nonlocal ws_alive
+        if not ws_alive:
+            return
+        try:
+            await websocket.send_json(data)
+        except Exception:
+            ws_alive = False
+
     # We will maintain conversation history for this session here
     # Load recent chat history from DB instead of starting empty
     try:
@@ -1229,7 +1619,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 lm = get_llamacpp_manager()
                 if not lm.is_running():
                     model_filename = current_model.replace("llamacpp/", "")
-                    await websocket.send_json({
+                    await _safe_send({
                         "type": "status",
                         "message": f"正在启动 llama-server 并加载 {model_filename}..."
                     })
@@ -1237,13 +1627,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     for i in range(120):
                         await asyncio.sleep(0.5)
                         if lm.is_running():
-                            await websocket.send_json({
+                            await _safe_send({
                                 "type": "status",
                                 "message": "llama-server 就绪，开始处理..."
                             })
                             break
                     else:
-                        await websocket.send_json({
+                        await _safe_send({
                             "type": "status",
                             "message": "llama-server 启动失败，请检查模型文件"
                         })
@@ -1280,7 +1670,7 @@ async def websocket_endpoint(websocket: WebSocket):
             )
             
             # Handle agent progress and check for interruption
-            while not agent_future.done():
+            while not agent_future.done() and ws_alive:
                 if receive_task is None:
                     receive_task = asyncio.create_task(websocket.receive_text())
 
@@ -1299,6 +1689,10 @@ async def websocket_endpoint(websocket: WebSocket):
                             if ws_task_id:
                                 update_task_status(ws_task_id, "interrupted", interruption_reason="user")
                         receive_task = None
+                    except WebSocketDisconnect:
+                        ws_alive = False
+                        agent.is_interrupted = True
+                        receive_task = None
                     except Exception:
                         receive_task = None
 
@@ -1306,17 +1700,17 @@ async def websocket_endpoint(websocket: WebSocket):
                 while True:
                     try:
                         event = progress_queue.get_nowait()
-                        await websocket.send_json({
+                        await _safe_send({
                             "type": "progress",
                             **event
                         })
                     except thread_queue.Empty:
                         break
-            
+
             while not progress_queue.empty():
                 try:
                     event = progress_queue.get_nowait()
-                    await websocket.send_json({
+                    await _safe_send({
                         "type": "progress",
                         **event
                     })
@@ -1416,7 +1810,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             if not is_heartbeat:
                 # Send immediate acknowledgment
-                await websocket.send_json({
+                await _safe_send({
                     "type": "status",
                     "message": "Agent is thinking..."
                 })
@@ -1435,7 +1829,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 save_message("agent", response)
 
                 # Send the final response
-                await websocket.send_json({
+                await _safe_send({
                     "type": "message",
                     "role": "agent",
                     "content": response
@@ -1448,7 +1842,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     error_msg += "\n\n---\n**💡 提示：您似乎尚未配置此模型的 API Key！**\n\n以 Kimi 为例，请前往 [Moonshot 开放平台](https://platform.moonshot.cn/console/api-keys) 免费申请一个 API Key，然后在左侧边栏的「设置 - 模型配置」中填入并保存即可开始对话！"
                 
                 save_message("system", error_msg)
-                await websocket.send_json({
+                await _safe_send({
                     "type": "error",
                     "content": error_msg,
                     "original_query": query if not is_heartbeat else ""
@@ -1516,16 +1910,23 @@ def start_email_listener():
 # Task Scheduler (Background Thread)
 # ==========================================
 
+async def _ws_send_safe(ws, message):
+    """Send a message via WebSocket, ignoring connection errors."""
+    try:
+        await ws.send_json(message)
+    except Exception:
+        pass
+
+
 def _broadcast_to_websockets(message: dict):
     """Send a message to all connected WebSocket clients (best-effort). Thread-safe."""
     global _main_event_loop
     loop = _main_event_loop
-    if loop is None:
+    if loop is None or loop.is_closed() or not loop.is_running():
         return
     for ws in list(connected_websockets):
         try:
-            if loop.is_running():
-                asyncio.run_coroutine_threadsafe(ws.send_json(message), loop)
+            asyncio.run_coroutine_threadsafe(_ws_send_safe(ws, message), loop)
         except Exception:
             pass
 

@@ -63,7 +63,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (targetNav) targetNav.classList.add('active');
 
         // Load view-specific data
-        if (viewId === 'settings-models') loadSettingsConfig();
+        if (viewId === 'settings-models') { loadSettingsConfig(); loadDownloadHistory(); }
         if (viewId === 'settings-skills') loadSkillsConfig();
         if (viewId === 'settings-mcp') loadMcpConfig();
         if (viewId === 'tasks') loadTasks();
@@ -143,6 +143,9 @@ document.addEventListener('DOMContentLoaded', () => {
         ws.onopen = () => {
             isConnected = true;
             updateInputState();
+            // Restore download progress state on reconnect
+            refreshLlamaStatus();
+            loadDownloadHistory();
         };
 
         ws.onmessage = (event) => {
@@ -224,11 +227,25 @@ document.addEventListener('DOMContentLoaded', () => {
     let downloadResumeInfo = null;
 
     function handleLlamaDownloadProgress(data) {
-        // --- Settings panel progress bar ---
-        const progressDiv = document.getElementById('llama-download-progress');
-        const label = document.getElementById('llama-download-label');
-        const pct = document.getElementById('llama-download-pct');
-        const bar = document.getElementById('llama-download-bar');
+        // --- Download history in-place update ---
+        const ratio = data.progress || 0;
+        const pctText = Math.round(ratio * 100) + '%';
+        const historyContainer = document.getElementById('download-history-container');
+        if (historyContainer) {
+            // Update active download items in-place for smooth progress
+            const downloadingItems = historyContainer.querySelectorAll('.download-item');
+            downloadingItems.forEach(item => {
+                const statusBadge = item.querySelector('.download-status-badge');
+                const isDownloading = statusBadge && statusBadge.classList.contains('downloading');
+                if (isDownloading) {
+                    const bar = item.querySelector('.download-item-progress-bar');
+                    if (bar) { bar.style.width = Math.max(ratio * 100, 0) + '%'; }
+                    // Update percentage in meta
+                    const metaSpans = item.querySelectorAll('.download-item-meta span');
+                    if (metaSpans.length >= 2) metaSpans[1].textContent = pctText;
+                }
+            });
+        }
 
         // --- Global banner ---
         const banner = document.getElementById('global-download-banner');
@@ -238,13 +255,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const bannerIcon = document.getElementById('global-download-icon');
 
         if (data.stage === 'complete') {
-            if (progressDiv) {
-                progressDiv.style.display = 'block';
-                label.textContent = data.label || '完成';
-                pct.textContent = '100%';
-                bar.style.width = '100%';
-                bar.style.background = 'var(--theme-color)';
-            }
             if (banner) {
                 banner.style.display = 'block';
                 bannerIcon.textContent = '✅';
@@ -255,19 +265,10 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             downloadResumeInfo = null;
             showStatus('✅ ' + (data.label || '下载完成'), 'success');
-            setTimeout(() => {
-                if (progressDiv) progressDiv.style.display = 'none';
-                if (banner) banner.style.display = 'none';
-            }, 4000);
+            setTimeout(() => { if (banner) banner.style.display = 'none'; }, 4000);
             refreshLlamaStatus();
+            loadDownloadHistory();
         } else if (data.stage === 'error') {
-            if (progressDiv) {
-                progressDiv.style.display = 'block';
-                label.textContent = data.error || data.label || '下载失败';
-                pct.textContent = '✗';
-                bar.style.width = '0%';
-                bar.style.background = 'var(--error)';
-            }
             if (banner) {
                 banner.style.display = 'block';
                 bannerIcon.textContent = '❌';
@@ -281,25 +282,15 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 showStatus('❌ ' + (data.error || '下载失败'), 'error');
             }
-            setTimeout(() => {
-                if (bar) bar.style.background = 'var(--theme-color)';
-                if (bannerBar) bannerBar.style.background = 'var(--theme-color)';
-            }, 8000);
+            setTimeout(() => { if (bannerBar) bannerBar.style.background = 'var(--theme-color)'; }, 8000);
+            loadDownloadHistory();
         } else {
             // Downloading or extracting
-            if (progressDiv) {
-                progressDiv.style.display = 'block';
-                label.textContent = data.label || '下载中...';
-            }
             if (banner) {
                 banner.style.display = 'block';
                 bannerIcon.textContent = data.stage === 'extracting' ? '📦' : '📥';
                 bannerLabel.textContent = data.label || '下载中...';
             }
-            const ratio = data.progress || 0;
-            const pctText = Math.round(ratio * 100) + '%';
-            if (pct) pct.textContent = pctText;
-            if (bar) { bar.style.width = (ratio * 100) + '%'; bar.style.background = 'var(--theme-color)'; }
             if (bannerPct) bannerPct.textContent = pctText;
             if (bannerBar) { bannerBar.style.width = (ratio * 100) + '%'; bannerBar.style.background = 'var(--theme-color)'; }
         }
@@ -1678,6 +1669,139 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // ==========================================
+    // Download History
+    // ==========================================
+    async function loadDownloadHistory() {
+        const container = document.getElementById('download-history-container');
+        const emptyState = document.getElementById('download-history-empty');
+        if (!container) return;
+
+        try {
+            const res = await fetch('/api/downloads');
+            const data = await res.json();
+
+            // Remove existing download items (keep emptyState intact)
+            container.querySelectorAll('.download-item').forEach(el => el.remove());
+
+            if (!data.downloads || data.downloads.length === 0) {
+                if (emptyState) emptyState.style.display = 'flex';
+                return;
+            }
+
+            if (emptyState) emptyState.style.display = 'none';
+
+            data.downloads.forEach(dl => {
+                const iconMap = {
+                    'downloading': '📥',
+                    'paused': '⏸️',
+                    'completed': '✅',
+                    'failed': '❌'
+                };
+                const icon = iconMap[dl.status] || '📋';
+                const statusText = {
+                    'downloading': '下载中',
+                    'paused': '已暂停',
+                    'completed': '已完成',
+                    'failed': '失败'
+                }[dl.status] || dl.status;
+
+                const progressPct = dl.total_size > 0
+                    ? Math.round((dl.progress || 0) * 100) + '%'
+                    : (dl.downloaded_bytes > 0 ? (dl.downloaded_bytes / 1024 / 1024).toFixed(1) + ' MB' : '');
+
+                const showActions = dl.status === 'paused' || dl.status === 'failed';
+                const showProgress = dl.status === 'downloading' || dl.status === 'paused';
+
+                const item = document.createElement('div');
+                item.className = 'download-item';
+                item.id = `download-item-${dl.id}`;
+                item.innerHTML = `
+                    <div class="download-item-icon">${icon}</div>
+                    <div class="download-item-body">
+                        <div class="download-item-title">${escapeHtml(dl.label || dl.filename || 'Unknown')}</div>
+                        <div class="download-item-meta">
+                            <span class="download-status-badge ${dl.status}">${statusText}</span>
+                            <span>${progressPct}</span>
+                            <span>${formatTimeAgo(dl.created_at)}</span>
+                        </div>
+                        ${showProgress ? `
+                        <div class="download-item-progress">
+                            <div class="download-item-progress-bar ${dl.status === 'failed' ? 'failed' : ''}"
+                                 style="width: ${Math.max(Math.min((dl.progress || 0) * 100, 100), 0)}%;"></div>
+                        </div>` : ''}
+                    </div>
+                    <div class="download-item-actions">
+                        ${showActions ? `
+                            <button class="download-action-btn resume" data-id="${dl.id}" title="续传">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                                </svg>
+                            </button>` : ''}
+                        ${dl.status !== 'downloading' ? `
+                        <button class="download-action-btn delete" data-id="${dl.id}" title="删除">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"></polyline>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                            </svg>
+                        </button>` : ''}
+                    </div>
+                `;
+                container.appendChild(item);
+
+                // Bind resume button
+                const resumeBtn = item.querySelector('.download-action-btn.resume');
+                if (resumeBtn) {
+                    resumeBtn.addEventListener('click', async (e) => {
+                        e.stopPropagation();
+                        resumeBtn.disabled = true;
+                        const origHTML = resumeBtn.innerHTML;
+                        resumeBtn.innerHTML = '<div class="spinner" style="width:12px;height:12px;border-width:2px;"></div>';
+                        try {
+                            const res = await fetch(`/api/downloads/${resumeBtn.dataset.id}/resume`, { method: 'POST' });
+                            if (res.ok) {
+                                showStatus('🔄 正在续传...', 'success');
+                                loadDownloadHistory();
+                            } else {
+                                const err = await res.json();
+                                showStatus('❌ ' + (err.detail || '续传失败'), 'error');
+                                resumeBtn.disabled = false;
+                                resumeBtn.innerHTML = origHTML;
+                            }
+                        } catch (e) {
+                            showStatus('❌ 网络错误', 'error');
+                            resumeBtn.disabled = false;
+                            resumeBtn.innerHTML = origHTML;
+                        }
+                    });
+                }
+
+                // Bind delete button
+                const deleteBtn = item.querySelector('.download-action-btn.delete');
+                if (deleteBtn) {
+                    deleteBtn.addEventListener('click', async (e) => {
+                        e.stopPropagation();
+                        if (!confirm('确定删除此下载记录？相关的未完成文件也将被删除。')) return;
+                        try {
+                            const res = await fetch(`/api/downloads/${deleteBtn.dataset.id}`, { method: 'DELETE' });
+                            if (res.ok) {
+                                showStatus('🗑 记录已删除', 'success');
+                            } else {
+                                const err = await res.json();
+                                showStatus('❌ ' + (err.detail || '删除失败'), 'error');
+                            }
+                        } catch (e) {
+                            showStatus('❌ 网络错误', 'error');
+                        }
+                        loadDownloadHistory();
+                    });
+                }
+            });
+        } catch (e) {
+            console.error('Failed to load download history:', e);
+        }
+    }
+
     function initLlamaListeners() {
         document.getElementById('llama-setup-btn')?.addEventListener('click', async () => {
             const btn = document.getElementById('llama-setup-btn');
@@ -1688,17 +1812,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const res = await fetch('/api/llamacpp/setup', { method: 'POST' });
                 const data = await res.json();
                 if (data.status === 'started') {
-                    // Progress will come via WebSocket; show the progress bar
-                    const progressDiv = document.getElementById('llama-download-progress');
-                    const bar = document.getElementById('llama-download-bar');
-                    const label = document.getElementById('llama-download-label');
-                    const pct = document.getElementById('llama-download-pct');
-                    if (progressDiv) {
-                        progressDiv.style.display = 'block';
-                        if (bar) { bar.style.width = '0%'; bar.style.background = 'var(--theme-color)'; }
-                        if (label) label.textContent = '正在下载 llama.cpp 二进制文件...';
-                        if (pct) pct.textContent = '0%';
-                    }
+                    loadDownloadHistory();
                 } else if (data.status === 'success') {
                     showStatus('✅ Llama 安装成功', 'success');
                 } else {
@@ -1794,6 +1908,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(() => {
         if (document.getElementById('view-settings')?.classList.contains('active')) {
             refreshLlamaStatus();
+            loadDownloadHistory();
         }
     }, 10000);
 
@@ -1870,18 +1985,10 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.addEventListener('click', async function() {
                 const repo = this.dataset.repo;
                 const file = this.dataset.file;
-                const progress = document.getElementById('llama-download-progress');
                 const shortName = file.split('/').pop();
 
                 this.disabled = true;
                 this.textContent = '启动中...';
-                progress.style.display = 'block';
-                const bar = document.getElementById('llama-download-bar');
-                const label = document.getElementById('llama-download-label');
-                const pct = document.getElementById('llama-download-pct');
-                if (bar) { bar.style.width = '0%'; bar.style.background = 'var(--theme-color)'; }
-                if (label) label.textContent = `正在下载 ${shortName} (大文件可能较慢)...`;
-                if (pct) pct.textContent = '0%';
 
                 const source = document.getElementById('llama-source-select')?.value || 'modelscope';
                 try {
@@ -1892,17 +1999,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     });
                     const data = await res.json();
                     if (data.status === 'started') {
-                        // Progress will come via WebSocket
+                        loadDownloadHistory();
                     } else if (data.status === 'success') {
                         showStatus('✅ 模型已下载: ' + shortName, 'success');
-                        progress.style.display = 'none';
+                        loadDownloadHistory();
                     } else {
                         showStatus('❌ 下载失败: ' + (data.detail || '未知错误'), 'error');
-                        progress.style.display = 'none';
                     }
                 } catch (e) {
                     showStatus('❌ 网络错误', 'error');
-                    progress.style.display = 'none';
                 } finally {
                     this.disabled = false;
                     this.textContent = '下载';
