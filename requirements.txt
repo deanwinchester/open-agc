@@ -15,3 +15,14 @@ Pillow
 opencv-python
 httptools
 croniter>=2.0.0
+# --- Model Training Dependencies ---
+# Core ML stack (required for training features)
+torch>=2.1.0
+transformers>=4.35.0
+peft>=0.6.0
+accelerate>=0.24.0
+datasets>=2.14.0
+bitsandbytes>=0.41.0
+sentencepiece>=0.1.99
+scikit-learn>=1.0.0
+pyyaml>=6.0.0

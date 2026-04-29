@@ -135,6 +135,50 @@
                     </svg>
                     <span>Agents & MCP</span>
                 </nav>
+
+                <div class="sidebar-divider"></div>
+
+                <!-- 模型训练 Section (collapsible) -->
+                <div class="sidebar-section" id="section-training">
+                    <div class="sidebar-section-header collapsible collapsed" data-section="training">
+                        <div class="section-icon-title">
+                            <span class="section-toggle-icon">▶</span>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+                                <path d="M2 17l10 5 10-5"></path>
+                                <path d="M2 12l10 5 10-5"></path>
+                            </svg>
+                            <span>模型训练</span>
+                        </div>
+                    </div>
+                    <div class="sidebar-subnav" style="display:none;">
+                        <nav class="nav-item" data-view="training-designer" id="nav-training-designer">
+                            <span class="nav-dot"></span>
+                            <span>模型设计器</span>
+                        </nav>
+                        <nav class="nav-item" data-view="training-datasets" id="nav-training-datasets">
+                            <span class="nav-dot"></span>
+                            <span>数据集管理</span>
+                        </nav>
+                        <nav class="nav-item" data-view="training-finetune" id="nav-training-finetune">
+                            <span class="nav-dot"></span>
+                            <span>模型微调</span>
+                        </nav>
+                        <nav class="nav-item" data-view="training-monitor" id="nav-training-monitor">
+                            <span class="nav-dot"></span>
+                            <span>训练监控</span>
+                        </nav>
+                        <nav class="nav-item" data-view="training-history" id="nav-training-history">
+                            <span class="nav-dot"></span>
+                            <span>训练历史</span>
+                        </nav>
+                        <div class="sidebar-divider" style="margin:0.25rem 0;"></div>
+                        <nav class="nav-item" data-view="training-benchmark" id="nav-training-benchmark">
+                            <span class="nav-dot"></span>
+                            <span>模型测评</span>
+                        </nav>
+                    </div>
+                </div>
             </div>
         </aside>
 
@@ -399,6 +443,14 @@
                                 disabled>停止服务</button>
                         </div>
 
+                        <div class="field" style="margin-top: 1rem;">
+                            <label>上下文窗口大小 (Context Size)</label>
+                            <div class="model-row" style="gap:0.5rem;">
+                                <input type="number" id="llamacpp-ctx-size" class="input-styled" value="32768" min="512" max="262144" step="1024" style="width:140px;">
+                                <span class="field-hint" style="margin:0;">token 数，默认 32768。Qwen3.5 支持 262144</span>
+                            </div>
+                        </div>
+
                         <div class="field" id="llama-model-group"
                             style="border-top: 1px solid var(--border-color); padding-top: 1rem; margin-top: 1rem;">
                             <label>模型管理</label>
@@ -592,6 +644,349 @@
                             保存设置
                         </button>
                     </div>
+                </div>
+            </div>
+
+            <!-- ============ View: Training Designer ============ -->
+            <div class="view" id="view-training-designer">
+                <header class="view-header">
+                    <h1>模型设计器</h1>
+                    <p class="view-desc">配置模型架构与超参数，预览参数量与计算量</p>
+                </header>
+                <div class="settings-body">
+                    <section class="card training-deps-missing" style="display:none; border-color:rgba(245,158,11,0.4); background:rgba(245,158,11,0.05);">
+                        <div style="display:flex; align-items:center; gap:0.75rem;">
+                            <span style="font-size:1.2rem;">⚠️</span>
+                            <div style="flex:1;"><strong>训练依赖未安装</strong><div class="training-deps-msg" style="font-size:0.78rem; color:var(--text-secondary); margin-top:0.15rem;"></div></div>
+                            <button class="btn-primary training-deps-install" style="white-space:nowrap;">一键安装</button>
+                        </div>
+                        <div class="training-deps-progress" style="display:none; margin-top:0.5rem;"><div class="training-deps-label" style="font-size:0.78rem;"></div><div style="height:4px; background:var(--border-color); border-radius:2px; margin-top:0.3rem;"><div class="training-deps-bar" style="width:0%; height:100%; background:var(--theme-color); border-radius:2px; transition:width 0.3s;"></div></div></div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>架构类型</h2><p class="card-desc">选择模型的基础架构</p></div>
+                        <div class="arch-selector" id="arch-selector">
+                            <div class="arch-option-wrapper"><button class="arch-option selected" data-arch="gpt_decoder">GPT Decoder</button><small class="arch-desc">自回归解码器。GPT-2/3 风格，单向注意力，适合文本生成</small></div>
+                            <div class="arch-option-wrapper"><button class="arch-option" data-arch="llama">LLaMA</button><small class="arch-desc">旋转位置编码 + SwiGLU + RMSNorm。高效推理，Llama/Qwen 家族</small></div>
+                            <div class="arch-option-wrapper"><button class="arch-option" data-arch="bert_encoder">BERT Encoder</button><small class="arch-desc">双向 Transformer 编码器。适合分类、NER、嵌入等理解任务</small></div>
+                            <div class="arch-option-wrapper"><button class="arch-option" data-arch="moe">MoE (专家混合)</button><small class="arch-desc">稀疏激活 FFN 层，多个专家并行。Mixtral/DeepSeek 架构</small></div>
+                            <div class="arch-option-wrapper"><button class="arch-option" data-arch="diffusion_dit">Diffusion DiT</button><small class="arch-desc">扩散 Transformer。使用 AdaLN 条件调制，适合图像/视频生成</small></div>
+                            <div class="arch-option-wrapper"><button class="arch-option" data-arch="mamba_ssm">Mamba / SSM</button><small class="arch-desc">状态空间模型替代注意力。线性复杂度，长序列优势</small></div>
+                        </div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>核心超参数</h2></div>
+                        <div class="model-row" style="gap:1rem;">
+                            <div class="field" style="flex:1;"><label>层数</label><input type="number" id="hp-num-layers" class="input-styled" value="12" min="1" max="200"></div>
+                            <div class="field" style="flex:1;"><label>隐藏维度</label><input type="number" id="hp-hidden-size" class="input-styled" value="768" min="64" max="32768" step="64"></div>
+                            <div class="field" style="flex:1;"><label>注意力头数</label><input type="number" id="hp-num-heads" class="input-styled" value="12" min="1" max="128"></div>
+                        </div>
+                        <div class="model-row" style="gap:1rem;">
+                            <div class="field" style="flex:1;"><label>中间层维度</label><input type="number" id="hp-intermediate" class="input-styled" value="3072" min="64" max="131072" step="64"></div>
+                            <div class="field" style="flex:1;"><label>词表大小</label><input type="number" id="hp-vocab-size" class="input-styled" value="50000" min="1000"></div>
+                            <div class="field" style="flex:1;"><label>最大序列长度</label><input type="number" id="hp-max-seq" class="input-styled" value="2048" min="128"></div>
+                        </div>
+                        <div class="model-row" style="gap:1rem;" id="moe-fields" style="display:none;">
+                            <div class="field" style="flex:1;"><label>专家数量 (MoE)</label><input type="number" id="hp-num-experts" class="input-styled" value="8" min="2"></div>
+                            <div class="field" style="flex:1;"><label>激活专家数</label><input type="number" id="hp-active-experts" class="input-styled" value="2" min="1"></div>
+                        </div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>注意力与残差机制</h2><p class="card-desc">细粒度控制 Transformer 内部结构</p></div>
+                        <div class="model-row" style="gap:1rem;">
+                            <div class="field" style="flex:1;">
+                                <label>注意力类型</label>
+                                <select id="hp-attention-type" class="select-styled">
+                                    <option value="scaled_dot">缩放点积注意力 (标准)</option>
+                                    <option value="flash_attn">Flash Attention (高效)</option>
+                                    <option value="mqa">Multi-Query Attention (MQA)</option>
+                                    <option value="gqa">Grouped-Query Attention (GQA)</option>
+                                </select>
+                            </div>
+                            <div class="field" style="flex:1;" id="gqa-kv-field" style="display:none;">
+                                <label>KV 头数 (GQA)</label><input type="number" id="hp-kv-heads" class="input-styled" value="4" min="1">
+                            </div>
+                        </div>
+                        <div class="model-row" style="gap:1rem;">
+                            <div class="field" style="flex:1;">
+                                <label>残差归一化位置</label>
+                                <select id="hp-norm-position" class="select-styled">
+                                    <option value="pre_norm">Pre-Norm (主流/稳定)</option>
+                                    <option value="post_norm">Post-Norm (原始 Transformer)</option>
+                                    <option value="sandwich_norm">Sandwich Norm (Pre+Post)</option>
+                                </select>
+                            </div>
+                            <div class="field" style="flex:1;">
+                                <label>归一化类型</label>
+                                <select id="hp-norm-type" class="select-styled">
+                                    <option value="layer_norm">LayerNorm</option>
+                                    <option value="rms_norm">RMSNorm (LLaMA 风格)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="model-row" style="gap:1rem;">
+                            <div class="field" style="flex:1;">
+                                <label>位置编码</label>
+                                <select id="hp-pos-encoding" class="select-styled">
+                                    <option value="rope">RoPE (旋转位置编码)</option>
+                                    <option value="learned">可学习位置编码 (GPT 风格)</option>
+                                    <option value="sinusoidal">正弦位置编码 (原始)</option>
+                                    <option value="alibi">ALiBi (线性偏置)</option>
+                                    <option value="none">无位置编码</option>
+                                </select>
+                            </div>
+                            <div class="field" style="flex:1;">
+                                <label>激活函数</label>
+                                <select id="hp-activation" class="select-styled">
+                                    <option value="gelu">GELU</option><option value="silu">SiLU / Swish</option>
+                                    <option value="swiglu">SwiGLU (LLaMA 风格)</option>
+                                    <option value="relu">ReLU</option><option value="gelu_new">GELU New</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label>Dropout</label>
+                            <div class="model-row" style="gap:1rem;">
+                                <div class="field" style="flex:1;"><label style="font-size:0.72rem;">注意力 Dropout</label><input type="number" id="hp-attn-dropout" class="input-styled" value="0.1" min="0" max="1" step="0.05"></div>
+                                <div class="field" style="flex:1;"><label style="font-size:0.72rem;">残差 Dropout</label><input type="number" id="hp-resid-dropout" class="input-styled" value="0.1" min="0" max="1" step="0.05"></div>
+                                <div class="field" style="flex:1;"><label style="font-size:0.72rem;">嵌入 Dropout</label><input type="number" id="hp-embd-dropout" class="input-styled" value="0.1" min="0" max="1" step="0.05"></div>
+                            </div>
+                        </div>
+                    </section>
+                    <section class="card" id="model-preview-card">
+                        <div class="card-header"><h2>模型预览</h2></div>
+                        <div id="model-preview-content"><div class="empty-state"><p>配置参数后点击"估算"查看</p></div></div>
+                    </section>
+                    <div class="global-actions">
+                        <button id="estimate-model-btn" class="btn-primary">估算参数量</button>
+                        <button id="save-model-config-btn" class="btn-save" style="margin-left:auto;">保存配置</button>
+                    </div>
+                    <section class="card" id="saved-configs-card">
+                        <div class="card-header"><h2>已保存的配置</h2></div>
+                        <div id="saved-configs-list"><div class="empty-state"><p>暂无保存的配置</p></div></div>
+                    </section>
+                </div>
+            </div>
+
+            <!-- ============ View: Training Datasets ============ -->
+            <div class="view" id="view-training-datasets">
+                <header class="view-header">
+                    <h1>数据集管理</h1>
+                    <p class="view-desc">上传、导入推荐数据集或手动创建训练数据</p>
+                </header>
+                <div class="settings-body">
+                    <section class="card" id="training-deps-missing-card" style="display:none; border-color:rgba(245,158,11,0.4); background:rgba(245,158,11,0.05);">
+                        <div style="display:flex; align-items:center; gap:0.75rem;">
+                            <span style="font-size:1.2rem;">⚠️</span>
+                            <div style="flex:1;">
+                                <strong>训练依赖未安装</strong>
+                                <div id="training-deps-missing-msg" style="font-size:0.78rem; color:var(--text-secondary); margin-top:0.15rem;"></div>
+                            </div>
+                            <button id="training-deps-install-btn" class="btn-primary" style="white-space:nowrap;">一键安装</button>
+                        </div>
+                        <div id="training-deps-install-progress" style="display:none; margin-top:0.5rem;">
+                            <div style="font-size:0.78rem;" id="training-deps-install-label">正在安装...</div>
+                            <div style="height:4px; background:var(--border-color); border-radius:2px; margin-top:0.3rem;"><div id="training-deps-install-bar" style="width:0%; height:100%; background:var(--theme-color); border-radius:2px; transition:width 0.3s;"></div></div>
+                        </div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>⭐ 推荐数据集 (HuggingFace)</h2><p class="card-desc">一键下载优质开源数据集，支持进度显示与断点续传</p></div>
+                        <div id="recommended-datasets-grid" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:0.75rem;">
+                            <div class="empty-state"><p>加载中...</p></div>
+                        </div>
+                        <div style="margin-top:0.5rem;">
+                            <div class="field"><input type="text" id="ds-hf-custom" class="input-styled" placeholder="或输入其他 HF 仓库 ID 下载..."></div>
+                            <button id="ds-hf-import-btn" class="btn-secondary" style="margin-top:0.25rem;">下载自定义数据集</button>
+                        </div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>上传本地文件</h2></div>
+                        <div class="field"><label>数据集名称</label><input type="text" id="ds-upload-name" class="input-styled" placeholder="输入数据集名称"></div>
+                        <div class="field"><input type="file" id="ds-file-input" class="input-styled" accept=".jsonl,.csv,.parquet" style="padding:0.4rem;"></div>
+                        <button id="ds-upload-btn" class="btn-primary">上传</button>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>✏️ 新建数据集</h2><p class="card-desc">手动编辑 JSONL 格式的训练数据</p></div>
+                        <div class="field"><label>数据集名称</label><input type="text" id="ds-editor-name" class="input-styled" placeholder="输入数据集名称"></div>
+                        <div class="field"><label>JSONL 内容 (每行一个 JSON)</label>
+                            <textarea id="ds-editor-content" class="input-styled" rows="10" style="font-family:monospace; font-size:0.78rem; width:100%; box-sizing:border-box;" placeholder='{"instruction": "...", "output": "..."}'></textarea>
+                        </div>
+                        <div style="display:flex; gap:0.5rem;">
+                            <button id="ds-editor-add-sample" class="btn-secondary">添加样本模板</button>
+                            <button id="ds-editor-validate" class="btn-secondary">验证 JSON</button>
+                            <button id="ds-editor-save" class="btn-primary" style="margin-left:auto;">保存数据集</button>
+                        </div>
+                        <div id="ds-editor-status" style="font-size:0.78rem; margin-top:0.4rem;"></div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>数据集列表</h2></div>
+                        <div id="dataset-list-container"><div class="empty-state"><p>暂无数据集</p></div></div>
+                    </section>
+                </div>
+            </div>
+
+            <!-- ============ View: Training Finetune ============ -->
+            <div class="view" id="view-training-finetune">
+                <header class="view-header">
+                    <h1>模型微调</h1>
+                    <p class="view-desc">选择基座模型和数据集，配置 LoRA 参数以开始微调</p>
+                </header>
+                <div class="settings-body">
+                    <section class="card training-deps-missing" style="display:none; border-color:rgba(245,158,11,0.4); background:rgba(245,158,11,0.05);">
+                        <div style="display:flex; align-items:center; gap:0.75rem;"><span style="font-size:1.2rem;">⚠️</span><div style="flex:1;"><strong>训练依赖未安装</strong><div class="training-deps-msg" style="font-size:0.78rem; color:var(--text-secondary); margin-top:0.15rem;"></div></div><button class="btn-primary training-deps-install" style="white-space:nowrap;">一键安装</button></div>
+                        <div class="training-deps-progress" style="display:none; margin-top:0.5rem;"><div class="training-deps-label" style="font-size:0.78rem;"></div><div style="height:4px; background:var(--border-color); border-radius:2px; margin-top:0.3rem;"><div class="training-deps-bar" style="width:0%; height:100%; background:var(--theme-color); border-radius:2px; transition:width 0.3s;"></div></div></div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>基座模型</h2></div>
+                        <div class="field">
+                            <label>选择模型</label>
+                            <select id="finetune-base-model" class="select-styled" onchange="onBaseModelSelected()"><option value="">加载中...</option></select>
+                        </div>
+                    </section>
+                    <section class="card" id="model-structure-card" style="display:none;">
+                        <div class="card-header"><h2>模型结构</h2><p class="card-desc" id="model-structure-info"></p></div>
+                        <div id="model-structure-viz" style="padding:0.5rem 0;"></div>
+                        <div style="border-top:1px solid var(--border-color); padding-top:0.75rem; margin-top:0.5rem;">
+                            <label style="font-weight:600; font-size:0.82rem;">微调范围</label>
+                            <div style="display:flex; gap:0.5rem; margin-top:0.4rem; flex-wrap:wrap;">
+                                <button class="arch-option selected" data-finetune-scope="all">全部参数</button>
+                                <button class="arch-option" data-finetune-scope="lora_attn">仅注意力 (LoRA)</button>
+                                <button class="arch-option" data-finetune-scope="lora_all">全部线性层 (LoRA)</button>
+                                <button class="arch-option" data-finetune-scope="lora_custom">自定义选择</button>
+                            </div>
+                        </div>
+                        <div id="custom-finetune-modules" style="display:none; margin-top:0.5rem; max-height:200px; overflow-y:auto;"></div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>数据集</h2></div>
+                        <div class="field">
+                            <label>选择数据集</label>
+                            <select id="finetune-dataset" class="select-styled"><option value="">加载中...</option></select>
+                        </div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>LoRA 配置</h2></div>
+                        <div class="model-row" style="gap:1rem;">
+                            <div class="field" style="flex:1;"><label>Rank (r)</label><input type="number" id="lora-rank" class="input-styled" value="8" min="1"></div>
+                            <div class="field" style="flex:1;"><label>Alpha</label><input type="number" id="lora-alpha" class="input-styled" value="16" min="1"></div>
+                            <div class="field" style="flex:1;"><label>Dropout</label><input type="number" id="lora-dropout" class="input-styled" value="0.05" min="0" max="1" step="0.01"></div>
+                        </div>
+                        <div class="field">
+                            <label>目标模块 (逗号分隔)</label>
+                            <input type="text" id="lora-targets" class="input-styled" value="q_proj, v_proj">
+                        </div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>训练参数</h2></div>
+                        <div class="model-row" style="gap:1rem;">
+                            <div class="field" style="flex:1;"><label>学习率</label><input type="number" id="train-lr" class="input-styled" value="0.0002" step="0.0001"></div>
+                            <div class="field" style="flex:1;"><label>Epochs</label><input type="number" id="train-epochs" class="input-styled" value="3" min="1"></div>
+                            <div class="field" style="flex:1;"><label>Batch Size</label><input type="number" id="train-batch" class="input-styled" value="4" min="1"></div>
+                        </div>
+                        <div class="model-row" style="gap:1rem;">
+                            <div class="field" style="flex:1;"><label>梯度累积</label><input type="number" id="train-grad-accum" class="input-styled" value="1" min="1"></div>
+                            <div class="field" style="flex:1;"><label>最大步数 (0=不限)</label><input type="number" id="train-max-steps" class="input-styled" value="0" min="0"></div>
+                        </div>
+                    </section>
+                    <div class="global-actions">
+                        <button id="start-training-btn" class="btn-save">开始训练</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ============ View: Training Monitor ============ -->
+            <div class="view" id="view-training-monitor">
+                <header class="view-header">
+                    <h1>训练监控</h1>
+                    <p class="view-desc" id="monitor-run-name">当前运行: 未选择</p>
+                </header>
+                <div class="training-monitor-body">
+                    <section class="card" id="monitor-control-card">
+                        <div class="card-header"><h2>控制面板</h2></div>
+                        <div class="field" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+                            <button id="monitor-pause-btn" class="btn-secondary">停</button>
+                            <button id="monitor-resume-btn" class="btn-primary" style="display:none;">继续</button>
+                            <button id="monitor-step-btn" class="btn-secondary">单步</button>
+                            <button id="monitor-abort-btn" class="btn-secondary" style="color:var(--error)">中止</button>
+                            <span id="monitor-status-badge" class="task-type-badge">空闲</span>
+                        </div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>损失曲线</h2></div>
+                        <div class="field">
+                            <canvas id="loss-chart-canvas" style="width:100%; height:280px; background:var(--bg-panel); border-radius:var(--radius-sm);"></canvas>
+                        </div>
+                        <div id="loss-chart-legend" style="font-size:0.75rem; color:var(--text-secondary); text-align:center; margin-top:0.25rem;"></div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>当前批次</h2></div>
+                        <div class="model-row" style="gap:1.5rem; flex-wrap:wrap;">
+                            <div class="stat-display"><label>Loss</label><span id="monitor-loss" class="stat-value">--</span></div>
+                            <div class="stat-display"><label>Grad Norm</label><span id="monitor-grad-norm" class="stat-value">--</span></div>
+                            <div class="stat-display"><label>LR</label><span id="monitor-lr" class="stat-value">--</span></div>
+                            <div class="stat-display"><label>Epoch</label><span id="monitor-epoch" class="stat-value">--</span></div>
+                            <div class="stat-display"><label>Step</label><span id="monitor-step" class="stat-value">--</span></div>
+                        </div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>逐层激活统计</h2></div>
+                        <div id="activation-stats-container"><div class="empty-state"><p>等待训练开始...</p></div></div>
+                    </section>
+                </div>
+            </div>
+
+            <!-- ============ View: Training History ============ -->
+            <div class="view" id="view-training-history">
+                <header class="view-header">
+                    <h1>训练历史</h1>
+                    <p class="view-desc">查看过去的训练运行及其指标</p>
+                </header>
+                <div class="settings-body">
+                    <section class="card">
+                        <div class="card-header"><h2>训练运行记录</h2></div>
+                        <div id="training-runs-list"><div class="empty-state"><p>暂无训练记录</p></div></div>
+                    </section>
+                </div>
+            </div>
+
+            <!-- ============ View: Training Benchmark ============ -->
+            <div class="view" id="view-training-benchmark">
+                <header class="view-header">
+                    <h1>模型测评</h1>
+                    <p class="view-desc">对在线或本地大模型进行多维度性能测评</p>
+                </header>
+                <div class="settings-body">
+                    <section class="card">
+                        <div class="card-header"><h2>测评配置</h2></div>
+                        <div class="field">
+                            <label>选择模型</label>
+                            <select id="bench-model-select" class="select-styled"><option value="">加载中...</option></select>
+                        </div>
+                        <div class="field">
+                            <label>测评类型</label>
+                            <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:0.4rem; margin-top:0.3rem;">
+                                <label class="finetune-module-check"><input type="checkbox" value="mmlu" checked> MMLU 多任务理解 (8题)</label>
+                                <label class="finetune-module-check"><input type="checkbox" value="hellaswag" checked> HellaSwag 常识推理 (5题)</label>
+                                <label class="finetune-module-check"><input type="checkbox" value="hle"> HLE 极限推理 (5题)</label>
+                                <label class="finetune-module-check"><input type="checkbox" value="swe_bench"> SWE-bench 软件工程 (5题)</label>
+                                <label class="finetune-module-check"><input type="checkbox" value="latency" checked> 延迟测试 (3题)</label>
+                            </div>
+                        </div>
+                        <button id="run-benchmark-btn" class="btn-primary" style="margin-top:0.5rem;">开始测评</button>
+                    </section>
+                    <section class="card" id="benchmark-progress-card" style="display:none;">
+                        <div class="card-header"><h2>测评进度</h2></div>
+                        <div id="benchmark-progress-container">
+                            <div class="field-hint">准备中...</div>
+                        </div>
+                    </section>
+                    <section class="card" id="benchmark-results-card" style="display:none;">
+                        <div class="card-header"><h2>测评结果</h2></div>
+                        <div id="benchmark-results-content"></div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>历史测评</h2></div>
+                        <div id="benchmark-history-list"><div class="empty-state"><p>暂无测评记录</p></div></div>
+                    </section>
                 </div>
             </div>
         </main>

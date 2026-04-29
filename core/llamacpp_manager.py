@@ -294,31 +294,53 @@ class LlamaCppManager:
     def is_running(self) -> bool:
         """Check if llama-server is already responding."""
         try:
-            resp = requests.get(f"http://localhost:{self.port}/health", timeout=1)
+            # Try /health first (standard endpoint)
+            resp = requests.get(f"http://localhost:{self.port}/health", timeout=2)
+            if resp.status_code == 200:
+                return True
+        except Exception:
+            pass
+        try:
+            # Fallback: try /v1/models (OpenAI-compatible endpoint always available)
+            resp = requests.get(f"http://localhost:{self.port}/v1/models", timeout=2)
             return resp.status_code == 200
-        except:
+        except Exception:
             return False
 
-    def start(self, model_filename: str):
-        """Start the llama-server with the specified model."""
+    def start(self, model_filename: str) -> bool:
+        """Start the llama-server with the specified model. Returns True on success, False on failure."""
         if self.is_running():
             print(f"[LlamaCPP] Already running on port {self.port}")
-            return
-        
+            return True
+
         model_path = os.path.join(self.models_dir, model_filename)
         if not os.path.exists(model_path):
             print(f"[LlamaCPP] Model NOT found: {model_path}")
-            return
+            return False
 
         print(f"[LlamaCPP] Starting server with model {model_filename} on port {self.port}...")
-        
+
+        # Read context size from config, default 32768
+        ctx_size = 32768
+        try:
+            from core.paths import get_data_path
+            import json
+            config_path = get_data_path("config.json")
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    ctx_size = config.get("llamacpp_ctx_size", 32768)
+        except Exception:
+            pass
+
         # Command to start llama-server
         cmd = [
             self.exe_path,
             "--model", model_path,
             "--port", str(self.port),
             "--host", "127.0.0.1",
-            "--n-gpu-layers", "-1" # Try to use all GPU layers by default
+            "--n-gpu-layers", "-1",
+            "--ctx-size", str(ctx_size)
         ]
 
         try:
