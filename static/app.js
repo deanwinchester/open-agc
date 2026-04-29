@@ -2927,12 +2927,26 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function handleBenchmarkProgress(data) {
+        const card = document.getElementById('benchmark-progress-card');
         const container = document.getElementById('benchmark-progress-container');
-        if (container) {
-            container.innerHTML = `<div style="display:flex; align-items:center; gap:0.5rem;">
-                <span>📝</span><span>${escapeHtml(data.task)}: ${escapeHtml(data.question || '')}</span>
-                <div style="flex:1; height:4px; background:var(--border-color); border-radius:2px;"><div style="width:${(data.progress||0)*100}%; height:100%; background:var(--theme-color); border-radius:2px;"></div></div>
-            </div>`;
+        if (!card || !container) return;
+        card.style.display = '';
+
+        const pct = Math.round((data.progress || 0) * 100);
+        if (data.stage === 'loaded') {
+            container.innerHTML = `<div style="padding:0.3rem 0;"><span>📋</span> <span>${escapeHtml(data.label||'')}</span></div>`;
+        } else {
+            container.innerHTML = `
+                <div style="margin-bottom:0.4rem;">
+                    <span style="font-weight:500;">${escapeHtml(data.task||'')}</span>
+                    <span style="color:var(--text-secondary); margin-left:0.5rem;">${escapeHtml(data.label||'')}</span>
+                </div>
+                <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <div style="flex:1; height:6px; background:var(--border-color); border-radius:3px; overflow:hidden;">
+                        <div style="width:${pct}%; height:100%; background:var(--theme-color); border-radius:3px; transition:width 0.3s;"></div>
+                    </div>
+                    <span style="font-size:0.75rem; color:var(--text-secondary); min-width:35px; text-align:right;">${pct}%</span>
+                </div>`;
         }
     }
 
@@ -2956,14 +2970,23 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>`;
 
         results.forEach(r => {
-            html += `<div style="margin-bottom:1rem;">
-                <div style="font-weight:700; margin-bottom:0.3rem;">${escapeHtml(r.name)} — 准确率: ${(r.accuracy*100).toFixed(0)}% (${r.correct}/${r.num_questions})</div>`;
+            html += `<div style="margin-bottom:1rem; border:1px solid var(--border-color); border-radius:8px; padding:0.8rem;">
+                <div style="font-weight:700; margin-bottom:0.5rem; font-size:0.9rem;">${escapeHtml(r.name)} — 准确率: <span style="color:${r.accuracy>=0.7?'var(--success)':r.accuracy>=0.4?'#f59e0b':'var(--error)'}">${(r.accuracy*100).toFixed(0)}%</span> (${r.correct}/${r.num_questions})</div>`;
+            // Per-subject breakdown
+            if (r.subjects && Object.keys(r.subjects).length > 1) {
+                html += '<div style="display:flex; flex-wrap:wrap; gap:0.3rem; margin-bottom:0.5rem;">';
+                Object.entries(r.subjects).forEach(([subj, s]) => {
+                    const subjColor = s.accuracy >= 0.7 ? 'var(--success)' : s.accuracy >= 0.4 ? '#f59e0b' : 'var(--error)';
+                    html += `<span style="font-size:0.65rem; padding:0.15rem 0.4rem; background:var(--bg-inner); border:1px solid var(--border-color); border-radius:10px;" title="${subj}: ${(s.accuracy*100).toFixed(0)}%">${subj} <b style="color:${subjColor}">${(s.accuracy*100).toFixed(0)}%</b></span>`;
+                });
+                html += '</div>';
+            }
             (r.details || []).forEach(d => {
                 const bg = d.score >= 0.6 ? 'rgba(16,185,129,0.08)' : d.error ? 'rgba(239,68,68,0.08)' : 'rgba(245,158,11,0.08)';
                 const border = d.score >= 0.6 ? 'rgba(16,185,129,0.3)' : d.error ? 'rgba(239,68,68,0.3)' : 'rgba(245,158,11,0.3)';
                 html += `<div style="padding:0.4rem 0.6rem; margin-bottom:0.25rem; background:${bg}; border:1px solid ${border}; border-radius:6px; font-size:0.78rem;">
                     <div style="font-weight:600;">Q: ${escapeHtml(d.question || '')}${d.error ? ' <span style="color:var(--error);">⚠ '+escapeHtml(d.error)+'</span>' : ''}</div>
-                    <div style="color:var(--text-secondary); margin-top:0.15rem;">得分: ${d.score} | 延迟: ${d.latency_ms}ms | Tokens: ${d.tokens} | ${escapeHtml((d.answer_preview||'').substring(0, 100))}</div>
+                    <div style="color:var(--text-secondary); margin-top:0.15rem;">得分: ${d.score} | 延迟: ${d.latency_ms}ms | ${escapeHtml((d.answer_preview||'').substring(0, 100))}</div>
                 </div>`;
             });
             html += '</div>';
@@ -2986,7 +3009,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const metrics = typeof b.metrics_json === 'string' ? JSON.parse(b.metrics_json) : (b.metrics_json || []);
                 let accStr = '';
                 metrics.forEach(m => { accStr += `${m.name}: ${(m.accuracy*100).toFixed(0)}% `; });
-                return `<div class="download-item">
+                return `<div class="download-item benchmark-history-item" data-id="${b.id}" style="cursor:pointer;">
                     <div class="download-item-icon">📊</div>
                     <div class="download-item-body">
                         <div class="download-item-title">${escapeHtml(b.model_id)}</div>
@@ -2999,6 +3022,24 @@ document.addEventListener('DOMContentLoaded', () => {
                     </button>
                 </div>`;
             }).join('');
+            // Click to view detail
+            container.querySelectorAll('.benchmark-history-item').forEach(item => {
+                item.addEventListener('click', async (e) => {
+                    if (e.target.closest('.download-action-btn')) return;
+                    const id = item.dataset.id;
+                    const res = await fetch(`/api/training/benchmarks/${id}`);
+                    const b = await res.json();
+                    const metrics = typeof b.metrics_json === 'string' ? JSON.parse(b.metrics_json) : (b.metrics_json || []);
+                    displayBenchmarkResults({
+                        model_id: b.model_id,
+                        results: metrics,
+                        avg_latency_ms: b.avg_latency_ms,
+                        tokens_per_second: b.tokens_per_second,
+                        total_questions: b.num_questions
+                    });
+                    document.getElementById('view-training-benchmark').scrollIntoView({behavior:'smooth'});
+                });
+            });
             container.querySelectorAll('.download-action-btn.delete').forEach(btn => {
                 btn.addEventListener('click', async (e) => {
                     e.stopPropagation();
