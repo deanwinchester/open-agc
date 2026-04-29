@@ -83,12 +83,15 @@ class LlamaCppManager:
                         with tarfile.open(fileobj=zip_buffer, mode="r:gz") as tar:
                             tar.extractall(self.bin_dir)
                     
-                    # Ensure llama-server exists (sometimes it's in a subfolder or named differently)
-                    if not os.path.exists(self.exe_path):
-                        for root, dirs, files in os.walk(self.bin_dir):
-                            if self.exe_name in files:
-                                os.rename(os.path.join(root, self.exe_name), self.exe_path)
-                                break
+                    # Ensure llama-server and libraries exist in the root bin_dir
+                    for root, dirs, files in os.walk(self.bin_dir):
+                        if root == self.bin_dir:
+                            continue
+                        for f in files:
+                            if f == self.exe_name or f.endswith(".dylib") or f.endswith(".so") or f.endswith(".dll"):
+                                target = os.path.join(self.bin_dir, f)
+                                if not os.path.exists(target):
+                                    os.rename(os.path.join(root, f), target)
                     
                     if sys.platform != "nt" and os.path.exists(self.exe_path):
                         os.chmod(self.exe_path, 0o755) # Make executable on Unix
