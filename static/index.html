@@ -135,6 +135,14 @@
                     </svg>
                     <span>Agents & MCP</span>
                 </nav>
+                <nav class="nav-item" data-view="downloads" id="nav-downloads">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <span>下载管理</span>
+                </nav>
 
                 <div class="sidebar-divider"></div>
 
@@ -476,25 +484,6 @@
                         </div>
                     </section>
 
-                    <!-- Download History -->
-                    <section class="card" id="download-history-section">
-                        <div class="card-header">
-                            <h2>📥 下载历史</h2>
-                            <p class="card-desc">查看所有下载记录，可续传中断的下载。</p>
-                        </div>
-                        <div id="download-history-container">
-                            <div class="empty-state" id="download-history-empty">
-                                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                                    <polyline points="7 10 12 15 17 10"></polyline>
-                                    <line x1="12" y1="15" x2="12" y2="3"></line>
-                                </svg>
-                                <p>暂无下载记录</p>
-                                <small>模型下载记录将在此显示</small>
-                            </div>
-                        </div>
-                    </section>
-
                     <!-- Heartbeat -->
                     <section class="card">
                         <div class="card-header">
@@ -520,6 +509,11 @@
                                 <input type="checkbox" id="sandbox-mode-toggle" checked>
                                 <span class="toggle-label">开启沙箱模式</span>
                             </label>
+                        </div>
+                        <div class="field">
+                            <label>HTTP 代理 (用于访问 HuggingFace 等)</label>
+                            <input type="text" id="http-proxy-input" class="input-styled" placeholder="如 http://127.0.0.1:7890">
+                            <small class="field-hint">留空则使用系统环境变量 HTTP_PROXY</small>
                         </div>
                         <div class="field" id="sandbox-dir-group">
                             <label>沙箱目录路径</label>
@@ -956,6 +950,11 @@
                 </header>
                 <div class="settings-body">
                     <section class="card">
+                        <div class="card-header"><h2>测评数据集</h2><p class="card-desc">下载后测评将使用真实数据集而非在线获取</p></div>
+                        <div id="benchmark-download-list" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:0.5rem;">
+                        </div>
+                    </section>
+                    <section class="card">
                         <div class="card-header"><h2>测评配置</h2></div>
                         <div class="field">
                             <label>选择模型</label>
@@ -964,14 +963,15 @@
                         <div class="field">
                             <label>测评类型</label>
                             <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:0.4rem; margin-top:0.3rem;">
-                                <label class="finetune-module-check"><input type="checkbox" value="mmlu" checked> MMLU 多任务理解 (8题)</label>
-                                <label class="finetune-module-check"><input type="checkbox" value="hellaswag" checked> HellaSwag 常识推理 (5题)</label>
-                                <label class="finetune-module-check"><input type="checkbox" value="hle"> HLE 极限推理 (5题)</label>
-                                <label class="finetune-module-check"><input type="checkbox" value="swe_bench"> SWE-bench 软件工程 (5题)</label>
-                                <label class="finetune-module-check"><input type="checkbox" value="latency" checked> 延迟测试 (3题)</label>
+                                <label class="finetune-module-check"><input type="checkbox" value="mmlu" checked> MMLU 多任务理解 (~100题)</label>
+                                <label class="finetune-module-check"><input type="checkbox" value="hellaswag" checked> HellaSwag 常识推理 (~50题)</label>
+                                <label class="finetune-module-check"><input type="checkbox" value="hle"> HLE 极限推理 (~20题)</label>
+                                <label class="finetune-module-check"><input type="checkbox" value="swe_bench"> SWE-bench 软件工程 (~10题)</label>
+                                <label class="finetune-module-check"><input type="checkbox" value="latency" checked> 延迟测试 (5题)</label>
                             </div>
                         </div>
                         <button id="run-benchmark-btn" class="btn-primary" style="margin-top:0.5rem;">开始测评</button>
+                        <div id="benchmark-resume-container" style="margin-top:0.5rem;"></div>
                     </section>
                     <section class="card" id="benchmark-progress-card" style="display:none;">
                         <div class="card-header"><h2>测评进度</h2></div>
@@ -986,6 +986,26 @@
                     <section class="card">
                         <div class="card-header"><h2>历史测评</h2></div>
                         <div id="benchmark-history-list"><div class="empty-state"><p>暂无测评记录</p></div></div>
+                    </section>
+                </div>
+            </div>
+            <!-- ============ View: Downloads ============ -->
+            <div class="view" id="view-downloads">
+                <header class="view-header">
+                    <h1>下载管理</h1>
+                    <p class="view-desc">管理所有模型与数据集的下载任务，支持并行下载</p>
+                </header>
+                <div class="settings-body">
+                    <section class="card">
+                        <div class="card-header"><h2>手动导入</h2><p class="card-desc">将下载好的文件放入目录后点击扫描即可自动导入</p></div>
+                        <div style="display:flex; gap:0.5rem; align-items:center;">
+                            <span class="field-hint" style="margin:0;">导入目录: data/datasets/</span>
+                            <button id="scan-import-btn" class="btn-secondary">扫描导入</button>
+                        </div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>下载记录</h2></div>
+                        <div id="downloads-view-container"><div class="empty-state"><p>暂无下载记录</p></div></div>
                     </section>
                 </div>
             </div>

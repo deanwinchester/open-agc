@@ -2045,3 +2045,11 @@ input:checked + .slider::before { transform: translateX(16px); }
     color: var(--text-secondary);
     opacity: 0.7;
 }
+
+/* Benchmark question cards */
+.bench-q-header:hover {
+    background: var(--bg-inner);
+}
+.bench-q-header:hover > span:last-child {
+    color: var(--theme-color);
+}

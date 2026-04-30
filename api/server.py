@@ -41,6 +41,10 @@ from core.paths import get_data_path, get_skills_dir
 from core.llamacpp_manager import get_llamacpp_manager
 from core.training_engine import get_training_engine, _training_available
 
+# ── Route modules ──
+from api.routes.benchmark import router as benchmark_router, init_benchmark_routes
+from api.routes.downloads import router as downloads_router, init_download_routes
+
 # Load environment variables
 env_file = get_data_path(".env")
 load_dotenv(env_file)
@@ -63,6 +67,8 @@ for var in ["no_proxy", "NO_PROXY"]:
         os.environ[var] = f"{current.rstrip(',')},{local_hosts}"
 
 app = FastAPI(title="Open-AGC UI Server")
+app.include_router(benchmark_router)
+app.include_router(downloads_router)
 
 # Store the main event loop for cross-thread WebSocket broadcasts
 _main_event_loop: asyncio.AbstractEventLoop = None
@@ -608,6 +614,8 @@ def load_config() -> dict:
         "sandbox_mode": True,
         "sandbox_dir": os.path.abspath(os.path.join(os.getcwd(), "workspace")),
         "llamacpp_ctx_size": 32768,
+        "browser_headless": False,
+        "http_proxy": "",
         "heartbeat_enabled": False,
         "heartbeat_interval": 60,
         "email_listener_enabled": False,
@@ -626,6 +634,8 @@ class ConfigUpdate(BaseModel):
     sandbox_mode: bool
     sandbox_dir: str
     llamacpp_ctx_size: int = 32768
+    browser_headless: bool = False
+    http_proxy: str = ""
     heartbeat_enabled: bool
     heartbeat_interval: int
     email_listener_enabled: bool
@@ -656,6 +666,8 @@ async def get_settings():
         "sandbox_mode": config.get("sandbox_mode", True),
         "sandbox_dir": config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace"))),
         "llamacpp_ctx_size": config.get("llamacpp_ctx_size", 32768),
+        "browser_headless": config.get("browser_headless", False),
+        "http_proxy": config.get("http_proxy", ""),
         "heartbeat_enabled": config.get("heartbeat_enabled", False),
         "heartbeat_interval": config.get("heartbeat_interval", 60),
         "email_listener_enabled": config.get("email_listener_enabled", False),
@@ -711,6 +723,8 @@ async def update_settings(config_update: ConfigUpdate):
         config["sandbox_mode"] = config_update.sandbox_mode
         config["sandbox_dir"] = os.path.abspath(config_update.sandbox_dir) if config_update.sandbox_dir else os.path.abspath(os.path.join(os.getcwd(), "workspace"))
         config["llamacpp_ctx_size"] = config_update.llamacpp_ctx_size
+        config["browser_headless"] = config_update.browser_headless
+        config["http_proxy"] = config_update.http_proxy
         config["heartbeat_enabled"] = config_update.heartbeat_enabled
         config["heartbeat_interval"] = config_update.heartbeat_interval
         config["email_listener_enabled"] = config_update.email_listener_enabled
@@ -1251,167 +1265,6 @@ async def delete_download(download_id: int):
 
 
 # ==========================================
-# Training API
-# ==========================================
-
-@app.get("/api/training/status")
-async def get_training_status():
-    """Check if training dependencies are available and return engine state."""
-    global _training_available
-    engine = get_training_engine()
-    # Re-check imports dynamically each time (not just cached module-level value)
-    available = _training_available
-    import_error = ""
-    if not available:
-        for pkg in ["torch", "transformers", "peft", "datasets"]:
-            try:
-                __import__(pkg)
-            except ImportError as e:
-                import_error = f"{pkg}: {e}"
-                break
-            except Exception as e:
-                import_error = f"{pkg}: {e}"
-                break
-        if not import_error:
-            available = True
-            _training_available = True
-    return {
-        "available": available,
-        "import_error": import_error,
-        "engine_state": engine.get_state(),
-        "install_state": _training_install_state
-    }
-
-
-@app.post("/api/training/install-deps")
-async def install_training_deps():
-    """Install training dependencies via pip with progress tracking."""
-    global _training_install_state
-    if _training_install_state["active"]:
-        raise HTTPException(status_code=409, detail="安装任务正在进行中")
-    # Dynamic check: try importing to confirm availability
-    try:
-        import torch, transformers, peft, datasets  # noqa: F401
-        raise HTTPException(status_code=400, detail="训练依赖已安装")
-    except ImportError:
-        pass  # Need to install
-
-    deps = ["torch>=2.1.0", "transformers>=4.35.0", "peft>=0.6.0",
-            "accelerate>=0.24.0", "datasets>=2.14.0",
-            "sentencepiece>=0.1.99", "scikit-learn>=1.0.0", "pyyaml>=6.0.0"]
-    # bitsandbytes requires Linux + CUDA; skip on other platforms
-    if sys.platform.startswith("linux"):
-        deps.append("bitsandbytes>=0.41.0")
-
-    _training_install_state = {
-        "active": True,
-        "stage": "installing",
-        "label": "正在安装训练依赖 (全部)...",
-        "progress": 0.0,
-        "current_pkg": ", ".join(deps),
-        "error": ""
-    }
-
-    def run_install():
-        global _training_install_state, _training_available
-        import sys, subprocess as sp
-        try:
-            cmd = [sys.executable, "-m", "pip", "install", "--progress-bar", "on"] + deps
-            proc = sp.Popen(cmd, stdout=sp.PIPE, stderr=sp.STDOUT, text=True, bufsize=1)
-
-            pkg_count = len(deps)
-            installed = 0
-            last_broadcast = 0
-            import re
-            output_lines = []  # Keep last 30 lines for error reporting
-
-            for line in proc.stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                output_lines.append(line)
-                if len(output_lines) > 30:
-                    output_lines.pop(0)
-                now = _time.time()
-
-                if "Successfully installed" in line:
-                    installed += 1
-                    _training_install_state["progress"] = min(installed / pkg_count, 0.98)
-                    _training_install_state["label"] = f"已安装 {installed}/{pkg_count} 个包"
-                elif "already satisfied" in line.lower() or "Requirement already satisfied" in line:
-                    installed += 1
-                    _training_install_state["progress"] = installed / pkg_count
-                    _training_install_state["label"] = f"已满足 {installed}/{pkg_count} 个包"
-                elif "Downloading" in line:
-                    pct_match = re.search(r'(\d+)%', line)
-                    if pct_match:
-                        dl_pct = int(pct_match.group(1)) / 100
-                        _training_install_state["progress"] = (installed + dl_pct) / pkg_count
-                    _training_install_state["label"] = line[:130]
-                elif "Collecting" in line or "Installing" in line or "Building" in line:
-                    _training_install_state["label"] = line[:130]
-                elif "ERROR" in line or "error:" in line.lower():
-                    _training_install_state["label"] = f"⚠ {line[:130]}"
-
-                if now - last_broadcast > 0.5:
-                    _broadcast_to_websockets({
-                        "type": "training_install_progress", "stage": "installing",
-                        "label": _training_install_state["label"],
-                        "progress": _training_install_state["progress"],
-                        "current_pkg": "", "active": True
-                    })
-                    last_broadcast = now
-
-            proc.wait()
-
-            # Check if key packages are importable regardless of pip exit code
-            # (pip may return non-zero for metadata conflicts even when packages work)
-            imports_ok = False
-            try:
-                import torch, transformers, peft, datasets
-                imports_ok = True
-                _training_available = True
-            except ImportError:
-                imports_ok = False
-
-            if proc.returncode != 0 and not imports_ok:
-                error_detail = "\n".join(output_lines[-10:]) or "无详细输出"
-                _training_install_state["active"] = False
-                _training_install_state["stage"] = "error"
-                _training_install_state["error"] = f"pip 退出码 {proc.returncode}: {error_detail[:400]}"
-                _broadcast_to_websockets({
-                    "type": "training_install_progress", "stage": "error",
-                    "label": f"安装失败 (错误 {proc.returncode})",
-                    "progress": 0, "error": _training_install_state["error"], "active": False
-                })
-                return
-
-            _training_install_state["active"] = False
-            _training_install_state["stage"] = "complete"
-            _training_install_state["progress"] = 1.0
-            msg = "依赖安装完成，请刷新页面启用训练功能"
-            if proc.returncode != 0 and imports_ok:
-                msg = "依赖已可用 (pip 有非关键警告)，请刷新页面启用训练功能"
-            _training_install_state["label"] = msg
-            _broadcast_to_websockets({
-                "type": "training_install_progress", "stage": "complete",
-                "label": msg, "progress": 1.0, "active": False
-            })
-        except Exception as e:
-            _training_install_state["active"] = False
-            _training_install_state["stage"] = "error"
-            _training_install_state["error"] = str(e)[:300]
-            _broadcast_to_websockets({
-                "type": "training_install_progress", "stage": "error",
-                "label": f"安装异常: {str(e)[:100]}", "progress": 0,
-                "error": str(e)[:300], "active": False
-            })
-
-    thread = threading.Thread(target=run_install, daemon=True)
-    thread.start()
-    return {"status": "started", "message": "正在安装训练依赖...", "total": total}
-
-
 # --- Model Config Endpoints ---
 
 @app.get("/api/training/model-configs")
@@ -1699,246 +1552,6 @@ async def delete_dataset(ds_id: int):
     return {"status": "success"}
 
 
-# --- Recommended HuggingFace Datasets ---
-
-RECOMMENDED_DATASETS = [
-    {"repo_id": "suff/alpaca-zh-52k", "name": "Alpaca 中文指令 (52K)", "desc": "中文指令微调，5.2万条", "size": "~50MB", "splits": ["train"]},
-    {"repo_id": "tatsu-lab/alpaca", "name": "Alpaca 英文指令 (52K)", "desc": "经典英文指令微调数据集", "size": "~25MB", "splits": ["train"]},
-    {"repo_id": "databricks/databricks-dolly-15k", "name": "Dolly 15K", "desc": "Databricks 通用指令数据集", "size": "~10MB", "splits": ["train"]},
-    {"repo_id": "Open-Orca/OpenOrca", "name": "OpenOrca", "desc": "大规模推理链微调数据", "size": "~800MB", "splits": ["train"]},
-    {"repo_id": "Open-Orca/SlimOrca", "name": "SlimOrca", "desc": "精简版推理链数据集", "size": "~200MB", "splits": ["train"]},
-    {"repo_id": "HuggingFaceH4/ultrachat_200k", "name": "UltraChat 200K", "desc": "多轮对话微调数据", "size": "~1.5GB", "splits": ["train_sft", "test_sft"]},
-    {"repo_id": "mindchain/wikitext-103-raw-v1", "name": "WikiText-103", "desc": "语言建模基准数据集", "size": "~180MB", "splits": ["train", "validation", "test"]},
-    {"repo_id": "cnn_dailymail", "name": "CNN/DailyMail", "desc": "新闻摘要数据集", "size": "~550MB", "splits": ["train", "validation", "test"], "config": "3.0.0"},
-]
-
-
-@app.get("/api/training/recommended-datasets")
-async def get_recommended_datasets():
-    """Return the curated list of recommended HF datasets."""
-    return {"datasets": RECOMMENDED_DATASETS}
-
-
-# --- Unified Dataset Download with Progress ---
-
-class DatasetDownloadRequest(BaseModel):
-    repo_id: str
-    name: str = ""
-    split: str = "train"
-    config: Optional[str] = None
-
-
-@app.post("/api/downloads/dataset")
-async def download_dataset(req: DatasetDownloadRequest):
-    """Download a HuggingFace dataset with full progress tracking + resume."""
-    global _llamacpp_download_state
-
-    if _llamacpp_download_state["active"]:
-        raise HTTPException(status_code=409, detail="下载任务正在进行中")
-
-    # Check which backend is available
-    use_datasets_lib = False
-    try:
-        import datasets  # noqa: F401
-        use_datasets_lib = True
-    except ImportError:
-        pass
-
-    ds_name = req.name or req.repo_id.split("/")[-1]
-    dataset_dir = os.path.join(os.path.dirname(DB_PATH), "datasets")
-    os.makedirs(dataset_dir, exist_ok=True)
-    storage_dir = os.path.join(dataset_dir, f"ds_{int(_time.time())}")
-    os.makedirs(storage_dir, exist_ok=True)
-    partial_path = os.path.join(storage_dir, "data.jsonl.partial")
-    target_path = os.path.join(storage_dir, "data.jsonl")
-
-    _llamacpp_download_state = {
-        "active": True,
-        "type": "dataset",
-        "label": f"正在下载数据集 {ds_name}...",
-        "progress": 0.0,
-        "stage": "downloading",
-        "error": "",
-        "repo_id": req.repo_id,
-        "name": ds_name,
-        "split": req.split,
-        "config": req.config
-    }
-
-    db_download_id = create_download_record(
-        type_="model",
-        label=f"数据集: {ds_name} ({req.split})",
-        repo_id=req.repo_id,
-        source="huggingface",
-        target_path=target_path,
-        partial_path=partial_path
-    )
-    # Override type for display purposes
-    conn = sqlite3.connect(DB_PATH)
-    conn.cursor().execute("UPDATE downloads SET type='dataset' WHERE id=?", (db_download_id,))
-    conn.commit()
-    conn.close()
-
-    _llamacpp_download_state["download_id"] = db_download_id
-
-    def run_download():
-        global _llamacpp_download_state
-        dl_id = db_download_id
-        try:
-            def progress_cb(ratio, label=None):
-                _llamacpp_download_state["progress"] = ratio
-                update_download_progress(dl_id, ratio)
-                _broadcast_to_websockets({
-                    "type": "llamacpp_download",
-                    "task": "dataset",
-                    "label": label or f"正在下载 {ds_name}...",
-                    "progress": ratio,
-                    "stage": "downloading"
-                })
-
-            count = 0
-
-            if use_datasets_lib:
-                # === Backend 1: HuggingFace datasets library ===
-                from datasets import load_dataset
-                load_kwargs = {"path": req.repo_id, "split": req.split, "streaming": False,
-                               "trust_remote_code": True, "cache_dir": storage_dir}
-                if req.config:
-                    load_kwargs["name"] = req.config
-                ds = load_dataset(**load_kwargs)
-                total = len(ds)
-                with open(partial_path, "w", encoding="utf-8") as f:
-                    for sample in ds:
-                        f.write(json.dumps(sample, ensure_ascii=False) + "\n")
-                        count += 1
-                        if count % 100 == 0:
-                            progress_cb(count / max(total, 1))
-            else:
-                # === Backend 2: Pure HTTP download (no ML deps needed) ===
-                progress_cb(0.05, f"正在获取 {ds_name} 的文件列表...")
-
-                # Get dataset file listing from HF API
-                api_url = f"https://huggingface.co/api/datasets/{req.repo_id}"
-                api_resp = requests.get(api_url, timeout=30)
-                if api_resp.status_code != 200:
-                    raise Exception(f"无法访问数据集 API: HTTP {api_resp.status_code}")
-                ds_info = api_resp.json()
-
-                # Find parquet files for the requested split/config
-                configs = ds_info.get("configs", []) or ds_info.get("dataset_info", {}).get("configs", [])
-                if not configs:
-                    # Try a simpler approach: download the first available file
-                    siblings = ds_info.get("siblings", [])
-                    jsonl_files = [s for s in siblings if s.get("rfilename", "").endswith(".jsonl")]
-                    if jsonl_files:
-                        # Direct JSONL download
-                        target_config = req.config
-                        target_split = req.split
-                        found = False
-                        for f in jsonl_files:
-                            rfilename = f["rfilename"]
-                            if target_split in rfilename:
-                                if target_config and target_config not in rfilename:
-                                    continue
-                                found = True
-                                dl_url = f"https://huggingface.co/datasets/{req.repo_id}/resolve/main/{rfilename}"
-                                progress_cb(0.1, f"下载 {rfilename}...")
-                                dl_resp = requests.get(dl_url, stream=True, timeout=120)
-                                total = int(dl_resp.headers.get("content-length", 0))
-                                downloaded = 0
-                                with open(partial_path, "wb") as f:
-                                    for chunk in dl_resp.iter_content(8192):
-                                        if chunk:
-                                            f.write(chunk)
-                                            downloaded += len(chunk)
-                                            if total > 0:
-                                                progress_cb(0.1 + 0.8 * downloaded / total,
-                                                            f"下载 {rfilename} ({downloaded/1024**2:.0f}MB)...")
-                                break
-                        if not found and jsonl_files:
-                            # Just pick the first JSONL file
-                            rfilename = jsonl_files[0]["rfilename"]
-                            dl_url = f"https://huggingface.co/datasets/{req.repo_id}/resolve/main/{rfilename}"
-                            progress_cb(0.1, f"下载 {rfilename}...")
-                            dl_resp = requests.get(dl_url, stream=True, timeout=120)
-                            total = int(dl_resp.headers.get("content-length", 0))
-                            downloaded = 0
-                            with open(partial_path, "wb") as f:
-                                for chunk in dl_resp.iter_content(8192):
-                                    if chunk:
-                                        f.write(chunk)
-                                        downloaded += len(chunk)
-                                        if total > 0:
-                                            progress_cb(0.1 + 0.8 * downloaded / total,
-                                                        f"下载中 ({downloaded/1024**2:.0f}MB)...")
-
-                    if not jsonl_files:
-                        # Fallback: try known paths for popular datasets
-                        raise Exception(
-                            f"HTTP 模式无法下载此数据集 ({req.repo_id})。"
-                            "请安装 datasets 库以获得完整支持: pip install datasets"
-                        )
-
-                progress_cb(0.95, "正在处理文件...")
-
-                # Count lines in downloaded file
-                if os.path.exists(partial_path):
-                    count = 0
-                    with open(partial_path, "r", encoding="utf-8") as f:
-                        for line in f:
-                            if line.strip():
-                                count += 1
-                    # Rename partial to final (it's already JSONL)
-                    os.rename(partial_path, target_path)
-
-            progress_cb(1.0)
-
-            # Rename partial to final if not already done
-            if os.path.exists(partial_path):
-                os.rename(partial_path, target_path)
-
-            # Count if not already counted
-            if count == 0 and os.path.exists(target_path):
-                with open(target_path, "r", encoding="utf-8") as f:
-                    count = sum(1 for line in f if line.strip())
-
-            # Auto-create dataset record
-            conn2 = sqlite3.connect(DB_PATH)
-            cursor2 = conn2.cursor()
-            cursor2.execute(
-                "INSERT INTO datasets (name, source, source_path, storage_path, format, sample_count) VALUES (?, 'huggingface', ?, ?, 'jsonl', ?)",
-                (ds_name, req.repo_id, target_path, count)
-            )
-            conn2.commit()
-            conn2.close()
-
-            _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "complete", "progress": 1.0}
-            update_download_progress(dl_id, 1.0, status="completed", downloaded_bytes=count)
-            _broadcast_to_websockets({
-                "type": "llamacpp_download",
-                "task": "dataset",
-                "label": f"{ds_name} 下载完成 ({count} 条)",
-                "progress": 1.0,
-                "stage": "complete"
-            })
-
-        except Exception as e:
-            _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
-            update_download_progress(dl_id, 0.0, status="failed", error_message=str(e))
-            _broadcast_to_websockets({
-                "type": "llamacpp_download",
-                "task": "dataset",
-                "label": f"下载失败: {e}",
-                "progress": 0.0,
-                "stage": "error",
-                "error": str(e)
-            })
-
-    thread = threading.Thread(target=run_download, daemon=True)
-    thread.start()
-    return {"status": "started", "message": f"开始下载数据集 {ds_name}...", "download_id": db_download_id}
-
-
 # --- Dataset Editor ---
 
 class CreateDatasetRequest(BaseModel):
@@ -2017,60 +1630,6 @@ async def edit_dataset(ds_id: int, req: EditDatasetRequest):
     return {"status": "success", "sample_count": count}
 
 
-# --- Unified Model Listing (for benchmark & fine-tune) ---
-
-@app.get("/api/training/all-models")
-async def list_all_models():
-    """List all available models (online + local) with proper litellm prefixes."""
-    models = []
-
-    # Online models from config
-    config = load_config()
-    default_model = config.get("default_model", "")
-    fallbacks = config.get("fallback_models", [])
-    seen = set()
-
-    def add_model(mid, label, source="online"):
-        if mid and mid not in seen:
-            seen.add(mid)
-            models.append({"id": mid, "name": label, "source": source})
-
-    if default_model:
-        add_model(default_model, f"{default_model} (默认)", "online")
-    for fb in fallbacks:
-        add_model(fb.strip(), f"{fb.strip()} (备用)", "online")
-
-    # Common online providers
-    add_model("moonshot/kimi-latest", "moonshot/kimi-latest (Kimi)", "online")
-    add_model("deepseek/deepseek-chat", "deepseek/deepseek-chat (DeepSeek)", "online")
-    add_model("deepseek/deepseek-reasoner", "deepseek/deepseek-reasoner (R1)", "online")
-    add_model("zai/glm-4.5", "zai/glm-4.5 (GLM)", "online")
-    add_model("minimax/MiniMax-M2.1", "minimax/MiniMax-M2.1 (MiniMax)", "online")
-    add_model("gpt-4o", "gpt-4o (OpenAI)", "online")
-    add_model("gpt-4o-mini", "gpt-4o-mini (OpenAI)", "online")
-    add_model("gemini/gemini-2.5-pro-preview-05-06", "gemini/gemini-2.5-pro (Google)", "online")
-    add_model("claude-3-5-sonnet-20240620", "claude-3-5-sonnet (Anthropic)", "online")
-
-    # Local GGUF models
-    manager = get_llamacpp_manager()
-    for f in manager.list_models():
-        mid = f"llamacpp/{f}"
-        if mid not in seen:
-            seen.add(mid)
-            models.append({"id": mid, "name": f"🦙 {f} (本地 GGUF)", "source": "local"})
-
-    # SGLang-cached models
-    from core.sglang_manager import get_sglang_manager as _get_sglang
-    sglang = _get_sglang()
-    if sglang and sglang.model:
-        mid = f"sglang/{sglang.model}"
-        if mid not in seen:
-            seen.add(mid)
-            models.append({"id": mid, "name": f"⚡ {sglang.model} (SGLang)", "source": "local"})
-
-    return {"models": models}
-
-
 # --- Base Models for Fine-tuning ---
 
 @app.get("/api/training/base-models")
@@ -2079,715 +1638,179 @@ async def list_base_models():
     models = []
     manager = get_llamacpp_manager()
     for f in manager.list_models():
-        models.append({"id": f, "name": f.replace(".gguf", ""), "source": "gguf", "path": os.path.join(manager.models_dir, f)})
-
-    # Scan HF cache for transformer models
+        models.append({"id": f"llamacpp/{f}", "name": f.replace('.gguf',''), "source": "gguf",
+                        "path": os.path.join(manager.models_dir, f)})
     hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
     if os.path.exists(hf_cache):
         for d in os.listdir(hf_cache):
             if d.startswith("models--"):
-                name = d.replace("models--", "").replace("--", "/")
-                models.append({"id": name, "name": name, "source": "huggingface", "path": os.path.join(hf_cache, d)})
-
-    # Add SGLang default
-    models.append({"id": "Qwen/Qwen3.5-9B-Instruct", "name": "Qwen3.5-9B-Instruct (SGLang)", "source": "huggingface", "path": ""})
-
+                name = d.replace("models--","").replace("--","/")
+                models.append({"id": name, "name": name, "source": "huggingface",
+                                "path": os.path.join(hf_cache, d)})
+    models.append({"id": "Qwen/Qwen3.5-9B-Instruct", "name": "Qwen3.5-9B (SGLang)", "source": "huggingface", "path": ""})
     return {"models": models}
 
 
-# --- Training Run Endpoints ---
+# --- Scan Import ---
 
-class CreateRunRequest(BaseModel):
-    name: str
-    model_config_id: int = None
-    dataset_id: int = None
-    base_model_id: str = ""
-    base_model_source: str = "huggingface"
-    training_params_json: str = "{}"
-
-
-@app.post("/api/training/runs")
-async def create_training_run(req: CreateRunRequest):
-    """Create a new training run and launch it."""
-    engine = get_training_engine()
-    if not _training_available:
-        raise HTTPException(status_code=400, detail="Training dependencies not installed")
-    if engine.get_state()["active"]:
-        raise HTTPException(status_code=409, detail="A training run is already active")
-
-    checkpoint_dir = os.path.join(os.path.dirname(DB_PATH), "checkpoints", f"run_{int(_time.time())}")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO training_runs (name, model_config_id, dataset_id, base_model_id, base_model_source, training_params_json, status, checkpoint_dir) "
-        "VALUES (?, ?, ?, ?, ?, ?, 'running', ?)",
-        (req.name, req.model_config_id, req.dataset_id, req.base_model_id, req.base_model_source, req.training_params_json, checkpoint_dir)
-    )
-    run_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-
-    run_record = {
-        "id": run_id,
-        "name": req.name,
-        "base_model_id": req.base_model_id,
-        "base_model_source": req.base_model_source,
-        "training_params_json": req.training_params_json,
-        "checkpoint_dir": checkpoint_dir
-    }
-
-    engine.set_broadcast_fn(_broadcast_to_websockets)
-    if not engine.start_training(run_id, run_record):
-        raise HTTPException(status_code=500, detail="Failed to start training")
-
-    return {"status": "started", "run_id": run_id}
-
-
-@app.get("/api/training/runs")
-async def list_training_runs():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM training_runs ORDER BY created_at DESC LIMIT 50")
-    rows = cursor.fetchall()
-    conn.close()
-    return {"runs": [dict(r) for r in rows]}
-
-
-@app.get("/api/training/runs/{run_id}")
-async def get_training_run(run_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM training_runs WHERE id=?", (run_id,))
-    row = cursor.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Run not found")
-    return dict(row)
-
-
-@app.get("/api/training/runs/{run_id}/metrics")
-async def get_training_metrics(run_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM training_metrics WHERE run_id=? ORDER BY global_step ASC", (run_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return {"metrics": [dict(r) for r in rows]}
-
-
-@app.post("/api/training/runs/{run_id}/pause")
-async def pause_training_run(run_id: int):
-    engine = get_training_engine()
-    if engine.get_state()["run_id"] != run_id:
-        raise HTTPException(status_code=400, detail="Not the active run")
-    if engine.pause_training():
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE training_runs SET status='paused', updated_at=CURRENT_TIMESTAMP WHERE id=?", (run_id,))
-        conn.commit()
-        conn.close()
-        return {"status": "paused"}
-    raise HTTPException(status_code=400, detail="Cannot pause")
-
-
-@app.post("/api/training/runs/{run_id}/resume")
-async def resume_training_run(run_id: int):
-    engine = get_training_engine()
-    if engine.resume_training():
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE training_runs SET status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?", (run_id,))
-        conn.commit()
-        conn.close()
-        return {"status": "resumed"}
-    raise HTTPException(status_code=400, detail="Cannot resume")
-
-
-@app.post("/api/training/runs/{run_id}/step")
-async def step_training_run(run_id: int):
-    engine = get_training_engine()
-    if engine.step_training():
-        return {"status": "stepping"}
-    raise HTTPException(status_code=400, detail="Cannot step")
-
-
-@app.post("/api/training/runs/{run_id}/abort")
-async def abort_training_run(run_id: int):
-    engine = get_training_engine()
-    if engine.abort_training():
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE training_runs SET status='aborted', updated_at=CURRENT_TIMESTAMP WHERE id=?", (run_id,))
-        conn.commit()
-        conn.close()
-        return {"status": "aborted"}
-    raise HTTPException(status_code=400, detail="Cannot abort")
-
-
-@app.delete("/api/training/runs/{run_id}")
-async def delete_training_run(run_id: int):
-    import shutil
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT checkpoint_dir FROM training_runs WHERE id=?", (run_id,))
-    row = cursor.fetchone()
-    if row and row["checkpoint_dir"]:
-        cp_dir = row["checkpoint_dir"]
-        if os.path.exists(cp_dir):
-            shutil.rmtree(cp_dir, ignore_errors=True)
-    cursor.execute("DELETE FROM training_runs WHERE id=?", (run_id,))
-    conn.commit()
-    conn.close()
-    return {"status": "success"}
-
-
-# ==========================================
-# Model Benchmark API
-# ==========================================
-
-BENCHMARK_REGISTRY = {
-    "mmlu": {
-        "name": "MMLU (Massive Multitask Language Understanding)",
-        "desc": "57学科×100+题，多选，评估知识广度。数据集: cais/mmlu, ~14K题",
-        "hf_repo": "cais/mmlu",
-        "hf_config": "all",
-        "sample_size": 100,
-        "scoring": "multiple_choice",
-        "subjects": ["abstract_algebra","anatomy","astronomy","business_ethics","clinical_knowledge",
-                     "college_biology","college_chemistry","college_computer_science","college_mathematics",
-                     "college_physics","computer_security","conceptual_physics","econometrics",
-                     "electrical_engineering","elementary_mathematics","high_school_biology",
-                     "high_school_chemistry","high_school_computer_science","high_school_mathematics",
-                     "high_school_physics","human_sexuality","international_law","jurisprudence",
-                     "logical_fallacies","machine_learning","management","marketing","medical_genetics",
-                     "miscellaneous","moral_disputes","philosophy","prehistory","professional_accounting",
-                     "professional_psychology","public_relations","security_studies","sociology",
-                     "us_foreign_policy","virology","world_religions"],
-    },
-    "hellaswag": {
-        "name": "HellaSwag (Commonsense NLI)",
-        "desc": "常识推理，选取最佳后续句。数据集: Rowan/hellaswag, ~10K题",
-        "hf_repo": "Rowan/hellaswag",
-        "sample_size": 50,
-        "scoring": "multiple_choice",
-    },
-    "hle": {
-        "name": "HLE (Humanity's Last Exam)",
-        "desc": "高难度跨学科极限推理。数据集: cais/hle, ~3K题",
-        "hf_repo": "cais/hle",
-        "sample_size": 20,
-        "scoring": "keyword_match",
-    },
-    "swe_bench": {
-        "name": "SWE-bench (Software Engineering)",
-        "desc": "真实GitHub issue代码修复。数据集: princeton-nlp/SWE-bench, ~2K题",
-        "hf_repo": "princeton-nlp/SWE-bench_Verified",
-        "sample_size": 10,
-        "scoring": "keyword_match",
-    },
-    "latency": {
-        "name": "延迟测试 (TTFT & TPS)",
-        "desc": "测量首Token时间和每秒Token生成速度",
-        "sample_size": 5,
-        "scoring": "latency_only",
-    },
-}
-
-
-def _load_benchmark_dataset(benchmark_type: str, sample_size: int = None) -> list:
-    """Load benchmark questions from local cache or download from HF.
-
-    Returns a list of question dicts with keys: question, choices (list), answer, subject
-    """
-    import hashlib
-
-    info = BENCHMARK_REGISTRY.get(benchmark_type, {})
-    hf_repo = info.get("hf_repo", "")
-    n = sample_size or info.get("sample_size", 30)
-
-    bench_dir = os.path.join(os.path.dirname(DB_PATH), "benchmarks", benchmark_type)
-    os.makedirs(bench_dir, exist_ok=True)
-
-    # Check local cache first
-    cache_file = os.path.join(bench_dir, "questions.json")
-    if os.path.exists(cache_file):
-        try:
-            with open(cache_file, "r", encoding="utf-8") as f:
-                questions = json.load(f)
-            if len(questions) >= n:
-                return questions[:n]
-        except Exception:
-            pass
-
-    # Download from HuggingFace
-    if not hf_repo:
-        # Latency test: built-in simple questions
-        questions = [
-            {"question": "1+1=?", "answer": "2", "subject": "latency"},
-            {"question": "Capital of France?", "answer": "Paris", "subject": "latency"},
-            {"question": "Translate: Hello World", "answer": "Hello World", "subject": "latency"},
-            {"question": "2^10 = ?", "answer": "1024", "subject": "latency"},
-            {"question": "What year is it?", "answer": "2026", "subject": "latency"},
-        ]
-        return questions[:n]
-
+def _try_populate_benchmark_from_file(fpath, bench_type):
+    """Try to read a JSONL/CSV/Parquet file and populate the benchmark cache."""
+    import json as _json
+    ext = os.path.splitext(fpath)[1].lower()
     questions = []
     try:
-        # Try getting dataset via HF API
-        api_url = f"https://huggingface.co/api/datasets/{hf_repo}"
-        resp = requests.get(api_url, timeout=15)
-        if resp.status_code != 200:
-            raise Exception(f"HF API returned {resp.status_code}")
-
-        ds_info = resp.json()
-
-        if benchmark_type == "mmlu":
-            questions = _download_mmlu_subset(bench_dir, n, info)
-        elif benchmark_type == "hellaswag":
-            questions = _download_hellaswag_subset(bench_dir, n, info)
-        elif benchmark_type == "hle":
-            questions = _download_hle_subset(bench_dir, n, info)
-        elif benchmark_type == "swe_bench":
-            questions = _download_swebench_subset(bench_dir, n, info)
-
-    except Exception as e:
-        print(f"[Benchmark] Download failed for {benchmark_type}: {e}, using fallback")
-
-    # Fallback: use built-in questions if download fails
-    if not questions:
-        questions = _get_fallback_questions(benchmark_type, n)
-
-    # Cache locally
-    try:
-        with open(cache_file, "w", encoding="utf-8") as f:
-            json.dump(questions, f, ensure_ascii=False)
-    except Exception:
-        pass
-
-    return questions[:n]
-
-
-def _download_mmlu_subset(bench_dir: str, n: int, info: dict) -> list:
-    """Download MMLU questions from HF. Each subject is a separate config."""
-    questions = []
-    subjects = info.get("subjects", [])
-    per_subject = max(n // max(len(subjects), 1), 1)
-
-    for subject in subjects[:min(len(subjects), 10)]:  # Limit to 10 subjects for speed
-        try:
-            url = f"https://huggingface.co/datasets/cais/mmlu/resolve/main/data/test/{subject}_test.csv"
-            resp = requests.get(url, timeout=30)
-            if resp.status_code == 200:
-                lines = resp.text.strip().split('\n')
-                import csv, io as _io
-                reader = csv.reader(_io.StringIO(resp.text))
-                header = next(reader, None)
-                for row in reader:
-                    if len(row) >= 6:
+        if ext == ".jsonl":
+            with open(fpath, "r", encoding="utf-8") as f:
+                first_line = f.readline().strip()
+                if not first_line:
+                    return False
+                sample = _json.loads(first_line)
+            # Auto-detect question/answer field names
+            q_field = a_field = None
+            for qk in ["question", "prompt", "input", "text", "query", "instruction"]:
+                if qk in sample: q_field = qk; break
+            for ak in ["answer", "solution", "output", "response", "completion", "target"]:
+                if ak in sample: a_field = ak; break
+            if not q_field or not a_field:
+                return False
+            with open(fpath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line: continue
+                    try:
+                        d = _json.loads(line)
                         questions.append({
-                            "question": row[0],
-                            "choices": [row[1], row[2], row[3], row[4]],
-                            "answer": row[5].strip(),
-                            "subject": subject,
+                            "question": str(d.get(q_field, "")),
+                            "answer": str(d.get(a_field, "")),
+                            "subject": d.get("subject", bench_type),
                         })
-                    if len(questions) >= n:
-                        break
-                if len(questions) >= n:
-                    break
-        except Exception as e:
-            print(f"[Benchmark] MMLU {subject} failed: {e}")
-            continue
-
-    return questions[:n]
-
-
-def _download_hellaswag_subset(bench_dir: str, n: int, info: dict) -> list:
-    """Download HellaSwag questions from HF."""
-    questions = []
-    try:
-        url = "https://huggingface.co/datasets/Rowan/hellaswag/resolve/main/data/hellaswag_val.jsonl"
-        resp = requests.get(url, stream=True, timeout=120)
-        if resp.status_code == 200:
-            import random as _random
-            lines = []
-            for line in resp.iter_lines(decode_unicode=True):
-                if line and line.strip():
-                    lines.append(line)
-            _random.shuffle(lines)
-            for line in lines[:n]:
-                data = json.loads(line)
-                questions.append({
-                    "question": data.get("ctx", ""),
-                    "choices": data.get("endings", []),
-                    "answer": str(data.get("label", 0)),
-                    "subject": "commonsense",
-                })
-    except Exception as e:
-        print(f"[Benchmark] HellaSwag download failed: {e}")
-    return questions[:n]
-
-
-def _download_hle_subset(bench_dir: str, n: int, info: dict) -> list:
-    """Download HLE questions from HF."""
-    questions = []
-    try:
-        url = "https://huggingface.co/datasets/cais/hle/resolve/main/data/test/hle_test.jsonl"
-        resp = requests.get(url, stream=True, timeout=120)
-        if resp.status_code == 200:
-            import random as _random
-            lines = []
-            for line in resp.iter_lines(decode_unicode=True):
-                if line and line.strip():
-                    lines.append(line)
-            _random.shuffle(lines)
-            for line in lines[:n]:
-                data = json.loads(line)
-                questions.append({
-                    "question": data.get("question", data.get("prompt", "")),
-                    "answer": data.get("answer", data.get("solution", "")),
-                    "subject": data.get("subject", "general"),
-                })
-    except Exception as e:
-        print(f"[Benchmark] HLE download failed: {e}")
-    return questions[:n]
-
-
-def _download_swebench_subset(bench_dir: str, n: int, info: dict) -> list:
-    """Download SWE-bench questions from HF."""
-    questions = []
-    try:
-        url = "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified/resolve/main/data/test-00000-of-00001.parquet"
-        resp = requests.get(url, timeout=120)
-        if resp.status_code == 200:
+                    except _json.JSONDecodeError:
+                        continue
+        elif ext == ".csv":
+            import csv as _csv, io as _io
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                reader = _csv.DictReader(f)
+                for row in reader:
+                    q = row.get("question") or row.get("prompt") or row.get("input") or ""
+                    a = row.get("answer") or row.get("solution") or row.get("output") or ""
+                    if q and a:
+                        questions.append({"question": q, "answer": a, "subject": bench_type})
+        elif ext == ".parquet":
+            df = None
             try:
                 import pyarrow.parquet as pq
-                import io as _io
-                table = pq.read_table(_io.BytesIO(resp.content))
-                import random as _random
-                indices = list(range(len(table)))
-                _random.shuffle(indices)
-                for i in indices[:n]:
-                    row = table.column("problem_statement")[i].as_py()
-                    patch = table.column("patch")[i].as_py() if "patch" in table.column_names else ""
-                    questions.append({
-                        "question": str(row)[:2000],
-                        "answer": str(patch)[:500],
-                        "subject": "software_engineering",
-                    })
+                df = pq.read_table(fpath).to_pandas()
             except ImportError:
-                pass
-    except Exception as e:
-        print(f"[Benchmark] SWE-bench download failed: {e}")
-    return questions[:n]
-
-
-def _get_fallback_questions(benchmark_type: str, n: int) -> list:
-    """Built-in fallback questions when HF download fails."""
-    fallbacks = {
-        "mmlu": [
-            {"question": "In quantum mechanics, superposition means that a system can exist in multiple states simultaneously until:\nA) Observed  B) Calculated  C) Energized  D) Stabilized",
-             "choices": ["A", "B", "C", "D"], "answer": "A", "subject": "physics"},
-            {"question": "The capital asset pricing model formula is:\nA) E(R)=Rf+β(E(Rm)-Rf)  B) P=D/(r-g)  C) F=ma  D) E=mc²",
-             "choices": ["A", "B", "C", "D"], "answer": "A", "subject": "finance"},
-            {"question": "Binary search tree search complexity:\nA) O(1)  B) O(n)  C) O(log n)  D) O(n²)",
-             "choices": ["A", "B", "C", "D"], "answer": "C", "subject": "computer_science"},
-            {"question": "Amendment abolishing slavery:\nA) 13th  B) 14th  C) 15th  D) 19th",
-             "choices": ["A", "B", "C", "D"], "answer": "A", "subject": "history"},
-            {"question": "Mitochondria primary function:\nA) Protein synthesis  B) ATP production  C) Cell division  D) DNA replication",
-             "choices": ["A", "B", "C", "D"], "answer": "B", "subject": "biology"},
-            {"question": "Diagonalizable matrix requires n linearly independent:\nA) rows  B) columns  C) eigenvectors  D) singular values",
-             "choices": ["A", "B", "C", "D"], "answer": "C", "subject": "mathematics"},
-            {"question": "Turing test evaluates:\nA) Creativity  B) Human-like intelligence  C) Math ability  D) Speed",
-             "choices": ["A", "B", "C", "D"], "answer": "B", "subject": "computer_science"},
-            {"question": "OSI layer for end-to-end reliable transfer:\nA) Network  B) Data Link  C) Transport  D) Session",
-             "choices": ["A", "B", "C", "D"], "answer": "C", "subject": "computer_science"},
-            {"question": "Chemical formula for water:\nA) CO2  B) H2O  C) NaCl  D) O2",
-             "choices": ["A", "B", "C", "D"], "answer": "B", "subject": "chemistry"},
-            {"question": "Largest planet in solar system:\nA) Earth  B) Mars  C) Jupiter  D) Saturn",
-             "choices": ["A", "B", "C", "D"], "answer": "C", "subject": "astronomy"},
-        ],
-        "hellaswag": [
-            {"question": "A person is playing guitar on stage. They strum a chord and then...",
-             "choices": ["take a bow", "start singing the lyrics", "put the guitar away", "leave the stage"], "answer": "1", "subject": "commonsense"},
-            {"question": "Someone is cooking pasta in boiling water. They take a strainer and...",
-             "choices": ["throw it away", "drain the water from the pasta", "add more water", "put it in the fridge"], "answer": "1", "subject": "commonsense"},
-            {"question": "A student opens their textbook to study. They read chapter one and...",
-             "choices": ["close it and sleep", "take notes on key concepts", "throw the book away", "watch TV"], "answer": "1", "subject": "commonsense"},
-            {"question": "A driver approaches a red light and...",
-             "choices": ["speeds up", "slows down and stops", "honks the horn", "closes their eyes"], "answer": "1", "subject": "commonsense"},
-            {"question": "A baker mixes bread dough, then...",
-             "choices": ["eats it immediately", "lets it rise before baking", "throws it away", "freezes it"], "answer": "1", "subject": "commonsense"},
-        ],
-        "hle": [
-            {"question": "Prove that the alternating group A₅ is simple.", "answer": "conjugacy classes of orders 1,12,12,15,20", "subject": "mathematics"},
-            {"question": "Calculate relativistic kinetic energy at 0.999c in terms of m₀c².", "answer": "γ=22.4, K≈21.4", "subject": "physics"},
-            {"question": "Explain Rust borrow checker and data race prevention.", "answer": "ownership, borrowing, lifetimes", "subject": "computer_science"},
-        ],
-        "swe_bench": [
-            {"question": "Fix infinite loop in binary search: left=mid causes infinite loop when target not found.", "answer": "Use mid+1 and mid-1", "subject": "debugging"},
-            {"question": "Refactor React class component to hooks (useState, useEffect).", "answer": "useState for count, useEffect for interval", "subject": "frontend"},
-            {"question": "Diagnose memory leak from undisposed EventListeners.", "answer": "removeEventListener in cleanup, WeakRef pattern", "subject": "debugging"},
-        ],
-    }
-    result = fallbacks.get(benchmark_type, [{"question": "1+1=?", "answer": "2", "subject": "general"}])
-    while len(result) < n:
-        result.append({"question": f"Sample question {len(result)+1}", "answer": f"answer {len(result)+1}", "subject": "general"})
-    return result[:n]
-
-
-class BenchmarkRequest(BaseModel):
-    model_id: str
-    model_source: str = "online"
-    benchmark_types: List[str] = ["qa_zh", "latency"]
-
-
-@app.post("/api/training/benchmark")
-async def run_benchmark(req: BenchmarkRequest):
-    """Run benchmark tasks against a model (in background thread for real-time progress)."""
-    global _llamacpp_download_state
-    engine = get_training_engine()
-
-    if engine.get_state()["active"]:
-        raise HTTPException(status_code=409, detail="训练任务正在进行中，请等待完成")
-
-    model_id = req.model_id
-    model_source = req.model_source
-
-    # Auto-start local model servers if needed
-    if "llamacpp/" in model_id:
-        lm = get_llamacpp_manager()
-        if not lm.is_running():
-            model_filename = model_id.replace("llamacpp/", "")
-            lm.start(model_filename)
-            for _ in range(120):
-                if lm.is_running():
-                    break
-                await asyncio.sleep(0.5)
-            if not lm.is_running():
-                raise HTTPException(status_code=500, detail="llama-server 启动失败")
-
-    # Load all benchmark questions upfront
-    all_questions = []
-    for btype in req.benchmark_types:
-        info = BENCHMARK_REGISTRY.get(btype, {})
-        if info:
-            questions = _load_benchmark_dataset(btype)
-            all_questions.append((btype, info, questions))
-            _broadcast_to_websockets({
-                "type": "benchmark_progress",
-                "task": btype,
-                "stage": "loaded",
-                "label": f"{info.get('name', btype)}: 已加载 {len(questions)} 题",
-                "progress": 0,
-                "active": True
-            })
-
-    if not all_questions:
-        raise HTTPException(status_code=400, detail="没有有效的测评类型")
-
-    # Run benchmark in background thread so WebSocket progress works
-    result_holder = {}
-
-    def run_benchmark_thread():
-        results = []
-        total_questions = 0
-        total_time = 0.0
-        total_tokens = 0
-
-        for btype, info, questions in all_questions:
-            benchmark_name = info.get("name", btype)
-            scoring = info.get("scoring", "keyword_match")
-            total_q = len(questions)
-            correct = 0
-            task_results = []
-
-            for idx, item in enumerate(questions):
-                total_questions += 1
-                prompt = item.get("question", "")
-                choices = item.get("choices", [])
-                if choices:
-                    labels = ["A", "B", "C", "D", "E", "F"][:len(choices)]
-                    prompt += "\n" + "\n".join(f"{l}) {c}" for l, c in zip(labels, choices))
-                    prompt += "\nAnswer with the letter only."
-
-                t0 = _time.time()
                 try:
-                    from core.llm_client import LLMClient
-                    client = LLMClient(default_model=model_id)
-                    response, _ = client.chat(messages=[{"role": "user", "content": prompt}])
-                    answer = response.choices[0].message.content if response else ""
-                    elapsed = (_time.time() - t0) * 1000
-                    usage = getattr(response, "usage", None)
-                    tok_count = usage.total_tokens if usage else (len(answer) // 3)
-                    total_time += elapsed
-                    total_tokens += tok_count
-
-                    expected = str(item.get("answer", "")).strip()
-                    score = 0
-                    answer_clean = answer.strip().upper()
-
-                    if scoring == "multiple_choice":
-                        first_letter = answer_clean[0] if answer_clean else ""
-                        if first_letter == expected.upper():
-                            score = 1.0
-                        elif expected.upper() in answer_clean[:5]:
-                            score = 0.8
-                        correct += 1 if score >= 0.5 else 0
-                    elif scoring == "latency_only":
-                        score = 1.0
-                        correct += 1
-                    else:
-                        if expected and expected.lower() in answer.lower():
-                            score = 0.8
-                        kw_count = sum(1 for kw in expected.lower().split() if kw in answer.lower())
-                        if expected:
-                            score = max(score, min(kw_count / max(len(expected.split()), 1), 1.0) * 0.7)
-                        correct += 1 if score >= 0.4 else 0
-
-                    task_results.append({
-                        "question": prompt[:100],
-                        "answer_preview": answer[:200],
-                        "expected": expected[:100],
-                        "score": round(score, 2),
-                        "latency_ms": round(elapsed, 1),
-                        "tokens": tok_count,
-                        "subject": item.get("subject", "")
-                    })
-                except Exception as e:
-                    task_results.append({
-                        "question": prompt[:100],
-                        "error": str(e)[:200],
-                        "score": 0, "latency_ms": 0, "tokens": 0,
-                        "subject": item.get("subject", "")
-                    })
-
-                _broadcast_to_websockets({
-                    "type": "benchmark_progress",
-                    "task": btype,
-                    "stage": "running",
-                    "label": f"{benchmark_name}: {idx+1}/{total_q} | {prompt[:80]}",
-                    "progress": (idx + 1) / total_q,
-                    "active": True
+                    import pandas as pd
+                    df = pd.read_parquet(fpath)
+                except ImportError:
+                    print(f"[Benchmark] Auto-import {bench_type}: need pyarrow or pandas for parquet")
+                    return False
+            if df is None or len(df) == 0:
+                return False
+            # Auto-detect question/answer columns
+            cols = list(df.columns)
+            q_col = a_col = None
+            for qk in ["question", "prompt", "input", "text", "query", "instruction", "problem_statement"]:
+                if qk in cols: q_col = qk; break
+            for ak in ["answer", "solution", "output", "response", "completion", "target"]:
+                if ak in cols: a_col = ak; break
+            if not q_col or not a_col:
+                return False
+            subj_col = "subject" if "subject" in cols else None
+            for _, row in df.iterrows():
+                questions.append({
+                    "question": str(row[q_col])[:4000],
+                    "answer": str(row[a_col])[:2000],
+                    "subject": str(row[subj_col]) if subj_col and not pd.isna(row[subj_col]) else bench_type,
                 })
+        else:
+            return False
+    except Exception as e:
+        print(f"[Benchmark] Auto-import {bench_type} from {fpath}: {e}")
+        return False
 
-            accuracy = correct / max(total_q, 1)
-            subject_scores = {}
-            for r in task_results:
-                subj = r.get("subject", "general") or "general"
-                if subj not in subject_scores:
-                    subject_scores[subj] = {"correct": 0, "total": 0}
-                subject_scores[subj]["total"] += 1
-                if r.get("score", 0) >= 0.5:
-                    subject_scores[subj]["correct"] += 1
+    if not questions:
+        return False
+    bench_dir = os.path.join(os.path.dirname(DB_PATH), "benchmarks", bench_type)
+    os.makedirs(bench_dir, exist_ok=True)
+    cache_file = os.path.join(bench_dir, "questions.json")
+    with open(cache_file, "w", encoding="utf-8") as f:
+        _json.dump(questions, f, ensure_ascii=False)
+    return True
 
-            results.append({
-                "type": btype, "name": benchmark_name,
-                "accuracy": round(accuracy, 3),
-                "num_questions": total_q, "correct": correct,
-                "subjects": {k: {"accuracy": round(v["correct"]/max(v["total"],1), 2), "n": v["total"]}
-                             for k, v in sorted(subject_scores.items())},
-                "details": task_results[:10]
-            })
 
-        avg_latency = total_time / max(total_questions, 1)
-        tps = total_tokens / (total_time / 1000) if total_time > 0 else 0
-        result_holder["data"] = {
-            "model_id": model_id, "results": results,
-            "avg_latency_ms": round(avg_latency, 1),
-            "tokens_per_second": round(tps, 1),
-            "total_questions": total_questions
-        }
-
-        # Save to DB
-        try:
+@app.post("/api/training/datasets/scan-import")
+async def scan_import_datasets():
+    """Scan data/datasets/ for new JSONL/CSV/Parquet files and auto-import them."""
+    import glob
+    dataset_dir = os.path.join(os.path.dirname(DB_PATH), "datasets")
+    imported = 0
+    bench_populated = []
+    # Benchmark type → filename keywords (order matters: longer match first)
+    bench_keywords = {
+        "hellaswag": ["hellaswag"],
+        "swe_bench": ["swe_bench", "swe-bench"],
+        "mmlu": ["mmlu"],
+        "hle": ["hle"],
+    }
+    for ext in ["jsonl", "csv", "parquet"]:
+        for fpath in glob.glob(os.path.join(dataset_dir, f"*.{ext}")):
+            fname = os.path.basename(fpath)
+            # Check if already imported
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
+            cursor.execute("SELECT id FROM datasets WHERE storage_path=?", (fpath,))
+            if cursor.fetchone():
+                conn.close()
+                # Still try to populate benchmark cache even if already imported
+                fname_lower = fname.lower()
+                for btype, keywords in bench_keywords.items():
+                    if btype not in bench_populated:
+                        for kw in keywords:
+                            if kw in fname_lower:
+                                if _try_populate_benchmark_from_file(fpath, btype):
+                                    bench_populated.append(btype)
+                                break
+                continue
+            # Count samples
+            count = 0
+            try:
+                if ext == "jsonl":
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        count = sum(1 for l in f if l.strip())
+                elif ext == "csv":
+                    import csv as csv_mod
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        count = sum(1 for _ in csv_mod.reader(f)) - 1
+                elif ext == "parquet":
+                    try:
+                        import pyarrow.parquet as pq
+                        count = pq.read_metadata(fpath).num_rows
+                    except ImportError:
+                        try:
+                            import pandas as pd
+                            count = len(pd.read_parquet(fpath))
+                        except ImportError:
+                            count = -1  # signal: needs deps
+            except Exception:
+                count = 0
             cursor.execute(
-                "INSERT INTO benchmark_results (model_id, model_source, benchmark_type, metrics_json, num_questions, avg_latency_ms, tokens_per_second) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (model_id, model_source, ",".join(req.benchmark_types),
-                 json.dumps(results, ensure_ascii=False), total_questions,
-                 round(avg_latency, 1), round(tps, 1))
-            )
-            bench_id = cursor.lastrowid
-            conn.commit()
-            conn.close()
-            result_holder["id"] = bench_id
-        except Exception:
-            pass
-
-        # Save results to a JSON file in benchmarks directory
-        try:
-            results_dir = os.path.join(os.path.dirname(DB_PATH), "benchmarks", "results")
-            os.makedirs(results_dir, exist_ok=True)
-            timestamp = _time.strftime("%Y%m%d_%H%M%S")
-            model_slug = model_id.replace("/", "_").replace("\\", "_")[:40]
-            result_file = os.path.join(results_dir, f"{timestamp}_{model_slug}.json")
-            with open(result_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "model_id": model_id,
-                    "timestamp": timestamp,
-                    "avg_latency_ms": round(avg_latency, 1),
-                    "tokens_per_second": round(tps, 1),
-                    "total_questions": total_questions,
-                    "results": results
-                }, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-        _broadcast_to_websockets({
-            "type": "benchmark_complete",
-            "benchmark_id": result_holder.get("id", 0),
-            "model_id": model_id,
-            "results": results,
-            "avg_latency_ms": round(avg_latency, 1),
-            "tokens_per_second": round(tps, 1),
-            "active": False
-        })
-
-    # Run in thread pool so WebSocket messages can be delivered
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, run_benchmark_thread)
-
-    return result_holder.get("data", {"error": "Benchmark failed to produce results"})
-
-
-@app.get("/api/training/benchmarks")
-async def list_benchmarks():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM benchmark_results ORDER BY created_at DESC LIMIT 30")
-    rows = cursor.fetchall()
-    conn.close()
-    return {"benchmarks": [dict(r) for r in rows]}
-
-
-@app.get("/api/training/benchmarks/{bench_id}")
-async def get_benchmark_detail(bench_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM benchmark_results WHERE id=?", (bench_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if not row:
-        raise HTTPException(status_code=404, detail="Not found")
-    return dict(row)
-
-
-@app.delete("/api/training/benchmarks/{bench_id}")
-async def delete_benchmark(bench_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM benchmark_results WHERE id=?", (bench_id,))
-    conn.commit()
-    conn.close()
-    return {"status": "success"}
+                "INSERT INTO datasets (name,source,source_path,storage_path,format,sample_count) VALUES (?,'manual',?,?,?,?)",
+                (fname, fname, fpath, ext, count))
+            conn.commit(); conn.close()
+            imported += 1
+            # Auto-populate benchmark cache if filename matches known benchmark
+            fname_lower = fname.lower()
+            for btype, keywords in bench_keywords.items():
+                if btype not in bench_populated:
+                    for kw in keywords:
+                        if kw in fname_lower:
+                            if _try_populate_benchmark_from_file(fpath, btype):
+                                bench_populated.append(btype)
+                            break
+    return {"status": "success", "imported": imported, "benchmarks_populated": bench_populated}
 
 
 class LlamaControlRequest(BaseModel):
@@ -3575,6 +2598,27 @@ def _broadcast_to_websockets(message: dict):
             asyncio.run_coroutine_threadsafe(_ws_send_safe(ws, message), loop)
         except Exception:
             pass
+
+
+# Wire route modules to shared state
+init_benchmark_routes(
+    db_path=DB_PATH,
+    download_state=_llamacpp_download_state,
+    install_state=_training_install_state,
+    broadcast_fn=_broadcast_to_websockets,
+    get_engine=get_training_engine,
+    get_llamacpp=get_llamacpp_manager,
+    load_config=load_config
+)
+init_download_routes(
+    db_path=DB_PATH,
+    download_state=_llamacpp_download_state,
+    install_state=_training_install_state,
+    broadcast_fn=_broadcast_to_websockets,
+    training_avail=_training_available,
+    get_llamacpp=get_llamacpp_manager,
+    load_config=load_config
+)
 
 def _run_background_task(task_id: int, user_query: str, context_messages: list = None,
                          is_resume: bool = False):

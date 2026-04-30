@@ -60,12 +60,14 @@ class OpenAGCAgent:
 
         # Store config for later use
         self.sandbox_dir = None
+        self.browser_headless = False
         if os.path.exists(config_path):
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
                     if config.get("sandbox_mode", True):
                         self.sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+                    self.browser_headless = config.get("browser_headless", False)
             except Exception: pass
 
         self.skills_text = skills_text
@@ -118,7 +120,7 @@ class OpenAGCAgent:
             "search_web": WebSearchTool(),
             "mac_system_action": MacSystemTool(),
             "save_learned_skill": SaveSkillTool(),
-            "browser_automation": BrowserAutomationTool(headless=False),
+            "browser_automation": BrowserAutomationTool(headless=self.browser_headless),
             "search_emails": SearchEmailTool(),
             "send_email": SendEmailTool()
         }
