@@ -2328,6 +2328,14 @@ document.addEventListener('DOMContentLoaded', () => {
         showStatus('✅ 配置已保存', 'success');
         modelConfigLoaded = false;
         loadModelConfigs();
+        
+        if (confirm('配置保存成功！是否立即前往 "模型微调" 选择数据集并开始训练？')) {
+            const header = document.querySelector('.sidebar-section-header[data-section="training"]');
+            if (header && header.classList.contains('collapsed')) {
+                header.click();
+            }
+            switchView('training-finetune');
+        }
     }
 
     setTimeout(() => {
@@ -2429,13 +2437,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Dataset Manager ---
+    let currentDatasets = [];
     async function loadDatasets() {
         if (datasetsLoaded) return;
         datasetsLoaded = true;
         try {
             const res = await fetch('/api/training/datasets');
             const data = await res.json();
-            renderDatasetList(data.datasets || []);
+            currentDatasets = data.datasets || [];
+            renderDatasetList(currentDatasets);
         } catch (e) { console.error('loadDatasets:', e); }
         loadRecommendedDatasets();
     }
@@ -2453,14 +2463,16 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderRecommendedDatasets(datasets) {
         const grid = document.getElementById('recommended-datasets-grid');
         if (!grid) return;
-        grid.innerHTML = datasets.map(d => `
+        grid.innerHTML = datasets.map(d => {
+            const isDownloaded = currentDatasets.some(cd => cd.name === d.name);
+            return `
             <div class="rec-ds-card">
                 <div class="rec-ds-name">📦 ${escapeHtml(d.name)}</div>
                 <div class="rec-ds-desc">${escapeHtml(d.desc)}</div>
                 <div class="rec-ds-meta">${d.size} · ${(d.splits||[]).join(', ')}</div>
-                <button class="btn-secondary rec-ds-dl-btn" data-repo="${d.repo_id}" data-name="${d.name}" data-config="${d.config||''}" style="margin-top:0.4rem; width:100%;">一键下载</button>
+                <button class="btn-secondary rec-ds-dl-btn" data-repo="${d.repo_id}" data-name="${d.name}" data-config="${d.config||''}" style="margin-top:0.4rem; width:100%;" ${isDownloaded ? 'disabled' : ''}>${isDownloaded ? '✓ 已下载' : '一键下载'}</button>
             </div>
-        `).join('');
+        `}).join('');
         grid.querySelectorAll('.rec-ds-dl-btn').forEach(btn => {
             btn.addEventListener('click', async function() {
                 this.disabled = true;
@@ -2523,7 +2535,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 const id = btn.dataset.id;
                 const res = await fetch(`/api/training/datasets/${id}/preview?n=5`);
                 const data = await res.json();
-                showStatus(`预览: ${(data.samples||[]).length} 条`, 'success');
+                
+                const pre = document.createElement('pre');
+                pre.style.cssText = 'background:#1a1b26;color:#a9b1d6;padding:15px;border-radius:8px;overflow:auto;max-height:60vh;white-space:pre-wrap;font-size:12px;margin:0;';
+                pre.textContent = JSON.stringify(data.samples || [], null, 2);
+                
+                const div = document.createElement('div');
+                div.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+                
+                const content = document.createElement('div');
+                content.style.cssText = 'background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;width:100%;max-width:800px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,0.5);';
+                content.innerHTML = `
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
+                        <h3 style="margin:0;font-size:1.1rem;">预览前 ${(data.samples||[]).length} 条数据</h3>
+                        <button onclick="this.closest('[style*=\\'position:fixed\\']').remove()" style="background:transparent;border:none;color:var(--text-secondary);cursor:pointer;font-size:1.2rem;padding:0 5px;">✖</button>
+                    </div>
+                `;
+                content.appendChild(pre);
+                div.appendChild(content);
+                document.body.appendChild(div);
             });
         });
         container.querySelectorAll('[data-action="edit"]').forEach(btn => {
