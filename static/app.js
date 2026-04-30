@@ -67,6 +67,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (viewId === 'settings-skills') loadSkillsConfig();
         if (viewId === 'settings-mcp') loadMcpConfig();
         if (viewId === 'tasks') loadTasks();
+        if (viewId === 'downloads') loadDownloadsView();
         if (viewId === 'training-designer') { loadModelConfigs(); checkAndOfferTrainingInstall(); }
         if (viewId === 'training-datasets') { loadDatasets(); checkAndOfferTrainingInstall(); }
         if (viewId === 'training-finetune') { loadBaseModels(); loadDatasets(); checkAndOfferTrainingInstall(); }
@@ -912,6 +913,7 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('sandbox-mode-toggle').checked = data.sandbox_mode ?? true;
             document.getElementById('sandbox-dir-input').value = data.sandbox_dir || '';
             document.getElementById('llamacpp-ctx-size').value = data.llamacpp_ctx_size || 32768;
+            document.getElementById('http-proxy-input').value = data.http_proxy || '';
             document.getElementById('heartbeat-toggle').checked = data.heartbeat_enabled ?? false;
 
             document.getElementById('email-listener-toggle').checked = data.email_listener_enabled ?? false;
@@ -1068,6 +1070,7 @@ document.addEventListener('DOMContentLoaded', () => {
             sandbox_mode: document.getElementById('sandbox-mode-toggle')?.checked ?? true,
             sandbox_dir: document.getElementById('sandbox-dir-input')?.value?.trim() || '',
             llamacpp_ctx_size: parseInt(document.getElementById('llamacpp-ctx-size')?.value) || 32768,
+            http_proxy: document.getElementById('http-proxy-input')?.value?.trim() || '',
             heartbeat_enabled: document.getElementById('heartbeat-toggle')?.checked ?? false,
             heartbeat_interval: 60,
             email_listener_enabled: document.getElementById('email-listener-toggle')?.checked ?? false,
@@ -1709,19 +1712,30 @@ document.addEventListener('DOMContentLoaded', () => {
     // Download History
     // ==========================================
     async function loadDownloadHistory() {
-        const container = document.getElementById('download-history-container');
-        const emptyState = document.getElementById('download-history-empty');
+        // Try new downloads view first, fall back to old settings container
+        let container = document.getElementById('downloads-view-container');
+        let emptyState = document.getElementById('download-history-empty');
+        if (!container) {
+            container = document.getElementById('download-history-container');
+        }
         if (!container) return;
 
         try {
             const res = await fetch('/api/downloads');
             const data = await res.json();
 
-            // Remove existing download items (keep emptyState intact)
+            // Remove existing download items and any loading placeholder
             container.querySelectorAll('.download-item').forEach(el => el.remove());
+            container.querySelectorAll('.empty-state').forEach(el => {
+                if (el.querySelector('.spinner')) el.remove();
+            });
 
             if (!data.downloads || data.downloads.length === 0) {
-                if (emptyState) emptyState.style.display = 'flex';
+                if (emptyState) {
+                    emptyState.style.display = 'flex';
+                } else {
+                    container.innerHTML = '<div class="empty-state"><p>暂无下载记录</p><small>模型和数据集下载记录将在此显示</small></div>';
+                }
                 return;
             }
 
@@ -2883,6 +2897,63 @@ document.addEventListener('DOMContentLoaded', () => {
         const sel = document.getElementById('bench-model-select');
         if (!sel) return;
         sel.innerHTML = '<option value="">加载中...</option>';
+
+        // Render benchmark dataset download cards
+        const benchList = document.getElementById('benchmark-download-list');
+        if (benchList) {
+            const benchmarks = [
+                {id:'mmlu', name:'MMLU', hf:'cais/mmlu', size:'~100MB'},
+                {id:'hellaswag', name:'HellaSwag', hf:'Rowan/hellaswag', size:'~50MB'},
+                {id:'hle', name:'HLE', hf:'cais/hle', size:'~10MB'},
+                {id:'swe_bench', name:'SWE-bench', hf:'princeton-nlp/SWE-bench_Verified', size:'~200MB'},
+            ];
+            benchList.innerHTML = benchmarks.map(b => `
+                <div class="rec-ds-card">
+                    <div class="rec-ds-name">📦 ${b.name}</div>
+                    <div class="rec-ds-meta">${b.hf} · ${b.size}</div>
+                    <div style="display:flex; gap:0.3rem; margin-top:0.4rem;">
+                        <button class="btn-secondary bench-dl-btn" data-bench="${b.id}" data-name="${b.name}" style="flex:1; font-size:0.72rem;">一键下载</button>
+                        <a href="https://huggingface.co/datasets/${b.hf}" target="_blank" class="btn-secondary" style="font-size:0.72rem; text-decoration:none; display:flex; align-items:center;">🔗</a>
+                    </div>
+                </div>
+            `).join('');
+            // Check cache status to show "已下载" where applicable
+            try {
+                const csRes = await fetch('/api/training/benchmark/cache-status');
+                const csData = await csRes.json();
+                if (csData.status === 'ok' && csData.caches) {
+                    benchList.querySelectorAll('.bench-dl-btn').forEach(btn => {
+                        const btype = btn.dataset.bench;
+                        if (csData.caches[btype] && csData.caches[btype].cached) {
+                            btn.textContent = '已下载 ✓';
+                            btn.dataset.cached = 'true';
+                            btn.dataset.count = csData.caches[btype].count;
+                        }
+                    });
+                }
+            } catch(e) { /* non-critical, buttons default to 一键下载 */ }
+            benchList.querySelectorAll('.bench-dl-btn').forEach(btn => {
+                btn.addEventListener('click', async function() {
+                    this.disabled = true; this.textContent = '下载中...';
+                    try {
+                        const res = await fetch('/api/training/benchmark/pre-download', {
+                            method:'POST', headers:{'Content-Type':'application/json'},
+                            body: JSON.stringify({benchmark_type:this.dataset.bench})
+                        });
+                        const d = await res.json();
+                        if (d.status === 'ok') {
+                            this.textContent = '已下载 ✓';
+                            this.dataset.cached = 'true';
+                            this.dataset.count = d.count;
+                            showStatus('📥 '+d.message, 'success');
+                        } else {
+                            showStatus('❌ '+(d.detail||'失败'), 'error');
+                        }
+                    } catch(e) { showStatus('❌ 网络错误','error'); }
+                    this.disabled = false;
+                });
+            });
+        }
         try {
             const res = await fetch('/api/training/all-models');
             const data = await res.json();
@@ -2895,10 +2966,50 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             sel.innerHTML = html;
         } catch (e) { console.error(e); }
+        loadCheckpointStatus();
         loadBenchmarkHistory();
     }
 
-    async function runBenchmark() {
+    async function loadCheckpointStatus() {
+        const container = document.getElementById('benchmark-resume-container');
+        if (!container) return;
+        try {
+            const res = await fetch('/api/training/benchmark/checkpoint-status');
+            const data = await res.json();
+            const ckpts = data.checkpoints || [];
+            if (!ckpts.length) { container.innerHTML = ''; return; }
+            container.innerHTML = ckpts.map(ck => {
+                const progress = Object.entries(ck.progress || {}).map(([k,v]) => `${k}: ${v}`).join(', ');
+                return `<div class="card" style="border-color:var(--theme-color); margin-bottom:0.5rem; padding:0.6rem 0.8rem;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.4rem;">
+                        <div>
+                            <span style="font-weight:600;">📋 ${escapeHtml(ck.model_id)}</span>
+                            <span style="color:var(--text-secondary); margin-left:0.5rem; font-size:0.8rem;">${progress}</span>
+                        </div>
+                        <button class="btn-primary resume-bench-btn"
+                            data-model="${escapeHtml(ck.model_id)}"
+                            data-types="${ck.benchmark_types.join(',')}"
+                            style="font-size:0.75rem; padding:0.3rem 0.8rem;">恢复测评</button>
+                    </div>
+                </div>`;
+            }).join('');
+            container.querySelectorAll('.resume-bench-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const mid = btn.dataset.model;
+                    const types = btn.dataset.types.split(',');
+                    // Select the model and checkboxes
+                    const sel = document.getElementById('bench-model-select');
+                    if (sel) sel.value = mid;
+                    document.querySelectorAll('#view-training-benchmark input[type=checkbox]').forEach(cb => {
+                        cb.checked = types.includes(cb.value);
+                    });
+                    runBenchmark(true);
+                });
+            });
+        } catch(e) { /* non-critical */ }
+    }
+
+    async function runBenchmark(resume = false) {
         if (benchmarkRunning) return;
         const modelId = document.getElementById('bench-model-select')?.value;
         if (!modelId) { showStatus('⚠️ 请选择模型', 'error'); return; }
@@ -2907,23 +3018,25 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!types.length) { showStatus('⚠️ 请选择测评类型', 'error'); return; }
 
         benchmarkRunning = true;
-        document.getElementById('run-benchmark-btn').disabled = true;
-        document.getElementById('run-benchmark-btn').textContent = '测评中...';
+        const btn = document.getElementById('run-benchmark-btn');
+        btn.disabled = true;
+        btn.textContent = resume ? '恢复中...' : '测评中...';
         document.getElementById('benchmark-progress-card').style.display = '';
         document.getElementById('benchmark-results-card').style.display = 'none';
-        document.getElementById('benchmark-progress-container').innerHTML = '<div class="field-hint">正在测评...</div>';
+        document.getElementById('benchmark-progress-container').innerHTML = '<div class="field-hint">' + (resume ? '正在恢复测评...' : '正在测评...') + '</div>';
 
         try {
             const res = await fetch('/api/training/benchmark', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ model_id: modelId, model_source: 'online', benchmark_types: types })
+                body: JSON.stringify({ model_id: modelId, model_source: 'online', benchmark_types: types, resume: resume })
             });
             const data = await res.json();
             displayBenchmarkResults(data);
+            if (resume) loadCheckpointStatus(); // refresh resume list
         } catch (e) { showStatus('❌ 测评失败', 'error'); }
         benchmarkRunning = false;
-        document.getElementById('run-benchmark-btn').disabled = false;
-        document.getElementById('run-benchmark-btn').textContent = '开始测评';
+        btn.disabled = false;
+        btn.textContent = '开始测评';
     }
 
     function handleBenchmarkProgress(data) {
@@ -2969,9 +3082,10 @@ document.addEventListener('DOMContentLoaded', () => {
             <div class="preview-item"><label>总题数</label><span>${data.total_questions||0}</span></div>
         </div>`;
 
-        results.forEach(r => {
+        results.forEach((r, ri) => {
+            const accColor = r.accuracy >= 0.7 ? 'var(--success)' : r.accuracy >= 0.4 ? '#f59e0b' : 'var(--error)';
             html += `<div style="margin-bottom:1rem; border:1px solid var(--border-color); border-radius:8px; padding:0.8rem;">
-                <div style="font-weight:700; margin-bottom:0.5rem; font-size:0.9rem;">${escapeHtml(r.name)} — 准确率: <span style="color:${r.accuracy>=0.7?'var(--success)':r.accuracy>=0.4?'#f59e0b':'var(--error)'}">${(r.accuracy*100).toFixed(0)}%</span> (${r.correct}/${r.num_questions})</div>`;
+                <div style="font-weight:700; margin-bottom:0.5rem; font-size:0.9rem;">${escapeHtml(r.name)} — 准确率: <span style="color:${accColor}">${(r.accuracy*100).toFixed(0)}%</span> (${r.correct}/${r.num_questions})</div>`;
             // Per-subject breakdown
             if (r.subjects && Object.keys(r.subjects).length > 1) {
                 html += '<div style="display:flex; flex-wrap:wrap; gap:0.3rem; margin-bottom:0.5rem;">';
@@ -2981,17 +3095,86 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
                 html += '</div>';
             }
-            (r.details || []).forEach(d => {
-                const bg = d.score >= 0.6 ? 'rgba(16,185,129,0.08)' : d.error ? 'rgba(239,68,68,0.08)' : 'rgba(245,158,11,0.08)';
-                const border = d.score >= 0.6 ? 'rgba(16,185,129,0.3)' : d.error ? 'rgba(239,68,68,0.3)' : 'rgba(245,158,11,0.3)';
-                html += `<div style="padding:0.4rem 0.6rem; margin-bottom:0.25rem; background:${bg}; border:1px solid ${border}; border-radius:6px; font-size:0.78rem;">
-                    <div style="font-weight:600;">Q: ${escapeHtml(d.question || '')}${d.error ? ' <span style="color:var(--error);">⚠ '+escapeHtml(d.error)+'</span>' : ''}</div>
-                    <div style="color:var(--text-secondary); margin-top:0.15rem;">得分: ${d.score} | 延迟: ${d.latency_ms}ms | ${escapeHtml((d.answer_preview||'').substring(0, 100))}</div>
-                </div>`;
+            // Score distribution bar
+            const details = r.details || [];
+            const scoreColors = {'1.0': 'var(--success)', '0.8': '#10b981', '0.7': '#34d399'};
+            html += '<div style="display:flex; gap:2px; margin-bottom:0.4rem; height:4px; border-radius:2px; overflow:hidden;">';
+            details.forEach(d => {
+                const sc = d.score || 0;
+                const scColor = sc >= 0.8 ? 'var(--success)' : sc >= 0.5 ? '#f59e0b' : sc > 0 ? 'var(--error)' : '#9ca3af';
+                html += `<div style="flex:1; background:${scColor};" title="#${(d.idx||0)+1}: ${sc}"></div>`;
             });
             html += '</div>';
+
+            // Expandable question cards
+            const batchId = `bench-batch-${ri}-${Date.now()}`;
+            html += `<div style="max-height:360px; overflow-y:auto; border:1px solid var(--border-color); border-radius:6px;">`;
+            details.forEach((d, di) => {
+                const qid = `${batchId}-q${di}`;
+                const sc = d.score || 0;
+                const scColor = sc >= 0.8 ? 'var(--success)' : sc >= 0.5 ? '#f59e0b' : 'var(--error)';
+                const scLabel = d.error ? 'ERR' : sc.toFixed(1);
+                // Use full question/answer if available, fall back to legacy truncated fields
+                const question = d.question || '';
+                const questionPreview = question.length > 80 ? question.substring(0, 80) + '...' : question;
+                const answer = d.answer || d.answer_preview || '';
+                const expected = d.expected || '';
+                const hasFull = !!(d.answer);
+                html += `<div style="border-bottom:1px solid var(--border-color); font-size:0.75rem;">
+                    <div class="bench-q-header" data-qid="${qid}" style="display:flex; align-items:center; gap:0.4rem; padding:0.35rem 0.5rem; cursor:pointer; user-select:none; hover:bg:var(--bg-inner);">
+                        <span style="font-weight:600; min-width:28px; color:var(--text-secondary);">#${(d.idx||di)+1}</span>
+                        <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(questionPreview)}</span>
+                        <span style="font-weight:700; min-width:32px; text-align:center; padding:0.1rem 0.3rem; border-radius:4px; font-size:0.7rem; background:${scColor}22; color:${scColor};">${scLabel}</span>
+                        <span style="color:var(--text-secondary); font-size:0.65rem; min-width:45px; text-align:right;">${d.latency_ms||0}ms</span>
+                        <span style="font-size:0.65rem; color:var(--text-secondary);">▶</span>
+                    </div>
+                    <div id="${qid}" style="display:none; padding:0.4rem 0.6rem; background:var(--bg-inner); border-top:1px solid var(--border-color);">
+                        <div style="margin-bottom:0.35rem;"><span style="font-weight:600; color:var(--text-secondary);">题目:</span><div style="white-space:pre-wrap; margin-top:0.15rem;">${escapeHtml(question)}</div></div>`;
+                if (d.choices && d.choices.length) {
+                    const labels = ['A','B','C','D','E','F'];
+                    html += `<div style="margin-bottom:0.35rem;"><span style="font-weight:600; color:var(--text-secondary);">选项:</span><div style="margin-top:0.15rem;">${d.choices.map((c,i) => `<span style="margin-right:0.6rem;">${labels[i]}) ${escapeHtml(c)}</span>`).join('')}</div></div>`;
+                }
+                if (d.error) {
+                    html += `<div style="margin-bottom:0.35rem; color:var(--error);"><span style="font-weight:600;">错误:</span> ${escapeHtml(d.error)}</div>`;
+                } else {
+                    html += `<div style="margin-bottom:0.35rem;"><span style="font-weight:600; color:var(--text-secondary);">模型回答:</span><div style="white-space:pre-wrap; margin-top:0.15rem;">${escapeHtml(answer)}</div></div>`;
+                }
+                html += `<div style="margin-bottom:0.35rem;"><span style="font-weight:600; color:var(--text-secondary);">期望答案:</span> ${escapeHtml(expected || '(无)')}</div>
+                        <div style="display:flex; gap:0.8rem; flex-wrap:wrap; font-size:0.7rem; color:var(--text-secondary);">
+                            <span>得分: <b style="color:${scColor}">${sc.toFixed(2)}</b></span>
+                            <span>评分方式: ${escapeHtml(d.scoring||'keyword_match')}</span>
+                            <span>延迟: ${d.latency_ms||0}ms</span>
+                            <span>Token: ${d.tokens||0}</span>
+                            <span>科目: ${escapeHtml(d.subject||'general')}</span>
+                        </div>`;
+                // Scoring method explanation
+                if (d.scoring === 'multiple_choice') {
+                    html += `<div style="font-size:0.65rem; color:var(--text-secondary); margin-top:0.2rem; padding:0.2rem 0.35rem; background:var(--bg-color); border-radius:4px;">📋 评分规则: 首字母完全匹配=1.0，期望答案出现在前5字符=0.8，≥0.5 判为正确</div>`;
+                } else if (d.scoring !== 'latency_only') {
+                    html += `<div style="font-size:0.65rem; color:var(--text-secondary); margin-top:0.2rem; padding:0.2rem 0.35rem; background:var(--bg-color); border-radius:4px;">📋 评分规则: 完全匹配关键词=0.8，按词重叠比例计算补充分(max 0.7)，≥0.4 判为正确</div>`;
+                }
+                html += '</div></div>';
+            });
+            html += '</div></div>';
         });
         content.innerHTML = html;
+
+        // Wire expand/collapse
+        content.querySelectorAll('.bench-q-header').forEach(header => {
+            header.addEventListener('click', function() {
+                const qid = this.dataset.qid;
+                const body = document.getElementById(qid);
+                if (!body) return;
+                const arrow = this.querySelector('span:last-child');
+                if (body.style.display === 'none') {
+                    body.style.display = '';
+                    if (arrow) arrow.textContent = '▼';
+                } else {
+                    body.style.display = 'none';
+                    if (arrow) arrow.textContent = '▶';
+                }
+            });
+        });
     }
 
     async function loadBenchmarkHistory() {
@@ -3052,8 +3235,37 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Wire benchmark button
     setTimeout(() => {
-        document.getElementById('run-benchmark-btn')?.addEventListener('click', runBenchmark);
+        document.getElementById('run-benchmark-btn')?.addEventListener('click', () => runBenchmark());
     }, 300);
+
+    // ==========================================
+    // Download Manager
+    // ==========================================
+    async function loadDownloadsView() {
+        const dst = document.getElementById('downloads-view-container');
+        if (dst) dst.innerHTML = '<div class="empty-state"><div class="spinner"></div><span>加载中...</span></div>';
+        await loadDownloadHistory();
+        document.getElementById('scan-import-btn')?.addEventListener('click', async () => {
+            const btn = document.getElementById('scan-import-btn');
+            btn.disabled = true; btn.textContent = '扫描中...';
+            try {
+                const res = await fetch('/api/training/datasets/scan-import', { method: 'POST' });
+                const data = await res.json();
+                const parts = [];
+                if (data.imported > 0) {
+                    parts.push(`已导入 ${data.imported} 个数据集`);
+                    datasetsLoaded = false;
+                } else {
+                    parts.push('未发现新数据集文件');
+                }
+                if (data.benchmarks_populated && data.benchmarks_populated.length > 0) {
+                    parts.push(`已关联测评缓存: ${data.benchmarks_populated.join(', ')}，请刷新测评页面`);
+                }
+                showStatus('✅ ' + parts.join('；'), 'success');
+            } catch (e) { showStatus('❌ 扫描失败', 'error'); }
+            btn.disabled = false; btn.textContent = '扫描导入';
+        });
+    }
 
     initI18n();
     initSettingsListeners();

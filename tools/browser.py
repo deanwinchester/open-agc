@@ -4,6 +4,8 @@ import threading
 import queue
 import os
 import glob
+import shutil
+import sys
 
 class BrowserAutomationTool:
     """
@@ -16,9 +18,10 @@ class BrowserAutomationTool:
     - 初始化增加超时保护，防止永久阻塞
     - Singleton 崩溃后可自动恢复
     - 持久模式失败时自动降级为非持久模式
+    - 自动检测无显示器环境（WSL/服务器）并切换 headless 模式
     """
     _instance = None
-    
+
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
             cls._instance = super(BrowserAutomationTool, cls).__new__(cls)
@@ -26,13 +29,68 @@ class BrowserAutomationTool:
         return cls._instance
 
     def __init__(self, headless: bool = False):
-        if self._initialized: 
+        if self._initialized:
             return
+        # Auto-detect headless requirement: if no display available, force headless
+        if not headless and not self._has_display():
+            headless = True
+            print("[Browser] 未检测到显示器 (DISPLAY/WAYLAND_DISPLAY)，自动切换为 headless 模式")
         self.headless = headless
         self.cmd_queue = queue.Queue()
         self.res_queue = queue.Queue()
         self.thread = None
         self._initialized = True
+
+    @staticmethod
+    def _has_display():
+        """Check if a graphical display is available."""
+        if sys.platform == "win32":
+            return True
+        return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+    @staticmethod
+    def _find_chromium():
+        """Check if Playwright's Chromium is installed. Returns path or None."""
+        # Standard Playwright browser cache locations
+        home = os.path.expanduser("~")
+        candidates = []
+        if sys.platform == "win32":
+            candidates = [
+                os.path.join(os.environ.get("LOCALAPPDATA", ""), "ms-playwright", "chromium-*"),
+                os.path.join(home, "AppData", "Local", "ms-playwright", "chromium-*"),
+            ]
+        elif sys.platform == "darwin":
+            candidates = [
+                os.path.join(home, "Library", "Caches", "ms-playwright", "chromium-*"),
+            ]
+        else:
+            candidates = [
+                os.path.join(home, ".cache", "ms-playwright", "chromium-*"),
+            ]
+        for pattern in candidates:
+            matches = glob.glob(pattern)
+            for m in matches:
+                if sys.platform == "win32":
+                    exe = os.path.join(m, "chrome-win", "chrome.exe")
+                elif sys.platform == "darwin":
+                    exe = os.path.join(m, "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium")
+                else:
+                    exe = os.path.join(m, "chrome-linux", "chrome")
+                if os.path.isfile(exe):
+                    return exe
+        # Fallback: check if playwright CLI is available and chromium is installed
+        if shutil.which("playwright"):
+            import subprocess
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "playwright", "install", "--dry-run", "chromium"],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    return True  # playwright says it's installed
+            except Exception:
+                pass
+        return None
 
     def _clean_lock_files(self, user_data_dir: str):
         """清理浏览器 profile 目录中的锁文件，防止启动冲突。"""
@@ -60,6 +118,17 @@ class BrowserAutomationTool:
             except queue.Empty:
                 break
 
+        # Pre-flight: check Chromium is installed
+        if not self._find_chromium():
+            msg = (
+                "Playwright Chromium 浏览器未安装。请运行以下命令安装：\n"
+                "  playwright install chromium\n"
+                "如果 playwright 命令不可用，请运行：\n"
+                f"  {sys.executable} -m playwright install chromium"
+            )
+            self.res_queue.put({"status": "error", "message": msg})
+            raise RuntimeError(msg)
+
         self.thread = threading.Thread(target=self._browser_loop, daemon=True)
         self.thread.start()
 
@@ -77,6 +146,15 @@ class BrowserAutomationTool:
         """运行在独立线程中的 Playwright 事件循环"""
         try:
             with sync_playwright() as p:
+                # Verify chromium is reachable via Playwright
+                try:
+                    _ = p.chromium
+                except Exception as e:
+                    msg = str(e)
+                    if "executable" in msg.lower() or "not found" in msg.lower() or "doesn't exist" in msg.lower():
+                        msg += "\n请运行: playwright install chromium"
+                    self.res_queue.put({"status": "error", "message": f"Chromium 不可用: {msg}"})
+                    return
                 user_data_dir = os.path.join(os.getcwd(), "data", "browser_profile")
                 os.makedirs(user_data_dir, exist_ok=True)
 
