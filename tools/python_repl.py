@@ -49,23 +49,27 @@ class PythonREPLTool(BaseTool):
                 pass
 
         # Create a temporary file to run the python code cleanly
-        # Use Sandbox dir if available
-        temp_dir = cwd if cwd else None
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir=temp_dir) as temp:
+        # Keep it in the system temp folder to avoid triggering uvicorn WatchFiles
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as temp:
             temp.write(code)
             temp_path = temp.name
 
         try:
             # Note: For production Open-AGC, this should run in a docker container or restricted environment.
             # Using current python environment for simplicity.
+            import sys
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+            
             result = subprocess.run(
-                ["python3", temp_path],
+                [sys.executable, temp_path],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 timeout=60,
-                cwd=cwd
+                cwd=cwd,
+                env=env
             )
             
             output = ""

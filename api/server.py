@@ -606,7 +606,8 @@ def load_config() -> dict:
             "ollama": "http://localhost:11434",
             "llamacpp": "http://localhost:8080/v1",
             "sglang": "http://localhost:8009/v1",
-            "vllm": "http://localhost:8000/v1"
+            "vllm": "http://localhost:8000/v1",
+            "huggingface": ""
         },
         "default_model": "sglang/Qwen/Qwen3.5-9B-Instruct",
         "fallback_models": ["ollama/qwen3.5:9b"],
@@ -695,7 +696,8 @@ async def update_settings(config_update: ConfigUpdate):
         "kimi": "MOONSHOT_API_KEY",
         "glm": "ZAI_API_KEY",
         "minimax": "MINIMAX_API_KEY",
-        "ollama": "OLLAMA_API_BASE"
+        "ollama": "OLLAMA_API_BASE",
+        "huggingface": "HF_TOKEN"
     }
 
     try:
