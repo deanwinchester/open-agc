@@ -4,15 +4,120 @@ Runs in a background thread and broadcasts progress via WebSocket.
 """
 import threading
 import time
+import sys
+import subprocess
+import importlib
 
-_training_available = False
-try:
+
+def _ensure_training_deps():
+    """
+    Auto-install missing training dependencies at server startup.
+    Installs packages one-by-one so a single failure doesn't block others.
+    Also detects corrupted packages (importable at top-level but broken internally).
+    """
+    required = {
+        "sklearn": "scikit-learn>=1.0.0",
+        "torch": "torch>=2.1.0",
+        "transformers": "transformers>=4.35.0",
+        "peft": "peft>=0.6.0",
+        "accelerate": "accelerate>=0.24.0",
+        "datasets": "datasets>=2.14.0",
+        "sentencepiece": "sentencepiece>=0.1.99",
+    }
+
+    # Deep import checks: verify internal submodules to catch corrupted installs
+    deep_checks = {
+        "sklearn": ["sklearn.utils", "sklearn.base", "sklearn.metrics"],
+        "transformers": ["transformers.AutoModel"],
+    }
+
+    def _is_package_ok(mod_name):
+        """Check if package imports AND its critical submodules work."""
+        try:
+            importlib.import_module(mod_name)
+        except (ImportError, ModuleNotFoundError):
+            return False, "not installed"
+        # Deep check
+        for sub in deep_checks.get(mod_name, []):
+            try:
+                parts = sub.split(".")
+                if len(parts) == 2:
+                    parent = importlib.import_module(parts[0])
+                    getattr(parent, parts[1])
+                else:
+                    importlib.import_module(sub)
+            except (ImportError, ModuleNotFoundError, AttributeError) as e:
+                return False, f"broken ({sub}: {e})"
+        return True, "ok"
+
+    missing = {}
+    broken = {}
+    for mod_name, pip_spec in required.items():
+        ok, reason = _is_package_ok(mod_name)
+        if not ok:
+            if "broken" in reason:
+                broken[mod_name] = pip_spec
+                print(f"[TrainingEngine] {mod_name} is corrupted: {reason}")
+            else:
+                missing[mod_name] = pip_spec
+
+    if not missing and not broken:
+        return True  # All deps already available and healthy
+
+    all_to_install = {**missing, **broken}
+    print(f"[TrainingEngine] Missing training deps: {', '.join(missing.keys()) or '(none)'}, "
+          f"broken: {', '.join(broken.keys()) or '(none)'}, auto-installing...")
+
+    for mod_name, pip_spec in all_to_install.items():
+        is_broken = mod_name in broken
+        print(f"[TrainingEngine]   installing {pip_spec} {'(repair)' if is_broken else ''}...")
+        try:
+            cmd = [sys.executable, "-m", "pip", "install", "--quiet"]
+            if is_broken:
+                # Force reinstall for corrupted packages
+                cmd.append("--force-reinstall")
+            cmd.append(pip_spec)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                # Check if it's actually importable despite pip exit code
+                importlib.invalidate_caches()
+                ok, reason = _is_package_ok(mod_name)
+                if ok:
+                    print(f"[TrainingEngine]   [OK] {mod_name} (pip exit {result.returncode} but works)")
+                else:
+                    stderr_short = (result.stderr or result.stdout or "")[-300:]
+                    print(f"[TrainingEngine]   [FAIL] {mod_name}: {reason} | pip: {stderr_short}")
+            else:
+                print(f"[TrainingEngine]   [OK] {mod_name}")
+        except subprocess.TimeoutExpired:
+            print(f"[TrainingEngine]   [FAIL] {mod_name} timeout")
+        except Exception as e:
+            print(f"[TrainingEngine]   [FAIL] {mod_name}: {e}")
+
+    # Re-verify after installation
+    importlib.invalidate_caches()
+    still_bad = []
+    for mod_name in required:
+        ok, reason = _is_package_ok(mod_name)
+        if not ok:
+            still_bad.append(f"{mod_name}({reason})")
+
+    if still_bad:
+        print(f"[TrainingEngine] WARNING: still broken: {', '.join(still_bad)}")
+        return False
+    else:
+        print("[TrainingEngine] All training deps ready.")
+        return True
+
+
+
+# Run auto-install at import time (i.e. server startup)
+_training_available = _ensure_training_deps()
+
+if _training_available:
     import torch
     import transformers
     import peft
-    _training_available = True
-except ImportError:
-    pass
 
 # datasets is optional — dataset download works via HTTP fallback
 _datasets_available = False
@@ -21,6 +126,7 @@ try:
     _datasets_available = True
 except ImportError:
     pass
+
 
 
 class TrainingEngine:

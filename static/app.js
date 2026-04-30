@@ -896,7 +896,8 @@ document.addEventListener('DOMContentLoaded', () => {
         { key: "gemini", label: "Google Gemini" },
         { key: "deepseek", label: "DeepSeek" },
         { key: "glm", label: "GLM (智谱)" },
-        { key: "minimax", label: "MiniMax" }
+        { key: "minimax", label: "MiniMax" },
+        { key: "huggingface", label: "HuggingFace Token" }
     ];
 
     let settingsLoaded = false;

@@ -6,6 +6,7 @@ import os
 import glob
 import shutil
 import sys
+import traceback
 
 class BrowserAutomationTool:
     """
@@ -19,6 +20,7 @@ class BrowserAutomationTool:
     - Singleton 崩溃后可自动恢复
     - 持久模式失败时自动降级为非持久模式
     - 自动检测无显示器环境（WSL/服务器）并切换 headless 模式
+    - 使用独立的 init_queue 避免初始化信号与命令响应混淆
     """
     _instance = None
 
@@ -38,7 +40,9 @@ class BrowserAutomationTool:
         self.headless = headless
         self.cmd_queue = queue.Queue()
         self.res_queue = queue.Queue()
+        self._init_queue = queue.Queue()  # Separate queue for init signals only
         self.thread = None
+        self._lock = threading.Lock()  # Protect thread startup from races
         self._initialized = True
 
     @staticmethod
@@ -71,7 +75,9 @@ class BrowserAutomationTool:
             matches = glob.glob(pattern)
             for m in matches:
                 if sys.platform == "win32":
-                    exe = os.path.join(m, "chrome-win", "chrome.exe")
+                    exe1 = os.path.join(m, "chrome-win64", "chrome.exe")
+                    exe2 = os.path.join(m, "chrome-win", "chrome.exe")
+                    exe = exe1 if os.path.isfile(exe1) else exe2
                 elif sys.platform == "darwin":
                     exe = os.path.join(m, "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium")
                 else:
@@ -106,41 +112,44 @@ class BrowserAutomationTool:
                     pass
         
     def _start_browser_thread(self):
-        if self.thread is not None and self.thread.is_alive():
-            return  # 线程仍然存活，无需重启
+        """启动浏览器后台线程，线程安全，带完善的错误传播。"""
+        with self._lock:
+            if self.thread is not None and self.thread.is_alive():
+                return  # 线程仍然存活，无需重启
 
-        # 如果旧线程已死，清理状态
-        self.thread = None
-        # 清空队列中的残留数据
-        while not self.res_queue.empty():
+            # 如果旧线程已死，清理状态
+            self.thread = None
+            # 清空队列中的残留数据
+            for q in (self.res_queue, self._init_queue):
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        break
+
+            # Pre-flight: check Chromium is installed
+            if not self._find_chromium():
+                msg = (
+                    "Playwright Chromium 浏览器未安装。请运行以下命令安装：\n"
+                    "  playwright install chromium\n"
+                    "如果 playwright 命令不可用，请运行：\n"
+                    f"  {sys.executable} -m playwright install chromium"
+                )
+                # Don't put into res_queue — return the error directly via raise
+                raise RuntimeError(msg)
+
+            self.thread = threading.Thread(target=self._browser_loop, daemon=True)
+            self.thread.start()
+
+            # 带超时的初始化等待 — 使用独立的 init_queue
             try:
-                self.res_queue.get_nowait()
+                res = self._init_queue.get(timeout=20)
+                if res.get("status") == "error":
+                    self.thread = None  # 允许重试
+                    raise RuntimeError(f"Playwright 初始化失败: {res.get('message')}")
             except queue.Empty:
-                break
-
-        # Pre-flight: check Chromium is installed
-        if not self._find_chromium():
-            msg = (
-                "Playwright Chromium 浏览器未安装。请运行以下命令安装：\n"
-                "  playwright install chromium\n"
-                "如果 playwright 命令不可用，请运行：\n"
-                f"  {sys.executable} -m playwright install chromium"
-            )
-            self.res_queue.put({"status": "error", "message": msg})
-            raise RuntimeError(msg)
-
-        self.thread = threading.Thread(target=self._browser_loop, daemon=True)
-        self.thread.start()
-
-        # 带超时的初始化等待
-        try:
-            res = self.res_queue.get(timeout=20)
-            if res.get("status") == "error":
-                self.thread = None  # 允许重试
-                raise RuntimeError(f"Playwright 初始化失败: {res.get('message')}")
-        except queue.Empty:
-            self.thread = None  # 超时，允许重试
-            raise RuntimeError("Playwright 初始化超时 (20秒)。请确认 Chromium 浏览器已正确安装。")
+                self.thread = None  # 超时，允许重试
+                raise RuntimeError("Playwright 初始化超时 (20秒)。请确认 Chromium 浏览器已正确安装。")
 
     def _browser_loop(self):
         """运行在独立线程中的 Playwright 事件循环"""
@@ -153,7 +162,7 @@ class BrowserAutomationTool:
                     msg = str(e)
                     if "executable" in msg.lower() or "not found" in msg.lower() or "doesn't exist" in msg.lower():
                         msg += "\n请运行: playwright install chromium"
-                    self.res_queue.put({"status": "error", "message": f"Chromium 不可用: {msg}"})
+                    self._init_queue.put({"status": "error", "message": f"Chromium 不可用: {msg}"})
                     return
                 user_data_dir = os.path.join(os.getcwd(), "data", "browser_profile")
                 os.makedirs(user_data_dir, exist_ok=True)
@@ -190,11 +199,11 @@ class BrowserAutomationTool:
                         )
                         page = context.new_page()
                     except Exception as e2:
-                        self.res_queue.put({"status": "error", "message": f"浏览器启动完全失败: {str(e2)}"})
+                        self._init_queue.put({"status": "error", "message": f"浏览器启动完全失败: {str(e2)}"})
                         return
                 
-                # Signal successful init
-                self.res_queue.put({"status": "success", "message": "init ok"})
+                # Signal successful init via the dedicated init queue
+                self._init_queue.put({"status": "success", "message": "init ok"})
                 
                 while True:
                     cmd = self.cmd_queue.get()
@@ -212,7 +221,18 @@ class BrowserAutomationTool:
                         self.res_queue.put({"status": "error", "message": f"浏览器执行出错 - {str(e)}"})
                         
         except Exception as e:
-            self.res_queue.put({"status": "error", "message": str(e)})
+            error_msg = f"Playwright 线程意外崩溃: {str(e)}"
+            print(f"[Browser] {error_msg}\n{traceback.format_exc()}")
+            # Try to signal via init_queue in case we crashed during init
+            try:
+                self._init_queue.put_nowait({"status": "error", "message": error_msg})
+            except Exception:
+                pass
+            # Also put into res_queue in case we crashed during command execution
+            try:
+                self.res_queue.put_nowait({"status": "error", "message": error_msg})
+            except Exception:
+                pass
 
     def _handle_action(self, page, cmd: dict) -> str:
         action = cmd.get("action")
@@ -308,8 +328,16 @@ class BrowserAutomationTool:
                 self.thread = None
             return "浏览器已关闭"
 
+        # Phase 1: Ensure browser thread is running
         try:
             self._start_browser_thread()
+        except RuntimeError as e:
+            # Directly return the detailed error from _start_browser_thread
+            # instead of hiding it behind "内部通讯错误"
+            return f"Error: {str(e)}"
+
+        # Phase 2: Send command and wait for response
+        try:
             self.cmd_queue.put({
                 "action": action, 
                 "url": url, 
@@ -325,9 +353,14 @@ class BrowserAutomationTool:
                 return f"Error: {res.get('message')}"
             return res.get("message", "")
         except queue.Empty:
-            return "Error: 执行超时或浏览器线程无响应"
+            # Check if the thread died while we were waiting
+            if self.thread is None or not self.thread.is_alive():
+                self.thread = None
+                return "Error: 浏览器线程已崩溃，下次调用将自动重启。请重试此操作。"
+            return "Error: 浏览器操作超时 (30秒)，页面可能加载缓慢，请增大 wait_time 参数后重试"
         except Exception as e:
-            return f"Error: 内部通讯错误 - {str(e)}"
+            print(f"[Browser] 执行异常: {str(e)}\n{traceback.format_exc()}")
+            return f"Error: 浏览器通讯异常 - {str(e)}"
 
     def get_openai_schema(self) -> dict:
         return {

@@ -312,7 +312,8 @@ class LLMClient:
             "ollama": "OLLAMA_API_BASE",
             "sglang": "SGLANG_API_BASE",
             "vllm": "VLLM_API_BASE",
-            "llamacpp": "LLAMACPP_API_BASE"
+            "llamacpp": "LLAMACPP_API_BASE",
+            "huggingface": "HF_TOKEN"
         }
         for provider, env_var in PROVIDER_ENV_MAP.items():
             key = config.get("api_keys", {}).get(provider, "")

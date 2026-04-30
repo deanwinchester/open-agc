@@ -49,6 +49,15 @@ def _get(url, **kwargs):
     proxies = _get_proxies()
     if proxies:
         kwargs.setdefault("proxies", proxies)
+    
+    # Inject HF Token for gated datasets
+    hf_token = os.environ.get("HF_TOKEN")
+    if hf_token and "huggingface.co" in url:
+        headers = kwargs.get("headers", {})
+        if "Authorization" not in headers:
+            headers["Authorization"] = f"Bearer {hf_token}"
+            kwargs["headers"] = headers
+            
     return requests.get(url, **kwargs)
 
 # ── shared state (injected at init) ──
@@ -214,8 +223,10 @@ async def download_dataset(req: DatasetDownloadRequest):
                         if proxies.get("http") and not os.environ.get(env_key):
                             os.environ[env_key] = proxies["http"]
                 from datasets import load_dataset
+                hf_token = os.environ.get("HF_TOKEN")
                 kw = {"path": req.repo_id, "split": req.split, "streaming": False,
-                      "trust_remote_code": True, "cache_dir": storage_dir}
+                      "trust_remote_code": True, "cache_dir": storage_dir,
+                      "token": hf_token}
                 if req.config: kw["name"] = req.config
                 ds = load_dataset(**kw)
                 total = len(ds)
@@ -369,11 +380,22 @@ async def install_training_deps():
     global _training_install_state
     if _training_install_state["active"]:
         raise HTTPException(status_code=409, detail="安装任务正在进行中")
-    try:
-        import torch, transformers, peft, datasets  # noqa: F401
+
+    # Check which core packages are actually missing using importlib (cache-safe)
+    import importlib
+    _core_pkgs = {
+        "torch": "torch", "transformers": "transformers",
+        "peft": "peft", "datasets": "datasets"
+    }
+    missing = []
+    for pkg_name, import_name in _core_pkgs.items():
+        try:
+            importlib.import_module(import_name)
+        except ImportError:
+            missing.append(pkg_name)
+
+    if not missing:
         raise HTTPException(status_code=400, detail="训练依赖已安装")
-    except ImportError:
-        pass
 
     deps = ["torch>=2.1.0","transformers>=4.35.0","peft>=0.6.0",
             "accelerate>=0.24.0","datasets>=2.14.0",
@@ -383,37 +405,59 @@ async def install_training_deps():
 
     _training_install_state.update({
         "active":True,"stage":"installing",
-        "label":"正在安装训练依赖 (全部)...","progress":0.0,
+        "label":f"正在安装训练依赖 (缺失: {', '.join(missing)})...","progress":0.0,
         "current_pkg":", ".join(deps),"error":""
     })
 
     def run_install():
         global _training_install_state
-        import subprocess as sp, re
+        import subprocess as sp, re, importlib
         try:
             cmd = [sys.executable,"-m","pip","install","--progress-bar","on"] + deps
             proc = sp.Popen(cmd, stdout=sp.PIPE, stderr=sp.STDOUT, text=True, bufsize=1)
-            pkg_count = len(deps); installed = 0; last_bc = 0; output_lines = []
+            pkg_count = len(deps); last_bc = 0; output_lines = []
+
+            # Track progress by top-level package names (not transitive deps)
+            top_level_names = set()
+            for d in deps:
+                # Extract package name from version specifier like "torch>=2.1.0"
+                name = re.split(r'[><=!]', d)[0].strip().lower().replace('-', '_')
+                top_level_names.add(name)
+            seen_satisfied = set()
 
             for line in proc.stdout:
                 line = line.strip()
                 if not line: continue
                 output_lines.append(line)
-                if len(output_lines) > 30: output_lines.pop(0)
+                if len(output_lines) > 50: output_lines.pop(0)
                 now = _time.time()
 
                 if "Successfully installed" in line:
-                    installed += 1
-                    _training_install_state["progress"] = min(installed/pkg_count, 0.98)
-                    _training_install_state["label"] = f"已安装 {installed}/{pkg_count} 个包"
-                elif "already satisfied" in line.lower() or "Requirement already satisfied" in line:
-                    installed += 1
-                    _training_install_state["progress"] = installed/pkg_count
-                    _training_install_state["label"] = f"已满足 {installed}/{pkg_count} 个包"
+                    # "Successfully installed torch-2.x transformers-4.x ..."
+                    # Count how many of our top-level deps were in this line
+                    parts = line.replace("Successfully installed", "").strip().split()
+                    for part in parts:
+                        pkg_base = re.split(r'[-]?\d', part)[0].strip().lower().replace('-', '_')
+                        if pkg_base in top_level_names:
+                            seen_satisfied.add(pkg_base)
+                    progress = min(len(seen_satisfied) / pkg_count, 0.98)
+                    _training_install_state["progress"] = progress
+                    _training_install_state["label"] = f"已安装 {len(seen_satisfied)}/{pkg_count} 个包"
+                elif "Requirement already satisfied" in line:
+                    # Only count if it's a top-level package, not a transitive dep
+                    m = re.match(r'Requirement already satisfied:\s*(\S+)', line)
+                    if m:
+                        pkg_base = re.split(r'[><=!;\[]', m.group(1))[0].strip().lower().replace('-', '_')
+                        if pkg_base in top_level_names:
+                            seen_satisfied.add(pkg_base)
+                            progress = min(len(seen_satisfied) / pkg_count, 0.98)
+                            _training_install_state["progress"] = progress
+                            _training_install_state["label"] = f"已满足 {len(seen_satisfied)}/{pkg_count} 个包"
                 elif "Downloading" in line:
                     m = re.search(r'(\d+)%', line)
                     if m:
-                        _training_install_state["progress"] = (installed + int(m.group(1))/100) / pkg_count
+                        base_progress = len(seen_satisfied) / pkg_count
+                        _training_install_state["progress"] = base_progress + (int(m.group(1))/100) / pkg_count
                     _training_install_state["label"] = line[:130]
                 elif any(w in line for w in ["Collecting","Installing","Building"]):
                     _training_install_state["label"] = line[:130]
@@ -428,22 +472,34 @@ async def install_training_deps():
                     last_bc = now
 
             proc.wait()
-            imports_ok = False
-            try:
-                import torch, transformers, peft  # noqa: F401
-                imports_ok = True
-            except ImportError:
-                pass
 
-            if proc.returncode != 0 and not imports_ok:
-                err = "\n".join(output_lines[-10:]) or "无详细输出"
+            # Verify imports using importlib (avoids Python import cache issues)
+            # invalidate_caches() ensures newly-installed packages are discoverable
+            importlib.invalidate_caches()
+            failed_imports = []
+            for pkg_name, import_name in [("torch","torch"),("transformers","transformers"),
+                                           ("peft","peft"),("datasets","datasets")]:
+                try:
+                    importlib.import_module(import_name)
+                except ImportError:
+                    failed_imports.append(pkg_name)
+
+            if failed_imports:
+                # Packages are still not importable even after pip ran
+                err_detail = f"以下包安装后仍无法导入: {', '.join(failed_imports)}"
+                if proc.returncode != 0:
+                    err_detail += f"\npip 退出码: {proc.returncode}"
+                    pip_output = "\n".join(output_lines[-10:])
+                    err_detail += f"\n{pip_output[:300]}"
                 _training_install_state.update({"active":False,"stage":"error",
-                    "error":f"pip 退出码 {proc.returncode}: {err[:400]}"})
+                    "error":err_detail[:500]})
                 _broadcast({"type":"training_install_progress","stage":"error",
-                            "label":f"安装失败 (错误 {proc.returncode})",
+                            "label":f"安装不完整: {', '.join(failed_imports)} 无法导入",
                             "progress":0,"error":_training_install_state["error"],"active":False})
                 return
 
+            # All core packages importable — success regardless of pip exit code
+            # (pip may exit 1 due to non-fatal warnings like "new pip version available")
             _training_install_state.update({"active":False,"stage":"complete","progress":1.0,
                 "label":"依赖安装完成，请刷新页面启用训练功能"})
             _broadcast({"type":"training_install_progress","stage":"complete",
@@ -455,7 +511,7 @@ async def install_training_deps():
                         "error":str(e)[:300],"active":False})
 
     threading.Thread(target=run_install, daemon=True).start()
-    return {"status":"started","message":"正在安装训练依赖...","total":len(deps)}
+    return {"status":"started","message":f"正在安装训练依赖 (缺失: {', '.join(missing)})...","total":len(deps)}
 
 
 # ── Status Endpoint ──
