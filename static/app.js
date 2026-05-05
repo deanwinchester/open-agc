@@ -70,6 +70,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (viewId === 'downloads') loadDownloadsView();
         if (viewId === 'training-designer') { loadModelConfigs(); checkAndOfferTrainingInstall(); }
         if (viewId === 'training-datasets') { loadDatasets(); checkAndOfferTrainingInstall(); }
+        if (viewId === 'training-scratch') { loadScratchTrainingData(); checkAndOfferTrainingInstall(); }
         if (viewId === 'training-finetune') { loadBaseModels(); loadDatasets(); checkAndOfferTrainingInstall(); }
         if (viewId === 'training-history') { loadTrainingRuns(); checkAndOfferTrainingInstall(); }
         if (viewId === 'training-monitor') { initTrainingMonitor(); checkAndOfferTrainingInstall(); }
@@ -2329,12 +2330,12 @@ document.addEventListener('DOMContentLoaded', () => {
         modelConfigLoaded = false;
         loadModelConfigs();
         
-        if (confirm('配置保存成功！是否立即前往 "模型微调" 选择数据集并开始训练？')) {
+        if (confirm('配置保存成功！是否立即前往 "模型训练" 选择数据集并从头开始训练？')) {
             const header = document.querySelector('.sidebar-section-header[data-section="training"]');
             if (header && header.classList.contains('collapsed')) {
                 header.click();
             }
-            switchView('training-finetune');
+            switchView('training-scratch');
         }
     }
 
@@ -2344,6 +2345,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('save-model-config-btn')?.addEventListener('click', saveModelConfig);
         document.getElementById('ds-upload-btn')?.addEventListener('click', uploadDataset);
         document.getElementById('ds-hf-import-btn')?.addEventListener('click', importHFDataset);
+        document.getElementById('start-scratch-training-btn')?.addEventListener('click', startScratchTraining);
         document.getElementById('start-training-btn')?.addEventListener('click', startTraining);
         initDatasetEditor();
 
@@ -2662,6 +2664,101 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else { status.textContent = '❌ ' + (data.detail || '失败'); status.style.color = 'var(--error)'; }
             } catch (e) { status.textContent = '❌ 网络错误'; status.style.color = 'var(--error)'; }
         });
+    }
+
+    // --- Training from Scratch ---
+    let scratchDataLoaded = false;
+
+    async function loadScratchTrainingData() {
+        if (scratchDataLoaded) return;
+        scratchDataLoaded = true;
+
+        // Load saved model configs
+        try {
+            const res = await fetch('/api/training/model-configs');
+            const data = await res.json();
+            const sel = document.getElementById('scratch-model-config');
+            if (sel) {
+                sel.innerHTML = '<option value="">-- 选择模型配置 --</option>' +
+                    (data.configs || []).map(c => {
+                        const params = c.param_count_estimate ? ` (${(c.param_count_estimate/1e6).toFixed(1)}M 参数)` : '';
+                        return `<option value="${c.id}">${c.name} - ${c.architecture}${params}</option>`;
+                    }).join('');
+            }
+        } catch (e) { console.error('loadScratchConfigs:', e); }
+
+        // Load datasets
+        try {
+            const dsRes = await fetch('/api/training/datasets');
+            const dsData = await dsRes.json();
+            const sel = document.getElementById('scratch-dataset');
+            if (sel) {
+                sel.innerHTML = '<option value="">-- 选择数据集 --</option>' +
+                    (dsData.datasets || []).map(d => `<option value="${d.id}">${d.name} (${d.sample_count}条)</option>`).join('');
+            }
+        } catch (e) { console.error('loadScratchDatasets:', e); }
+    }
+
+    async function onScratchConfigSelected() {
+        const configId = document.getElementById('scratch-model-config')?.value;
+        const preview = document.getElementById('scratch-config-preview');
+        if (!configId || !preview) { if (preview) preview.style.display = 'none'; return; }
+
+        try {
+            const res = await fetch(`/api/training/model-configs/${configId}`);
+            const cfg = await res.json();
+            document.getElementById('scratch-preview-arch').textContent = cfg.architecture || '';
+            document.getElementById('scratch-preview-params').textContent = cfg.param_count_estimate
+                ? `${(cfg.param_count_estimate/1e6).toFixed(1)}M 参数` : '';
+            const configJson = typeof cfg.config_json === 'string' ? JSON.parse(cfg.config_json) : cfg.config_json;
+            document.getElementById('scratch-preview-layers').textContent =
+                `层数: ${configJson.num_layers || '?'} | 隐藏维度: ${configJson.hidden_size || '?'} | 头数: ${configJson.num_heads || '?'}`;
+            document.getElementById('scratch-config-json').textContent = JSON.stringify(configJson, null, 2);
+            preview.style.display = 'block';
+        } catch (e) {
+            console.error('onScratchConfigSelected:', e);
+            if (preview) preview.style.display = 'none';
+        }
+    }
+
+    async function startScratchTraining() {
+        const configId = document.getElementById('scratch-model-config')?.value;
+        const datasetId = parseInt(document.getElementById('scratch-dataset')?.value) || null;
+        if (!configId) { showStatus('⚠️ 请选择模型配置', 'error'); return; }
+
+        const params = {
+            learning_rate: parseFloat(document.getElementById('scratch-lr')?.value) || 1e-3,
+            epochs: parseInt(document.getElementById('scratch-epochs')?.value) || 10,
+            batch_size: parseInt(document.getElementById('scratch-batch')?.value) || 8,
+            optimizer: document.getElementById('scratch-optimizer')?.value || 'adamw',
+            weight_decay: parseFloat(document.getElementById('scratch-weight-decay')?.value) || 0.01,
+            warmup_steps: parseInt(document.getElementById('scratch-warmup')?.value) || 500,
+            gradient_accumulation: parseInt(document.getElementById('scratch-grad-accum')?.value) || 1,
+            max_steps: parseInt(document.getElementById('scratch-max-steps')?.value) || -1
+        };
+
+        // Get config name for the run name
+        const configName = document.getElementById('scratch-model-config')?.selectedOptions[0]?.text?.split(' - ')[0] || '模型';
+
+        try {
+            const res = await fetch('/api/training/runs', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    name: `${configName} 从头训练`,
+                    dataset_id: datasetId,
+                    model_config_id: parseInt(configId),
+                    training_params_json: JSON.stringify(params)
+                })
+            });
+            const data = await res.json();
+            if (data.status === 'started') {
+                currentTrainingRunId = data.run_id;
+                showStatus('🚀 训练已启动', 'success');
+                switchView('training-monitor');
+            } else {
+                showStatus('❌ 启动失败: ' + (data.detail || ''), 'error');
+            }
+        } catch (e) { showStatus('❌ 网络错误', 'error'); }
     }
 
     // --- Fine-tuning ---

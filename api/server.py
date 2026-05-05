@@ -1815,6 +1815,119 @@ async def scan_import_datasets():
     return {"status": "success", "imported": imported, "benchmarks_populated": bench_populated}
 
 
+# ── Training Runs API ────────────────────────────────────────────
+
+class CreateTrainingRunRequest(BaseModel):
+    name: str
+    model_config_id: Optional[int] = None
+    dataset_id: Optional[int] = None
+    base_model_id: str = ""
+    base_model_source: str = "huggingface"
+    training_params_json: str = "{}"
+
+
+@app.post("/api/training/runs")
+async def create_training_run(req: CreateTrainingRunRequest):
+    """Create and start a training run (scratch or fine-tune)."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO training_runs (name, model_config_id, dataset_id, base_model_id, base_model_source, training_params_json, status) VALUES (?,?,?,?,?,?, 'pending')",
+        (req.name, req.model_config_id, req.dataset_id, req.base_model_id, req.base_model_source, req.training_params_json)
+    )
+    run_id = cursor.lastrowid
+    conn.commit()
+
+    # Fetch the full record to pass to engine
+    cursor.execute("SELECT * FROM training_runs WHERE id=?", (run_id,))
+    run_record = dict(cursor.fetchone())
+    conn.close()
+
+    engine = get_training_engine()
+    if engine.is_available():
+        ok = engine.start_training(run_id, run_record)
+        if ok:
+            return {"status": "started", "run_id": run_id}
+        else:
+            # Training already active — leave run as pending
+            return {"status": "queued", "run_id": run_id, "detail": "另一个训练已在运行中"}
+    else:
+        return {"status": "error", "detail": "训练环境不可用（依赖未安装）"}
+
+
+@app.get("/api/training/runs")
+async def list_training_runs():
+    """List all training runs."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM training_runs ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return {"runs": [dict(r) for r in rows]}
+
+
+@app.get("/api/training/runs/{run_id}")
+async def get_training_run(run_id: int):
+    """Get a single training run by ID."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM training_runs WHERE id=?", (run_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="训练运行不存在")
+    return dict(row)
+
+
+@app.delete("/api/training/runs/{run_id}")
+async def delete_training_run(run_id: int):
+    """Delete a training run and its metrics."""
+    engine = get_training_engine()
+    state = engine.get_state()
+    if state.get("run_id") == run_id and state.get("active"):
+        engine.abort_training()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM training_metrics WHERE run_id=?", (run_id,))
+    cursor.execute("DELETE FROM training_runs WHERE id=?", (run_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "deleted"}
+
+
+@app.post("/api/training/runs/{run_id}/{action}")
+async def control_training_run(run_id: int, action: str):
+    """Control a training run: pause, resume, step, abort."""
+    engine = get_training_engine()
+    state = engine.get_state()
+    if state.get("run_id") != run_id:
+        raise HTTPException(status_code=400, detail="该运行不是当前活动运行")
+    action_map = {
+        "pause": engine.pause_training,
+        "resume": engine.resume_training,
+        "step": engine.step_training,
+        "abort": engine.abort_training,
+    }
+    if action not in action_map:
+        raise HTTPException(status_code=400, detail=f"未知操作: {action}")
+    ok = action_map[action]()
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"无法执行 {action}，当前状态: {state.get('status')}")
+    # Update DB status
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    new_status = engine.get_state()["status"]
+    cursor.execute("UPDATE training_runs SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (new_status, run_id))
+    conn.commit()
+    conn.close()
+    # Map internal status to frontend-expected action result
+    status_map = {"pause": "paused", "resume": "resumed", "step": "stepping", "abort": "aborted"}
+    return {"status": status_map.get(action, new_status)}
+
+
 class LlamaControlRequest(BaseModel):
     action: str
     model: Optional[str] = None

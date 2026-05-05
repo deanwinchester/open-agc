@@ -168,6 +168,10 @@
                             <span class="nav-dot"></span>
                             <span>数据集管理</span>
                         </nav>
+                        <nav class="nav-item" data-view="training-scratch" id="nav-training-scratch">
+                            <span class="nav-dot"></span>
+                            <span>模型训练</span>
+                        </nav>
                         <nav class="nav-item" data-view="training-finetune" id="nav-training-finetune">
                             <span class="nav-dot"></span>
                             <span>模型微调</span>
@@ -815,6 +819,69 @@
                         <div class="card-header"><h2>数据集列表</h2></div>
                         <div id="dataset-list-container"><div class="empty-state"><p>暂无数据集</p></div></div>
                     </section>
+                </div>
+            </div>
+
+            <!-- ============ View: Training Scratch ============ -->
+            <div class="view" id="view-training-scratch">
+                <header class="view-header">
+                    <h1>模型训练</h1>
+                    <p class="view-desc">选择模型设计器中保存的架构配置和数据集，从头开始训练模型</p>
+                </header>
+                <div class="settings-body">
+                    <section class="card training-deps-missing" style="display:none; border-color:rgba(245,158,11,0.4); background:rgba(245,158,11,0.05);">
+                        <div style="display:flex; align-items:center; gap:0.75rem;"><span style="font-size:1.2rem;">⚠️</span><div style="flex:1;"><strong>训练依赖未安装</strong><div class="training-deps-msg" style="font-size:0.78rem; color:var(--text-secondary); margin-top:0.15rem;"></div></div><button class="btn-primary training-deps-install" style="white-space:nowrap;">一键安装</button></div>
+                        <div class="training-deps-progress" style="display:none; margin-top:0.5rem;"><div class="training-deps-label" style="font-size:0.78rem;"></div><div style="height:4px; background:var(--border-color); border-radius:2px; margin-top:0.3rem;"><div class="training-deps-bar" style="width:0%; height:100%; background:var(--theme-color); border-radius:2px; transition:width 0.3s;"></div></div></div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>模型配置</h2><p class="card-desc">选择在模型设计器中保存的架构配置</p></div>
+                        <div class="field">
+                            <label>选择配置</label>
+                            <select id="scratch-model-config" class="select-styled" onchange="onScratchConfigSelected()"><option value="">加载中...</option></select>
+                        </div>
+                        <div id="scratch-config-preview" style="margin-top:0.75rem; display:none;">
+                            <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
+                                <span class="badge" style="background:var(--theme-color); color:#fff; padding:0.15rem 0.5rem; border-radius:4px; font-size:0.72rem;" id="scratch-preview-arch"></span>
+                                <span class="badge" style="background:var(--bg-card-hover); padding:0.15rem 0.5rem; border-radius:4px; font-size:0.72rem;" id="scratch-preview-params"></span>
+                                <span class="badge" style="background:var(--bg-card-hover); padding:0.15rem 0.5rem; border-radius:4px; font-size:0.72rem;" id="scratch-preview-layers"></span>
+                            </div>
+                            <details style="margin-top:0.5rem;"><summary style="font-size:0.78rem; cursor:pointer; color:var(--text-secondary);">查看完整配置</summary><pre id="scratch-config-json" style="font-size:0.7rem; max-height:200px; overflow-y:auto; background:var(--bg-card-hover); padding:0.5rem; border-radius:4px; margin-top:0.25rem;"></pre></details>
+                        </div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>数据集</h2></div>
+                        <div class="field">
+                            <label>选择数据集</label>
+                            <select id="scratch-dataset" class="select-styled"><option value="">加载中...</option></select>
+                        </div>
+                    </section>
+                    <section class="card">
+                        <div class="card-header"><h2>训练参数</h2></div>
+                        <div class="model-row" style="gap:1rem;">
+                            <div class="field" style="flex:1;"><label>学习率</label><input type="number" id="scratch-lr" class="input-styled" value="0.001" step="0.0001"></div>
+                            <div class="field" style="flex:1;"><label>Epochs</label><input type="number" id="scratch-epochs" class="input-styled" value="10" min="1"></div>
+                            <div class="field" style="flex:1;"><label>Batch Size</label><input type="number" id="scratch-batch" class="input-styled" value="8" min="1"></div>
+                        </div>
+                        <div class="model-row" style="gap:1rem;">
+                            <div class="field" style="flex:1;">
+                                <label>优化器</label>
+                                <select id="scratch-optimizer" class="select-styled">
+                                    <option value="adamw">AdamW</option>
+                                    <option value="adam">Adam</option>
+                                    <option value="sgd">SGD</option>
+                                </select>
+                            </div>
+                            <div class="field" style="flex:1;"><label>权重衰减</label><input type="number" id="scratch-weight-decay" class="input-styled" value="0.01" step="0.001"></div>
+                            <div class="field" style="flex:1;"><label>预热步数</label><input type="number" id="scratch-warmup" class="input-styled" value="500" min="0"></div>
+                        </div>
+                        <div class="model-row" style="gap:1rem;">
+                            <div class="field" style="flex:1;"><label>梯度累积</label><input type="number" id="scratch-grad-accum" class="input-styled" value="1" min="1"></div>
+                            <div class="field" style="flex:1;"><label>最大步数 (0=不限)</label><input type="number" id="scratch-max-steps" class="input-styled" value="0" min="0"></div>
+                        </div>
+                    </section>
+                    <div class="global-actions">
+                        <button id="start-scratch-training-btn" class="btn-save">开始训练</button>
+                    </div>
                 </div>
             </div>
 
