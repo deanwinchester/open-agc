@@ -229,6 +229,85 @@ class TrainingEngine:
             except Exception:
                 pass
 
+    def _build_model_from_config(self, config: dict):
+        """Build a causal LM from scratch based on model designer config."""
+        import math
+        import torch.nn as nn
+
+        arch = config.get("architecture", "gpt_decoder")
+        num_layers = int(config.get("num_layers", 12))
+        hidden_size = int(config.get("hidden_size", 768))
+        num_heads = int(config.get("num_heads", 12))
+        intermediate_size = int(config.get("intermediate_size", hidden_size * 4))
+        vocab_size = int(config.get("vocab_size", 50000))
+        max_seq_len = int(config.get("max_seq_len", 2048))
+        attention_type = config.get("attention_type", "scaled_dot")
+        norm_type = config.get("norm_type", "layer_norm")
+        pos_encoding = config.get("pos_encoding", "rope")
+        activation = config.get("activation", "gelu")
+        dropout = float(config.get("attn_dropout", 0.1))
+
+        from transformers import AutoConfig, AutoModelForCausalLM
+
+        # Map architecture to a HuggingFace model class and build config
+        hf_config = AutoConfig.for_model(
+            model_type="gpt2",
+            vocab_size=vocab_size,
+            n_positions=max_seq_len,
+            n_embd=hidden_size,
+            n_layer=num_layers,
+            n_head=num_heads,
+            n_inner=intermediate_size,
+            activation_function=activation if activation != "swiglu" else "gelu",
+            resid_pdrop=dropout,
+            embd_pdrop=dropout,
+            attn_pdrop=dropout,
+        )
+
+        if norm_type == "rms_norm" or arch == "llama":
+            from transformers import LlamaConfig, LlamaForCausalLM
+            hf_config = LlamaConfig(
+                vocab_size=vocab_size,
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                num_hidden_layers=num_layers,
+                num_attention_heads=num_heads,
+                max_position_embeddings=max_seq_len,
+                rms_norm_eps=1e-6,
+            )
+            model = LlamaForCausalLM(hf_config)
+        elif arch == "bert_encoder":
+            from transformers import BertConfig, BertForMaskedLM
+            hf_config = BertConfig(
+                vocab_size=vocab_size,
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                num_hidden_layers=num_layers,
+                num_attention_heads=num_heads,
+                max_position_embeddings=max_seq_len,
+                hidden_dropout_prob=dropout,
+                attention_probs_dropout_prob=dropout,
+            )
+            model = BertForMaskedLM(hf_config)
+        else:
+            # Default: GPT-2 style decoder
+            from transformers import GPT2Config, GPT2LMHeadModel
+            hf_config = GPT2Config(
+                vocab_size=vocab_size,
+                n_positions=max_seq_len,
+                n_embd=hidden_size,
+                n_layer=num_layers,
+                n_head=num_heads,
+                n_inner=intermediate_size,
+                activation_function=activation if activation != "swiglu" else "gelu",
+                resid_pdrop=dropout,
+                embd_pdrop=dropout,
+                attn_pdrop=dropout,
+            )
+            model = GPT2LMHeadModel(hf_config)
+
+        return model
+
     def _training_loop(self, run_id: int, run_record: dict):
         """Custom training loop with pause/step hooks."""
         if not _training_available:
@@ -252,54 +331,107 @@ class TrainingEngine:
             learning_rate = params.get("learning_rate", 2e-4)
             grad_accum = params.get("gradient_accumulation", 1)
             max_steps = params.get("max_steps", -1)
+            optimizer_name = params.get("optimizer", "adamw")
+            weight_decay = params.get("weight_decay", 0.01)
+            warmup_steps = params.get("warmup_steps", 0)
 
+            model_config_id = run_record.get("model_config_id")
             base_model = run_record.get("base_model_id", "")
             base_source = run_record.get("base_model_source", "huggingface")
+            is_scratch = bool(model_config_id and not base_model)
 
             self._broadcast({"type": "training_progress", "run_id": run_id,
                              "epoch": 0, "step": 0, "global_step": 0,
                              "loss": 0, "grad_norm": 0, "progress": 0,
                              "status": "initializing"})
 
-            # Load tokenizer and model
-            from transformers import AutoTokenizer, AutoModelForCausalLM
-            tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
-            if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
+            from transformers import AutoTokenizer
 
-            self._broadcast({"type": "training_progress", "run_id": run_id,
-                             "epoch": 0, "step": 0, "global_step": 0,
-                             "loss": 0, "grad_norm": 0, "progress": 0.02,
-                             "status": "loading_model"})
+            if is_scratch:
+                # ── Train from scratch ──────────────────────────
+                import sqlite3
+                from core.paths import get_data_path
+                db_path = get_data_path("chat_history.db")
+                conn = sqlite3.connect(db_path)
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM model_configs WHERE id=?", (model_config_id,))
+                config_row = cursor.fetchone()
+                conn.close()
 
-            model = AutoModelForCausalLM.from_pretrained(
-                base_model,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto" if torch.cuda.is_available() else None,
-                trust_remote_code=True
-            )
+                if not config_row:
+                    raise ValueError(f"模型配置 {model_config_id} 不存在")
 
-            # Apply LoRA
-            lora_config = params.get("lora", {})
-            if lora_config:
-                from peft import LoraConfig, get_peft_model, TaskType
-                peft_config = LoraConfig(
-                    task_type=TaskType.CAUSAL_LM,
-                    r=lora_config.get("rank", 8),
-                    lora_alpha=lora_config.get("alpha", 16),
-                    lora_dropout=lora_config.get("dropout", 0.05),
-                    target_modules=lora_config.get("target_modules", ["q_proj", "v_proj"]),
+                config_json = config_row["config_json"]
+                if isinstance(config_json, str):
+                    config_json = json.loads(config_json)
+                config_json["architecture"] = config_row["architecture"]
+
+                self._broadcast({"type": "training_progress", "run_id": run_id,
+                                 "epoch": 0, "step": 0, "global_step": 0,
+                                 "loss": 0, "grad_norm": 0, "progress": 0.05,
+                                 "status": "building_model"})
+
+                model = self._build_model_from_config(config_json)
+                model = model.to(torch.float16 if torch.cuda.is_available() else torch.float32)
+                if torch.cuda.is_available():
+                    model = model.to("cuda")
+
+                vocab_size = int(config_json.get("vocab_size", 50000))
+                tokenizer = AutoTokenizer.from_pretrained("gpt2", trust_remote_code=True)
+                if tokenizer.pad_token is None:
+                    tokenizer.pad_token = tokenizer.eos_token
+            else:
+                # ── Fine-tune pre-trained model ─────────────────
+                tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+                if tokenizer.pad_token is None:
+                    tokenizer.pad_token = tokenizer.eos_token
+
+                self._broadcast({"type": "training_progress", "run_id": run_id,
+                                 "epoch": 0, "step": 0, "global_step": 0,
+                                 "loss": 0, "grad_norm": 0, "progress": 0.02,
+                                 "status": "loading_model"})
+
+                from transformers import AutoModelForCausalLM
+                model = AutoModelForCausalLM.from_pretrained(
+                    base_model,
+                    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                    device_map="auto" if torch.cuda.is_available() else None,
+                    trust_remote_code=True
                 )
-                model = get_peft_model(model, peft_config)
-                model.print_trainable_parameters()
+
+                # Apply LoRA
+                lora_config = params.get("lora", {})
+                if lora_config:
+                    from peft import LoraConfig, get_peft_model, TaskType
+                    peft_config = LoraConfig(
+                        task_type=TaskType.CAUSAL_LM,
+                        r=lora_config.get("rank", 8),
+                        lora_alpha=lora_config.get("alpha", 16),
+                        lora_dropout=lora_config.get("dropout", 0.05),
+                        target_modules=lora_config.get("target_modules", ["q_proj", "v_proj"]),
+                    )
+                    model = get_peft_model(model, peft_config)
+                    model.print_trainable_parameters()
 
             # Register forward hooks for activation stats
             self._register_activation_hooks(model)
 
             # Optimizer and scheduler
-            optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+            if optimizer_name == "adam":
+                optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+            elif optimizer_name == "sgd":
+                optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, weight_decay=weight_decay, momentum=0.9)
+            else:
+                optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
             total_steps = epochs * 100  # placeholder; real value depends on dataset size
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+
+            if warmup_steps > 0:
+                from torch.optim.lr_scheduler import SequentialLR, LinearLR
+                warmup = LinearLR(optimizer, start_factor=0.01, total_iters=warmup_steps)
+                scheduler = SequentialLR(optimizer, schedulers=[warmup, scheduler], milestones=[warmup_steps])
 
             global_step = 0
             best_loss = float("inf")
@@ -310,6 +442,7 @@ class TrainingEngine:
                 for batch_idx in range(100):  # simulated batches for now
                     self._pause_event.wait()
                     if self._abort_flag.is_set():
+                        self._update_run_db(run_id, status="aborted", best_loss=best_loss)
                         self._broadcast({"type": "training_complete", "run_id": run_id,
                                          "best_loss": best_loss, "total_time": 0,
                                          "aborted": True})
@@ -380,6 +513,7 @@ class TrainingEngine:
 
             self._state["status"] = "completed"
             self._state["active"] = False
+            self._update_run_db(run_id, status="completed", best_loss=best_loss)
             self._broadcast({
                 "type": "training_complete",
                 "run_id": run_id,
@@ -390,6 +524,7 @@ class TrainingEngine:
         except Exception as e:
             self._state["status"] = "failed"
             self._state["active"] = False
+            self._update_run_db(run_id, status="failed", error_message=str(e))
             self._broadcast({
                 "type": "training_error",
                 "run_id": run_id,
@@ -415,6 +550,23 @@ class TrainingEngine:
             if isinstance(module, torch.nn.Linear):
                 hook = module.register_forward_hook(make_hook(name))
                 self._hooks.append(hook)
+
+    def _update_run_db(self, run_id, **fields):
+        """Update training_runs row from the training thread."""
+        try:
+            import sqlite3
+            from core.paths import get_data_path
+            db_path = get_data_path("chat_history.db")
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            sets = ", ".join(f"{k}=?" for k in fields)
+            vals = list(fields.values())
+            vals.append(run_id)
+            cursor.execute(f"UPDATE training_runs SET {sets}, updated_at=CURRENT_TIMESTAMP WHERE id=?", vals)
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
 
     def _record_metrics(self, run_id, epoch, step, global_step,
                         loss, grad_norm, lr, act_mean=0, act_std=0):
