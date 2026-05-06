@@ -5,8 +5,11 @@ Runs in a background thread and broadcasts progress via WebSocket.
 import threading
 import time
 import sys
+import os
 import subprocess
 import importlib
+
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 
 def _ensure_training_deps():
@@ -127,6 +130,47 @@ try:
 except ImportError:
     pass
 
+class JsonlDataset(torch.utils.data.Dataset):
+    def __init__(self, filepath, tokenizer, max_length):
+        import json
+        self.data = []
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip(): continue
+                try:
+                    obj = json.loads(line)
+                    text = ""
+                    if "instruction" in obj:
+                        text = f"Instruction: {obj['instruction']}\n"
+                        if obj.get("input"): text += f"Input: {obj['input']}\n"
+                        text += f"Output: {obj.get('output', '')}"
+                    elif "text" in obj:
+                        text = obj["text"]
+                    elif "messages" in obj:
+                        text = "\n".join(f"{m['role']}: {m['content']}" for m in obj["messages"])
+                    else:
+                        text = str(obj)
+                    if text:
+                        self.data.append(text)
+                except Exception:
+                    pass
+        if not self.data:
+            # Fallback dummy data if empty
+            self.data = ["The quick brown fox jumps over the lazy dog." * 10] * 100
+            
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        
+    def __len__(self):
+        return len(self.data)
+        
+    def __getitem__(self, idx):
+        text = self.data[idx]
+        tokens = self.tokenizer(text, truncation=True, max_length=self.max_length, padding="max_length", return_tensors="pt")
+        item = {key: val.squeeze(0) for key, val in tokens.items()}
+        item["labels"] = item["input_ids"].clone()
+        return item
+
 
 
 class TrainingEngine:
@@ -161,7 +205,9 @@ class TrainingEngine:
         return _training_available
 
     def get_state(self) -> dict:
-        return dict(self._state)
+        state_copy = dict(self._state)
+        state_copy["act_stats"] = dict(self._act_stats)
+        return state_copy
 
     def start_training(self, run_id: int, run_record: dict) -> bool:
         """Launch training in background thread."""
@@ -240,7 +286,8 @@ class TrainingEngine:
         num_heads = int(config.get("num_heads", 12))
         intermediate_size = int(config.get("intermediate_size", hidden_size * 4))
         vocab_size = int(config.get("vocab_size", 50000))
-        max_seq_len = int(config.get("max_seq_len", 2048))
+        max_seq_len = int(config.get("max_seq_len", config.get("max_seq_length", 2048)))
+        max_seq_length = max_seq_len # Alias for robustness
         attention_type = config.get("attention_type", "scaled_dot")
         norm_type = config.get("norm_type", "layer_norm")
         pos_encoding = config.get("pos_encoding", "rope")
@@ -334,6 +381,10 @@ class TrainingEngine:
             optimizer_name = params.get("optimizer", "adamw")
             weight_decay = params.get("weight_decay", 0.01)
             warmup_steps = params.get("warmup_steps", 0)
+            max_seq_len = params.get("max_seq_len", params.get("max_seq_length", 512))
+            max_seq_length = max_seq_len # Alias for robustness
+            val_ratio = params.get("val_ratio", 0.1)
+            patience = params.get("patience", 3)
 
             model_config_id = run_record.get("model_config_id")
             base_model = run_record.get("base_model_id", "")
@@ -372,15 +423,17 @@ class TrainingEngine:
                                  "loss": 0, "grad_norm": 0, "progress": 0.05,
                                  "status": "building_model"})
 
-                model = self._build_model_from_config(config_json)
-                model = model.to(torch.float16 if torch.cuda.is_available() else torch.float32)
-                if torch.cuda.is_available():
-                    model = model.to("cuda")
-
-                vocab_size = int(config_json.get("vocab_size", 50000))
                 tokenizer = AutoTokenizer.from_pretrained("gpt2", trust_remote_code=True)
                 if tokenizer.pad_token is None:
                     tokenizer.pad_token = tokenizer.eos_token
+                
+                # Sync vocab size from tokenizer
+                config_json["vocab_size"] = len(tokenizer)
+                model = self._build_model_from_config(config_json)
+                
+                if torch.cuda.is_available():
+                    model = model.to("cuda")
+                # Let AMP handle precision during training, keep model in float32 for better stability
             else:
                 # ── Fine-tune pre-trained model ─────────────────
                 tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
@@ -395,7 +448,7 @@ class TrainingEngine:
                 from transformers import AutoModelForCausalLM
                 model = AutoModelForCausalLM.from_pretrained(
                     base_model,
-                    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                    torch_dtype=torch.float32, # Keep in float32, use AMP for mixed precision
                     device_map="auto" if torch.cuda.is_available() else None,
                     trust_remote_code=True
                 )
@@ -417,7 +470,7 @@ class TrainingEngine:
             # Register forward hooks for activation stats
             self._register_activation_hooks(model)
 
-            # Optimizer and scheduler
+            # Optimizer
             if optimizer_name == "adam":
                 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
             elif optimizer_name == "sgd":
@@ -425,7 +478,52 @@ class TrainingEngine:
             else:
                 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-            total_steps = epochs * 100  # placeholder; real value depends on dataset size
+            # Load Dataset
+            dataset_id = run_record.get("dataset_id")
+            from torch.utils.data import DataLoader
+            train_loader = None
+            
+            # Get model's max position limit to avoid Index Error during forward pass
+            max_pos = getattr(model.config, "n_positions", getattr(model.config, "max_position_embeddings", 2048))
+            effective_max_len = min(max_seq_len, max_pos)
+
+            if dataset_id:
+                import sqlite3
+                from core.paths import get_data_path
+                db_path = get_data_path("chat_history.db")
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT storage_path FROM datasets WHERE id=?", (dataset_id,))
+                ds_row = cursor.fetchone()
+                conn.close()
+                if ds_row and ds_row[0]:
+                    ds_path = ds_row[0]
+                    full_dataset = JsonlDataset(ds_path, tokenizer, effective_max_len)
+                    
+                    # Split for validation
+                    if val_ratio > 0 and len(full_dataset) > 10:
+                        val_size = int(len(full_dataset) * val_ratio)
+                        train_size = len(full_dataset) - val_size
+                        from torch.utils.data import random_split
+                        train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+                    else:
+                        train_dataset = full_dataset
+                        val_dataset = None
+                        
+                    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+                    if val_dataset:
+                        val_loader = DataLoader(val_dataset, batch_size=batch_size)
+                    else:
+                        val_loader = None
+            
+            if not train_loader:
+                # Dummy loader for testing
+                train_dataset = JsonlDataset("dummy", tokenizer, effective_max_len)
+                train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+                val_loader = None
+
+
+            total_steps = epochs * len(train_loader)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
 
             if warmup_steps > 0:
@@ -435,39 +533,78 @@ class TrainingEngine:
 
             global_step = 0
             best_loss = float("inf")
-            scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
+            # Use modern torch.amp API
+            use_amp = torch.cuda.is_available()
+            # RTX 50-series supports bfloat16, which is much more stable than float16
+            amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
+            scaler = torch.amp.GradScaler('cuda') if (use_amp and amp_dtype == torch.float16) else None
+
+            device = "cuda" if use_amp else "cpu"
+            model.train()
+            no_improve_epochs = 0
 
             for epoch in range(epochs):
-                # Placeholder: iterate over actual dataset batches
-                for batch_idx in range(100):  # simulated batches for now
+                for batch_idx, batch in enumerate(train_loader):
                     self._pause_event.wait()
                     if self._abort_flag.is_set():
                         self._update_run_db(run_id, status="aborted", best_loss=best_loss)
-                        self._broadcast({"type": "training_complete", "run_id": run_id,
-                                         "best_loss": best_loss, "total_time": 0,
-                                         "aborted": True})
-                        self._record_metrics(run_id, epoch, batch_idx, global_step, best_loss, 0, learning_rate)
+                        self._broadcast({"type": "training_complete", "run_id": run_id, "best_loss": best_loss, "total_time": 0, "aborted": True})
                         return
 
-                    # Simulate forward/backward for now
-                    loss_val = 2.0 / (global_step + 1) + 0.1
-                    grad_norm_val = 1.0 / (global_step + 1) ** 0.5
+                    optimizer.zero_grad()
+                    input_ids = batch["input_ids"].to(device)
+                    attention_mask = batch["attention_mask"].to(device)
+                    labels = batch["labels"].to(device)
 
-                    # Simulate activation stats
-                    act_mean = 0.02 / (global_step + 1) ** 0.1
-                    act_std = 0.15 / (global_step + 1) ** 0.1
+                    if use_amp:
+                        with torch.amp.autocast(device_type="cuda", dtype=amp_dtype):
+                            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                            loss = outputs.loss
+                        
+                        if scaler:
+                            scaler.scale(loss).backward()
+                            scaler.unscale_(optimizer)
+                            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            # bfloat16 doesn't need scaling
+                            loss.backward()
+                            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                            optimizer.step()
+                    else:
+                        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                        loss = outputs.loss
+                        loss.backward()
+                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                        optimizer.step()
+
+                    scheduler.step()
+
+                    loss_val = loss.item()
+                    grad_norm_val = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+                    
+                    # Update stats
+                    act_mean = 0
+                    act_std = 0
+                    if self._act_buffer:
+                        act_mean = sum(x["mean"] for x in self._act_buffer) / len(self._act_buffer)
+                        act_std = sum(x["std"] for x in self._act_buffer) / len(self._act_buffer)
+                        self._act_stats = {"mean": act_mean, "std": act_std, "per_layer": list(self._act_buffer)}
+                        self._act_buffer.clear()
 
                     self._state["current_loss"] = loss_val
                     self._state["current_grad_norm"] = grad_norm_val
-                    self._state["current_lr"] = learning_rate
+                    self._state["current_lr"] = scheduler.get_last_lr()[0]
                     self._state["current_epoch"] = epoch
                     self._state["current_step"] = batch_idx
                     self._state["progress"] = global_step / max(total_steps, 1)
-                    self._act_stats = {"mean": act_mean, "std": act_std, "per_layer": []}
 
                     if loss_val < best_loss:
                         best_loss = loss_val
-
+                        no_improve_epochs = 0
+                        # Save interim best checkpoint if needed
+                    
                     global_step += 1
 
                     # Broadcast progress
@@ -479,7 +616,7 @@ class TrainingEngine:
                         "global_step": global_step,
                         "loss": round(loss_val, 6),
                         "grad_norm": round(grad_norm_val, 6),
-                        "learning_rate": learning_rate,
+                        "learning_rate": self._state["current_lr"],
                         "progress": min(self._state["progress"], 1.0),
                         "status": "training"
                     })
@@ -487,7 +624,7 @@ class TrainingEngine:
                     # Record metrics
                     if global_step % 5 == 0:
                         self._record_metrics(run_id, epoch, batch_idx, global_step,
-                                             loss_val, grad_norm_val, learning_rate,
+                                             loss_val, grad_norm_val, self._state["current_lr"],
                                              act_mean, act_std)
 
                     # Step mode: pause after each batch
@@ -502,18 +639,61 @@ class TrainingEngine:
                             "global_step": global_step,
                             "loss": round(loss_val, 6),
                             "grad_norm": round(grad_norm_val, 6),
-                            "learning_rate": learning_rate,
+                            "learning_rate": self._state["current_lr"],
                             "act_stats": self._act_stats
                         })
 
                     if max_steps > 0 and global_step >= max_steps:
                         break
+                
+                # ── End of Epoch Validation ─────────────────────
+                if val_loader:
+                    model.eval()
+                    val_loss = 0
+                    with torch.no_grad():
+                        for vbatch in val_loader:
+                            v_input_ids = vbatch["input_ids"].to(device)
+                            v_attention_mask = vbatch["attention_mask"].to(device)
+                            v_labels = vbatch["labels"].to(device)
+                            with torch.amp.autocast(device_type="cuda" if "cuda" in device else "cpu", enabled=use_amp):
+                                v_outputs = model(input_ids=v_input_ids, attention_mask=v_attention_mask, labels=v_labels)
+                                val_loss += v_outputs.loss.item()
+                    
+                    avg_val_loss = val_loss / len(val_loader)
+                    self._broadcast({
+                        "type": "training_progress",
+                        "run_id": run_id,
+                        "status": "validating",
+                        "val_loss": round(avg_val_loss, 4)
+                    })
+                    
+                    if avg_val_loss < best_loss:
+                        best_loss = avg_val_loss
+                        no_improve_epochs = 0
+                    else:
+                        no_improve_epochs += 1
+                    
+                    model.train()
+                    
+                    if no_improve_epochs >= patience:
+                        self._broadcast({"type": "log", "message": f"Early stopping at epoch {epoch+1}"})
+                        break
+                else:
+                    # If no val set, use the last training loss for progress tracking
+                    if loss_val < best_loss:
+                        best_loss = loss_val
 
-                    time.sleep(0.3)  # simulate compute time
+            # End of training, save the model
+            import os
+            from core.paths import get_data_path
+            save_dir = os.path.join(get_data_path("models"), "trained", f"run_{run_id}")
+            os.makedirs(save_dir, exist_ok=True)
+            model.save_pretrained(save_dir)
+            tokenizer.save_pretrained(save_dir)
 
             self._state["status"] = "completed"
             self._state["active"] = False
-            self._update_run_db(run_id, status="completed", best_loss=best_loss)
+            self._update_run_db(run_id, status="completed", best_loss=best_loss, checkpoint_dir=save_dir)
             self._broadcast({
                 "type": "training_complete",
                 "run_id": run_id,

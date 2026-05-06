@@ -1341,7 +1341,8 @@ async def estimate_model(req: EstimateRequest):
     num_heads = config.get("num_attention_heads", 12)
     intermediate_size = config.get("intermediate_size", hidden_size * 4)
     vocab_size = config.get("vocab_size", 50000)
-    max_seq_len = config.get("max_seq_length", 2048)
+    max_seq_len = config.get("max_seq_len", config.get("max_seq_length", 2048))
+    max_seq_length = max_seq_len # Alias
 
     if arch == "moe":
         num_experts = config.get("num_experts", 8)
@@ -1896,6 +1897,53 @@ async def delete_training_run(run_id: int):
     conn.commit()
     conn.close()
     return {"status": "deleted"}
+
+
+class TestModelRequest(BaseModel):
+    prompt: str
+    max_length: int = 200
+    temperature: float = 0.7
+
+@app.post("/api/training/runs/{run_id}/test-chat")
+async def test_trained_model(run_id: int, req: TestModelRequest):
+    """Test a trained model with a prompt."""
+    import os
+    import torch
+    from core.paths import get_data_path
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    
+    save_dir = os.path.join(get_data_path("models"), "trained", f"run_{run_id}")
+    if not os.path.exists(save_dir):
+        raise HTTPException(status_code=404, detail="训练好的模型尚未保存或不存在")
+        
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(save_dir)
+        model = AutoModelForCausalLM.from_pretrained(
+            save_dir,
+            device_map="auto" if torch.cuda.is_available() else None,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+        )
+        
+        inputs = tokenizer(req.prompt, return_tensors="pt")
+        if torch.cuda.is_available():
+            inputs = {k: v.to("cuda") for k, v in inputs.items()}
+            
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=req.max_length,
+            temperature=req.temperature,
+            do_sample=req.temperature > 0,
+            pad_token_id=tokenizer.eos_token_id
+        )
+        
+        text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        # return the generated text minus the prompt if it included it
+        if text.startswith(req.prompt):
+            text = text[len(req.prompt):].strip()
+            
+        return {"response": text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"模型推理失败: {str(e)}")
 
 
 @app.post("/api/training/runs/{run_id}/{action}")
@@ -2715,6 +2763,9 @@ def _broadcast_to_websockets(message: dict):
             pass
 
 
+# Wire up Training Engine broadcast
+get_training_engine().set_broadcast_fn(_broadcast_to_websockets)
+
 # Wire route modules to shared state
 init_benchmark_routes(
     db_path=DB_PATH,
@@ -2734,6 +2785,7 @@ init_download_routes(
     get_llamacpp=get_llamacpp_manager,
     load_config=load_config
 )
+
 
 def _run_background_task(task_id: int, user_query: str, context_messages: list = None,
                          is_resume: bool = False):

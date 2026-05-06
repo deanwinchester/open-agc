@@ -968,6 +968,7 @@
                             <button id="monitor-resume-btn" class="btn-primary" style="display:none;">继续</button>
                             <button id="monitor-step-btn" class="btn-secondary">单步</button>
                             <button id="monitor-abort-btn" class="btn-secondary" style="color:var(--error)">中止</button>
+                            <button id="monitor-test-btn" class="btn-primary" style="display:none;">🧪 测试模型</button>
                             <span id="monitor-status-badge" class="task-type-badge">空闲</span>
                         </div>
                     </section>
@@ -1153,6 +1154,36 @@
             <div class="modal-actions" style="margin-top: 1rem;">
                 <button class="btn-secondary" id="schedule-modal-cancel">取消</button>
                 <button class="btn-primary" id="schedule-modal-save">创建任务</button>
+            </div>
+        </div>
+    </div>
+    <!-- ============ Test Model Modal ============ -->
+    <div class="modal-overlay" id="test-model-modal" style="display: none;">
+        <div class="modal-box" style="max-width: 600px; width: 95%;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem;">
+                <h3 style="margin: 0;">🧪 测试微调模型</h3>
+                <button class="icon-btn" id="test-model-close" title="关闭" style="margin-top: -4px; margin-right: -8px;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-desc" id="test-model-desc">与训练好的模型进行对话</div>
+
+            <div class="test-chat-history" id="test-chat-history" style="height: 300px; overflow-y: auto; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-top: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
+                <div class="message system" style="text-align: center; color: var(--text-secondary); font-size: 0.85rem;">模型已就绪。请输入测试文本。</div>
+            </div>
+
+            <div class="field" style="margin-top: 1rem;">
+                <textarea id="test-model-input" class="input-styled" rows="2" placeholder="输入测试 Prompt..." style="width: 100%; box-sizing: border-box; resize: vertical;"></textarea>
+            </div>
+            <div class="modal-actions" style="margin-top: 1rem; justify-content: space-between; align-items: center;">
+                <div>
+                    <label style="font-size: 0.85rem; color: var(--text-secondary);">Max Length: <input type="number" id="test-max-len" value="200" style="width: 60px; padding: 2px 4px; background:var(--bg-panel); color:var(--text-primary); border:1px solid var(--border-color);"></label>
+                    <label style="font-size: 0.85rem; color: var(--text-secondary); margin-left: 10px;">Temp: <input type="number" id="test-temp" value="0.7" step="0.1" style="width: 50px; padding: 2px 4px; background:var(--bg-panel); color:var(--text-primary); border:1px solid var(--border-color);"></label>
+                </div>
+                <button class="btn-primary" id="test-model-send">发送生成</button>
             </div>
         </div>
     </div>

@@ -179,6 +179,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Don't auto-switch for download progress — user may be managing downloads in settings
         if (!isBackground && data.type !== 'llamacpp_download' && data.type !== 'training_install_progress'
             && data.type !== 'benchmark_progress' && data.type !== 'benchmark_complete'
+            && data.type !== 'training_progress' && data.type !== 'training_step_paused'
+            && data.type !== 'training_complete' && data.type !== 'training_error'
             && document.querySelector('.view.active')?.id !== 'view-chat') {
             switchView('chat');
         }
@@ -2827,12 +2829,47 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Training Monitor ---
-    function initTrainingMonitor() {
+    async function initTrainingMonitor() {
         const canvas = document.getElementById('loss-chart-canvas');
         if (canvas) {
             const ctx = canvas.getContext('2d');
             canvas.width = canvas.parentElement.clientWidth;
             canvas.height = 280;
+        }
+
+        try {
+            const res = await fetch('/api/training/status');
+            const data = await res.json();
+            const s = data.engine_state;
+            if (s && s.run_id != null && s.active) {
+                if (s.status === 'paused') {
+                    handleTrainingStepPaused({
+                        loss: s.current_loss,
+                        grad_norm: s.current_grad_norm,
+                        act_stats: s.act_stats
+                    });
+                } else if (s.status === 'aborted' || (s.status === 'idle' && s.progress >= 1.0)) {
+                    handleTrainingComplete({
+                        run_id: s.run_id,
+                        aborted: s.status === 'aborted',
+                        best_loss: s.current_loss
+                    });
+                } else if (s.status === 'error') {
+                    handleTrainingError({run_id: s.run_id, error: s.error});
+                } else {
+                    handleTrainingProgress({
+                        status: 'training',
+                        run_id: s.run_id,
+                        loss: s.current_loss,
+                        grad_norm: s.current_grad_norm,
+                        learning_rate: s.current_lr,
+                        epoch: s.current_epoch,
+                        global_step: s.current_step
+                    });
+                }
+            }
+        } catch (e) {
+            console.error('Failed to load training monitor status', e);
         }
     }
 
@@ -2848,7 +2885,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const ph = h - margin.top - margin.bottom;
 
         const maxLoss = Math.max(...lossData.map(d => d.loss)) * 1.1 || 1;
+        const minStep = lossData[0].step;
         const maxStep = Math.max(...lossData.map(d => d.step)) || 1;
+        const stepRange = (maxStep - minStep) || 1;
 
         ctx.strokeStyle = 'var(--border-color)';
         ctx.lineWidth = 1;
@@ -2862,7 +2901,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.lineWidth = 2;
         ctx.beginPath();
         lossData.forEach((d, i) => {
-            const x = margin.left + (d.step / maxStep) * pw;
+            const x = margin.left + ((d.step - minStep) / stepRange) * pw;
             const y = margin.top + ph - (d.loss / maxLoss) * ph;
             if (i === 0) ctx.moveTo(x, y);
             else ctx.lineTo(x, y);
@@ -2934,6 +2973,14 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('monitor-pause-btn').style.display = 'none';
         document.getElementById('monitor-resume-btn').style.display = 'none';
         document.getElementById('monitor-step-btn').style.display = 'none';
+        document.getElementById('monitor-abort-btn').style.display = 'none';
+        
+        const testBtn = document.getElementById('monitor-test-btn');
+        if (testBtn) {
+            testBtn.style.display = data.aborted ? 'none' : 'inline-flex';
+            testBtn.onclick = () => openTestModelModal(data.run_id);
+        }
+
         document.getElementById('monitor-run-name').textContent = `运行 #${data.run_id} — ${data.aborted ? '已中止' : '已完成'}`;
         showStatus(data.aborted ? '⏹ 训练已中止' : `✅ 训练完成! 最佳Loss: ${data.best_loss}`, data.aborted ? 'error' : 'success');
         drawLossChart();
@@ -2993,15 +3040,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="config-item-body">
                     <div class="config-item-title">${statusIcon[r.status]||'📋'} ${escapeHtml(r.name)}</div>
                     <div class="config-item-meta">
-                        <span>${r.base_model_id}</span>
+                        <span>${r.base_model_id || 'Scratch'}</span>
                         <span>${statusText[r.status]||r.status}</span>
                         <span>${r.current_epoch.toFixed(1)} epoch</span>
                         <span>${formatTimeAgo(r.created_at)}</span>
+                        ${r.checkpoint_dir ? `<span style="opacity:0.8; font-size:0.8rem; display:block; margin-top:0.2rem;">📍 ${r.checkpoint_dir}</span>` : ''}
                     </div>
                 </div>
-                <button class="download-action-btn delete" data-id="${r.id}" title="删除">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-                </button>
+                <div style="display:flex; gap:0.4rem; align-items:center;">
+                    ${r.status === 'completed' ? `<button class="download-action-btn test-run-btn" data-id="${r.id}" title="测试模型" style="color:var(--theme-color)">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+                    </button>` : ''}
+                    <button class="download-action-btn delete" data-id="${r.id}" title="删除">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                    </button>
+                </div>
             </div>
         `).join('');
         container.querySelectorAll('.download-action-btn.delete').forEach(btn => {
@@ -3013,6 +3066,64 @@ document.addEventListener('DOMContentLoaded', () => {
                 loadTrainingRuns();
             });
         });
+        container.querySelectorAll('.test-run-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openTestModelModal(btn.dataset.id);
+            });
+        });
+    }
+
+    let currentTestRunId = null;
+    function openTestModelModal(runId) {
+        currentTestRunId = runId;
+        const modal = document.getElementById('test-model-modal');
+        const history = document.getElementById('test-chat-history');
+        const desc = document.getElementById('test-model-desc');
+        if (!modal || !history) return;
+        desc.textContent = `正在与运行 #${runId} 的微调模型对话`;
+        history.innerHTML = '<div class="message system" style="text-align: center; color: var(--text-secondary); font-size: 0.85rem;">模型已就绪。请输入测试文本。</div>';
+        document.getElementById('test-model-input').value = '';
+        modal.style.display = 'flex';
+    }
+
+    async function sendTestChat() {
+        const input = document.getElementById('test-model-input');
+        const history = document.getElementById('test-chat-history');
+        const sendBtn = document.getElementById('test-model-send');
+        const maxLen = parseInt(document.getElementById('test-max-len').value) || 200;
+        const temp = parseFloat(document.getElementById('test-temp').value) || 0.7;
+        const prompt = input.value.trim();
+        if (!prompt || !currentTestRunId) return;
+
+        const userMsg = document.createElement('div');
+        Object.assign(userMsg.style, { alignSelf: 'flex-end', background: 'var(--theme-color)', color: 'white', padding: '0.6rem 0.8rem', borderRadius: '12px 12px 2px 12px', maxWidth: '85%', fontSize: '0.9rem' });
+        userMsg.textContent = prompt;
+        history.appendChild(userMsg);
+        input.value = '';
+        sendBtn.disabled = true;
+        sendBtn.textContent = '生成中...';
+        history.scrollTop = history.scrollHeight;
+
+        try {
+            const res = await fetch(`/api/training/runs/${currentTestRunId}/test-chat`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt, max_length: maxLen, temperature: temp })
+            });
+            const data = await res.json();
+            const aiMsg = document.createElement('div');
+            Object.assign(aiMsg.style, { alignSelf: 'flex-start', background: 'var(--bg-panel)', border: '1px solid var(--border-color)', padding: '0.6rem 0.8rem', borderRadius: '12px 12px 12px 2px', maxWidth: '85%', fontSize: '0.9rem', whiteSpace: 'pre-wrap' });
+            if (data.response) aiMsg.textContent = data.response;
+            else { aiMsg.style.color = 'var(--error)'; aiMsg.textContent = '❌ 错误: ' + (data.detail || '生成失败'); }
+            history.appendChild(aiMsg);
+        } catch (e) {
+            const errMsg = document.createElement('div');
+            errMsg.style.alignSelf = 'flex-start'; errMsg.style.color = 'var(--error)'; errMsg.style.fontSize = '0.8rem';
+            errMsg.textContent = '❌ 推理失败，请确保后台有足够显存/内存。';
+            history.appendChild(errMsg);
+        }
+        sendBtn.disabled = false; sendBtn.textContent = '发送生成';
+        history.scrollTop = history.scrollHeight;
     }
 
     // ==========================================
@@ -3403,4 +3514,17 @@ document.addEventListener('DOMContentLoaded', () => {
     updateInputState();
     updateTaskBadge();
     refreshLlamaStatus();
+
+    // Test Model Listeners
+    document.getElementById('test-model-close')?.addEventListener('click', () => {
+        document.getElementById('test-model-modal').style.display = 'none';
+    });
+    document.getElementById('test-model-send')?.addEventListener('click', sendTestChat);
+    document.getElementById('test-model-input')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendTestChat();
+        }
+    });
 });
+
