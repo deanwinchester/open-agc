@@ -132,7 +132,7 @@ def _update_download_progress(download_id: int, progress: float,
 # ── Recommended Datasets ──
 
 RECOMMENDED_DATASETS = [
-    {"repo_id": "suff/alpaca-zh-52k", "name": "Alpaca 中文指令 (52K)", "desc": "中文指令微调，5.2万条", "size": "~50MB", "splits": ["train"]},
+    {"repo_id": "fuguowen/alpaca_zh", "name": "Alpaca 中文指令", "desc": "中文指令微调数据集，约4.8万条", "size": "~50MB", "splits": ["train"]},
     {"repo_id": "tatsu-lab/alpaca", "name": "Alpaca 英文指令 (52K)", "desc": "经典英文指令微调数据集", "size": "~25MB", "splits": ["train"]},
     {"repo_id": "databricks/databricks-dolly-15k", "name": "Dolly 15K", "desc": "Databricks 通用指令数据集", "size": "~10MB", "splits": ["train"]},
     {"repo_id": "Open-Orca/OpenOrca", "name": "OpenOrca", "desc": "大规模推理链微调数据", "size": "~800MB", "splits": ["train"]},
