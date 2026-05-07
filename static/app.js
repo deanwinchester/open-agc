@@ -2037,7 +2037,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Bind download buttons
         container.querySelectorAll('button').forEach(btn => {
-            btn.addEventListener('click', async function() {
+            btn.addEventListener('click', async function () {
                 const repo = this.dataset.repo;
                 const file = this.dataset.file;
                 const shortName = file.split('/').pop();
@@ -2134,7 +2134,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Fine-tune Scope Selection ---
 
-    window.onBaseModelSelected = function() {
+    window.onBaseModelSelected = function () {
         const sel = document.getElementById('finetune-base-model');
         const modelId = sel?.value;
         const card = document.getElementById('model-structure-card');
@@ -2157,24 +2157,24 @@ document.addEventListener('DOMContentLoaded', () => {
     function showTypicalStructure(modelId) {
         const viz = document.getElementById('model-structure-viz');
         const layers = [
-            {name: 'Embedding', type: 'embed'},
-            {name: 'LayerNorm (Pre)', type: 'norm'},
+            { name: 'Embedding', type: 'embed' },
+            { name: 'LayerNorm (Pre)', type: 'norm' },
         ];
         for (let i = 0; i < 8; i++) {
-            layers.push({name: `Block[${i}].SelfAttn`, type: 'attn'});
-            layers.push({name: `Block[${i}].LayerNorm`, type: 'norm'});
-            layers.push({name: `Block[${i}].FFN`, type: 'ffn'});
+            layers.push({ name: `Block[${i}].SelfAttn`, type: 'attn' });
+            layers.push({ name: `Block[${i}].LayerNorm`, type: 'norm' });
+            layers.push({ name: `Block[${i}].FFN`, type: 'ffn' });
         }
-        layers.push({name: 'LayerNorm (Final)', type: 'norm'});
-        layers.push({name: 'LM Head', type: 'head'});
+        layers.push({ name: 'LayerNorm (Final)', type: 'norm' });
+        layers.push({ name: 'LM Head', type: 'head' });
 
         const scope = document.querySelector('.arch-option.selected[data-finetune-scope]')?.dataset.finetuneScope || 'all';
         let html = '<div style="max-height:300px; overflow-y:auto;">';
         layers.forEach((l, i) => {
             const isFrozen = (scope === 'lora_attn' && l.type !== 'attn') ||
-                             (scope === 'lora_custom' && l.type === 'head');
+                (scope === 'lora_custom' && l.type === 'head');
             html += `<div class="model-structure-layer" style="${isFrozen ? 'opacity:0.45;' : ''}">
-                <span style="flex:0 0 30px; font-size:0.65rem; color:var(--text-secondary);">${i+1}</span>
+                <span style="flex:0 0 30px; font-size:0.65rem; color:var(--text-secondary);">${i + 1}</span>
                 <span class="model-structure-tag ${l.type}">${l.type.toUpperCase()}</span>
                 <span style="flex:1;">${l.name}</span>
                 ${isFrozen ? '<span style="font-size:0.65rem; color:var(--text-secondary);">❄ 冻结</span>' : '<span style="font-size:0.65rem; color:var(--success);">🔥 训练</span>'}
@@ -2186,7 +2186,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function updateFineTuneScope() {
         document.querySelectorAll('[data-finetune-scope]').forEach(btn => {
-            btn.addEventListener('click', function() {
+            btn.addEventListener('click', function () {
                 document.querySelectorAll('[data-finetune-scope]').forEach(b => b.classList.remove('selected'));
                 this.classList.add('selected');
                 fineTuneScope = this.dataset.finetuneScope;
@@ -2207,21 +2207,21 @@ document.addEventListener('DOMContentLoaded', () => {
         const container = document.getElementById('custom-finetune-modules');
         if (!container) return;
         const modules = [
-            {id:'q_proj', name:'Query 投影', checked:true},
-            {id:'k_proj', name:'Key 投影', checked:true},
-            {id:'v_proj', name:'Value 投影', checked:true},
-            {id:'o_proj', name:'Output 投影', checked:true},
-            {id:'gate_proj', name:'Gate 投影 (SwiGLU)', checked:false},
-            {id:'up_proj', name:'Up 投影 (FFN)', checked:false},
-            {id:'down_proj', name:'Down 投影 (FFN)', checked:false},
-            {id:'embed_tokens', name:'嵌入层', checked:false},
-            {id:'lm_head', name:'输出头', checked:false},
+            { id: 'q_proj', name: 'Query 投影', checked: true },
+            { id: 'k_proj', name: 'Key 投影', checked: true },
+            { id: 'v_proj', name: 'Value 投影', checked: true },
+            { id: 'o_proj', name: 'Output 投影', checked: true },
+            { id: 'gate_proj', name: 'Gate 投影 (SwiGLU)', checked: false },
+            { id: 'up_proj', name: 'Up 投影 (FFN)', checked: false },
+            { id: 'down_proj', name: 'Down 投影 (FFN)', checked: false },
+            { id: 'embed_tokens', name: '嵌入层', checked: false },
+            { id: 'lm_head', name: '输出头', checked: false },
         ];
         container.innerHTML = `<div style="font-size:0.75rem; color:var(--text-secondary); margin-bottom:0.3rem;">选择要微调的模块:</div>` +
-            modules.map(m => `<label class="finetune-module-check"><input type="checkbox" value="${m.id}" ${m.checked?'checked':''} onchange="updateLoraTargets()"> ${m.name}</label>`).join('');
+            modules.map(m => `<label class="finetune-module-check"><input type="checkbox" value="${m.id}" ${m.checked ? 'checked' : ''} onchange="updateLoraTargets()"> ${m.name}</label>`).join('');
     }
 
-    window.updateLoraTargets = function() {
+    window.updateLoraTargets = function () {
         const checked = [...document.querySelectorAll('#custom-finetune-modules input:checked')].map(cb => cb.value);
         document.getElementById('lora-targets').value = checked.join(', ');
     };
@@ -2248,7 +2248,7 @@ document.addEventListener('DOMContentLoaded', () => {
         container.innerHTML = configs.map(c => {
             const cfg = JSON.parse(c.config_json || '{}');
             const params = c.param_count_estimate;
-            const paramsStr = params > 1e9 ? (params/1e9).toFixed(2)+'B' : (params/1e6).toFixed(1)+'M';
+            const paramsStr = params > 1e9 ? (params / 1e9).toFixed(2) + 'B' : (params / 1e6).toFixed(1) + 'M';
             return `<div class="config-item" data-id="${c.id}">
                 <div class="config-item-body">
                     <div class="config-item-title">${escapeHtml(c.name)}</div>
@@ -2298,7 +2298,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function estimateModel() {
         const configJson = getModelConfigFromForm();
         const res = await fetch('/api/training/model-configs/estimate', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ architecture: currentSelectedArch, config_json: configJson })
         });
         const data = await res.json();
@@ -2307,9 +2307,9 @@ document.addEventListener('DOMContentLoaded', () => {
             preview.innerHTML = `<div class="model-preview">
                 <div class="preview-item"><label>总参数量</label><span>${data.total_params_formatted}</span></div>
                 <div class="preview-item"><label>层数</label><span>${data.num_layers}</span></div>
-                <div class="preview-item"><label>每层参数量</label><span>${(data.per_layer_params/1e6).toFixed(1)}M</span></div>
-                <div class="preview-item"><label>嵌入参数量</label><span>${(data.embed_params/1e6).toFixed(1)}M</span></div>
-                <div class="preview-item"><label>每Token FLOPs</label><span>${(data.flops_per_forward/1e6).toFixed(1)}M</span></div>
+                <div class="preview-item"><label>每层参数量</label><span>${(data.per_layer_params / 1e6).toFixed(1)}M</span></div>
+                <div class="preview-item"><label>嵌入参数量</label><span>${(data.embed_params / 1e6).toFixed(1)}M</span></div>
+                <div class="preview-item"><label>每Token FLOPs</label><span>${(data.flops_per_forward / 1e6).toFixed(1)}M</span></div>
                 <div class="preview-item"><label>架构</label><span>${data.architecture}</span></div>
             </div>`;
         }
@@ -2320,18 +2320,18 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!name) return;
         const configJson = getModelConfigFromForm();
         const est = await fetch('/api/training/model-configs/estimate', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ architecture: currentSelectedArch, config_json: configJson })
         });
         const estData = await est.json();
         await fetch('/api/training/model-configs', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, architecture: currentSelectedArch, config_json: configJson, param_count_estimate: estData.total_params })
         });
         showStatus('✅ 配置已保存', 'success');
         modelConfigLoaded = false;
         loadModelConfigs();
-        
+
         if (confirm('配置保存成功！是否立即前往 "模型训练" 选择数据集并从头开始训练？')) {
             const header = document.querySelector('.sidebar-section-header[data-section="training"]');
             if (header && header.classList.contains('collapsed')) {
@@ -2425,7 +2425,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         card.querySelector('.training-deps-install').style.display = 'none';
                         card.querySelector('.training-deps-progress').style.display = '';
                         card.querySelector('.training-deps-label').textContent = state.label || '安装中...';
-                        card.querySelector('.training-deps-bar').style.width = Math.round((state.progress||0)*100) + '%';
+                        card.querySelector('.training-deps-bar').style.width = Math.round((state.progress || 0) * 100) + '%';
                     } else {
                         card.querySelector('.training-deps-install').style.display = '';
                         card.querySelector('.training-deps-progress').style.display = 'none';
@@ -2473,17 +2473,17 @@ document.addEventListener('DOMContentLoaded', () => {
             <div class="rec-ds-card">
                 <div class="rec-ds-name">📦 ${escapeHtml(d.name)}</div>
                 <div class="rec-ds-desc">${escapeHtml(d.desc)}</div>
-                <div class="rec-ds-meta">${d.size} · ${(d.splits||[]).join(', ')}</div>
-                <button class="btn-secondary rec-ds-dl-btn" data-repo="${d.repo_id}" data-name="${d.name}" data-config="${d.config||''}" style="margin-top:0.4rem; width:100%;" ${isDownloaded ? 'disabled' : ''}>${isDownloaded ? '✓ 已下载' : '一键下载'}</button>
+                <div class="rec-ds-meta">${d.size} · ${(d.splits || []).join(', ')}</div>
+                <button class="btn-secondary rec-ds-dl-btn" data-repo="${d.repo_id}" data-name="${d.name}" data-config="${d.config || ''}" style="margin-top:0.4rem; width:100%;" ${isDownloaded ? 'disabled' : ''}>${isDownloaded ? '✓ 已下载' : '一键下载'}</button>
             </div>
         `}).join('');
         grid.querySelectorAll('.rec-ds-dl-btn').forEach(btn => {
-            btn.addEventListener('click', async function() {
+            btn.addEventListener('click', async function () {
                 this.disabled = true;
                 this.textContent = '启动中...';
                 try {
                     const res = await fetch('/api/downloads/dataset', {
-                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ repo_id: this.dataset.repo, name: this.dataset.name, config: this.dataset.config || null })
                     });
                     const d = await res.json();
@@ -2539,19 +2539,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 const id = btn.dataset.id;
                 const res = await fetch(`/api/training/datasets/${id}/preview?n=5`);
                 const data = await res.json();
-                
+
                 const pre = document.createElement('pre');
                 pre.style.cssText = 'background:#1a1b26;color:#a9b1d6;padding:15px;border-radius:8px;overflow:auto;max-height:60vh;white-space:pre-wrap;font-size:12px;margin:0;';
                 pre.textContent = JSON.stringify(data.samples || [], null, 2);
-                
+
                 const div = document.createElement('div');
                 div.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
-                
+
                 const content = document.createElement('div');
                 content.style.cssText = 'background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;width:100%;max-width:800px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,0.5);';
                 content.innerHTML = `
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
-                        <h3 style="margin:0;font-size:1.1rem;">预览前 ${(data.samples||[]).length} 条数据</h3>
+                        <h3 style="margin:0;font-size:1.1rem;">预览前 ${(data.samples || []).length} 条数据</h3>
                         <button onclick="this.closest('[style*=\\'position:fixed\\']').remove()" style="background:transparent;border:none;color:var(--text-secondary);cursor:pointer;font-size:1.2rem;padding:0 5px;">✖</button>
                     </div>
                 `;
@@ -2570,7 +2570,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const contentRes = await fetch(`/api/training/datasets/${id}/preview?n=9999`);
                     const contentData = await contentRes.json();
                     document.getElementById('ds-editor-name').value = ds.name;
-                    document.getElementById('ds-editor-content').value = (contentData.samples||[]).map(s => JSON.stringify(s)).join('\n');
+                    document.getElementById('ds-editor-content').value = (contentData.samples || []).map(s => JSON.stringify(s)).join('\n');
                     document.getElementById('ds-editor-save').textContent = '更新数据集';
                     document.getElementById('ds-editor-save').dataset.editId = id;
                     document.getElementById('ds-editor-status').textContent = `正在编辑: ${ds.name} (${ds.sample_count} 条)`;
@@ -2611,7 +2611,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!repo) { showStatus('⚠️ 请输入仓库ID', 'error'); return; }
         try {
             const res = await fetch('/api/downloads/dataset', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ repo_id: repo, name: repo })
             });
             const data = await res.json();
@@ -2652,7 +2652,7 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 const url = editId ? `/api/training/datasets/${editId}` : '/api/training/datasets/create';
                 const method = editId ? 'PUT' : 'POST';
-                const res = await fetch(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ name, samples: content }) });
+                const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, samples: content }) });
                 const data = await res.json();
                 if (data.status === 'success') {
                     showStatus(`✅ 数据集已${editId ? '更新' : '创建'} (${data.sample_count} 条)`, 'success');
@@ -2683,7 +2683,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (sel) {
                 sel.innerHTML = '<option value="">-- 选择模型配置 --</option>' +
                     (data.configs || []).map(c => {
-                        const params = c.param_count_estimate ? ` (${(c.param_count_estimate/1e6).toFixed(1)}M 参数)` : '';
+                        const params = c.param_count_estimate ? ` (${(c.param_count_estimate / 1e6).toFixed(1)}M 参数)` : '';
                         return `<option value="${c.id}">${c.name} - ${c.architecture}${params}</option>`;
                     }).join('');
             }
@@ -2711,7 +2711,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const cfg = await res.json();
             document.getElementById('scratch-preview-arch').textContent = cfg.architecture || '';
             document.getElementById('scratch-preview-params').textContent = cfg.param_count_estimate
-                ? `${(cfg.param_count_estimate/1e6).toFixed(1)}M 参数` : '';
+                ? `${(cfg.param_count_estimate / 1e6).toFixed(1)}M 参数` : '';
             const configJson = typeof cfg.config_json === 'string' ? JSON.parse(cfg.config_json) : cfg.config_json;
             document.getElementById('scratch-preview-layers').textContent =
                 `层数: ${configJson.num_layers || '?'} | 隐藏维度: ${configJson.hidden_size || '?'} | 头数: ${configJson.num_heads || '?'}`;
@@ -2744,7 +2744,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             const res = await fetch('/api/training/runs', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     name: `${configName} 从头训练`,
                     dataset_id: datasetId,
@@ -2808,7 +2808,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             const res = await fetch('/api/training/runs', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     name: `${baseModel.split('/').pop()} 微调`,
                     dataset_id: datasetId,
@@ -2855,7 +2855,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         best_loss: s.current_loss
                     });
                 } else if (s.status === 'error') {
-                    handleTrainingError({run_id: s.run_id, error: s.error});
+                    handleTrainingError({ run_id: s.run_id, error: s.error });
                 } else {
                     handleTrainingProgress({
                         status: 'training',
@@ -2958,8 +2958,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 row.className = 'layer-stat-row';
                 row.innerHTML = `
                     <span class="layer-stat-name" title="${l.name}">${l.name.split('.').slice(-2).join('.')}</span>
-                    <div class="layer-stat-bar"><div class="layer-stat-bar-fill" style="width:${Math.min(Math.abs(l.mean||0)/maxVal*100, 100)}%"></div></div>
-                    <span class="layer-stat-values">μ=${(l.mean||0).toFixed(3)} σ=${(l.std||0).toFixed(3)}</span>
+                    <div class="layer-stat-bar"><div class="layer-stat-bar-fill" style="width:${Math.min(Math.abs(l.mean || 0) / maxVal * 100, 100)}%"></div></div>
+                    <span class="layer-stat-values">μ=${(l.mean || 0).toFixed(3)} σ=${(l.std || 0).toFixed(3)}</span>
                 `;
                 container.appendChild(row);
             });
@@ -2974,7 +2974,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('monitor-resume-btn').style.display = 'none';
         document.getElementById('monitor-step-btn').style.display = 'none';
         document.getElementById('monitor-abort-btn').style.display = 'none';
-        
+
         const testBtn = document.getElementById('monitor-test-btn');
         if (testBtn) {
             testBtn.style.display = data.aborted ? 'none' : 'inline-flex';
@@ -3038,10 +3038,10 @@ document.addEventListener('DOMContentLoaded', () => {
         container.innerHTML = runs.map(r => `
             <div class="config-item" data-id="${r.id}">
                 <div class="config-item-body">
-                    <div class="config-item-title">${statusIcon[r.status]||'📋'} ${escapeHtml(r.name)}</div>
+                    <div class="config-item-title">${statusIcon[r.status] || '📋'} ${escapeHtml(r.name)}</div>
                     <div class="config-item-meta">
                         <span>${r.base_model_id || 'Scratch'}</span>
-                        <span>${statusText[r.status]||r.status}</span>
+                        <span>${statusText[r.status] || r.status}</span>
                         <span>${r.current_epoch.toFixed(1)} epoch</span>
                         <span>${formatTimeAgo(r.created_at)}</span>
                         ${r.checkpoint_dir ? `<span style="opacity:0.8; font-size:0.8rem; display:block; margin-top:0.2rem;">📍 ${r.checkpoint_dir}</span>` : ''}
@@ -3141,10 +3141,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const benchList = document.getElementById('benchmark-download-list');
         if (benchList) {
             const benchmarks = [
-                {id:'mmlu', name:'MMLU', hf:'cais/mmlu', size:'~100MB'},
-                {id:'hellaswag', name:'HellaSwag', hf:'Rowan/hellaswag', size:'~50MB'},
-                {id:'hle', name:'HLE', hf:'cais/hle', size:'~10MB'},
-                {id:'swe_bench', name:'SWE-bench', hf:'princeton-nlp/SWE-bench_Verified', size:'~200MB'},
+                { id: 'mmlu', name: 'MMLU', hf: 'cais/mmlu', size: '~100MB' },
+                { id: 'hellaswag', name: 'HellaSwag', hf: 'Rowan/hellaswag', size: '~50MB' },
+                { id: 'hle', name: 'HLE', hf: 'cais/hle', size: '~10MB' },
+                { id: 'swe_bench', name: 'SWE-bench', hf: 'princeton-nlp/SWE-bench_Verified', size: '~200MB' },
             ];
             benchList.innerHTML = benchmarks.map(b => `
                 <div class="rec-ds-card">
@@ -3170,25 +3170,25 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                     });
                 }
-            } catch(e) { /* non-critical, buttons default to 一键下载 */ }
+            } catch (e) { /* non-critical, buttons default to 一键下载 */ }
             benchList.querySelectorAll('.bench-dl-btn').forEach(btn => {
-                btn.addEventListener('click', async function() {
+                btn.addEventListener('click', async function () {
                     this.disabled = true; this.textContent = '下载中...';
                     try {
                         const res = await fetch('/api/training/benchmark/pre-download', {
-                            method:'POST', headers:{'Content-Type':'application/json'},
-                            body: JSON.stringify({benchmark_type:this.dataset.bench})
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ benchmark_type: this.dataset.bench })
                         });
                         const d = await res.json();
                         if (d.status === 'ok') {
                             this.textContent = '已下载 ✓';
                             this.dataset.cached = 'true';
                             this.dataset.count = d.count;
-                            showStatus('📥 '+d.message, 'success');
+                            showStatus('📥 ' + d.message, 'success');
                         } else {
-                            showStatus('❌ '+(d.detail||'失败'), 'error');
+                            showStatus('❌ ' + (d.detail || '失败'), 'error');
                         }
-                    } catch(e) { showStatus('❌ 网络错误','error'); }
+                    } catch (e) { showStatus('❌ 网络错误', 'error'); }
                     this.disabled = false;
                 });
             });
@@ -3218,7 +3218,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const ckpts = data.checkpoints || [];
             if (!ckpts.length) { container.innerHTML = ''; return; }
             container.innerHTML = ckpts.map(ck => {
-                const progress = Object.entries(ck.progress || {}).map(([k,v]) => `${k}: ${v}`).join(', ');
+                const progress = Object.entries(ck.progress || {}).map(([k, v]) => `${k}: ${v}`).join(', ');
                 return `<div class="card" style="border-color:var(--theme-color); margin-bottom:0.5rem; padding:0.6rem 0.8rem;">
                     <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.4rem;">
                         <div>
@@ -3245,7 +3245,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     runBenchmark(true);
                 });
             });
-        } catch(e) { /* non-critical */ }
+        } catch (e) { /* non-critical */ }
     }
 
     async function runBenchmark(resume = false) {
@@ -3266,7 +3266,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             const res = await fetch('/api/training/benchmark', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ model_id: modelId, model_source: 'online', benchmark_types: types, resume: resume })
             });
             const data = await res.json();
@@ -3286,12 +3286,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const pct = Math.round((data.progress || 0) * 100);
         if (data.stage === 'loaded') {
-            container.innerHTML = `<div style="padding:0.3rem 0;"><span>📋</span> <span>${escapeHtml(data.label||'')}</span></div>`;
+            container.innerHTML = `<div style="padding:0.3rem 0;"><span>📋</span> <span>${escapeHtml(data.label || '')}</span></div>`;
         } else {
             container.innerHTML = `
                 <div style="margin-bottom:0.4rem;">
-                    <span style="font-weight:500;">${escapeHtml(data.task||'')}</span>
-                    <span style="color:var(--text-secondary); margin-left:0.5rem;">${escapeHtml(data.label||'')}</span>
+                    <span style="font-weight:500;">${escapeHtml(data.task || '')}</span>
+                    <span style="color:var(--text-secondary); margin-left:0.5rem;">${escapeHtml(data.label || '')}</span>
                 </div>
                 <div style="display:flex; align-items:center; gap:0.5rem;">
                     <div style="flex:1; height:6px; background:var(--border-color); border-radius:3px; overflow:hidden;">
@@ -3315,33 +3315,33 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const results = data.results || [];
         let html = `<div class="model-preview" style="margin-bottom:1rem;">
-            <div class="preview-item"><label>模型</label><span>${escapeHtml(data.model_id||'')}</span></div>
-            <div class="preview-item"><label>平均延迟</label><span>${(data.avg_latency_ms||0).toFixed(0)} ms</span></div>
-            <div class="preview-item"><label>Token/秒</label><span>${(data.tokens_per_second||0).toFixed(1)}</span></div>
-            <div class="preview-item"><label>总题数</label><span>${data.total_questions||0}</span></div>
+            <div class="preview-item"><label>模型</label><span>${escapeHtml(data.model_id || '')}</span></div>
+            <div class="preview-item"><label>平均延迟</label><span>${(data.avg_latency_ms || 0).toFixed(0)} ms</span></div>
+            <div class="preview-item"><label>Token/秒</label><span>${(data.tokens_per_second || 0).toFixed(1)}</span></div>
+            <div class="preview-item"><label>总题数</label><span>${data.total_questions || 0}</span></div>
         </div>`;
 
         results.forEach((r, ri) => {
             const accColor = r.accuracy >= 0.7 ? 'var(--success)' : r.accuracy >= 0.4 ? '#f59e0b' : 'var(--error)';
             html += `<div style="margin-bottom:1rem; border:1px solid var(--border-color); border-radius:8px; padding:0.8rem;">
-                <div style="font-weight:700; margin-bottom:0.5rem; font-size:0.9rem;">${escapeHtml(r.name)} — 准确率: <span style="color:${accColor}">${(r.accuracy*100).toFixed(0)}%</span> (${r.correct}/${r.num_questions})</div>`;
+                <div style="font-weight:700; margin-bottom:0.5rem; font-size:0.9rem;">${escapeHtml(r.name)} — 准确率: <span style="color:${accColor}">${(r.accuracy * 100).toFixed(0)}%</span> (${r.correct}/${r.num_questions})</div>`;
             // Per-subject breakdown
             if (r.subjects && Object.keys(r.subjects).length > 1) {
                 html += '<div style="display:flex; flex-wrap:wrap; gap:0.3rem; margin-bottom:0.5rem;">';
                 Object.entries(r.subjects).forEach(([subj, s]) => {
                     const subjColor = s.accuracy >= 0.7 ? 'var(--success)' : s.accuracy >= 0.4 ? '#f59e0b' : 'var(--error)';
-                    html += `<span style="font-size:0.65rem; padding:0.15rem 0.4rem; background:var(--bg-inner); border:1px solid var(--border-color); border-radius:10px;" title="${subj}: ${(s.accuracy*100).toFixed(0)}%">${subj} <b style="color:${subjColor}">${(s.accuracy*100).toFixed(0)}%</b></span>`;
+                    html += `<span style="font-size:0.65rem; padding:0.15rem 0.4rem; background:var(--bg-inner); border:1px solid var(--border-color); border-radius:10px;" title="${subj}: ${(s.accuracy * 100).toFixed(0)}%">${subj} <b style="color:${subjColor}">${(s.accuracy * 100).toFixed(0)}%</b></span>`;
                 });
                 html += '</div>';
             }
             // Score distribution bar
             const details = r.details || [];
-            const scoreColors = {'1.0': 'var(--success)', '0.8': '#10b981', '0.7': '#34d399'};
+            const scoreColors = { '1.0': 'var(--success)', '0.8': '#10b981', '0.7': '#34d399' };
             html += '<div style="display:flex; gap:2px; margin-bottom:0.4rem; height:4px; border-radius:2px; overflow:hidden;">';
             details.forEach(d => {
                 const sc = d.score || 0;
                 const scColor = sc >= 0.8 ? 'var(--success)' : sc >= 0.5 ? '#f59e0b' : sc > 0 ? 'var(--error)' : '#9ca3af';
-                html += `<div style="flex:1; background:${scColor};" title="#${(d.idx||0)+1}: ${sc}"></div>`;
+                html += `<div style="flex:1; background:${scColor};" title="#${(d.idx || 0) + 1}: ${sc}"></div>`;
             });
             html += '</div>';
 
@@ -3361,17 +3361,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 const hasFull = !!(d.answer);
                 html += `<div style="border-bottom:1px solid var(--border-color); font-size:0.75rem;">
                     <div class="bench-q-header" data-qid="${qid}" style="display:flex; align-items:center; gap:0.4rem; padding:0.35rem 0.5rem; cursor:pointer; user-select:none; hover:bg:var(--bg-inner);">
-                        <span style="font-weight:600; min-width:28px; color:var(--text-secondary);">#${(d.idx||di)+1}</span>
+                        <span style="font-weight:600; min-width:28px; color:var(--text-secondary);">#${(d.idx || di) + 1}</span>
                         <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(questionPreview)}</span>
                         <span style="font-weight:700; min-width:32px; text-align:center; padding:0.1rem 0.3rem; border-radius:4px; font-size:0.7rem; background:${scColor}22; color:${scColor};">${scLabel}</span>
-                        <span style="color:var(--text-secondary); font-size:0.65rem; min-width:45px; text-align:right;">${d.latency_ms||0}ms</span>
+                        <span style="color:var(--text-secondary); font-size:0.65rem; min-width:45px; text-align:right;">${d.latency_ms || 0}ms</span>
                         <span style="font-size:0.65rem; color:var(--text-secondary);">▶</span>
                     </div>
                     <div id="${qid}" style="display:none; padding:0.4rem 0.6rem; background:var(--bg-inner); border-top:1px solid var(--border-color);">
                         <div style="margin-bottom:0.35rem;"><span style="font-weight:600; color:var(--text-secondary);">题目:</span><div style="white-space:pre-wrap; margin-top:0.15rem;">${escapeHtml(question)}</div></div>`;
                 if (d.choices && d.choices.length) {
-                    const labels = ['A','B','C','D','E','F'];
-                    html += `<div style="margin-bottom:0.35rem;"><span style="font-weight:600; color:var(--text-secondary);">选项:</span><div style="margin-top:0.15rem;">${d.choices.map((c,i) => `<span style="margin-right:0.6rem;">${labels[i]}) ${escapeHtml(c)}</span>`).join('')}</div></div>`;
+                    const labels = ['A', 'B', 'C', 'D', 'E', 'F'];
+                    html += `<div style="margin-bottom:0.35rem;"><span style="font-weight:600; color:var(--text-secondary);">选项:</span><div style="margin-top:0.15rem;">${d.choices.map((c, i) => `<span style="margin-right:0.6rem;">${labels[i]}) ${escapeHtml(c)}</span>`).join('')}</div></div>`;
                 }
                 if (d.error) {
                     html += `<div style="margin-bottom:0.35rem; color:var(--error);"><span style="font-weight:600;">错误:</span> ${escapeHtml(d.error)}</div>`;
@@ -3381,10 +3381,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 html += `<div style="margin-bottom:0.35rem;"><span style="font-weight:600; color:var(--text-secondary);">期望答案:</span> ${escapeHtml(expected || '(无)')}</div>
                         <div style="display:flex; gap:0.8rem; flex-wrap:wrap; font-size:0.7rem; color:var(--text-secondary);">
                             <span>得分: <b style="color:${scColor}">${sc.toFixed(2)}</b></span>
-                            <span>评分方式: ${escapeHtml(d.scoring||'keyword_match')}</span>
-                            <span>延迟: ${d.latency_ms||0}ms</span>
-                            <span>Token: ${d.tokens||0}</span>
-                            <span>科目: ${escapeHtml(d.subject||'general')}</span>
+                            <span>评分方式: ${escapeHtml(d.scoring || 'keyword_match')}</span>
+                            <span>延迟: ${d.latency_ms || 0}ms</span>
+                            <span>Token: ${d.tokens || 0}</span>
+                            <span>科目: ${escapeHtml(d.subject || 'general')}</span>
                         </div>`;
                 // Scoring method explanation
                 if (d.scoring === 'multiple_choice') {
@@ -3400,7 +3400,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Wire expand/collapse
         content.querySelectorAll('.bench-q-header').forEach(header => {
-            header.addEventListener('click', function() {
+            header.addEventListener('click', function () {
                 const qid = this.dataset.qid;
                 const body = document.getElementById(qid);
                 if (!body) return;
@@ -3430,7 +3430,7 @@ document.addEventListener('DOMContentLoaded', () => {
             container.innerHTML = benchmarks.map(b => {
                 const metrics = typeof b.metrics_json === 'string' ? JSON.parse(b.metrics_json) : (b.metrics_json || []);
                 let accStr = '';
-                metrics.forEach(m => { accStr += `${m.name}: ${(m.accuracy*100).toFixed(0)}% `; });
+                metrics.forEach(m => { accStr += `${m.name}: ${(m.accuracy * 100).toFixed(0)}% `; });
                 return `<div class="download-item benchmark-history-item" data-id="${b.id}" style="cursor:pointer;">
                     <div class="download-item-icon">📊</div>
                     <div class="download-item-body">
@@ -3459,7 +3459,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         tokens_per_second: b.tokens_per_second,
                         total_questions: b.num_questions
                     });
-                    document.getElementById('view-training-benchmark').scrollIntoView({behavior:'smooth'});
+                    document.getElementById('view-training-benchmark').scrollIntoView({ behavior: 'smooth' });
                 });
             });
             container.querySelectorAll('.download-action-btn.delete').forEach(btn => {
