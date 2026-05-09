@@ -909,13 +909,31 @@ class TrainingEngine:
             })
 
         except Exception as e:
+            print(f"[Training] Error at run {run_id}: {e}")
+            import traceback
+            traceback.print_exc()
+
+            # Try to save the model even on failure
+            save_dir = None
+            try:
+                from core.paths import get_data_path
+                save_dir = os.path.join(get_data_path("models"), "trained", f"run_{run_id}")
+                os.makedirs(save_dir, exist_ok=True)
+                model.save_pretrained(save_dir)
+                tokenizer.save_pretrained(save_dir)
+                print(f"[Training] Model saved despite error: {save_dir}")
+            except Exception as save_err:
+                print(f"[Training] Could not save model after error: {save_err}")
+
             self._state["status"] = "failed"
             self._state["active"] = False
-            self._update_run_db(run_id, status="failed", error_message=str(e))
+            self._update_run_db(run_id, status="failed", error_message=str(e),
+                               checkpoint_dir=save_dir)
             self._broadcast({
                 "type": "training_error",
                 "run_id": run_id,
-                "error": str(e)
+                "error": str(e),
+                "checkpoint_saved": save_dir is not None
             })
 
     def _register_activation_hooks(self, model):

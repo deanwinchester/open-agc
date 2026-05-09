@@ -58,3 +58,70 @@ Open-AGC 提供了便捷的脚本入口：
 
 ## 🤝 贡献 (Contributing)
 欢迎提交 Pull Requests 来丰富 `tools/` 目录下的可用工具库或是贡献您编写的好用技能！
+
+---
+
+## 🔌 插件系统 (Plugin System)
+
+Open-AGC 支持即插即用的插件架构。插件存放在 `plugins/` 目录，服务启动时自动发现并加载，前端菜单动态渲染。
+
+### 插件规范
+
+每个插件是一个子目录，必须包含 `plugin.json` 清单文件和 `__init__.py` 入口：
+
+```
+plugins/<name>/
+├── plugin.json          # 清单：name, version, menu, dependencies
+├── __init__.py          # init_plugin(context) → PluginInstance
+├── routes.py            # FastAPI APIRouter（可选）
+├── static/              # 前端资源（可选）
+│   ├── plugin.js        # 前端入口
+│   └── plugin.css       # 样式
+└── requirements.txt     # 插件依赖（可选）
+```
+
+`plugin.json` 示例：
+
+```json
+{
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "description": "插件描述",
+  "menu": {
+    "section": "my-section",
+    "label": "菜单名称",
+    "icon": "🔧",
+    "views": [
+      {"id": "view-id", "label": "视图名称"}
+    ]
+  }
+}
+```
+
+### 内置插件：open-agc-train
+
+模型训练、微调、PPL 评估与 Benchmark 测评功能已作为内置插件提供，源码位于 `plugins/open-agc-train/`。
+
+**安装依赖**（可选，训练功能需要）：
+
+```bash
+pip install torch transformers peft accelerate datasets
+```
+
+**数据迁移**：如有旧版训练数据，运行：
+
+```bash
+cd plugins/open-agc-train
+python db.py migrate --from ../../data/chat_history.db --to ../../data/plugins/open-agc-train/training.db
+```
+
+### 开发自定义插件
+
+1. 在 `plugins/` 下创建目录
+2. 编写 `plugin.json` 清单
+3. 实现 `init_plugin(context)` 返回 `PluginInstance`
+4. 重启服务，插件自动加载
+
+### 卸载插件
+
+直接删除 `plugins/<name>/` 目录，重启服务即可。

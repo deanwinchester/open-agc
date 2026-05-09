@@ -15,7 +15,11 @@
       "Bash(echo \"Exit: $?\")",
       "Bash(python -c \"import py_compile; py_compile.compile\\('core/model_codegen.py', doraise=True\\); print\\('model_codegen.py: OK'\\)\")",
       "Bash(python -c \"import py_compile; py_compile.compile\\('core/model_architectures.py', doraise=True\\); print\\('model_architectures.py: OK'\\)\")",
-      "Bash(python -c \"import py_compile; py_compile.compile\\('api/server.py', doraise=True\\); print\\('server.py: OK'\\)\")"
+      "Bash(python -c \"import py_compile; py_compile.compile\\('api/server.py', doraise=True\\); print\\('server.py: OK'\\)\")",
+      "Bash(sed -i 's/from core.model_architectures import/from .architectures import/g' engine.py)",
+      "Bash(sed -i 's/from core.paths import get_data_path/# get_data_path replaced by self.db_path/g' engine.py)",
+      "Bash(sed -i 's/from core.llm_client import LLMClient/try:\\\\n    from core.llm_client import LLMClient\\\\nexcept ImportError:\\\\n    LLMClient = None/g' eval.py)",
+      "Bash(gh auth *)"
     ]
   }
 }
