@@ -5,20 +5,16 @@ from PyInstaller.utils.hooks import copy_metadata
 
 datas = [('static', 'static'), ('build_data', 'data'), ('skills', 'skills'), ('agent', 'agent'), ('core', 'core'), ('tools', 'tools'), ('api', 'api')]
 binaries = []
-hiddenimports = ['uvicorn', 'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto', 'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.websockets', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan', 'uvicorn.lifespan.on', 'fastapi', 'starlette', 'starlette.routing', 'starlette.middleware', 'starlette.responses', 'starlette.staticfiles', 'starlette.websockets', 'litellm', 'pydantic', 'dotenv', 'rich', 'duckduckgo_search', 'requests', 'bs4', 'httptools', 'websockets', 'tiktoken', 'tiktoken_ext', 'tiktoken_ext.openai_public', 'sglang', 'sglang.launch_server', 'api.server', 'agent.agent', 'core.llm_client', 'core.sglang_manager', 'tools.shell', 'tools.filesystem', 'tools.python_repl', 'tools.computer', 'tools.memory', 'tools.web_search', 'tools.system_mac', 'webview', 'webview.platforms.winforms']
+hiddenimports = ['uvicorn', 'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto', 'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.websockets', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan', 'uvicorn.lifespan.on', 'fastapi', 'starlette', 'starlette.routing', 'starlette.middleware', 'starlette.responses', 'starlette.staticfiles', 'starlette.websockets', 'litellm', 'pydantic', 'dotenv', 'rich', 'duckduckgo_search', 'requests', 'bs4', 'httptools', 'websockets', 'tiktoken', 'tiktoken_ext', 'tiktoken_ext.openai_public', 'api.server', 'agent.agent', 'core.llm_client', 'core.sglang_manager', 'tools.shell', 'tools.filesystem', 'tools.python_repl', 'tools.computer', 'tools.memory', 'tools.web_search', 'tools.system_mac', 'webview', 'webview.platforms.winforms']
 datas += copy_metadata('litellm')
 datas += copy_metadata('tiktoken')
-datas += copy_metadata('sglang')
 hiddenimports += collect_submodules('tiktoken')
 hiddenimports += collect_submodules('tiktoken_ext')
-hiddenimports += collect_submodules('sglang')
 tmp_ret = collect_all('litellm')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('tiktoken')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('openai')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('sglang')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
@@ -31,7 +27,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'torch', 'transformers', 'peft', 'accelerate', 'datasets',
+        'bitsandbytes', 'sentencepiece', 'sklearn', 'scikit-learn',
+        'tkinter', 'matplotlib', 'numpy', 'scipy', 'pandas',
+    ],
     noarchive=False,
     optimize=0,
 )
