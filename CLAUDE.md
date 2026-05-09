@@ -23,7 +23,7 @@ python main.py "list files in current directory"
 build_win.bat       # Windows → dist/*.zip
 
 # Install ML training dependencies (optional, large)
-pip install torch transformers peft accelerate datasets
+pip install -r plugins/open-agc-train/requirements.txt
 ```
 
 No formal test suite; manual testing is done by starting the server and interacting through the web UI at `http://localhost:8000`.
@@ -89,7 +89,7 @@ Plugins live in `plugins/<name>/`. Each must have:
 
 The `PluginInstance` carries a FastAPI `APIRouter` and optional `static_dir`. On startup, the server calls `discover_plugins()`, mounts each plugin's router at `/api/plugin/<name>` and static files at `/static/plugins/<name>`. The frontend fetches `/api/plugins` and dynamically renders sidebar menu sections.
 
-The built-in `open-agc-train` plugin provides model training, finetuning, PPL evaluation, and benchmark testing — imported from the original `core/training_engine.py` and `core/eval_engine.py`.
+The built-in `open-agc-train` plugin provides model training, finetuning, PPL evaluation, and benchmark testing. The core implementation has been decoupled into `plugins/open-agc-train/`. This separation ensures that heavy ML dependencies don't block the main server startup.
 
 ### Frontend (`static/`)
 

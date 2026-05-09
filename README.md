@@ -100,12 +100,13 @@ plugins/<name>/
 
 ### 内置插件：open-agc-train
 
-模型训练、微调、PPL 评估与 Benchmark 测评功能已作为内置插件提供，源码位于 `plugins/open-agc-train/`。
+模型训练、微调、PPL 评估与 Benchmark 测评功能作为独立插件存放于 `plugins/open-agc-train/` 目录下。
 
-**安装依赖**（可选，训练功能需要）：
+**开启训练功能与安装依赖**（可选，默认情况下主程序不会加载训练依赖以保持极速启动）：
 
 ```bash
-pip install torch transformers peft accelerate datasets
+# 安装训练所需的核心组件
+pip install -r plugins/open-agc-train/requirements.txt
 ```
 
 **数据迁移**：如有旧版训练数据，运行：
