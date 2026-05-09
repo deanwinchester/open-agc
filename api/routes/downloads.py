@@ -656,8 +656,6 @@ async def install_training_deps():
 
 @router.get("/api/training/status")
 async def get_training_status():
-    from core.training_engine import get_training_engine
-    engine = get_training_engine()
     available = _training_available
     import_error = ""
     if not available:
@@ -670,4 +668,4 @@ async def get_training_status():
                 import_error = f"{pkg}: {e}"; break
         if not import_error: available = True
     return {"available":available,"import_error":import_error,
-            "engine_state":engine.get_state(),"install_state":_training_install_state}
+            "engine_state":{},"install_state":_training_install_state}

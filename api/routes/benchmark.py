@@ -462,8 +462,8 @@ async def delete_benchmark(bench_id: int):
 @router.post("/benchmark")
 async def run_benchmark(req: BenchmarkRequest):
     """Run benchmark tasks against a model (in background thread for real-time progress)."""
-    engine = _get_training_engine()
-    if engine.get_state()["active"]:
+    engine = _get_training_engine() if _get_training_engine else None
+    if engine and engine.get_state()["active"]:
         raise HTTPException(status_code=409, detail="Training in progress")
 
     model_id = req.model_id
