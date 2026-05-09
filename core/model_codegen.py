@@ -1,0 +1,477 @@
+"""
+Model code generation engine.
+Generates complete PyTorch model.py, HuggingFace config.json, and tokenizer config
+from architecture config dicts (both template and custom-builder modes).
+"""
+import json
+import math
+
+
+def generate_model_code(config: dict, arch: str) -> str:
+    """Generate a complete model.py source file from an architecture config.
+
+    Args:
+        config: parsed config_json dict
+        arch: architecture identifier (gpt_decoder, llama, bert_encoder, moe,
+              mamba_ssm, diffusion_dit, custom_builder)
+
+    Returns:
+        Complete Python source code as a string.
+    """
+    mode = config.get("mode", "template")
+    if mode == "custom" or arch == "custom_builder":
+        return _generate_custom_model(config)
+    return _generate_template_model(config, arch)
+
+
+def _generate_template_model(config: dict, arch: str) -> str:
+    """Generate code for a template architecture wrapping a HuggingFace config."""
+    hidden_size = config.get("hidden_size", 768)
+    num_layers = config.get("num_layers", 12)
+    num_heads = config.get("num_attention_heads", 12)
+    intermediate_size = config.get("intermediate_size", hidden_size * 4)
+    vocab_size = config.get("vocab_size", 50000)
+    max_seq_len = config.get("max_seq_length", 2048)
+    activation = config.get("activation", "gelu")
+    norm_type = config.get("norm_type", "layer_norm")
+    tie_embeddings = config.get("tie_word_embeddings", False)
+    dropout = config.get("embd_dropout", 0.1)
+    attn_dropout = config.get("attn_dropout", 0.1)
+    pos_encoding = config.get("pos_encoding", "rope")
+    rope_theta = config.get("rope_theta", 10000)
+    kv_heads = int(config.get("kv_heads", num_heads))
+    head_dim = config.get("head_dim", hidden_size // num_heads)
+
+    if arch in ("gpt_decoder",):
+        hf_config_class = "GPT2Config"
+        hf_model_class = "GPT2LMHeadModel"
+        config_kwargs = _fmt_dict({
+            "vocab_size": vocab_size,
+            "n_positions": max_seq_len,
+            "n_embd": hidden_size,
+            "n_layer": num_layers,
+            "n_head": num_heads,
+            "n_inner": intermediate_size,
+            "activation_function": "gelu_new" if activation == "gelu_new" else activation,
+            "resid_pdrop": dropout,
+            "embd_pdrop": dropout,
+            "attn_pdrop": attn_dropout,
+        })
+
+    elif arch in ("llama",):
+        hf_config_class = "LlamaConfig"
+        hf_model_class = "LlamaForCausalLM"
+        rms_norm_eps = config.get("rms_norm_eps", 1e-6)
+        config_kwargs = _fmt_dict({
+            "vocab_size": vocab_size,
+            "hidden_size": hidden_size,
+            "intermediate_size": intermediate_size,
+            "num_hidden_layers": num_layers,
+            "num_attention_heads": num_heads,
+            "num_key_value_heads": kv_heads,
+            "max_position_embeddings": max_seq_len,
+            "rms_norm_eps": rms_norm_eps,
+            "rope_theta": rope_theta,
+            "tie_word_embeddings": tie_embeddings,
+            "hidden_act": "silu",
+        })
+
+    elif arch in ("bert_encoder",):
+        hf_config_class = "BertConfig"
+        hf_model_class = "BertForMaskedLM"
+        config_kwargs = _fmt_dict({
+            "vocab_size": vocab_size,
+            "hidden_size": hidden_size,
+            "intermediate_size": intermediate_size,
+            "num_hidden_layers": num_layers,
+            "num_attention_heads": num_heads,
+            "max_position_embeddings": max_seq_len,
+            "hidden_dropout_prob": dropout,
+            "attention_probs_dropout_prob": attn_dropout,
+        })
+
+    elif arch in ("moe",):
+        hf_config_class = "LlamaConfig"
+        hf_model_class = "LlamaForCausalLM"
+        num_experts = config.get("num_experts", 8)
+        rms_norm_eps = config.get("rms_norm_eps", 1e-6)
+        config_kwargs = _fmt_dict({
+            "vocab_size": vocab_size,
+            "hidden_size": hidden_size,
+            "intermediate_size": intermediate_size,
+            "num_hidden_layers": num_layers,
+            "num_attention_heads": num_heads,
+            "num_key_value_heads": kv_heads,
+            "max_position_embeddings": max_seq_len,
+            "rms_norm_eps": rms_norm_eps,
+            "rope_theta": rope_theta,
+            "tie_word_embeddings": tie_embeddings,
+        })
+        # MoE requires custom model wrapping
+        hf_model_class = "AutoModelForCausalLM"  # Fallback: won't use HF's native MoE yet
+
+    elif arch in ("mamba_ssm",):
+        return _generate_mamba_model(config)
+
+    elif arch in ("diffusion_dit",):
+        return _generate_dit_model(config)
+
+    else:
+        hf_config_class = "GPT2Config"
+        hf_model_class = "GPT2LMHeadModel"
+        config_kwargs = _fmt_dict({
+            "vocab_size": vocab_size,
+            "n_positions": max_seq_len,
+            "n_embd": hidden_size,
+            "n_layer": num_layers,
+            "n_head": num_heads,
+        })
+
+    return f'''"""
+Auto-generated model definition — {arch}
+Generated by Open-AGC Model Designer
+"""
+from transformers import {hf_config_class}, {hf_model_class}
+import torch
+
+
+def create_model():
+    """Create and return the model with its HF config."""
+    config = {hf_config_class}(
+{config_kwargs}
+    )
+    model = {hf_model_class}(config)
+    return model, config
+
+
+if __name__ == "__main__":
+    model, config = create_model()
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Model: {arch}")
+    print(f"Parameters: {{total_params / 1e6:.1f}}M")
+    print(f"Config: {{config}}")
+'''
+
+
+def _generate_custom_model(config: dict) -> str:
+    """Generate a custom nn.Module from component builder blocks."""
+    hidden_size = config.get("hidden_size", 768)
+    vocab_size = config.get("vocab_size", 50000)
+    max_seq_len = config.get("max_seq_length", 2048)
+    blocks = config.get("blocks", [])
+
+    block_code = []
+    block_init = []
+    block_forward = []
+    layer_idx = 0
+
+    for blk in blocks:
+        btype = blk.get("type", "")
+        cfg = blk.get("config", {})
+
+        if btype == "embedding":
+            block_init.append(f"        self.embed = nn.Embedding({cfg.get('vocab_size', vocab_size)}, {cfg.get('hidden_size', hidden_size)})")
+            block_forward.append("        x = self.embed(input_ids)")
+
+        elif btype == "attention":
+            nh = cfg.get("num_heads", 12)
+            kvh = cfg.get("kv_heads", nh)
+            hd = cfg.get("head_dim", hidden_size // nh)
+            block_init.append(f"        self.attn_{layer_idx} = nn.MultiheadAttention({hidden_size}, {nh}, batch_first=True)")
+            block_init.append(f"        self.norm_attn_{layer_idx} = nn.LayerNorm({hidden_size})")
+            block_forward.append(f"        a, _ = self.attn_{layer_idx}(x, x, x)")
+            block_forward.append(f"        x = self.norm_attn_{layer_idx}(x + a)")
+            layer_idx += 1
+
+        elif btype == "ffn":
+            inter = cfg.get("intermediate_size", hidden_size * 4)
+            act = cfg.get("activation", "gelu")
+            act_fn = {"gelu": "nn.GELU()", "silu": "nn.SiLU()", "relu": "nn.ReLU()", "swiglu": "nn.SiLU()"}.get(act, "nn.GELU()")
+            # SwiGLU uses 3 projections
+            is_swiglu = cfg.get("ffn_type", "standard") == "swiglu" or act == "swiglu"
+            if is_swiglu:
+                block_init.append(f"        self.gate_{layer_idx} = nn.Linear({hidden_size}, {inter})")
+                block_init.append(f"        self.up_{layer_idx} = nn.Linear({hidden_size}, {inter})")
+                block_init.append(f"        self.down_{layer_idx} = nn.Linear({inter}, {hidden_size})")
+                block_init.append(f"        self.norm_ffn_{layer_idx} = nn.LayerNorm({hidden_size})")
+                block_forward.append(f"        g = {act_fn}(self.gate_{layer_idx}(x))")
+                block_forward.append(f"        u = self.up_{layer_idx}(x)")
+                block_forward.append(f"        f = self.down_{layer_idx}(g * u)")
+            else:
+                block_init.append(f"        self.fc1_{layer_idx} = nn.Linear({hidden_size}, {inter})")
+                block_init.append(f"        self.fc2_{layer_idx} = nn.Linear({inter}, {hidden_size})")
+                block_init.append(f"        self.norm_ffn_{layer_idx} = nn.LayerNorm({hidden_size})")
+                block_forward.append(f"        f = self.fc2_{layer_idx}({act_fn}(self.fc1_{layer_idx}(x)))")
+            block_forward.append(f"        x = self.norm_ffn_{layer_idx}(x + f)")
+            layer_idx += 1
+
+        elif btype == "norm":
+            nt = cfg.get("norm_type", "layer_norm")
+            if nt == "rms_norm":
+                block_init.append(f"        self.norm_{layer_idx} = nn.RMSNorm({hidden_size})")
+            else:
+                block_init.append(f"        self.norm_{layer_idx} = nn.LayerNorm({hidden_size})")
+            block_forward.append(f"        x = self.norm_{layer_idx}(x)")
+            layer_idx += 1
+
+        elif btype == "output":
+            tie = cfg.get("tie_embeddings", False)
+            nt = cfg.get("norm_type", "layer_norm")
+            if nt == "rms_norm":
+                block_init.append("        self.final_norm = nn.RMSNorm(hidden_size)")
+            else:
+                block_init.append("        self.final_norm = nn.LayerNorm(hidden_size)")
+            block_init.append(f"        self.lm_head = nn.Linear(hidden_size, {vocab_size}, bias=False)")
+            block_forward.append("        x = self.final_norm(x)")
+            if tie:
+                block_forward.append("        logits = nn.functional.linear(x, self.embed.weight)")
+            else:
+                block_forward.append("        logits = self.lm_head(x)")
+
+    code = f'''"""
+Auto-generated custom model — component builder
+Generated by Open-AGC Model Designer
+"""
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class CustomModel(nn.Module):
+    """Custom architecture built from components."""
+
+    def __init__(self, vocab_size={vocab_size}, hidden_size={hidden_size}, max_seq_len={max_seq_len}):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+{chr(10).join(block_init)}
+
+    def forward(self, input_ids, attention_mask=None):
+{chr(10).join(block_forward)}
+        return logits
+
+
+def create_model():
+    """Create and return the model."""
+    model = CustomModel()
+    return model, None
+
+
+if __name__ == "__main__":
+    model, _ = create_model()
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Parameters: {{total_params / 1e6:.1f}}M")
+'''
+    return code
+
+
+def _generate_mamba_model(config: dict) -> str:
+    """Generate a Mamba/SSM-based model."""
+    hidden_size = config.get("hidden_size", 768)
+    vocab_size = config.get("vocab_size", 50000)
+    num_layers = config.get("num_layers", 12)
+    d_state = config.get("d_state", 16)
+    d_conv = config.get("d_conv", 4)
+    expand = config.get("expand_factor", 2)
+
+    return f'''"""
+Auto-generated Mamba/SSM model
+Generated by Open-AGC Model Designer
+
+Requires: pip install mamba-ssm
+"""
+import torch
+import torch.nn as nn
+
+try:
+    from mamba_ssm import Mamba, MambaConfig
+    _HAS_MAMBA = True
+except ImportError:
+    _HAS_MAMBA = False
+    print("Warning: mamba-ssm not installed. Install with: pip install mamba-ssm")
+
+
+class MambaModel(nn.Module):
+    """Mamba/SSM language model."""
+
+    def __init__(self, vocab_size={vocab_size}, hidden_size={hidden_size},
+                 num_layers={num_layers}, d_state={d_state}, d_conv={d_conv},
+                 expand={expand}):
+        super().__init__()
+        if not _HAS_MAMBA:
+            raise ImportError("mamba-ssm required: pip install mamba-ssm")
+        self.embed = nn.Embedding(vocab_size, hidden_size)
+        mamba_config = MambaConfig(
+            d_model=hidden_size,
+            n_layer=num_layers,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
+            vocab_size=vocab_size,
+        )
+        self.mamba = Mamba(mamba_config)
+        self.norm = nn.LayerNorm(hidden_size)
+        self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
+
+    def forward(self, input_ids):
+        x = self.embed(input_ids)
+        x = self.mamba(x)
+        x = self.norm(x)
+        return self.lm_head(x)
+
+
+def create_model():
+    model = MambaModel()
+    return model, None
+
+
+if __name__ == "__main__":
+    model, _ = create_model()
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Parameters: {{total_params / 1e6:.1f}}M")
+'''
+
+
+def _generate_dit_model(config: dict) -> str:
+    """Generate a Diffusion DiT model."""
+    hidden_size = config.get("hidden_size", 768)
+    num_layers = config.get("num_layers", 12)
+    num_heads = config.get("num_attention_heads", 12)
+    patch_size = config.get("patch_size", 2)
+    in_channels = config.get("in_channels", 4)
+    out_channels = config.get("out_channels", 4)
+
+    return f'''"""
+Auto-generated Diffusion DiT model
+Generated by Open-AGC Model Designer
+"""
+import torch
+import torch.nn as nn
+import math
+
+
+class DiTBlock(nn.Module):
+    """Diffusion Transformer block with AdaLN modulation."""
+
+    def __init__(self, hidden_size={hidden_size}, num_heads={num_heads}):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False)
+        self.attn = nn.MultiheadAttention(hidden_size, num_heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False)
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 4),
+            nn.GELU(),
+            nn.Linear(hidden_size * 4, hidden_size),
+        )
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size)
+        )
+
+    def forward(self, x, c):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = \\
+            self.adaLN_modulation(c).chunk(6, dim=-1)
+        x_norm = self.norm1(x) * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)
+        a, _ = self.attn(x_norm, x_norm, x_norm)
+        x = x + gate_msa.unsqueeze(1) * a
+        x_norm = self.norm2(x) * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(x_norm)
+        return x
+
+
+class DiTModel(nn.Module):
+    """Diffusion Transformer for image generation."""
+
+    def __init__(self, patch_size={patch_size}, in_channels={in_channels},
+                 out_channels={out_channels}, hidden_size={hidden_size},
+                 num_layers={num_layers}, num_heads={num_heads}):
+        super().__init__()
+        self.patch_size = patch_size
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.patch_embed = nn.Conv2d(
+            in_channels, hidden_size, kernel_size=patch_size, stride=patch_size
+        )
+        self.pos_embed = nn.Parameter(torch.zeros(1, 1024, hidden_size))
+        self.blocks = nn.ModuleList([
+            DiTBlock(hidden_size, num_heads) for _ in range(num_layers)
+        ])
+        self.final_norm = nn.LayerNorm(hidden_size, elementwise_affine=False)
+        self.final_conv = nn.ConvTranspose2d(
+            hidden_size, out_channels, kernel_size=patch_size, stride=patch_size
+        )
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        nn.init.normal_(self.pos_embed, std=0.02)
+        for module in self.modules():
+            if isinstance(module, (nn.Linear, nn.Conv2d)):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
+    def forward(self, x, t_emb):
+        B, C, H, W = x.shape
+        x = self.patch_embed(x)  # B, hidden, H/P, W/P
+        x = x.flatten(2).transpose(1, 2)  # B, L, hidden
+        x = x + self.pos_embed[:, :x.shape[1]]
+        for blk in self.blocks:
+            x = blk(x, t_emb)
+        x = self.final_norm(x)
+        L = x.shape[1]
+        Hp = Wp = int(math.sqrt(L))
+        x = x.transpose(1, 2).reshape(B, -1, Hp, Wp)
+        x = self.final_conv(x)
+        return x
+
+
+def create_model():
+    model = DiTModel()
+    return model, None
+
+
+if __name__ == "__main__":
+    model, _ = create_model()
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Parameters: {{total_params / 1e6:.1f}}M")
+'''
+
+
+def generate_hf_config(config: dict, arch: str) -> dict:
+    """Generate a HuggingFace-compatible config.json dict."""
+    common = {
+        "model_type": arch,
+        "architectures": [f"{arch.upper()}Model"],
+    }
+    for k in ("hidden_size", "num_layers", "num_attention_heads", "intermediate_size",
+              "vocab_size", "max_seq_length"):
+        v = config.get(k)
+        if v is not None:
+            common[k] = v
+    return common
+
+
+def generate_tokenizer_config(config: dict) -> dict:
+    """Generate a tokenizer_config.json dict."""
+    return {
+        "model_max_length": config.get("max_seq_length", 2048),
+        "bos_token": "<|endoftext|>",
+        "eos_token": "<|endoftext|>",
+        "pad_token": "<|endoftext|>",
+        "unk_token": "<|endoftext|>",
+    }
+
+
+def _fmt_dict(d: dict, indent: int = 8) -> str:
+    """Format a dict as Python constructor kwargs with proper indentation."""
+    lines = []
+    prefix = " " * indent
+    for k, v in d.items():
+        if isinstance(v, str):
+            lines.append(f"{prefix}{k}=\"{v}\",")
+        elif isinstance(v, bool):
+            lines.append(f"{prefix}{k}={v},")
+        elif isinstance(v, float):
+            lines.append(f"{prefix}{k}={v},")
+        else:
+            lines.append(f"{prefix}{k}={v},")
+    return "\n".join(lines)

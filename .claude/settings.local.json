@@ -12,7 +12,10 @@
       "WebFetch(domain:modelscope.cn)",
       "WebSearch",
       "Bash(/mnt/d/GitHub/open-agc/venv/bin/python -c ' *)",
-      "Bash(echo \"Exit: $?\")"
+      "Bash(echo \"Exit: $?\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('core/model_codegen.py', doraise=True\\); print\\('model_codegen.py: OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('core/model_architectures.py', doraise=True\\); print\\('model_architectures.py: OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('api/server.py', doraise=True\\); print\\('server.py: OK'\\)\")"
     ]
   }
 }

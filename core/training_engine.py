@@ -130,6 +130,143 @@ try:
 except ImportError:
     pass
 
+def _collate_batch(batch, pad_token_id):
+    """Dynamic padding collate: pads each batch to its longest sequence."""
+    import torch
+    max_len = max(item["input_ids"].size(0) for item in batch)
+    input_ids_list, attention_mask_list, labels_list = [], [], []
+    for item in batch:
+        ids = item["input_ids"]
+        am = item["attention_mask"]
+        cur_len = ids.size(0)
+        pad_len = max_len - cur_len
+        if pad_len > 0:
+            # Pad on the RIGHT for causal LM (model sees [tokens, PAD, PAD])
+            ids = torch.cat([ids, torch.full((pad_len,), pad_token_id, dtype=ids.dtype)])
+            am = torch.cat([am, torch.zeros(pad_len, dtype=am.dtype)])
+        input_ids_list.append(ids)
+        attention_mask_list.append(am)
+        # Labels: clone input_ids, set PAD positions to -100 (ignored in loss)
+        labels = ids.clone()
+        labels[am == 0] = -100
+        labels_list.append(labels)
+    return {
+        "input_ids": torch.stack(input_ids_list),
+        "attention_mask": torch.stack(attention_mask_list),
+        "labels": torch.stack(labels_list),
+    }
+
+
+class TokenChunkDataset(torch.utils.data.Dataset):
+    """Token-based dataset: concatenates all text, splits into fixed-length chunks.
+
+    No padding waste — every chunk is exactly `max_length` tokens.
+    This is the standard approach for causal LM pre-training (GPT, LLaMA, etc.).
+
+    One epoch = one pass through all concatenated tokens.
+    """
+
+    def __init__(self, filepath, tokenizer, max_length, progress_cb=None):
+        import json
+        self.max_length = max_length
+        self.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+
+        # Read all text
+        texts = []
+        has_instruction = False
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if "instruction" in obj:
+                        has_instruction = True
+                        text = f"Instruction: {obj['instruction']}\n"
+                        if obj.get("input"):
+                            text += f"Input: {obj['input']}\n"
+                        text += f"Output: {obj.get('output', '')}"
+                    elif "text" in obj:
+                        text = obj["text"]
+                    elif "messages" in obj:
+                        text = "\n".join(f"{m['role']}: {m['content']}" for m in obj["messages"])
+                    else:
+                        text = str(obj)
+                    if text and len(text.strip()) > 10:
+                        texts.append(text)
+                except Exception:
+                    pass
+
+        if not texts:
+            texts = ["The quick brown fox jumps over the lazy dog." * 10] * 100
+            has_instruction = False
+
+        self.has_instruction = has_instruction
+        self.total_texts = len(texts)
+
+        # Tokenize in batches
+        eos_str = tokenizer.eos_token or " "
+        batch_size = 100
+        all_ids = []
+        total_chars = 0
+        report_interval = max(len(texts) // 20, 1)
+        # Suppress length warnings: we are tokenizing for dataset prep, not inference
+        old_max = getattr(tokenizer, "model_max_length", 1024)
+        tokenizer.model_max_length = 10_000_000  # effectively unlimited
+
+        print(f"[Dataset] Tokenizing {len(texts)} texts (batch size {batch_size})...")
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start:start + batch_size]
+            batch_text = eos_str.join(batch)
+            total_chars += len(batch_text)
+            enc = tokenizer(batch_text, return_tensors="pt", truncation=False,
+                           padding=False).input_ids[0]
+            if enc.size(0) > 0:
+                all_ids.append(enc)
+            if progress_cb and (start % (report_interval * batch_size) == 0 or
+                               start + batch_size >= len(texts)):
+                progress_cb(start / max(len(texts), 1),
+                           f"分词中: {start}/{len(texts)} 条 ({total_chars/1e6:.1f}M 字符)")
+
+        tokenizer.model_max_length = old_max  # restore
+
+        # Concatenate all token tensors
+        tokens = torch.cat(all_ids, dim=0)
+        print(f"[Dataset] Tokenized: {tokens.size(0)/1e6:.1f}M tokens from {len(texts)} texts")
+
+        # Split into chunks
+        total_len = tokens.size(0)
+        chunk_count = total_len // max_length
+        if chunk_count == 0:
+            chunk_count = 1
+        # Trim to exact multiple so all chunks are the same size
+        tokens = tokens[:chunk_count * max_length]
+        self.chunks = tokens.view(chunk_count, max_length)
+        self.total_tokens = tokens.size(0)
+        print(f"[Dataset] Created {chunk_count} chunks of {max_length} tokens each")
+
+    def __len__(self):
+        return self.chunks.size(0)
+
+    def __getitem__(self, idx):
+        ids = self.chunks[idx]
+        return {
+            "input_ids": ids,
+            "labels": ids.clone(),
+            "attention_mask": torch.ones(self.max_length, dtype=torch.long),
+        }
+
+
+def _collate_token_chunks(batch):
+    """Simple stack collate for fixed-size token chunks (no padding needed)."""
+    import torch
+    return {
+        "input_ids": torch.stack([b["input_ids"] for b in batch]),
+        "labels": torch.stack([b["labels"] for b in batch]),
+        "attention_mask": torch.stack([b["attention_mask"] for b in batch]),
+    }
+
+
 class JsonlDataset(torch.utils.data.Dataset):
     def __init__(self, filepath, tokenizer, max_length):
         import json
@@ -157,19 +294,20 @@ class JsonlDataset(torch.utils.data.Dataset):
         if not self.data:
             # Fallback dummy data if empty
             self.data = ["The quick brown fox jumps over the lazy dog." * 10] * 100
-            
+
         self.tokenizer = tokenizer
         self.max_length = max_length
-        
+        self.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+
     def __len__(self):
         return len(self.data)
-        
+
     def __getitem__(self, idx):
         text = self.data[idx]
-        tokens = self.tokenizer(text, truncation=True, max_length=self.max_length, padding="max_length", return_tensors="pt")
-        item = {key: val.squeeze(0) for key, val in tokens.items()}
-        item["labels"] = item["input_ids"].clone()
-        return item
+        # Tokenize WITHOUT padding (collate function handles per-batch dynamic padding)
+        tokens = self.tokenizer(text, truncation=True, max_length=self.max_length,
+                                padding=False, return_tensors="pt")
+        return {key: val.squeeze(0) for key, val in tokens.items()}
 
 
 
@@ -192,6 +330,7 @@ class TrainingEngine:
         self._pause_event = threading.Event()
         self._pause_event.set()
         self._abort_flag = threading.Event()
+        self._abort_and_save_flag = threading.Event()
         self._step_mode = False
         self._training_thread = None
         self._act_stats = {"mean": 0.0, "std": 0.0, "per_layer": []}
@@ -218,6 +357,7 @@ class TrainingEngine:
         self._state["status"] = "running"
         self._state["progress"] = 0.0
         self._abort_flag.clear()
+        self._abort_and_save_flag.clear()
         self._pause_event.set()
         self._step_mode = False
         self._training_thread = threading.Thread(
@@ -255,13 +395,22 @@ class TrainingEngine:
         return True
 
     def abort_training(self) -> bool:
-        """Abort training after current batch."""
+        """Abort training after current batch (no save)."""
         if not self._state["active"]:
             return False
         self._abort_flag.set()
         self._pause_event.set()
         self._state["status"] = "aborted"
         self._state["active"] = False
+        return True
+
+    def abort_and_save_training(self) -> bool:
+        """Abort training after current batch AND save the model checkpoint."""
+        if not self._state["active"]:
+            return False
+        self._abort_and_save_flag.set()
+        self._pause_event.set()
+        self._state["status"] = "aborting_save"
         return True
 
     def get_batch_stats(self) -> dict:
@@ -276,84 +425,31 @@ class TrainingEngine:
                 pass
 
     def _build_model_from_config(self, config: dict):
-        """Build a causal LM from scratch based on model designer config."""
-        import math
-        import torch.nn as nn
+        """Build a model from scratch based on model designer config.
 
+        Uses the architecture builder registry for template architectures
+        and the custom builder for component-assembled architectures.
+        """
         arch = config.get("architecture", "gpt_decoder")
-        num_layers = int(config.get("num_layers", 12))
-        hidden_size = int(config.get("hidden_size", 768))
-        num_heads = int(config.get("num_heads", 12))
-        intermediate_size = int(config.get("intermediate_size", hidden_size * 4))
-        vocab_size = int(config.get("vocab_size", 50000))
-        max_seq_len = int(config.get("max_seq_len", config.get("max_seq_length", 2048)))
-        max_seq_length = max_seq_len # Alias for robustness
-        attention_type = config.get("attention_type", "scaled_dot")
-        norm_type = config.get("norm_type", "layer_norm")
-        pos_encoding = config.get("pos_encoding", "rope")
-        activation = config.get("activation", "gelu")
-        dropout = float(config.get("attn_dropout", 0.1))
+        mode = config.get("mode", "template")
 
-        from transformers import AutoConfig, AutoModelForCausalLM
+        import math
+        from core.model_architectures import get_builder
 
-        # Map architecture to a HuggingFace model class and build config
-        hf_config = AutoConfig.for_model(
-            model_type="gpt2",
-            vocab_size=vocab_size,
-            n_positions=max_seq_len,
-            n_embd=hidden_size,
-            n_layer=num_layers,
-            n_head=num_heads,
-            n_inner=intermediate_size,
-            activation_function=activation if activation != "swiglu" else "gelu",
-            resid_pdrop=dropout,
-            embd_pdrop=dropout,
-            attn_pdrop=dropout,
-        )
+        # Normalize config keys for builder consumption
+        params = dict(config)
+        # Handle key name aliases
+        if "num_heads" in params and "num_attention_heads" not in params:
+            params["num_attention_heads"] = params["num_heads"]
+        if "max_seq_len" in params and "max_seq_length" not in params:
+            params["max_seq_length"] = params["max_seq_len"]
 
-        if norm_type == "rms_norm" or arch == "llama":
-            from transformers import LlamaConfig, LlamaForCausalLM
-            hf_config = LlamaConfig(
-                vocab_size=vocab_size,
-                hidden_size=hidden_size,
-                intermediate_size=intermediate_size,
-                num_hidden_layers=num_layers,
-                num_attention_heads=num_heads,
-                max_position_embeddings=max_seq_len,
-                rms_norm_eps=1e-6,
-            )
-            model = LlamaForCausalLM(hf_config)
-        elif arch == "bert_encoder":
-            from transformers import BertConfig, BertForMaskedLM
-            hf_config = BertConfig(
-                vocab_size=vocab_size,
-                hidden_size=hidden_size,
-                intermediate_size=intermediate_size,
-                num_hidden_layers=num_layers,
-                num_attention_heads=num_heads,
-                max_position_embeddings=max_seq_len,
-                hidden_dropout_prob=dropout,
-                attention_probs_dropout_prob=dropout,
-            )
-            model = BertForMaskedLM(hf_config)
-        else:
-            # Default: GPT-2 style decoder
-            from transformers import GPT2Config, GPT2LMHeadModel
-            hf_config = GPT2Config(
-                vocab_size=vocab_size,
-                n_positions=max_seq_len,
-                n_embd=hidden_size,
-                n_layer=num_layers,
-                n_head=num_heads,
-                n_inner=intermediate_size,
-                activation_function=activation if activation != "swiglu" else "gelu",
-                resid_pdrop=dropout,
-                embd_pdrop=dropout,
-                attn_pdrop=dropout,
-            )
-            model = GPT2LMHeadModel(hf_config)
-
-        return model
+        builder = get_builder(arch)
+        print(f"[TrainingEngine] Building model: arch={arch}, mode={mode}, "
+              f"builder={builder.__class__.__name__}, "
+              f"layers={params.get('num_layers', '?')}, "
+              f"hidden={params.get('hidden_size', '?')}")
+        return builder.build_model(params)
 
     def _training_loop(self, run_id: int, run_record: dict):
         """Custom training loop with pause/step hooks."""
@@ -391,6 +487,8 @@ class TrainingEngine:
             base_source = run_record.get("base_model_source", "huggingface")
             is_scratch = bool(model_config_id and not base_model)
 
+            print(f"[Training] Starting run {run_id}: scratch={is_scratch}, "
+                  f"base={base_model or 'none'}, epochs={epochs}, batch={batch_size}")
             self._broadcast({"type": "training_progress", "run_id": run_id,
                              "epoch": 0, "step": 0, "global_step": 0,
                              "loss": 0, "grad_norm": 0, "progress": 0,
@@ -436,7 +534,27 @@ class TrainingEngine:
                 # Let AMP handle precision during training, keep model in float32 for better stability
             else:
                 # ── Fine-tune pre-trained model ─────────────────
-                tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+                # Resolve trained/run_X to actual checkpoint path
+                load_path = base_model
+                if base_model.startswith("trained/run_"):
+                    try:
+                        run_id_ref = int(base_model.replace("trained/run_", ""))
+                        import sqlite3, os as _os
+                        dp = get_data_path("chat_history.db")
+                        _conn = sqlite3.connect(dp)
+                        _conn.row_factory = sqlite3.Row
+                        _cur = _conn.cursor()
+                        _cur.execute("SELECT checkpoint_dir FROM training_runs WHERE id=?", (run_id_ref,))
+                        _row = _cur.fetchone()
+                        _conn.close()
+                        if _row and _row["checkpoint_dir"] and _os.path.isdir(_row["checkpoint_dir"]):
+                            load_path = _row["checkpoint_dir"]
+                            self._broadcast({"type": "training_progress", "stage": "loading_model",
+                                             "label": f"加载训练模型: {load_path}", "progress": 0.01, "active": True})
+                    except Exception as e:
+                        print(f"[Training] Failed to resolve trained model path: {e}")
+
+                tokenizer = AutoTokenizer.from_pretrained(load_path, trust_remote_code=True)
                 if tokenizer.pad_token is None:
                     tokenizer.pad_token = tokenizer.eos_token
 
@@ -447,7 +565,7 @@ class TrainingEngine:
 
                 from transformers import AutoModelForCausalLM
                 model = AutoModelForCausalLM.from_pretrained(
-                    base_model,
+                    load_path,
                     torch_dtype=torch.float32, # Keep in float32, use AMP for mixed precision
                     device_map="auto" if torch.cuda.is_available() else None,
                     trust_remote_code=True
@@ -480,10 +598,12 @@ class TrainingEngine:
 
             # Load Dataset
             dataset_id = run_record.get("dataset_id")
-            from torch.utils.data import DataLoader
+            from torch.utils.data import DataLoader, random_split
             train_loader = None
-            
-            # Get model's max position limit to avoid Index Error during forward pass
+            val_loader = None
+            use_token_chunks = False
+
+            # Get model's max position limit
             max_pos = getattr(model.config, "n_positions", getattr(model.config, "max_position_embeddings", 2048))
             effective_max_len = min(max_seq_len, max_pos)
 
@@ -498,41 +618,107 @@ class TrainingEngine:
                 conn.close()
                 if ds_row and ds_row[0]:
                     ds_path = ds_row[0]
-                    full_dataset = JsonlDataset(ds_path, tokenizer, effective_max_len)
-                    
-                    # Split for validation
-                    if val_ratio > 0 and len(full_dataset) > 10:
-                        val_size = int(len(full_dataset) * val_ratio)
-                        train_size = len(full_dataset) - val_size
-                        from torch.utils.data import random_split
-                        train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+                    def _tokenize_progress(ratio, label):
+                        self._broadcast({"type": "training_progress", "run_id": run_id,
+                                         "stage": "loading_data",
+                                         "label": label, "progress": 0.01 + ratio * 0.04,
+                                         "active": True})
+                    self._broadcast({"type": "training_progress", "run_id": run_id,
+                                     "stage": "loading_data",
+                                     "label": "正在加载并分词数据集...",
+                                     "progress": 0.01, "active": True})
+                    # Auto-detect: use TokenChunkDataset for plain text, JsonlDataset for instructions
+                    probe_ds = TokenChunkDataset(ds_path, tokenizer, effective_max_len,
+                                                 progress_cb=_tokenize_progress)
+                    use_token_chunks = not probe_ds.has_instruction
+
+                    if use_token_chunks:
+                        # ── Token-based batching (standard for LM pre-training) ──
+                        total_tokens = probe_ds.total_tokens
+                        if val_ratio > 0 and len(probe_ds) > 10:
+                            val_chunks = max(1, int(len(probe_ds) * val_ratio))
+                            train_chunks = len(probe_ds) - val_chunks
+                            train_dataset, val_dataset = random_split(probe_ds, [train_chunks, val_chunks])
+                        else:
+                            train_dataset = probe_ds
+                            val_dataset = None
+
+                        collate_fn = _collate_token_chunks
+                        batch_msg = f"token-chunk 模式: {total_tokens/1e6:.1f}M tokens, {len(probe_ds)} chunks × {effective_max_len} tokens"
                     else:
-                        train_dataset = full_dataset
-                        val_dataset = None
-                        
-                    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+                        # ── Sample-based batching (for instruction data) ──
+                        full_dataset = JsonlDataset(ds_path, tokenizer, effective_max_len)
+                        if val_ratio > 0 and len(full_dataset) > 10:
+                            val_size = int(len(full_dataset) * val_ratio)
+                            train_size = len(full_dataset) - val_size
+                            train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+                        else:
+                            train_dataset = full_dataset
+                            val_dataset = None
+                        collate_fn = lambda b: _collate_batch(b, tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id)
+                        batch_msg = f"sample 模式: {len(train_dataset)} samples"
+
+                    self._broadcast({
+                        "type": "training_progress", "run_id": run_id,
+                        "stage": "preparing",
+                        "label": batch_msg,
+                        "progress": 0.02, "active": True
+                    })
+                    # Save validation set for later PPL evaluation
+                    if val_dataset is not None:
+                        try:
+                            save_dir = os.path.join(get_data_path("models"), "trained", f"run_{run_id}")
+                            os.makedirs(save_dir, exist_ok=True)
+                            val_path = os.path.join(save_dir, "validation.jsonl")
+                            with open(val_path, "w", encoding="utf-8") as vf:
+                                for i in range(len(val_dataset)):
+                                    chunk = val_dataset[i]
+                                    vf.write(json.dumps({"text": chunk["input_ids"].tolist()}) + "\n")
+                            self._update_run_db(run_id, checkpoint_dir=save_dir)
+                        except Exception as e:
+                            print(f"[Training] Failed to save validation set: {e}")
+
+                    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                                              collate_fn=collate_fn)
                     if val_dataset:
-                        val_loader = DataLoader(val_dataset, batch_size=batch_size)
-                    else:
-                        val_loader = None
-            
+                        val_loader = DataLoader(val_dataset, batch_size=batch_size,
+                                                collate_fn=collate_fn)
+
             if not train_loader:
-                # Dummy loader for testing
-                train_dataset = JsonlDataset("dummy", tokenizer, effective_max_len)
-                train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-                val_loader = None
+                # Dummy loader
+                dummy_ds = JsonlDataset("dummy", tokenizer, effective_max_len)
+                train_loader = DataLoader(dummy_ds, batch_size=batch_size, shuffle=True,
+                                          collate_fn=lambda b: _collate_batch(b, tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id))
 
-
-            total_steps = epochs * len(train_loader)
+            steps_per_epoch = len(train_loader)
+            total_steps = epochs * steps_per_epoch
+            if total_steps <= 0:
+                total_steps = epochs
+            if use_token_chunks:
+                tokens_per_batch = batch_size * effective_max_len
+                total_train_tokens = steps_per_epoch * tokens_per_batch * epochs
+            else:
+                tokens_per_batch = None
+                total_train_tokens = None
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
 
             if warmup_steps > 0:
                 from torch.optim.lr_scheduler import SequentialLR, LinearLR
-                warmup = LinearLR(optimizer, start_factor=0.01, total_iters=warmup_steps)
-                scheduler = SequentialLR(optimizer, schedulers=[warmup, scheduler], milestones=[warmup_steps])
+                warmup_sched = LinearLR(optimizer, start_factor=0.01, total_iters=min(warmup_steps, total_steps))
+                scheduler = SequentialLR(optimizer, schedulers=[warmup_sched, scheduler],
+                                        milestones=[min(warmup_steps, total_steps)])
+
+            self._broadcast({
+                "type": "training_progress", "run_id": run_id,
+                "stage": "preparing",
+                "label": f"准备训练: {epochs} epochs × {steps_per_epoch} batches = {total_steps} steps" +
+                         (f" | {total_train_tokens/1e6:.1f}M tokens" if total_train_tokens else ""),
+                "progress": 0.03, "active": True
+            })
 
             global_step = 0
             best_loss = float("inf")
+
             # Use modern torch.amp API
             use_amp = torch.cuda.is_available()
             # RTX 50-series supports bfloat16, which is much more stable than float16
@@ -542,14 +728,20 @@ class TrainingEngine:
             device = "cuda" if use_amp else "cpu"
             model.train()
             no_improve_epochs = 0
+            break_save = False
 
             for epoch in range(epochs):
+                if break_save:
+                    break
                 for batch_idx, batch in enumerate(train_loader):
                     self._pause_event.wait()
                     if self._abort_flag.is_set():
                         self._update_run_db(run_id, status="aborted", best_loss=best_loss)
                         self._broadcast({"type": "training_complete", "run_id": run_id, "best_loss": best_loss, "total_time": 0, "aborted": True})
                         return
+                    if self._abort_and_save_flag.is_set():
+                        break_save = True
+                        break
 
                     optimizer.zero_grad()
                     input_ids = batch["input_ids"].to(device)
@@ -596,8 +788,10 @@ class TrainingEngine:
                     self._state["current_loss"] = loss_val
                     self._state["current_grad_norm"] = grad_norm_val
                     self._state["current_lr"] = scheduler.get_last_lr()[0]
-                    self._state["current_epoch"] = epoch
+                    self._state["current_epoch"] = epoch + 1  # 1-indexed
                     self._state["current_step"] = batch_idx
+                    self._state["total_epochs"] = epochs
+                    self._state["steps_per_epoch"] = steps_per_epoch
                     self._state["progress"] = global_step / max(total_steps, 1)
 
                     if loss_val < best_loss:
@@ -611,8 +805,10 @@ class TrainingEngine:
                     self._broadcast({
                         "type": "training_progress",
                         "run_id": run_id,
-                        "epoch": epoch,
+                        "epoch": epoch + 1,
+                        "total_epochs": epochs,
                         "step": batch_idx,
+                        "steps_per_epoch": steps_per_epoch,
                         "global_step": global_step,
                         "loss": round(loss_val, 6),
                         "grad_norm": round(grad_norm_val, 6),
@@ -650,31 +846,40 @@ class TrainingEngine:
                 if val_loader:
                     model.eval()
                     val_loss = 0
+                    val_token_count = 0
                     with torch.no_grad():
                         for vbatch in val_loader:
                             v_input_ids = vbatch["input_ids"].to(device)
                             v_attention_mask = vbatch["attention_mask"].to(device)
                             v_labels = vbatch["labels"].to(device)
+                            # Count non-masked tokens for accurate PPL
+                            valid_tokens = (v_labels != -100).sum().item()
                             with torch.amp.autocast(device_type="cuda" if "cuda" in device else "cpu", enabled=use_amp):
                                 v_outputs = model(input_ids=v_input_ids, attention_mask=v_attention_mask, labels=v_labels)
-                                val_loss += v_outputs.loss.item()
-                    
-                    avg_val_loss = val_loss / len(val_loader)
+                                val_loss += v_outputs.loss.item() * valid_tokens
+                            val_token_count += valid_tokens
+
+                    avg_val_loss = val_loss / max(val_token_count, 1)
+                    val_ppl = math.exp(avg_val_loss) if avg_val_loss < 100 else float('inf')
                     self._broadcast({
                         "type": "training_progress",
                         "run_id": run_id,
                         "status": "validating",
-                        "val_loss": round(avg_val_loss, 4)
+                        "epoch": epoch,
+                        "val_loss": round(avg_val_loss, 4),
+                        "val_ppl": round(val_ppl, 2),
+                        "train_loss": round(loss_val, 4),
                     })
-                    
+
+                    # Best loss tracking + early stopping
                     if avg_val_loss < best_loss:
                         best_loss = avg_val_loss
                         no_improve_epochs = 0
                     else:
                         no_improve_epochs += 1
-                    
+
                     model.train()
-                    
+
                     if no_improve_epochs >= patience:
                         self._broadcast({"type": "log", "message": f"Early stopping at epoch {epoch+1}"})
                         break
@@ -683,22 +888,24 @@ class TrainingEngine:
                     if loss_val < best_loss:
                         best_loss = loss_val
 
-            # End of training, save the model
-            import os
+            # End of training (normal completion or abort-and-save)
             from core.paths import get_data_path
             save_dir = os.path.join(get_data_path("models"), "trained", f"run_{run_id}")
             os.makedirs(save_dir, exist_ok=True)
             model.save_pretrained(save_dir)
             tokenizer.save_pretrained(save_dir)
 
-            self._state["status"] = "completed"
+            final_status = "aborted_saved" if break_save else "completed"
+            self._state["status"] = final_status
             self._state["active"] = False
-            self._update_run_db(run_id, status="completed", best_loss=best_loss, checkpoint_dir=save_dir)
+            self._update_run_db(run_id, status=final_status, best_loss=best_loss, checkpoint_dir=save_dir)
             self._broadcast({
                 "type": "training_complete",
                 "run_id": run_id,
                 "best_loss": round(best_loss, 6),
-                "total_time": 0
+                "total_time": 0,
+                "aborted_saved": break_save,
+                "checkpoint_dir": save_dir
             })
 
         except Exception as e:
