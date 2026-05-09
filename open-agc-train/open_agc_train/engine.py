@@ -314,7 +314,9 @@ class JsonlDataset(torch.utils.data.Dataset):
 class TrainingEngine:
     """Manages the training lifecycle with batch-level pause/step control."""
 
-    def __init__(self):
+    def __init__(self, data_dir: str = "", db_path: str = ""):
+        self.data_dir = data_dir or os.getcwd()
+        self.db_path = db_path or os.path.join(self.data_dir, "training.db")
         self._state = {
             "active": False,
             "run_id": None,
@@ -434,7 +436,7 @@ class TrainingEngine:
         mode = config.get("mode", "template")
 
         import math
-        from core.model_architectures import get_builder
+        from .architectures import get_builder
 
         # Normalize config keys for builder consumption
         params = dict(config)
@@ -499,8 +501,7 @@ class TrainingEngine:
             if is_scratch:
                 # ── Train from scratch ──────────────────────────
                 import sqlite3
-                from core.paths import get_data_path
-                db_path = get_data_path("chat_history.db")
+                db_path = self.db_path
                 conn = sqlite3.connect(db_path)
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
@@ -540,7 +541,7 @@ class TrainingEngine:
                     try:
                         run_id_ref = int(base_model.replace("trained/run_", ""))
                         import sqlite3, os as _os
-                        dp = get_data_path("chat_history.db")
+                        dp = self.db_path
                         _conn = sqlite3.connect(dp)
                         _conn.row_factory = sqlite3.Row
                         _cur = _conn.cursor()
@@ -609,8 +610,7 @@ class TrainingEngine:
 
             if dataset_id:
                 import sqlite3
-                from core.paths import get_data_path
-                db_path = get_data_path("chat_history.db")
+                db_path = self.db_path
                 conn = sqlite3.connect(db_path)
                 cursor = conn.cursor()
                 cursor.execute("SELECT storage_path FROM datasets WHERE id=?", (dataset_id,))
@@ -667,7 +667,7 @@ class TrainingEngine:
                     # Save validation set for later PPL evaluation
                     if val_dataset is not None:
                         try:
-                            save_dir = os.path.join(get_data_path("models"), "trained", f"run_{run_id}")
+                            save_dir = os.path.join(os.path.join(self.data_dir, "models"), "trained", f"run_{run_id}")
                             os.makedirs(save_dir, exist_ok=True)
                             val_path = os.path.join(save_dir, "validation.jsonl")
                             with open(val_path, "w", encoding="utf-8") as vf:
@@ -889,8 +889,7 @@ class TrainingEngine:
                         best_loss = loss_val
 
             # End of training (normal completion or abort-and-save)
-            from core.paths import get_data_path
-            save_dir = os.path.join(get_data_path("models"), "trained", f"run_{run_id}")
+save_dir = os.path.join(os.path.join(self.data_dir, "models"), "trained", f"run_{run_id}")
             os.makedirs(save_dir, exist_ok=True)
             model.save_pretrained(save_dir)
             tokenizer.save_pretrained(save_dir)
@@ -916,8 +915,7 @@ class TrainingEngine:
             # Try to save the model even on failure
             save_dir = None
             try:
-                from core.paths import get_data_path
-                save_dir = os.path.join(get_data_path("models"), "trained", f"run_{run_id}")
+        save_dir = os.path.join(os.path.join(self.data_dir, "models"), "trained", f"run_{run_id}")
                 os.makedirs(save_dir, exist_ok=True)
                 model.save_pretrained(save_dir)
                 tokenizer.save_pretrained(save_dir)
@@ -960,8 +958,7 @@ class TrainingEngine:
         """Update training_runs row from the training thread."""
         try:
             import sqlite3
-            from core.paths import get_data_path
-            db_path = get_data_path("chat_history.db")
+db_path = self.db_path
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             sets = ", ".join(f"{k}=?" for k in fields)
@@ -978,8 +975,7 @@ class TrainingEngine:
         """Write a training_metrics row to DB (called from training thread)."""
         try:
             import sqlite3
-            from core.paths import get_data_path
-            db_path = get_data_path("chat_history.db")
+db_path = self.db_path
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             cursor.execute(
@@ -997,8 +993,8 @@ class TrainingEngine:
 _training_engine = None
 
 
-def get_training_engine() -> TrainingEngine:
+def get_training_engine(data_dir="", db_path="") -> TrainingEngine:
     global _training_engine
     if _training_engine is None:
-        _training_engine = TrainingEngine()
+        _training_engine = TrainingEngine(data_dir=data_dir, db_path=db_path)
     return _training_engine

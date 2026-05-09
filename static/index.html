@@ -148,6 +148,13 @@
                     </svg>
                     <span>下载管理</span>
                 </nav>
+                <nav class="nav-item" data-view="settings-plugins" id="nav-settings-plugins">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5l6.74-6.76z"></path>
+                        <line x1="16" y1="8" x2="22" y2="14"></line>
+                    </svg>
+                    <span>插件管理</span>
+                </nav>
 
                 <div class="sidebar-divider"></div>
 
@@ -652,6 +659,55 @@
                             </svg>
                             保存设置
                         </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ============ View: Settings - Plugins ============ -->
+            <div class="view" id="view-settings-plugins">
+                <header class="view-header">
+                    <h1>🔌 插件管理</h1>
+                    <p class="view-desc">安装、管理和卸载扩展插件</p>
+                </header>
+                <div class="settings-body">
+                    <!-- Tab bar -->
+                    <div style="display:flex; gap:0; margin-bottom:1rem; border-bottom:2px solid var(--border-color);">
+                        <button class="plugin-tab active" data-tab="installed" style="flex:1; padding:0.5rem; border:none; background:transparent; cursor:pointer; font-weight:600; font-size:0.85rem; color:var(--theme-color); border-bottom:2px solid var(--theme-color); margin-bottom:-2px;">📦 已安装</button>
+                        <button class="plugin-tab" data-tab="marketplace" style="flex:1; padding:0.5rem; border:none; background:transparent; cursor:pointer; font-weight:600; font-size:0.85rem; color:var(--text-secondary);">🏪 插件市场</button>
+                        <button class="plugin-tab" data-tab="install" style="flex:1; padding:0.5rem; border:none; background:transparent; cursor:pointer; font-weight:600; font-size:0.85rem; color:var(--text-secondary);">📥 手动安装</button>
+                    </div>
+
+                    <!-- Tab: Installed -->
+                    <div id="plugin-tab-installed">
+                        <div id="plugin-list-container"><div class="empty-state"><p>加载中...</p></div></div>
+                        <div style="margin-top:0.8rem; display:flex; gap:0.5rem;">
+                            <button id="plugin-scan-btn" class="btn-primary" style="font-size:0.8rem;">🔍 扫描新插件</button>
+                            <span style="font-size:0.72rem; color:var(--text-secondary); align-self:center;"><code id="plugin-dir-path">--</code></span>
+                        </div>
+                    </div>
+
+                    <!-- Tab: Marketplace -->
+                    <div id="plugin-tab-marketplace" style="display:none;">
+                        <div style="margin-bottom:0.8rem;">
+                            <input type="text" id="marketplace-search" class="input-styled" placeholder="搜索插件..." style="max-width:400px;">
+                            <span style="font-size:0.7rem; color:var(--text-secondary); margin-left:0.5rem;" id="marketplace-count"></span>
+                        </div>
+                        <div id="marketplace-list"><div class="empty-state"><p>加载中...</p></div></div>
+                    </div>
+
+                    <!-- Tab: Manual Install -->
+                    <div id="plugin-tab-install" style="display:none;">
+                        <section class="card">
+                            <div class="card-header"><h2>从 Git 安装</h2></div>
+                            <div style="display:flex; gap:0.5rem;">
+                                <input type="text" id="plugin-git-url" class="input-styled" placeholder="https://github.com/user/plugin-repo.git" style="flex:1;">
+                                <button id="plugin-git-install-btn" class="btn-primary">安装</button>
+                            </div>
+                        </section>
+                        <section class="card">
+                            <div class="card-header"><h2>手动安装说明</h2></div>
+                            <p class="card-desc">将插件文件夹放入 <code id="plugin-dir-path2">plugins/</code> 目录，返回"已安装"页签点击"扫描新插件"即可。</p>
+                        </section>
                     </div>
                 </div>
             </div>

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "open-agc-train"
+version = "1.0.0"
+description = "Model training, fine-tuning, evaluation, and benchmark plugin for Open-AGC"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1.0",
+    "transformers>=4.35.0",
+    "peft>=0.6.0",
+    "accelerate>=0.24.0",
+    "datasets>=2.14.0",
+    "sentencepiece>=0.1.99",
+    "scikit-learn>=1.0.0",
+    "pyyaml>=6.0.0",
+    "python-multipart>=0.0.6",
+    "fastapi>=0.100.0",
+]
+
+[project.optional-dependencies]
+gpu = ["bitsandbytes>=0.41.0"]
+eval = ["nltk>=3.8"]
+mamba = ["mamba-ssm>=2.0.0"]
+
+[project.entry-points."open_agc.plugins"]
+train = "open_agc_train:init_plugin"
+
+[tool.setuptools]
+packages = ["open_agc_train"]
