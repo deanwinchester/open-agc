@@ -9,6 +9,11 @@ import os
 import subprocess
 import importlib
 
+try:
+    import torch
+except ImportError:
+    torch = None
+
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 
@@ -157,157 +162,159 @@ def _collate_batch(batch, pad_token_id):
     }
 
 
-class TokenChunkDataset(torch.utils.data.Dataset):
-    """Token-based dataset: concatenates all text, splits into fixed-length chunks.
+if _training_available:
 
-    No padding waste — every chunk is exactly `max_length` tokens.
-    This is the standard approach for causal LM pre-training (GPT, LLaMA, etc.).
+    class TokenChunkDataset(torch.utils.data.Dataset):
+        """Token-based dataset: concatenates all text, splits into fixed-length chunks.
 
-    One epoch = one pass through all concatenated tokens.
-    """
+        No padding waste — every chunk is exactly `max_length` tokens.
+        This is the standard approach for causal LM pre-training (GPT, LLaMA, etc.).
 
-    def __init__(self, filepath, tokenizer, max_length, progress_cb=None):
-        import json
-        self.max_length = max_length
-        self.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+        One epoch = one pass through all concatenated tokens.
+        """
 
-        # Read all text
-        texts = []
-        has_instruction = False
-        with open(filepath, 'r', encoding='utf-8') as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if "instruction" in obj:
-                        has_instruction = True
-                        text = f"Instruction: {obj['instruction']}\n"
-                        if obj.get("input"):
-                            text += f"Input: {obj['input']}\n"
-                        text += f"Output: {obj.get('output', '')}"
-                    elif "text" in obj:
-                        text = obj["text"]
-                    elif "messages" in obj:
-                        text = "\n".join(f"{m['role']}: {m['content']}" for m in obj["messages"])
-                    else:
-                        text = str(obj)
-                    if text and len(text.strip()) > 10:
-                        texts.append(text)
-                except Exception:
-                    pass
+        def __init__(self, filepath, tokenizer, max_length, progress_cb=None):
+            import json
+            self.max_length = max_length
+            self.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
-        if not texts:
-            texts = ["The quick brown fox jumps over the lazy dog." * 10] * 100
+            # Read all text
+            texts = []
             has_instruction = False
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        if "instruction" in obj:
+                            has_instruction = True
+                            text = f"Instruction: {obj['instruction']}\n"
+                            if obj.get("input"):
+                                text += f"Input: {obj['input']}\n"
+                            text += f"Output: {obj.get('output', '')}"
+                        elif "text" in obj:
+                            text = obj["text"]
+                        elif "messages" in obj:
+                            text = "\n".join(f"{m['role']}: {m['content']}" for m in obj["messages"])
+                        else:
+                            text = str(obj)
+                        if text and len(text.strip()) > 10:
+                            texts.append(text)
+                    except Exception:
+                        pass
 
-        self.has_instruction = has_instruction
-        self.total_texts = len(texts)
+            if not texts:
+                texts = ["The quick brown fox jumps over the lazy dog." * 10] * 100
+                has_instruction = False
 
-        # Tokenize in batches
-        eos_str = tokenizer.eos_token or " "
-        batch_size = 100
-        all_ids = []
-        total_chars = 0
-        report_interval = max(len(texts) // 20, 1)
-        # Suppress length warnings: we are tokenizing for dataset prep, not inference
-        old_max = getattr(tokenizer, "model_max_length", 1024)
-        tokenizer.model_max_length = 10_000_000  # effectively unlimited
+            self.has_instruction = has_instruction
+            self.total_texts = len(texts)
 
-        print(f"[Dataset] Tokenizing {len(texts)} texts (batch size {batch_size})...")
-        for start in range(0, len(texts), batch_size):
-            batch = texts[start:start + batch_size]
-            batch_text = eos_str.join(batch)
-            total_chars += len(batch_text)
-            enc = tokenizer(batch_text, return_tensors="pt", truncation=False,
-                           padding=False).input_ids[0]
-            if enc.size(0) > 0:
-                all_ids.append(enc)
-            if progress_cb and (start % (report_interval * batch_size) == 0 or
-                               start + batch_size >= len(texts)):
-                progress_cb(start / max(len(texts), 1),
-                           f"分词中: {start}/{len(texts)} 条 ({total_chars/1e6:.1f}M 字符)")
+            # Tokenize in batches
+            eos_str = tokenizer.eos_token or " "
+            batch_size = 100
+            all_ids = []
+            total_chars = 0
+            report_interval = max(len(texts) // 20, 1)
+            # Suppress length warnings: we are tokenizing for dataset prep, not inference
+            old_max = getattr(tokenizer, "model_max_length", 1024)
+            tokenizer.model_max_length = 10_000_000  # effectively unlimited
 
-        tokenizer.model_max_length = old_max  # restore
+            print(f"[Dataset] Tokenizing {len(texts)} texts (batch size {batch_size})...")
+            for start in range(0, len(texts), batch_size):
+                batch = texts[start:start + batch_size]
+                batch_text = eos_str.join(batch)
+                total_chars += len(batch_text)
+                enc = tokenizer(batch_text, return_tensors="pt", truncation=False,
+                               padding=False).input_ids[0]
+                if enc.size(0) > 0:
+                    all_ids.append(enc)
+                if progress_cb and (start % (report_interval * batch_size) == 0 or
+                                   start + batch_size >= len(texts)):
+                    progress_cb(start / max(len(texts), 1),
+                               f"分词中: {start}/{len(texts)} 条 ({total_chars/1e6:.1f}M 字符)")
 
-        # Concatenate all token tensors
-        tokens = torch.cat(all_ids, dim=0)
-        print(f"[Dataset] Tokenized: {tokens.size(0)/1e6:.1f}M tokens from {len(texts)} texts")
+            tokenizer.model_max_length = old_max  # restore
 
-        # Split into chunks
-        total_len = tokens.size(0)
-        chunk_count = total_len // max_length
-        if chunk_count == 0:
-            chunk_count = 1
-        # Trim to exact multiple so all chunks are the same size
-        tokens = tokens[:chunk_count * max_length]
-        self.chunks = tokens.view(chunk_count, max_length)
-        self.total_tokens = tokens.size(0)
-        print(f"[Dataset] Created {chunk_count} chunks of {max_length} tokens each")
+            # Concatenate all token tensors
+            tokens = torch.cat(all_ids, dim=0)
+            print(f"[Dataset] Tokenized: {tokens.size(0)/1e6:.1f}M tokens from {len(texts)} texts")
 
-    def __len__(self):
-        return self.chunks.size(0)
+            # Split into chunks
+            total_len = tokens.size(0)
+            chunk_count = total_len // max_length
+            if chunk_count == 0:
+                chunk_count = 1
+            # Trim to exact multiple so all chunks are the same size
+            tokens = tokens[:chunk_count * max_length]
+            self.chunks = tokens.view(chunk_count, max_length)
+            self.total_tokens = tokens.size(0)
+            print(f"[Dataset] Created {chunk_count} chunks of {max_length} tokens each")
 
-    def __getitem__(self, idx):
-        ids = self.chunks[idx]
+        def __len__(self):
+            return self.chunks.size(0)
+
+        def __getitem__(self, idx):
+            ids = self.chunks[idx]
+            return {
+                "input_ids": ids,
+                "labels": ids.clone(),
+                "attention_mask": torch.ones(self.max_length, dtype=torch.long),
+            }
+
+
+    def _collate_token_chunks(batch):
+        """Simple stack collate for fixed-size token chunks (no padding needed)."""
+        import torch
         return {
-            "input_ids": ids,
-            "labels": ids.clone(),
-            "attention_mask": torch.ones(self.max_length, dtype=torch.long),
+            "input_ids": torch.stack([b["input_ids"] for b in batch]),
+            "labels": torch.stack([b["labels"] for b in batch]),
+            "attention_mask": torch.stack([b["attention_mask"] for b in batch]),
         }
 
 
-def _collate_token_chunks(batch):
-    """Simple stack collate for fixed-size token chunks (no padding needed)."""
-    import torch
-    return {
-        "input_ids": torch.stack([b["input_ids"] for b in batch]),
-        "labels": torch.stack([b["labels"] for b in batch]),
-        "attention_mask": torch.stack([b["attention_mask"] for b in batch]),
-    }
+    class JsonlDataset(torch.utils.data.Dataset):
+        def __init__(self, filepath, tokenizer, max_length):
+            import json
+            self.data = []
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if not line.strip(): continue
+                    try:
+                        obj = json.loads(line)
+                        text = ""
+                        if "instruction" in obj:
+                            text = f"Instruction: {obj['instruction']}\n"
+                            if obj.get("input"): text += f"Input: {obj['input']}\n"
+                            text += f"Output: {obj.get('output', '')}"
+                        elif "text" in obj:
+                            text = obj["text"]
+                        elif "messages" in obj:
+                            text = "\n".join(f"{m['role']}: {m['content']}" for m in obj["messages"])
+                        else:
+                            text = str(obj)
+                        if text:
+                            self.data.append(text)
+                    except Exception:
+                        pass
+            if not self.data:
+                # Fallback dummy data if empty
+                self.data = ["The quick brown fox jumps over the lazy dog." * 10] * 100
 
+            self.tokenizer = tokenizer
+            self.max_length = max_length
+            self.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
-class JsonlDataset(torch.utils.data.Dataset):
-    def __init__(self, filepath, tokenizer, max_length):
-        import json
-        self.data = []
-        with open(filepath, 'r', encoding='utf-8') as f:
-            for line in f:
-                if not line.strip(): continue
-                try:
-                    obj = json.loads(line)
-                    text = ""
-                    if "instruction" in obj:
-                        text = f"Instruction: {obj['instruction']}\n"
-                        if obj.get("input"): text += f"Input: {obj['input']}\n"
-                        text += f"Output: {obj.get('output', '')}"
-                    elif "text" in obj:
-                        text = obj["text"]
-                    elif "messages" in obj:
-                        text = "\n".join(f"{m['role']}: {m['content']}" for m in obj["messages"])
-                    else:
-                        text = str(obj)
-                    if text:
-                        self.data.append(text)
-                except Exception:
-                    pass
-        if not self.data:
-            # Fallback dummy data if empty
-            self.data = ["The quick brown fox jumps over the lazy dog." * 10] * 100
+        def __len__(self):
+            return len(self.data)
 
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        text = self.data[idx]
-        # Tokenize WITHOUT padding (collate function handles per-batch dynamic padding)
-        tokens = self.tokenizer(text, truncation=True, max_length=self.max_length,
-                                padding=False, return_tensors="pt")
-        return {key: val.squeeze(0) for key, val in tokens.items()}
+        def __getitem__(self, idx):
+            text = self.data[idx]
+            # Tokenize WITHOUT padding (collate function handles per-batch dynamic padding)
+            tokens = self.tokenizer(text, truncation=True, max_length=self.max_length,
+                                    padding=False, return_tensors="pt")
+            return {key: val.squeeze(0) for key, val in tokens.items()}
 
 
 

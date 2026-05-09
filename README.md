@@ -1,4 +1,4 @@
-# Open-AGC (Agentic Computer Control)
+# Open-AGC (Agency)
 
 ![Panda Logo](/static/icon-panda.svg) 
 ![Open-AGC Home](assets/screenshot_home.png)

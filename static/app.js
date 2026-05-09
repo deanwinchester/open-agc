@@ -1,3 +1,9 @@
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
 async function loadPlugins() {
     try {
         const res = await fetch('/api/plugins');
@@ -831,12 +837,6 @@ document.addEventListener('DOMContentLoaded', () => {
             progressSteps = {};
             // Don't clear progressStepData - keep for detail panel clicks
         }
-    }
-
-    function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
     }
 
     // ==========================================
