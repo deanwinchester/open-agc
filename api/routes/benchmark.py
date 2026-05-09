@@ -480,6 +480,43 @@ async def run_benchmark(req: BenchmarkRequest):
             if not lm.is_running():
                 raise HTTPException(status_code=500, detail="llama-server failed to start")
 
+    # Load trained model from disk
+    trained_model_info = None  # (model, tokenizer, device)
+    if "trained/" in model_id:
+        run_id_str = model_id.replace("trained/run_", "")
+        try:
+            run_id = int(run_id_str)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的训练模型ID: {model_id}")
+        conn_tm = sqlite3.connect(_db_path)
+        conn_tm.row_factory = sqlite3.Row
+        cur_tm = conn_tm.cursor()
+        cur_tm.execute("SELECT * FROM training_runs WHERE id=?", (run_id,))
+        row_tm = cur_tm.fetchone()
+        conn_tm.close()
+        if not row_tm or not row_tm["checkpoint_dir"]:
+            raise HTTPException(status_code=404, detail="训练模型不存在或路径为空")
+        save_dir = row_tm["checkpoint_dir"]
+        if not os.path.isdir(save_dir):
+            raise HTTPException(status_code=404, detail=f"模型目录不存在: {save_dir}")
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            tokenizer = AutoTokenizer.from_pretrained(save_dir, trust_remote_code=True)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            model = AutoModelForCausalLM.from_pretrained(
+                save_dir, trust_remote_code=True,
+                torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+            ).to(device)
+            model.eval()
+            trained_model_info = (model, tokenizer, device)
+            _broadcast({"type": "benchmark_progress", "task": "system", "stage": "loaded",
+                         "label": f"已加载训练模型: {row_tm['name']}", "progress": 0, "active": True})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"加载训练模型失败: {e}")
+
     # ── Load or resume checkpoint ──
     checkpoint = _load_checkpoint(model_id, req.benchmark_types) if req.resume else None
     if req.resume and not checkpoint:
@@ -569,15 +606,34 @@ async def run_benchmark(req: BenchmarkRequest):
 
                 t0 = _time.time()
                 try:
-                    from core.llm_client import LLMClient
-                    client = LLMClient(default_model=model_id)
-                    response, _ = client.chat(messages=[{"role": "user", "content": prompt}])
-                    answer = response.choices[0].message.content if response else ""
-                    elapsed = (_time.time() - t0) * 1000
-                    usage = getattr(response, "usage", None)
-                    tok_count = usage.total_tokens if usage else (len(answer)//3)
-                    total_time += elapsed
-                    total_tokens += tok_count
+                    if trained_model_info is not None:
+                        # Direct HuggingFace inference for trained models
+                        import torch
+                        model, tokenizer, device = trained_model_info
+                        inputs = tokenizer(prompt, return_tensors="pt", truncation=True,
+                                          max_length=2048).to(device)
+                        with torch.no_grad():
+                            outputs = model.generate(
+                                **inputs, max_new_tokens=256, do_sample=False,
+                                pad_token_id=tokenizer.pad_token_id,
+                            )
+                        answer = tokenizer.decode(
+                            outputs[0][inputs.input_ids.shape[1]:],
+                            skip_special_tokens=True)
+                        elapsed = (_time.time() - t0) * 1000
+                        tok_count = outputs.shape[1] - inputs.input_ids.shape[1]
+                        total_time += elapsed
+                        total_tokens += tok_count
+                    else:
+                        from core.llm_client import LLMClient
+                        client = LLMClient(default_model=model_id)
+                        response, _ = client.chat(messages=[{"role": "user", "content": prompt}])
+                        answer = response.choices[0].message.content if response else ""
+                        elapsed = (_time.time() - t0) * 1000
+                        usage = getattr(response, "usage", None)
+                        tok_count = usage.total_tokens if usage else (len(answer)//3)
+                        total_time += elapsed
+                        total_tokens += tok_count
 
                     expected = str(item.get("answer","")).strip()
                     score = 0
@@ -752,5 +808,33 @@ async def list_all_models():
         if mid not in seen:
             seen.add(mid)
             models.append({"id": mid, "name": f"🦙 {f} (本地 GGUF)", "source": "local"})
+
+    # Include trained/finetuned models
+    try:
+        conn = sqlite3.connect(_db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, name, checkpoint_dir FROM training_runs "
+            "WHERE status='completed' AND checkpoint_dir IS NOT NULL "
+            "ORDER BY updated_at DESC LIMIT 20"
+        )
+        rows = cursor.fetchall()
+        for row in rows:
+            ckpt = row["checkpoint_dir"]
+            if ckpt and os.path.isdir(ckpt):
+                mid = f"trained/run_{row['id']}"
+                if mid not in seen:
+                    seen.add(mid)
+                    models.append({
+                        "id": mid,
+                        "name": f"🎓 {row['name']} (训练模型)",
+                        "source": "trained",
+                    })
+        conn.close()
+        if rows:
+            print(f"[Benchmark] Loaded {len(rows)} trained models for benchmark list")
+    except Exception as e:
+        print(f"[Benchmark] Failed to list trained models: {e}")
 
     return {"models": models}

@@ -1331,8 +1331,11 @@ class EstimateRequest(BaseModel):
 
 @app.post("/api/training/model-configs/estimate")
 async def estimate_model(req: EstimateRequest):
-    """Estimate parameter count and FLOPs for a model config."""
-    import json
+    """Estimate parameter count, FLOPs, and memory for a model config.
+
+    Supports: gpt_decoder, llama, bert_encoder, moe, mamba_ssm, diffusion_dit
+    """
+    import json, math
     config = json.loads(req.config_json)
     arch = req.architecture
 
@@ -1342,34 +1345,407 @@ async def estimate_model(req: EstimateRequest):
     intermediate_size = config.get("intermediate_size", hidden_size * 4)
     vocab_size = config.get("vocab_size", 50000)
     max_seq_len = config.get("max_seq_len", config.get("max_seq_length", 2048))
-    max_seq_length = max_seq_len # Alias
+    head_dim = hidden_size // num_heads
 
-    if arch == "moe":
-        num_experts = config.get("num_experts", 8)
-        active_experts = config.get("active_experts", 2)
-        expert_factor = num_experts / active_experts
-        intermediate_size = int(intermediate_size * expert_factor)
+    # Normalization
+    norm_type = config.get("norm_type", "layer_norm")
+    norm_eps = config.get("rms_norm_eps", 1e-6)
+    if norm_type == "rms_norm":
+        norm_params = hidden_size  # gain only (no bias)
+    else:
+        norm_params = 2 * hidden_size  # weight + bias
 
-    # Rough param count: embedding + per-layer (attn + FFN)
+    # Position encoding
+    pos_encoding = config.get("pos_encoding", "rope")
+    tie_embeddings = config.get("tie_word_embeddings", False)
+
+    # Embedding
     embed_params = vocab_size * hidden_size
-    attn_params = 4 * hidden_size * hidden_size  # Q, K, V, O projections
-    ffn_params = 2 * hidden_size * intermediate_size  # up + down projections
-    layer_params = attn_params + ffn_params
-    total_params = embed_params + num_layers * layer_params
+    if pos_encoding == "learned":
+        embed_params += max_seq_len * hidden_size
 
-    # Rough FLOPs estimate (per forward pass)
-    flops_per_token = 2 * total_params  # 2 FLOPs per param per token (matmul)
-    flops_per_forward = flops_per_token * max_seq_len
+    # Architecture-specific computation
+    if arch in ("gpt_decoder", "llama"):
+        # ── Attention: Q/K/V/O projections ──
+        kv_heads = int(config.get("kv_heads", num_heads))
+        qkv_bias = config.get("qkv_bias", False)
+        q_params = hidden_size * (hidden_size + (hidden_size if qkv_bias else 0))
+        k_params = hidden_size * (kv_heads * head_dim + (kv_heads * head_dim if qkv_bias else 0))
+        v_params = hidden_size * (kv_heads * head_dim + (kv_heads * head_dim if qkv_bias else 0))
+        o_params = hidden_size * (hidden_size + (hidden_size if qkv_bias else 0))
+        attn_params = q_params + k_params + v_params + o_params
+
+        # ── FFN ──
+        activation = config.get("activation", "gelu")
+        if activation in ("swiglu", "silu"):
+            # gate_proj + up_proj + down_proj
+            ffn_params = 3 * hidden_size * intermediate_size
+        else:
+            # fc1 + fc2
+            ffn_params = 2 * hidden_size * intermediate_size
+
+        # ── Norms ──
+        norm_position = config.get("norm_position", "pre_norm")
+        norms_per_layer = 3 if norm_position == "sandwich_norm" else 2
+        norm_layer_params = norms_per_layer * norm_params
+
+        layer_params = attn_params + ffn_params + norm_layer_params
+        total_params = embed_params + num_layers * layer_params
+
+        # LM head + final norm
+        if not tie_embeddings:
+            total_params += hidden_size * vocab_size
+        total_params += norm_params
+
+    elif arch == "bert_encoder":
+        attn_params = 4 * hidden_size * hidden_size
+        ffn_params = 2 * hidden_size * intermediate_size
+        norms_per_layer = 2
+        layer_params = attn_params + ffn_params + norms_per_layer * norm_params
+        total_params = embed_params + num_layers * layer_params
+        # Segment embeddings + pooler
+        total_params += 2 * hidden_size  # token_type_embeddings
+        total_params += hidden_size * hidden_size + hidden_size  # pooler
+        # LM head
+        total_params += hidden_size * vocab_size
+
+    elif arch == "moe":
+        kv_heads = int(config.get("kv_heads", num_heads))
+        attn_params = (hidden_size * hidden_size +  # Q
+                       hidden_size * kv_heads * head_dim +  # K
+                       hidden_size * kv_heads * head_dim +  # V
+                       hidden_size * hidden_size)  # O
+
+        num_experts = config.get("num_experts", 8)
+        # Each expert: gate + up + down (SwiGLU-style = 3 matrices)
+        expert_ffn = 3 * hidden_size * intermediate_size
+        # Router/gate
+        router_params = hidden_size * num_experts
+        ffn_params_per_layer = num_experts * expert_ffn + router_params
+
+        layer_params = attn_params + ffn_params_per_layer + 2 * norm_params
+        total_params = embed_params + num_layers * layer_params
+        if not tie_embeddings:
+            total_params += hidden_size * vocab_size
+        total_params += norm_params
+
+    elif arch == "mamba_ssm":
+        d_state = config.get("d_state", 16)
+        d_conv = config.get("d_conv", 4)
+        expand_factor = config.get("expand_factor", 2)
+        inner_dim = int(expand_factor * hidden_size)
+        dt_rank = config.get("dt_rank", -1)
+        if dt_rank <= 0:
+            dt_rank = max(1, math.ceil(hidden_size / 16))
+
+        # in_proj: x -> (z, x, dt) = inner_dim + inner_dim + dt_rank
+        in_proj = hidden_size * (2 * inner_dim + dt_rank)
+        # conv1d: depthwise separable
+        conv_params = inner_dim * d_conv * 2
+        # SSM: dt_proj + A_log + D
+        ssm_params = dt_rank * inner_dim + inner_dim + inner_dim
+        # out_proj
+        out_proj = inner_dim * hidden_size
+        # Norms: 2 per block
+        norm_mamba_params = 2 * norm_params
+
+        layer_params = in_proj + conv_params + ssm_params + out_proj + norm_mamba_params
+        total_params = embed_params + num_layers * layer_params
+        if not tie_embeddings:
+            total_params += hidden_size * vocab_size
+        total_params += norm_params
+
+    elif arch == "diffusion_dit":
+        patch_size = config.get("patch_size", 2)
+        in_channels = config.get("in_channels", 4)
+        out_channels = config.get("out_channels", in_channels)
+        # Patch embedding
+        patch_embed_params = (patch_size * patch_size * in_channels) * hidden_size
+        # Positional
+        pos_params = max_seq_len * hidden_size  # sin-cos or learned
+
+        kv_heads = int(config.get("kv_heads", num_heads))
+        attn_params = (hidden_size * hidden_size +
+                       hidden_size * kv_heads * head_dim +
+                       hidden_size * kv_heads * head_dim +
+                       hidden_size * hidden_size)
+        # SwiGLU FFN
+        ffn_params = 3 * hidden_size * intermediate_size
+        # AdaLN: 6 modulation vectors per layer (scale, shift, gate) * 2
+        adaln_params = 6 * hidden_size
+        # Cross-attention (conditional)
+        cross_attn_params = 4 * hidden_size * hidden_size
+
+        layer_params = attn_params + ffn_params + adaln_params + cross_attn_params
+        total_params = (patch_embed_params + pos_params +
+                        num_layers * layer_params +
+                        hidden_size * out_channels * patch_size * patch_size)  # final proj
+
+    else:
+        # Generic GPT-decoder fallback
+        attn_params = 4 * hidden_size * hidden_size
+        activation = config.get("activation", "gelu")
+        swiglu_factor = 3 if activation in ("swiglu",) else 2
+        ffn_params = swiglu_factor * hidden_size * intermediate_size
+        layer_params = attn_params + ffn_params + 2 * norm_params
+        total_params = embed_params + num_layers * layer_params + norm_params
+        if not tie_embeddings:
+            total_params += hidden_size * vocab_size
+
+    # ── FLOPs estimates ──
+    flops_per_token = 2 * total_params  # ~2 FLOPs per param per token for matmul-dominated nets
+    # Attention: QK^T + softmax + AV computations
+    attn_flops_per_token = 4 * num_layers * hidden_size * hidden_size
+    flops_per_forward = flops_per_token * max_seq_len + attn_flops_per_token * max_seq_len
+
+    # ── Memory estimates (fp32) ──
+    fp32_bytes = total_params * 4
+    memory_mb = round(fp32_bytes / (1024 * 1024))
+    # Training: model * 4 (params + grads + optimizer states + activations)
+    training_memory_mb = round(fp32_bytes * 4 / (1024 * 1024))
 
     return {
         "total_params": total_params,
-        "total_params_formatted": f"{total_params / 1e6:.1f}M" if total_params < 1e9 else f"{total_params / 1e9:.2f}B",
-        "flops_per_forward": flops_per_forward,
+        "total_params_formatted": (
+            f"{total_params / 1e6:.1f}M" if total_params < 1e9
+            else f"{total_params / 1e9:.2f}B"
+        ),
+        "flops_per_forward": round(flops_per_forward),
+        "flops_per_token": round(flops_per_token),
         "embed_params": embed_params,
-        "per_layer_params": layer_params,
+        "per_layer_params": round(total_params / num_layers) if num_layers else 0,
         "num_layers": num_layers,
-        "architecture": arch
+        "architecture": arch,
+        "memory_mb": memory_mb,
+        "training_memory_mb": training_memory_mb,
     }
+
+
+# --- Code Generation Endpoints ---
+
+class CodeGenRequest(BaseModel):
+    architecture: str
+    config_json: str
+
+
+@app.post("/api/training/model-configs/generate-code")
+async def generate_model_code(req: CodeGenRequest):
+    """Generate model.py source code and config.json from a model designer config."""
+    import json
+    config = json.loads(req.config_json)
+    try:
+        from core.model_codegen import generate_model_code as _gen_code, \
+            generate_hf_config, generate_tokenizer_config
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Code generator not available: {e}")
+
+    model_code = _gen_code(config, req.architecture)
+    hf_cfg = generate_hf_config(config, req.architecture)
+    tok_cfg = generate_tokenizer_config(config)
+
+    return {
+        "status": "ok",
+        "model_code": model_code,
+        "config_json": hf_cfg,
+        "tokenizer_config": tok_cfg,
+    }
+
+
+@app.get("/api/training/model-configs/schema/{architecture}")
+async def get_architecture_schema(architecture: str):
+    """Return the JSON schema of configurable fields for an architecture."""
+    base_schema = {
+        "type": "object",
+        "properties": {
+            "num_layers": {"type": "integer", "default": 12, "min": 1, "max": 200, "label": "层数"},
+            "hidden_size": {"type": "integer", "default": 768, "min": 64, "max": 32768, "step": 64, "label": "隐藏维度"},
+            "num_attention_heads": {"type": "integer", "default": 12, "min": 1, "max": 128, "label": "注意力头数"},
+            "intermediate_size": {"type": "integer", "default": 3072, "label": "中间层维度"},
+            "vocab_size": {"type": "integer", "default": 50000, "min": 1000, "label": "词表大小"},
+            "max_seq_length": {"type": "integer", "default": 2048, "min": 128, "label": "最大序列长度"},
+            "attention_type": {"type": "string", "enum": ["scaled_dot", "flash_attn", "mqa", "gqa"], "label": "注意力类型"},
+            "norm_position": {"type": "string", "enum": ["pre_norm", "post_norm", "sandwich_norm"], "label": "归一化位置"},
+            "norm_type": {"type": "string", "enum": ["layer_norm", "rms_norm"], "label": "归一化类型"},
+            "pos_encoding": {"type": "string", "enum": ["rope", "learned", "sinusoidal", "alibi", "none"], "label": "位置编码"},
+            "activation": {"type": "string", "enum": ["gelu", "silu", "swiglu", "relu", "gelu_new"], "label": "激活函数"},
+            "tie_word_embeddings": {"type": "boolean", "label": "绑定嵌入权重"},
+            "rope_theta": {"type": "number", "default": 10000.0, "label": "RoPE theta"},
+            "rms_norm_eps": {"type": "number", "default": 1e-6, "label": "RMSNorm epsilon"},
+        },
+    }
+
+    arch_specific = {
+        "moe": {
+            "num_experts": {"type": "integer", "default": 8, "min": 2, "label": "专家数量"},
+            "active_experts": {"type": "integer", "default": 2, "min": 1, "label": "激活专家数"},
+            "router_type": {"type": "string", "enum": ["topk", "switch", "expert_choice"], "label": "路由类型"},
+            "expert_capacity_factor": {"type": "number", "default": 1.25, "label": "容量因子"},
+            "aux_loss_weight": {"type": "number", "default": 0.02, "label": "辅助损失权重"},
+            "shared_expert": {"type": "boolean", "label": "共享专家"},
+        },
+        "mamba_ssm": {
+            "d_state": {"type": "integer", "default": 16, "label": "状态维度"},
+            "d_conv": {"type": "integer", "default": 4, "label": "卷积核"},
+            "dt_rank": {"type": "integer", "default": -1, "label": "dt秩"},
+            "expand_factor": {"type": "number", "default": 2, "label": "扩展比"},
+        },
+        "diffusion_dit": {
+            "patch_size": {"type": "integer", "default": 2, "label": "Patch大小"},
+            "in_channels": {"type": "integer", "default": 4, "label": "输入通道"},
+            "out_channels": {"type": "integer", "default": 4, "label": "输出通道"},
+        },
+    }
+
+    schema = dict(base_schema)
+    extra = arch_specific.get(architecture, {})
+    schema["properties"] = {**schema["properties"], **extra}
+    return {"architecture": architecture, "schema": schema}
+
+
+# --- Export Endpoint ---
+
+@app.post("/api/training/model-configs/export")
+async def export_model_package(req: CodeGenRequest):
+    """Export a complete training package as a downloadable zip."""
+    import json, zipfile, io as _io
+    config = json.loads(req.config_json)
+    arch = req.architecture
+
+    try:
+        from core.model_codegen import (
+            generate_model_code as _gen_code,
+            generate_hf_config,
+            generate_tokenizer_config,
+        )
+        from core import model_architectures
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Code generator not available: {e}")
+
+    model_code = _gen_code(config, arch)
+    hf_cfg = generate_hf_config(config, arch)
+    tok_cfg = generate_tokenizer_config(config)
+
+    train_code = _generate_train_script(config, arch)
+
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("exported_model/model.py", model_code)
+        zf.writestr("exported_model/config.json", json.dumps(hf_cfg, indent=2, ensure_ascii=False))
+        zf.writestr("exported_model/tokenizer_config.json", json.dumps(tok_cfg, indent=2, ensure_ascii=False))
+        zf.writestr("exported_model/train.py", train_code)
+
+    buf.seek(0)
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        buf, media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=model_{arch}.zip"}
+    )
+
+
+def _generate_train_script(config: dict, arch: str) -> str:
+    """Generate a minimal training script for the exported model."""
+    vocab_size = config.get("vocab_size", 50000)
+    hidden_size = config.get("hidden_size", 768)
+    num_layers = config.get("num_layers", 12)
+    max_seq_len = config.get("max_seq_length", 2048)
+    return f'''"""
+Auto-generated training script — {arch}
+Generated by Open-AGC Model Designer
+Usage: python train.py --data ./data.jsonl --output ./checkpoints
+"""
+import argparse
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from model import create_model
+
+
+class JsonlDataset(Dataset):
+    def __init__(self, path, max_len={max_seq_len}):
+        import json
+        self.samples = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                    text = d.get("text", d.get("output", str(d)))
+                    if isinstance(text, str):
+                        self.samples.append(text[:max_len])
+                except Exception:
+                    pass
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+
+def train(args):
+    model, _ = create_model()
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    model = model.to(device)
+    model.train()
+
+    ds = JsonlDataset(args.data)
+    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=list)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
+                                   weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=len(loader) * args.epochs)
+
+    print(f"Model: {arch}")
+    total = sum(p.numel() for p in model.parameters())
+    print(f"Parameters: {{total/1e6:.1f}}M")
+    print(f"Training on {{device}} for {{args.epochs}} epochs")
+
+    for epoch in range(args.epochs):
+        total_loss = 0
+        for step, batch in enumerate(loader):
+            if not batch:
+                continue
+            x = model.tokenizer(batch, return_tensors="pt", padding=True,
+                                truncation=True, max_length={max_seq_len})
+            x = {{k: v.to(device) for k, v in x.items()}}
+            optimizer.zero_grad()
+            outputs = model(**x, labels=x["input_ids"])
+            loss = outputs.loss
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            optimizer.step()
+            scheduler.step()
+            total_loss += loss.item()
+            if step % args.log_every == 0:
+                print(f"Epoch {{epoch+1}} Step {{step}} Loss {{loss.item():.4f}}")
+        avg = total_loss / max(len(loader), 1)
+        print(f"Epoch {{epoch+1}} Avg Loss {{avg:.4f}}")
+
+    if args.output:
+        import os
+        os.makedirs(args.output, exist_ok=True)
+        ckpt_path = f"{{args.output}}/model.pth"
+        torch.save(model.state_dict(), ckpt_path)
+        print(f"Saved checkpoint to {{ckpt_path}}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=f"Train {arch} model")
+    parser.add_argument("--data", required=True, help="Training data (JSONL)")
+    parser.add_argument("--output", default="./checkpoints", help="Output directory")
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--log-every", type=int, default=50)
+    parser.add_argument("--cpu", action="store_true")
+    args = parser.parse_args()
+    train(args)
+'''
 
 
 # --- Dataset Endpoints ---
@@ -1637,7 +2013,7 @@ async def edit_dataset(ds_id: int, req: EditDatasetRequest):
 
 @app.get("/api/training/base-models")
 async def list_base_models():
-    """List available GGUF + HuggingFace-cached models for fine-tuning."""
+    """List available GGUF + HuggingFace-cached + trained models for fine-tuning."""
     models = []
     manager = get_llamacpp_manager()
     for f in manager.list_models():
@@ -1651,6 +2027,30 @@ async def list_base_models():
                 models.append({"id": name, "name": name, "source": "huggingface",
                                 "path": os.path.join(hf_cache, d)})
     models.append({"id": "Qwen/Qwen3.5-9B-Instruct", "name": "Qwen3.5-9B (SGLang)", "source": "huggingface", "path": ""})
+
+    # Include trained/finetuned models
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, name, checkpoint_dir FROM training_runs "
+            "WHERE status='completed' AND checkpoint_dir IS NOT NULL "
+            "ORDER BY updated_at DESC LIMIT 20"
+        )
+        for row in cursor.fetchall():
+            ckpt = row["checkpoint_dir"]
+            if ckpt and os.path.isdir(ckpt):
+                models.append({
+                    "id": f"trained/run_{row['id']}",
+                    "name": f"🎓 {row['name']}",
+                    "source": "trained",
+                    "path": ckpt,
+                })
+        conn.close()
+    except Exception as e:
+        print(f"[BaseModels] Failed to list trained models: {e}")
+
     return {"models": models}
 
 
@@ -1825,6 +2225,7 @@ class CreateTrainingRunRequest(BaseModel):
     base_model_id: str = ""
     base_model_source: str = "huggingface"
     training_params_json: str = "{}"
+    val_ratio: float = 0.1  # 10% validation split by default
 
 
 @app.post("/api/training/runs")
@@ -1946,6 +2347,138 @@ async def test_trained_model(run_id: int, req: TestModelRequest):
         raise HTTPException(status_code=500, detail=f"模型推理失败: {str(e)}")
 
 
+# --- Model Evaluation (PPL, BLEU, ROUGE) ---
+
+class EvalPPLRequest(BaseModel):
+    dataset_path: str = ""       # optional: path to custom JSONL dataset
+    max_samples: int = 500
+    stride: int = 512
+    max_length: int = 1024
+    dataset_id: Optional[int] = None  # use a dataset from the datasets table
+
+
+@app.post("/api/training/runs/{run_id}/eval-ppl")
+async def eval_model_ppl(run_id: int, req: EvalPPLRequest):
+    """Run PPL evaluation on a trained model."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM training_runs WHERE id=? AND status='completed'", (run_id,))
+    run = cursor.fetchone()
+    conn.close()
+    if not run:
+        raise HTTPException(status_code=404, detail="训练运行不存在或未完成")
+    save_dir = run["checkpoint_dir"]
+    if not save_dir or not os.path.isdir(save_dir):
+        raise HTTPException(status_code=400,
+                            detail=f"模型目录不存在: {save_dir}")
+
+    # Resolve dataset path — auto-use validation split if available
+    dataset_path = req.dataset_path
+    # Auto-detect validation set saved during training
+    if not dataset_path and save_dir:
+        val_file = os.path.join(save_dir, "validation.jsonl")
+        if os.path.exists(val_file):
+            dataset_path = val_file
+    if not dataset_path and req.dataset_id:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM datasets WHERE id=?", (req.dataset_id,))
+        ds = cursor.fetchone()
+        conn.close()
+        if ds and ds["storage_path"]:
+            dataset_path = ds["storage_path"]
+
+    result_holder = {}
+
+    def run_eval():
+        try:
+            from core.eval_engine import compute_ppl
+            kwargs = {"model_path": save_dir, "max_samples": req.max_samples,
+                      "stride": req.stride, "max_length": req.max_length}
+            if dataset_path and os.path.exists(dataset_path):
+                kwargs["dataset_path"] = dataset_path
+            result = compute_ppl(**kwargs)
+            # Save result
+            conn2 = sqlite3.connect(DB_PATH)
+            conn2.cursor().execute(
+                "INSERT INTO benchmark_results (model_id,model_source,benchmark_type,metrics_json,num_questions,avg_latency_ms,tokens_per_second) VALUES (?,?,?,?,?,?,?)",
+                (f"trained/run_{run_id}", "trained", "ppl",
+                 json.dumps(result, ensure_ascii=False), result.get("num_windows", 0),
+                 result.get("eval_time_seconds", 0) * 1000, 0))
+            conn2.commit(); conn2.close()
+            result_holder["result"] = result
+        except Exception as e:
+            result_holder["error"] = str(e)
+
+    threading.Thread(target=run_eval, daemon=True).start()
+    return {"status": "started", "message": f"开始 PPL 评估 (run_{run_id})..."}
+
+
+@app.get("/api/training/runs/{run_id}/eval-ppl")
+async def get_eval_ppl_result(run_id: int):
+    """Get the latest PPL evaluation result for a training run."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM benchmark_results WHERE model_id=? AND benchmark_type='ppl' ORDER BY created_at DESC LIMIT 1",
+        (f"trained/run_{run_id}",))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="未找到 PPL 评估结果")
+    d = dict(row)
+    d["metrics_json"] = json.loads(d["metrics_json"]) if isinstance(d["metrics_json"], str) else d["metrics_json"]
+    return d
+
+
+class EvalMetricsRequest(BaseModel):
+    model_path: str = ""          # path to HF model dir, or run_id as "run_<id>"
+    dataset_path: str = ""        # JSONL with input/output pairs
+    dataset_id: Optional[int] = None
+    max_samples: int = 100
+
+
+@app.post("/api/training/eval-metrics")
+async def eval_generation_metrics(req: EvalMetricsRequest):
+    """Run BLEU/ROUGE evaluation on a model with reference-hypothesis data."""
+    # Resolve model path
+    model_path = req.model_path
+    if model_path.startswith("run_"):
+        run_id = int(model_path.replace("run_", ""))
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT checkpoint_dir FROM training_runs WHERE id=?", (run_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row and row["checkpoint_dir"]:
+            model_path = row["checkpoint_dir"]
+        else:
+            raise HTTPException(status_code=404, detail="训练运行不存在或模型目录为空")
+
+    # Resolve dataset
+    dataset_path = req.dataset_path
+    if not dataset_path and req.dataset_id:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT storage_path FROM datasets WHERE id=?", (req.dataset_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            dataset_path = row["storage_path"]
+
+    if not dataset_path:
+        raise HTTPException(status_code=400, detail="请提供评测数据集 (dataset_path 或 dataset_id)")
+
+    from core.eval_engine import compute_generation_metrics
+    result = compute_generation_metrics(model_path, dataset_path, req.max_samples)
+    return {"status": "ok", "metrics": result}
+
+
 @app.post("/api/training/runs/{run_id}/{action}")
 async def control_training_run(run_id: int, action: str):
     """Control a training run: pause, resume, step, abort."""
@@ -1958,21 +2491,23 @@ async def control_training_run(run_id: int, action: str):
         "resume": engine.resume_training,
         "step": engine.step_training,
         "abort": engine.abort_training,
+        "abort_save": engine.abort_and_save_training,
     }
     if action not in action_map:
         raise HTTPException(status_code=400, detail=f"未知操作: {action}")
     ok = action_map[action]()
     if not ok:
         raise HTTPException(status_code=400, detail=f"无法执行 {action}，当前状态: {state.get('status')}")
-    # Update DB status
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    new_status = engine.get_state()["status"]
-    cursor.execute("UPDATE training_runs SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (new_status, run_id))
-    conn.commit()
-    conn.close()
+    # Update DB status (skip for abort_save — engine handles it)
+    if action != "abort_save":
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        new_status = engine.get_state()["status"]
+        cursor.execute("UPDATE training_runs SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (new_status, run_id))
+        conn.commit()
+        conn.close()
     # Map internal status to frontend-expected action result
-    status_map = {"pause": "paused", "resume": "resumed", "step": "stepping", "abort": "aborted"}
+    status_map = {"pause": "paused", "resume": "resumed", "step": "stepping", "abort": "aborted", "abort_save": "aborting_save"}
     return {"status": status_map.get(action, new_status)}
 
 

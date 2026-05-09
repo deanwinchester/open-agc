@@ -138,7 +138,7 @@ RECOMMENDED_DATASETS = [
     {"repo_id": "Open-Orca/OpenOrca", "name": "OpenOrca", "desc": "大规模推理链微调数据", "size": "~800MB", "splits": ["train"]},
     {"repo_id": "Open-Orca/SlimOrca", "name": "SlimOrca", "desc": "精简版推理链数据集", "size": "~200MB", "splits": ["train"]},
     {"repo_id": "HuggingFaceH4/ultrachat_200k", "name": "UltraChat 200K", "desc": "多轮对话微调数据", "size": "~1.5GB", "splits": ["train_sft", "test_sft"]},
-    {"repo_id": "mindchain/wikitext-103-raw-v1", "name": "WikiText-103", "desc": "语言建模基准数据集", "size": "~180MB", "splits": ["train", "validation", "test"]},
+    {"repo_id": "Salesforce/wikitext", "name": "WikiText-103", "desc": "语言建模基准数据集", "size": "~180MB", "splits": ["train", "validation", "test"], "config": "wikitext-103-raw-v1"},
     {"repo_id": "cnn_dailymail", "name": "CNN/DailyMail", "desc": "新闻摘要数据集", "size": "~550MB", "splits": ["train", "validation", "test"], "config": "3.0.0"},
 ]
 
@@ -155,6 +155,135 @@ class DatasetDownloadRequest(BaseModel):
     name: str = ""
     split: str = "train"
     config: Optional[str] = None
+    target_file: Optional[str] = None   # specific file to download (from siblings list)
+
+
+@router.get("/api/downloads/dataset-files/{repo_id:path}")
+async def list_dataset_files(repo_id: str, split: str = "", config: str = ""):
+    """List available data files in a HuggingFace dataset repo.
+
+    Returns files grouped by inferred split, so the frontend can let the user
+    pick which files to download.
+    """
+    api_url = f"https://huggingface.co/api/datasets/{repo_id}"
+    resp = _get(api_url, timeout=30)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code,
+                            detail=f"HF API returned {resp.status_code}")
+    ds_info = resp.json()
+    siblings = ds_info.get("siblings", [])
+
+    data_exts = {".jsonl", ".parquet", ".arrow", ".json", ".csv"}
+    data_files = []
+    for s in siblings:
+        rf = s.get("rfilename", "")
+        ext = os.path.splitext(rf)[1].lower()
+        if ext in data_exts:
+            # Guess split from path components
+            parts = rf.replace("\\", "/").split("/")
+            inferred_split = "unknown"
+            for known in ["train", "test", "validation", "val", "dev", "eval"]:
+                if known in parts:
+                    inferred_split = known
+                    break
+            # Also look at directory name (e.g. data/train/, data/test/)
+            if inferred_split == "unknown":
+                for p in parts:
+                    if p in ("train", "test", "validation", "val", "dev", "eval"):
+                        inferred_split = p
+                        break
+
+            # Estimate file size
+            size_bytes = s.get("size", 0)
+            size_str = ""
+            if size_bytes > 1e9:
+                size_str = f"{size_bytes/1e9:.1f} GB"
+            elif size_bytes > 1e6:
+                size_str = f"{size_bytes/1e6:.1f} MB"
+            elif size_bytes > 1e3:
+                size_str = f"{size_bytes/1e3:.1f} KB"
+            elif size_bytes > 0:
+                size_str = f"{size_bytes} B"
+
+            data_files.append({
+                "rfilename": rf,
+                "basename": os.path.basename(rf),
+                "ext": ext,
+                "split": inferred_split,
+                "size": size_bytes,
+                "size_str": size_str,
+            })
+
+    # Filter by requested split/config
+    if split:
+        data_files = [f for f in data_files if split in f.get("split", "")]
+    if config:
+        data_files = [f for f in data_files if config in f["rfilename"]]
+
+    # Group by split
+    by_split = {}
+    for f in data_files:
+        sp = f["split"]
+        by_split.setdefault(sp, []).append(f)
+
+    return {
+        "repo_id": repo_id,
+        "total_files": len(data_files),
+        "by_split": {k: sorted(v, key=lambda x: x["rfilename"]) for k, v in sorted(by_split.items())},
+        "all_files": sorted(data_files, key=lambda x: x["rfilename"]),
+    }
+
+
+@router.get("/api/downloads/dataset-configs/{repo_id:path}")
+async def list_dataset_configs(repo_id: str):
+    """List available configs/subset names for a HuggingFace dataset.
+
+    Some datasets (e.g. Salesforce/wikitext, cnn_dailymail) have multiple
+    configs that must be specified in `load_dataset(name=...)`.
+    """
+    api_url = f"https://huggingface.co/api/datasets/{repo_id}"
+    resp = _get(api_url, timeout=30)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code,
+                            detail=f"HF API returned {resp.status_code}")
+    ds_info = resp.json()
+
+    # HF API returns configs in `configs` or `card.configs` or `dataset_info.configs`
+    configs = []
+
+    # The HF datasets-server API may nest configs differently
+    # Try the direct key first
+    raw_configs = ds_info.get("configs", [])
+    if not raw_configs:
+        # Try nested paths
+        raw_configs = ds_info.get("cardData", {}).get("configs", [])
+    if not raw_configs:
+        raw_configs = ds_info.get("dataset_info", {}).get("configs", [])
+
+    for c in raw_configs:
+        if isinstance(c, str):
+            configs.append({"name": c, "label": c})
+        elif isinstance(c, dict):
+            configs.append({
+                "name": c.get("config", c.get("name", c.get("subset", ""))),
+                "label": c.get("config", c.get("name", c.get("subset", ""))),
+                "description": c.get("description", ""),
+            })
+
+    # If HF API doesn't expose configs, try the old-school approach: siblings
+    if not configs:
+        # Try cardData.dataset_info
+        card_data = ds_info.get("cardData", {}) or {}
+        dataset_info = card_data.get("dataset_info", {}) or {}
+        features = dataset_info.get("features", {})
+        # If no configs array, assume single-config dataset
+        pass
+
+    return {
+        "repo_id": repo_id,
+        "configs": configs,
+        "needs_config": len(configs) > 1,
+    }
 
 
 @router.post("/api/downloads/dataset")
@@ -228,7 +357,13 @@ async def download_dataset(req: DatasetDownloadRequest):
                       "trust_remote_code": True, "cache_dir": storage_dir,
                       "token": hf_token}
                 if req.config: kw["name"] = req.config
-                ds = load_dataset(**kw)
+                try:
+                    ds = load_dataset(**kw)
+                except ValueError as e:
+                    msg = str(e)
+                    if "Config name is missing" in msg or "available configs" in msg:
+                        raise Exception(f"{msg}\n\n请在下载前选择 config，或通过前端弹窗指定。")
+                    raise
                 total = len(ds)
                 with open(partial_path, "w", encoding="utf-8") as f:
                     for sample in ds:
@@ -269,30 +404,33 @@ async def download_dataset(req: DatasetDownloadRequest):
 
 def _download_via_http(req, partial_path, progress_cb, ds_name, count_ref):
     """Fallback: download dataset via HF REST API (no datasets lib needed)."""
-    progress_cb(0.05, f"正在获取 {ds_name} 的文件列表...")
-    api_url = f"https://huggingface.co/api/datasets/{req.repo_id}"
-    resp = _get(api_url, timeout=30)
-    if resp.status_code != 200:
-        raise Exception(f"HF API HTTP {resp.status_code}")
-    ds_info = resp.json()
-    siblings = ds_info.get("siblings", [])
+    # If a specific target_file was requested, use it directly
+    if req.target_file:
+        rfilename = req.target_file
+    else:
+        progress_cb(0.05, f"正在获取 {ds_name} 的文件列表...")
+        api_url = f"https://huggingface.co/api/datasets/{req.repo_id}"
+        resp = _get(api_url, timeout=30)
+        if resp.status_code != 200:
+            raise Exception(f"HF API HTTP {resp.status_code}")
+        ds_info = resp.json()
+        siblings = ds_info.get("siblings", [])
 
-    # Search for data files: jsonl, parquet, arrow, json, csv
-    data_exts = [".jsonl", ".parquet", ".arrow", ".json", ".csv"]
-    data_files = [s for s in siblings
-                  if any(s.get("rfilename","").endswith(ext) for ext in data_exts)]
-    if not data_files:
-        raise Exception(f"未找到数据文件，请安装 datasets 库: pip install datasets pyarrow")
+        # Search for data files: jsonl, parquet, arrow, json, csv
+        data_exts = [".jsonl", ".parquet", ".arrow", ".json", ".csv"]
+        data_files = [s for s in siblings
+                      if any(s.get("rfilename","").endswith(ext) for ext in data_exts)]
+        if not data_files:
+            raise Exception(f"未找到数据文件，请安装 datasets 库: pip install datasets pyarrow")
 
-    target_split = req.split
-    matching = [f for f in data_files if target_split in f["rfilename"]]
-    if req.config:
-        matching = [f for f in matching if req.config in f["rfilename"]]
-    if not matching:
-        matching = data_files
+        target_split = req.split
+        matching = [f for f in data_files if target_split in f["rfilename"]]
+        if req.config:
+            matching = [f for f in matching if req.config in f["rfilename"]]
+        if not matching:
+            matching = data_files
 
-    target_file = matching[0]["rfilename"]
-    rfilename = target_file
+        rfilename = matching[0]["rfilename"]
 
     dl_url = f"https://huggingface.co/datasets/{req.repo_id}/resolve/main/{rfilename}"
     progress_cb(0.1, f"下载 {rfilename}...")

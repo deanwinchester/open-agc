@@ -2086,6 +2086,164 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Architecture Selector ---
     let fineTuneScope = 'all';
 
+    // ── Component Builder State ──
+    let designerMode = 'template';  // 'template' | 'component'
+    let componentLayers = [];       // [{type, config}, ...]
+
+    const COMPONENT_TYPES = [
+        { type: 'attention', label: 'Attention', icon: '👁', color: '#fef3c7', defaultConfig: { attention_type: 'scaled_dot', num_heads: 12, kv_heads: 12, head_dim: 64 } },
+        { type: 'ffn', label: 'FFN', icon: '⊞', color: '#d1fae5', defaultConfig: { ffn_type: 'standard', intermediate_size: 3072, activation: 'gelu' } },
+        { type: 'moe', label: 'MoE FFN', icon: '⧩', color: '#fce7f3', defaultConfig: { num_experts: 8, active_experts: 2, router_type: 'topk' } },
+        { type: 'ssm', label: 'SSM Block', icon: '∿', color: '#cffafe', defaultConfig: { d_state: 16, d_conv: 4, expand: 2 } },
+        { type: 'norm', label: 'Norm', icon: '⦿', color: '#f3e8ff', defaultConfig: { norm_type: 'rms_norm' } },
+        { type: 'embedding', label: 'Embed', icon: '📥', color: '#dbeafe', defaultConfig: { vocab_size: 50000, hidden_size: 768, pos_encoding: 'rope' } },
+        { type: 'output', label: 'Output', icon: '📤', color: '#e5e7eb', defaultConfig: { tie_embeddings: true, norm_type: 'rms_norm' } },
+    ];
+
+    function toggleDesignerMode(mode) {
+        designerMode = mode;
+        document.getElementById('mode-template-btn').classList.toggle('selected', mode === 'template');
+        document.getElementById('mode-component-btn').classList.toggle('selected', mode === 'component');
+        document.getElementById('card-component-builder').style.display = mode === 'component' ? '' : 'none';
+        const templateCards = document.getElementById('template-cards');
+        if (templateCards) templateCards.style.display = mode === 'template' ? '' : 'none';
+        if (mode === 'component') { initComponentPalette(); renderLayerEditor(); }
+    }
+
+    function initComponentPalette() {
+        const palette = document.getElementById('component-palette');
+        if (!palette || palette.children.length) return;
+        COMPONENT_TYPES.forEach(comp => {
+            const btn = document.createElement('button');
+            btn.className = 'btn-secondary';
+            btn.style.cssText = `font-size:0.7rem; padding:0.3rem 0.6rem; background:${comp.color}; border-color:rgba(0,0,0,0.1);`;
+            btn.textContent = `${comp.icon} ${comp.label}`;
+            btn.addEventListener('click', () => {
+                componentLayers.push({ type: comp.type, config: { ...comp.defaultConfig } });
+                renderLayerEditor();
+            });
+            palette.appendChild(btn);
+        });
+    }
+
+    function renderLayerEditor() {
+        const editor = document.getElementById('layer-editor');
+        if (!editor) return;
+        if (!componentLayers.length) {
+            editor.innerHTML = '<div style="color:var(--text-secondary); font-size:0.8rem; text-align:center; padding:1.5rem;">从上方组件库添加块，或点击预设模板</div>';
+            return;
+        }
+        editor.innerHTML = componentLayers.map((layer, i) => {
+            const comp = COMPONENT_TYPES.find(c => c.type === layer.type) || {};
+            const cfg = layer.config;
+            let cfgPreview = '';
+            if (layer.type === 'attention') cfgPreview = `${cfg.num_heads}h ${cfg.attention_type}`;
+            else if (layer.type === 'ffn') cfgPreview = `${cfg.intermediate_size} ${cfg.activation}`;
+            else if (layer.type === 'moe') cfgPreview = `${cfg.num_experts} experts`;
+            else if (layer.type === 'ssm') cfgPreview = `d_state=${cfg.d_state}`;
+            else if (layer.type === 'embedding') cfgPreview = `vocab=${cfg.vocab_size}`;
+            return `<div class="layer-item" style="display:flex; align-items:center; gap:0.4rem; padding:0.35rem 0.5rem; background:${comp.color||'#f9fafb'}; border:1px solid var(--border-color); border-radius:6px; margin-bottom:0.25rem;">
+                <span style="font-weight:700; min-width:24px; font-size:0.7rem; color:var(--text-secondary);">#${i+1}</span>
+                <span style="font-size:0.8rem;">${comp.icon||''} ${comp.label||layer.type}</span>
+                <span style="font-size:0.65rem; color:var(--text-secondary); flex:1;">${cfgPreview}</span>
+                <button class="btn-secondary layer-config-btn" data-idx="${i}" style="font-size:0.65rem; padding:0.1rem 0.3rem;" title="配置">⚙</button>
+                <button class="btn-secondary layer-up-btn" data-idx="${i}" style="font-size:0.65rem; padding:0.1rem 0.3rem;" title="上移" ${i===0?'disabled':''}>↑</button>
+                <button class="btn-secondary layer-down-btn" data-idx="${i}" style="font-size:0.65rem; padding:0.1rem 0.3rem;" title="下移" ${i===componentLayers.length-1?'disabled':''}>↓</button>
+                <button class="btn-secondary layer-del-btn" data-idx="${i}" style="font-size:0.65rem; padding:0.1rem 0.3rem; color:var(--error);" title="删除">✕</button>
+            </div>`;
+        }).join('');
+        // Wire layer buttons
+        editor.querySelectorAll('.layer-up-btn').forEach(b => { b.addEventListener('click', () => { const i = +b.dataset.idx; if (i > 0) { [componentLayers[i-1], componentLayers[i]] = [componentLayers[i], componentLayers[i-1]]; renderLayerEditor(); }});});
+        editor.querySelectorAll('.layer-down-btn').forEach(b => { b.addEventListener('click', () => { const i = +b.dataset.idx; if (i < componentLayers.length-1) { [componentLayers[i], componentLayers[i+1]] = [componentLayers[i+1], componentLayers[i]]; renderLayerEditor(); }});});
+        editor.querySelectorAll('.layer-del-btn').forEach(b => { b.addEventListener('click', () => { componentLayers.splice(+b.dataset.idx, 1); renderLayerEditor(); });});
+        editor.querySelectorAll('.layer-config-btn').forEach(b => { b.addEventListener('click', () => { openLayerConfig(+b.dataset.idx); });});
+    }
+
+    function openLayerConfig(idx) {
+        const layer = componentLayers[idx];
+        const comp = COMPONENT_TYPES.find(c => c.type === layer.type);
+        if (!comp) return;
+        // Build a simple config dialog
+        const cfg = layer.config;
+        let fieldsHtml = '';
+        Object.entries(cfg).forEach(([k, v]) => {
+            fieldsHtml += `<div style="margin-bottom:0.4rem;"><label style="font-size:0.72rem; display:block; margin-bottom:0.15rem;">${k}</label><input class="input-styled layer-cfg-input" data-key="${k}" value="${v}" style="font-size:0.78rem; width:100%;"></div>`;
+        });
+        const overlay = document.createElement('div');
+        overlay.className = 'dataset-preview-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+        overlay.innerHTML = `<div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;width:100%;max-width:420px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,0.5);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;"><h3 style="margin:0;">${comp.icon} ${comp.label} 配置</h3><button class="dataset-preview-close" style="background:transparent;border:none;color:var(--text-secondary);cursor:pointer;font-size:1.2rem;">✖</button></div>
+            ${fieldsHtml}
+            <button class="btn-primary layer-cfg-save" style="margin-top:0.5rem; width:100%;">保存</button>
+        </div>`;
+        document.body.appendChild(overlay);
+        overlay.querySelector('.dataset-preview-close').addEventListener('click', () => overlay.remove());
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        overlay.querySelector('.layer-cfg-save').addEventListener('click', () => {
+            overlay.querySelectorAll('.layer-cfg-input').forEach(inp => {
+                const key = inp.dataset.key;
+                const val = typeof cfg[key] === 'number' ? parseFloat(inp.value) || 0 : inp.value;
+                layer.config[key] = val;
+            });
+            renderLayerEditor();
+            overlay.remove();
+        });
+    }
+
+    function getComponentConfig() {
+        const hiddenSize = parseInt(document.getElementById('hp-hidden-size')?.value) || 768;
+        return JSON.stringify({
+            mode: 'custom',
+            architecture: 'custom_builder',
+            hidden_size: hiddenSize,
+            vocab_size: parseInt(document.getElementById('hp-vocab-size')?.value) || 50000,
+            max_seq_length: parseInt(document.getElementById('hp-max-seq')?.value) || 2048,
+            blocks: componentLayers.map(l => ({ type: l.type, config: l.config })),
+        });
+    }
+
+    function getModelConfigForCurrentMode() {
+        if (designerMode === 'component') return getComponentConfig();
+        return getModelConfigFromForm();
+    }
+
+    function getArchitectureForCurrentMode() {
+        if (designerMode === 'component') return 'custom_builder';
+        return currentSelectedArch;
+    }
+
+    // Preset templates for component builder
+    function applyComponentPreset(preset) {
+        const h = parseInt(document.getElementById('hp-hidden-size')?.value) || 768;
+        if (preset === 'gpt') {
+            componentLayers = [
+                { type: 'embedding', config: { vocab_size: 50000, hidden_size: h, pos_encoding: 'learned' } },
+                ...[...Array(12)].flatMap(() => [
+                    { type: 'norm', config: { norm_type: 'layer_norm' } },
+                    { type: 'attention', config: { attention_type: 'scaled_dot', num_heads: 12, kv_heads: 12, head_dim: 64 } },
+                    { type: 'norm', config: { norm_type: 'layer_norm' } },
+                    { type: 'ffn', config: { ffn_type: 'standard', intermediate_size: h*4, activation: 'gelu' } },
+                ]),
+                { type: 'norm', config: { norm_type: 'layer_norm' } },
+                { type: 'output', config: { tie_embeddings: false, norm_type: 'layer_norm' } },
+            ];
+        } else if (preset === 'llama') {
+            componentLayers = [
+                { type: 'embedding', config: { vocab_size: 50000, hidden_size: h, pos_encoding: 'rope' } },
+                ...[...Array(12)].flatMap(() => [
+                    { type: 'norm', config: { norm_type: 'rms_norm' } },
+                    { type: 'attention', config: { attention_type: 'gqa', num_heads: 12, kv_heads: 4, head_dim: 64 } },
+                    { type: 'norm', config: { norm_type: 'rms_norm' } },
+                    { type: 'ffn', config: { ffn_type: 'swiglu', intermediate_size: Math.round(h*3.5), activation: 'silu' } },
+                ]),
+                { type: 'norm', config: { norm_type: 'rms_norm' } },
+                { type: 'output', config: { tie_embeddings: true, norm_type: 'rms_norm' } },
+            ];
+        }
+        renderLayerEditor();
+    }
+
     function initArchSelector() {
         document.querySelectorAll('.arch-option').forEach(btn => {
             btn.addEventListener('click', () => {
@@ -2106,26 +2264,123 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateArchFieldVisibility() {
+        // Legacy MoE fields
         const moeFields = document.getElementById('moe-fields');
         if (moeFields) moeFields.style.display = currentSelectedArch === 'moe' ? 'flex' : 'none';
+        // New arch-specific cards
+        const cards = {
+            'card-moe-specific': 'moe',
+            'card-mamba-specific': 'mamba_ssm',
+            'card-dit-specific': 'diffusion_dit',
+        };
+        Object.entries(cards).forEach(([cardId, arch]) => {
+            const el = document.getElementById(cardId);
+            if (el) el.style.display = currentSelectedArch === arch ? '' : 'none';
+        });
+        // Architecture visualization
+        const vizCard = document.getElementById('card-arch-viz');
+        if (vizCard) {
+            vizCard.style.display = '';  // always show after first estimate
+            renderArchitectureViz();
+        }
+    }
+
+    function renderArchitectureViz() {
+        const container = document.getElementById('arch-viz-content');
+        if (!container) return;
+        const arch = currentSelectedArch;
+        const numLayers = parseInt(document.getElementById('hp-num-layers')?.value) || 12;
+        const hiddenSize = parseInt(document.getElementById('hp-hidden-size')?.value) || 768;
+        const numHeads = parseInt(document.getElementById('hp-num-heads')?.value) || 12;
+        const kvHeads = parseInt(document.getElementById('hp-kv-heads')?.value) || numHeads;
+
+        const archNames = { gpt_decoder: 'GPT Decoder', llama: 'LLaMA', bert_encoder: 'BERT Encoder', moe: 'MoE (专家混合)', mamba_ssm: 'Mamba / SSM', diffusion_dit: 'Diffusion DiT' };
+        const isSSM = arch === 'mamba_ssm';
+        const isMoE = arch === 'moe';
+        const isDiT = arch === 'diffusion_dit';
+        const isBERT = arch === 'bert_encoder';
+
+        let blocks = '';
+        // Build block diagram for N layers
+        const showLayers = Math.min(numLayers, 8);
+        for (let i = 0; i < showLayers; i++) {
+            let blockInner = '';
+            if (isSSM) {
+                blockInner = `<div class="viz-node viz-norm">Norm</div><div class="viz-arrow">→</div><div class="viz-node viz-ssm">SSM</div><div class="viz-arrow">→</div><div class="viz-node viz-norm">Norm</div>`;
+            } else if (isDiT) {
+                blockInner = `<div class="viz-node viz-adaln">AdaLN</div><div class="viz-arrow">→</div><div class="viz-node viz-attn">Attn</div><div class="viz-arrow">→</div><div class="viz-node viz-adaln">AdaLN</div><div class="viz-arrow">→</div><div class="viz-node viz-ffn">FFN</div>`;
+            } else {
+                const ffnLabel = isMoE ? `MoE FFN` : 'FFN';
+                blockInner = `<div class="viz-node viz-norm">Norm</div><div class="viz-arrow">→</div><div class="viz-node viz-attn">Attn</div><div class="viz-arrow">→</div><div class="viz-node viz-norm">Norm</div><div class="viz-arrow">→</div><div class="viz-node viz-ffn">${ffnLabel}</div>`;
+            }
+            blocks += `<div class="viz-block"><div class="viz-block-label">#${i+1}</div>${blockInner}</div>`;
+            if (i < showLayers - 1) blocks += '<div class="viz-arrow viz-down">↓</div>';
+        }
+        if (numLayers > showLayers) {
+            blocks += `<div class="viz-arrow viz-down">↓</div><div class="viz-block"><div class="viz-block-label">×${numLayers - showLayers} more</div></div>`;
+        }
+
+        const headInfo = kvHeads < numHeads ? `GQA(${numHeads}Q/${kvHeads}KV)` : `MHA(${numHeads}h)`;
+        const dimInfo = `H=${hiddenSize}`;
+
+        container.innerHTML = `<div class="arch-viz" style="display:flex; flex-direction:column; align-items:center; gap:0; font-size:0.7rem;">
+            <div style="font-weight:700; margin-bottom:0.4rem;">${archNames[arch] || arch} · ${headInfo} · ${dimInfo}</div>
+            <div class="viz-node viz-embed">Embedding</div>
+            <div class="viz-arrow viz-down">↓</div>
+            ${blocks}
+            <div class="viz-arrow viz-down">↓</div>
+            <div class="viz-node viz-norm">Final Norm</div>
+            <div class="viz-arrow viz-down">↓</div>
+            <div class="viz-node viz-output">LM Head</div>
+        </div>`;
     }
 
     function getModelConfigFromForm() {
+        const headDim = parseInt(document.getElementById('hp-head-dim')?.value) || 0;
+        const numHeads = parseInt(document.getElementById('hp-num-heads').value) || 12;
+        const hiddenSize = parseInt(document.getElementById('hp-hidden-size').value) || 768;
+        const ffnRatio = parseFloat(document.getElementById('hp-ffn-ratio')?.value) || 4.0;
+        const intermediateFromRatio = Math.round(ffnRatio * hiddenSize);
+        const intermediateVal = parseInt(document.getElementById('hp-intermediate').value) || intermediateFromRatio;
+
         return JSON.stringify({
             num_layers: parseInt(document.getElementById('hp-num-layers').value) || 12,
-            hidden_size: parseInt(document.getElementById('hp-hidden-size').value) || 768,
-            num_attention_heads: parseInt(document.getElementById('hp-num-heads').value) || 12,
-            intermediate_size: parseInt(document.getElementById('hp-intermediate').value) || 3072,
+            hidden_size: hiddenSize,
+            num_attention_heads: numHeads,
+            head_dim: headDim > 0 ? headDim : undefined,
+            intermediate_size: intermediateVal,
             vocab_size: parseInt(document.getElementById('hp-vocab-size').value) || 50000,
             max_seq_length: parseInt(document.getElementById('hp-max-seq').value) || 2048,
+            // MoE
             num_experts: currentSelectedArch === 'moe' ? (parseInt(document.getElementById('hp-num-experts').value) || 8) : undefined,
             active_experts: currentSelectedArch === 'moe' ? (parseInt(document.getElementById('hp-active-experts').value) || 2) : undefined,
+            router_type: currentSelectedArch === 'moe' ? (document.getElementById('hp-router-type')?.value || 'topk') : undefined,
+            expert_capacity_factor: currentSelectedArch === 'moe' ? (parseFloat(document.getElementById('hp-expert-capacity')?.value) || 1.25) : undefined,
+            aux_loss_weight: currentSelectedArch === 'moe' ? (parseFloat(document.getElementById('hp-aux-loss-weight')?.value) || 0.02) : undefined,
+            shared_expert: currentSelectedArch === 'moe' ? (document.getElementById('hp-shared-expert')?.checked || false) : undefined,
+            // Mamba
+            d_state: currentSelectedArch === 'mamba_ssm' ? (parseInt(document.getElementById('hp-d-state')?.value) || 16) : undefined,
+            d_conv: currentSelectedArch === 'mamba_ssm' ? (parseInt(document.getElementById('hp-d-conv')?.value) || 4) : undefined,
+            dt_rank: currentSelectedArch === 'mamba_ssm' ? (parseInt(document.getElementById('hp-dt-rank')?.value) || -1) : undefined,
+            expand_factor: currentSelectedArch === 'mamba_ssm' ? (parseFloat(document.getElementById('hp-expand-factor')?.value) || 2) : undefined,
+            // DiT
+            patch_size: currentSelectedArch === 'diffusion_dit' ? (parseInt(document.getElementById('hp-patch-size')?.value) || 2) : undefined,
+            in_channels: currentSelectedArch === 'diffusion_dit' ? (parseInt(document.getElementById('hp-in-channels')?.value) || 4) : undefined,
+            out_channels: currentSelectedArch === 'diffusion_dit' ? (parseInt(document.getElementById('hp-out-channels')?.value) || 4) : undefined,
+            adaln_hidden_dim: currentSelectedArch === 'diffusion_dit' ? (parseInt(document.getElementById('hp-adaln-hidden')?.value) || 0) : undefined,
+            // Common advanced
             attention_type: document.getElementById('hp-attention-type')?.value || 'scaled_dot',
-            kv_heads: document.getElementById('hp-kv-heads')?.value || 4,
+            kv_heads: parseInt(document.getElementById('hp-kv-heads')?.value) || numHeads,
             norm_position: document.getElementById('hp-norm-position')?.value || 'pre_norm',
             norm_type: document.getElementById('hp-norm-type')?.value || 'layer_norm',
             pos_encoding: document.getElementById('hp-pos-encoding')?.value || 'rope',
             activation: document.getElementById('hp-activation')?.value || 'gelu',
+            rms_norm_eps: parseFloat(document.getElementById('hp-rms-norm-eps')?.value) || 1e-6,
+            rope_theta: parseFloat(document.getElementById('hp-rope-theta')?.value) || 10000,
+            tie_word_embeddings: document.getElementById('hp-tie-embeddings')?.value === 'true',
+            qkv_bias: document.getElementById('hp-qkv-bias')?.value === 'true',
+            ffn_ratio: ffnRatio,
+            init_range: parseFloat(document.getElementById('hp-init-range')?.value) || 0.02,
             attn_dropout: parseFloat(document.getElementById('hp-attn-dropout')?.value) || 0.1,
             resid_dropout: parseFloat(document.getElementById('hp-resid-dropout')?.value) || 0.1,
             embd_dropout: parseFloat(document.getElementById('hp-embd-dropout')?.value) || 0.1
@@ -2279,54 +2534,201 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function fillConfigForm(cfg) {
         const c = JSON.parse(cfg.config_json || '{}');
+        currentSelectedArch = cfg.architecture;
+
+        // Core hyperparams
         document.getElementById('hp-num-layers').value = c.num_layers || 12;
         document.getElementById('hp-hidden-size').value = c.hidden_size || 768;
         document.getElementById('hp-num-heads').value = c.num_attention_heads || 12;
         document.getElementById('hp-intermediate').value = c.intermediate_size || 3072;
         document.getElementById('hp-vocab-size').value = c.vocab_size || 50000;
         document.getElementById('hp-max-seq').value = c.max_seq_length || 2048;
-        if (c.num_experts) document.getElementById('hp-num-experts').value = c.num_experts;
-        if (c.active_experts) document.getElementById('hp-active-experts').value = c.active_experts;
+
+        // MoE fields
+        if (c.num_experts !== undefined) document.getElementById('hp-num-experts').value = c.num_experts;
+        if (c.active_experts !== undefined) document.getElementById('hp-active-experts').value = c.active_experts;
+
+        // Attention and residual controls
+        if (c.attention_type) document.getElementById('hp-attention-type').value = c.attention_type;
+        if (c.kv_heads !== undefined) document.getElementById('hp-kv-heads').value = parseInt(c.kv_heads) || 4;
+        if (c.norm_position) document.getElementById('hp-norm-position').value = c.norm_position;
+        if (c.norm_type) document.getElementById('hp-norm-type').value = c.norm_type;
+        if (c.pos_encoding) document.getElementById('hp-pos-encoding').value = c.pos_encoding;
         if (c.activation) document.getElementById('hp-activation').value = c.activation;
-        currentSelectedArch = cfg.architecture;
+
+        // Dropout fields
+        if (c.attn_dropout !== undefined) document.getElementById('hp-attn-dropout').value = c.attn_dropout;
+        if (c.resid_dropout !== undefined) document.getElementById('hp-resid-dropout').value = c.resid_dropout;
+        if (c.embd_dropout !== undefined) document.getElementById('hp-embd-dropout').value = c.embd_dropout;
+
+        // GQA field visibility
+        const gqaField = document.getElementById('gqa-kv-field');
+        if (gqaField) gqaField.style.display = (c.attention_type === 'gqa') ? '' : 'none';
+
+        // Advanced common params
+        if (c.head_dim !== undefined) document.getElementById('hp-head-dim').value = c.head_dim;
+        if (c.rope_theta !== undefined) document.getElementById('hp-rope-theta').value = c.rope_theta;
+        if (c.rms_norm_eps !== undefined) document.getElementById('hp-rms-norm-eps').value = c.rms_norm_eps;
+        if (c.tie_word_embeddings !== undefined) document.getElementById('hp-tie-embeddings').value = c.tie_word_embeddings ? 'true' : 'false';
+        if (c.ffn_ratio !== undefined) document.getElementById('hp-ffn-ratio').value = c.ffn_ratio;
+        if (c.qkv_bias !== undefined) document.getElementById('hp-qkv-bias').value = c.qkv_bias ? 'true' : 'false';
+        if (c.init_range !== undefined) document.getElementById('hp-init-range').value = c.init_range;
+        // Arch-specific params
+        if (c.router_type) document.getElementById('hp-router-type').value = c.router_type;
+        if (c.expert_capacity_factor !== undefined) document.getElementById('hp-expert-capacity').value = c.expert_capacity_factor;
+        if (c.aux_loss_weight !== undefined) document.getElementById('hp-aux-loss-weight').value = c.aux_loss_weight;
+        if (c.shared_expert !== undefined) document.getElementById('hp-shared-expert').checked = c.shared_expert;
+        if (c.d_state !== undefined) document.getElementById('hp-d-state').value = c.d_state;
+        if (c.d_conv !== undefined) document.getElementById('hp-d-conv').value = c.d_conv;
+        if (c.dt_rank !== undefined) document.getElementById('hp-dt-rank').value = c.dt_rank;
+        if (c.expand_factor !== undefined) document.getElementById('hp-expand-factor').value = c.expand_factor;
+        if (c.patch_size !== undefined) document.getElementById('hp-patch-size').value = c.patch_size;
+        if (c.in_channels !== undefined) document.getElementById('hp-in-channels').value = c.in_channels;
+        if (c.out_channels !== undefined) document.getElementById('hp-out-channels').value = c.out_channels;
+        if (c.adaln_hidden_dim !== undefined) document.getElementById('hp-adaln-hidden').value = c.adaln_hidden_dim;
+
+        // Architecture selector
         document.querySelectorAll('.arch-option').forEach(b => {
             b.classList.toggle('selected', b.dataset.arch === cfg.architecture);
         });
         updateArchFieldVisibility();
     }
 
+    function validateModelConfig(configJson) {
+        const c = JSON.parse(configJson);
+        const warnings = [];
+        const numHeads = c.num_attention_heads || 12;
+        const hiddenSize = c.hidden_size || 768;
+        const kvHeads = parseInt(c.kv_heads) || numHeads;
+        const headDim = hiddenSize / numHeads;
+
+        if (hiddenSize % numHeads !== 0) {
+            warnings.push(`hidden_size (${hiddenSize}) 不能被 num_attention_heads (${numHeads}) 整除`);
+        }
+        if (kvHeads > numHeads) {
+            warnings.push(`kv_heads (${kvHeads}) 不能大于 num_attention_heads (${numHeads})`);
+        }
+        if (kvHeads > 1 && numHeads % kvHeads !== 0) {
+            warnings.push(`GQA: num_attention_heads (${numHeads}) 应被 kv_heads (${kvHeads}) 整除`);
+        }
+        if (headDim < 16 || headDim > 256) {
+            warnings.push(`head_dim (${headDim.toFixed(0)}) 建议在 32-128 范围内`);
+        }
+        if (c.vocab_size < 1000) {
+            warnings.push(`词表大小 (${c.vocab_size}) 过小`);
+        }
+        if (c.intermediate_size < c.hidden_size) {
+            warnings.push(`intermediate_size (${c.intermediate_size}) 小于 hidden_size (${c.hidden_size})，FFN 容量不足`);
+        }
+        if (c.num_layers < 1) {
+            warnings.push('层数必须至少为 1');
+        }
+        return warnings;
+    }
+
     async function estimateModel() {
-        const configJson = getModelConfigFromForm();
+        const configJson = getModelConfigForCurrentMode();
+        const arch = getArchitectureForCurrentMode();
+        const validationWarnings = validateModelConfig(configJson);
+        const warnContainer = document.getElementById('validation-warnings');
+        if (warnContainer) {
+            if (validationWarnings.length) {
+                warnContainer.innerHTML = validationWarnings.map(w => `<div style="padding:0.3rem 0.6rem; background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.3); border-radius:4px; font-size:0.72rem; margin-bottom:0.2rem;">⚠️ ${escapeHtml(w)}</div>`).join('');
+                warnContainer.style.display = '';
+            } else {
+                warnContainer.innerHTML = '';
+                warnContainer.style.display = 'none';
+            }
+        }
         const res = await fetch('/api/training/model-configs/estimate', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ architecture: currentSelectedArch, config_json: configJson })
+            body: JSON.stringify({ architecture: arch, config_json: configJson })
         });
         const data = await res.json();
         const preview = document.getElementById('model-preview-content');
+        const memStr = data.memory_mb >= 1024 ? `${(data.memory_mb/1024).toFixed(1)} GB` : `${data.memory_mb} MB`;
+        const trainMemStr = data.training_memory_mb >= 1024 ? `${(data.training_memory_mb/1024).toFixed(1)} GB` : `${data.training_memory_mb} MB`;
         if (preview) {
             preview.innerHTML = `<div class="model-preview">
                 <div class="preview-item"><label>总参数量</label><span>${data.total_params_formatted}</span></div>
                 <div class="preview-item"><label>层数</label><span>${data.num_layers}</span></div>
                 <div class="preview-item"><label>每层参数量</label><span>${(data.per_layer_params / 1e6).toFixed(1)}M</span></div>
                 <div class="preview-item"><label>嵌入参数量</label><span>${(data.embed_params / 1e6).toFixed(1)}M</span></div>
-                <div class="preview-item"><label>每Token FLOPs</label><span>${(data.flops_per_forward / 1e6).toFixed(1)}M</span></div>
+                <div class="preview-item"><label>推理显存</label><span>${memStr}</span></div>
+                <div class="preview-item"><label>训练显存</label><span>${trainMemStr}</span></div>
+                <div class="preview-item"><label>每Token FLOPs</label><span>${data.flops_per_token >= 1e9 ? (data.flops_per_token/1e9).toFixed(1)+'G' : (data.flops_per_token/1e6).toFixed(0)+'M'}</span></div>
                 <div class="preview-item"><label>架构</label><span>${data.architecture}</span></div>
             </div>`;
         }
     }
 
+    async function generateCode() {
+        const configJson = getModelConfigForCurrentMode();
+        const arch = getArchitectureForCurrentMode();
+        const res = await fetch('/api/training/model-configs/generate-code', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ architecture: arch, config_json: configJson })
+        });
+        const data = await res.json();
+        if (!data.model_code) { showStatus('❌ 代码生成失败', 'error'); return; }
+        // Show code in a preview modal
+        const overlay = document.createElement('div');
+        overlay.className = 'dataset-preview-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+        overlay.innerHTML = `<div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;width:100%;max-width:900px;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 10px 30px rgba(0,0,0,0.5);">
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:15px 20px;border-bottom:1px solid var(--border-color);">
+                <h3 style="margin:0;">model.py — ${escapeHtml(arch)}</h3>
+                <div style="display:flex;gap:0.5rem;">
+                    <button class="btn-primary copy-code-btn" style="font-size:0.75rem;">复制代码</button>
+                    <button class="dataset-preview-close" style="background:transparent;border:none;color:var(--text-secondary);cursor:pointer;font-size:1.2rem;">✖</button>
+                </div>
+            </div>
+            <pre style="flex:1; overflow:auto; margin:0; padding:15px; background:#1a1b26; color:#a9b1d6; font-size:0.75rem; white-space:pre-wrap;">${escapeHtml(data.model_code)}</pre>
+        </div>`;
+        document.body.appendChild(overlay);
+        overlay.querySelector('.dataset-preview-close').addEventListener('click', () => overlay.remove());
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        overlay.querySelector('.copy-code-btn').addEventListener('click', () => {
+            navigator.clipboard.writeText(data.model_code).then(() => showStatus('✅ 已复制到剪贴板', 'success'));
+        });
+        showStatus('✅ 代码已生成 (' + (data.model_code.length / 1024).toFixed(1) + ' KB)', 'success');
+    }
+
+    async function exportModelPackage() {
+        const configJson = getModelConfigForCurrentMode();
+        const arch = getArchitectureForCurrentMode();
+        const res = await fetch('/api/training/model-configs/export', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ architecture: arch, config_json: configJson })
+        });
+        if (!res.ok) {
+            const err = await res.json();
+            showStatus('❌ ' + (err.detail || '导出失败'), 'error');
+            return;
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `model_${arch}.zip`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showStatus('✅ 训练包已下载', 'success');
+    }
+
     async function saveModelConfig() {
         const name = prompt('配置名称:');
         if (!name) return;
-        const configJson = getModelConfigFromForm();
+        const configJson = getModelConfigForCurrentMode();
+        const arch = getArchitectureForCurrentMode();
         const est = await fetch('/api/training/model-configs/estimate', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ architecture: currentSelectedArch, config_json: configJson })
+            body: JSON.stringify({ architecture: arch, config_json: configJson })
         });
         const estData = await est.json();
         await fetch('/api/training/model-configs', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, architecture: currentSelectedArch, config_json: configJson, param_count_estimate: estData.total_params })
+            body: JSON.stringify({ name, architecture: arch, config_json: configJson, param_count_estimate: estData.total_params })
         });
         showStatus('✅ 配置已保存', 'success');
         modelConfigLoaded = false;
@@ -2343,7 +2745,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     setTimeout(() => {
         initArchSelector();
+        // Mode toggle
+        document.getElementById('mode-template-btn')?.addEventListener('click', () => toggleDesignerMode('template'));
+        document.getElementById('mode-component-btn')?.addEventListener('click', () => toggleDesignerMode('component'));
+        // Component preset buttons
+        document.getElementById('layer-preset-gpt')?.addEventListener('click', () => applyComponentPreset('gpt'));
+        document.getElementById('layer-preset-llama')?.addEventListener('click', () => applyComponentPreset('llama'));
+        document.getElementById('layer-preset-clear')?.addEventListener('click', () => { componentLayers = []; renderLayerEditor(); });
         document.getElementById('estimate-model-btn')?.addEventListener('click', estimateModel);
+        document.getElementById('gen-code-btn')?.addEventListener('click', generateCode);
+        document.getElementById('export-model-btn')?.addEventListener('click', exportModelPackage);
         document.getElementById('save-model-config-btn')?.addEventListener('click', saveModelConfig);
         document.getElementById('ds-upload-btn')?.addEventListener('click', uploadDataset);
         document.getElementById('ds-hf-import-btn')?.addEventListener('click', importHFDataset);
@@ -2355,6 +2766,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('monitor-resume-btn')?.addEventListener('click', () => trainingControl('resume'));
         document.getElementById('monitor-step-btn')?.addEventListener('click', () => trainingControl('step'));
         document.getElementById('monitor-abort-btn')?.addEventListener('click', () => trainingControl('abort'));
+        document.getElementById('monitor-abort-save-btn')?.addEventListener('click', () => trainingControl('abort_save'));
 
         // Collapsible sidebar section toggle
         document.querySelectorAll('.sidebar-section-header.collapsible').forEach(header => {
@@ -2479,31 +2891,255 @@ document.addEventListener('DOMContentLoaded', () => {
         `}).join('');
         grid.querySelectorAll('.rec-ds-dl-btn').forEach(btn => {
             btn.addEventListener('click', async function () {
-                this.disabled = true;
-                this.textContent = '启动中...';
+                const repoId = this.dataset.repo;
+                const dsName = this.dataset.name;
+                let dsConfig = this.dataset.config || '';
+                const btnEl = this;
+
+                // Step 0: Check for configs if not already specified
+                if (!dsConfig) {
+                    try {
+                        const cfgRes = await fetch(`/api/downloads/dataset-configs/${encodeURIComponent(repoId)}`);
+                        if (cfgRes.ok) {
+                            const cfgData = await cfgRes.json();
+                            if (cfgData.needs_config && cfgData.configs.length > 0) {
+                                btnEl.disabled = false;
+                                btnEl.textContent = '一键下载';
+                                showConfigSelectionPopup(cfgData, repoId, dsName, btnEl);
+                                return; // popup will re-trigger download with config
+                            }
+                        }
+                    } catch (e) { /* proceed without config */ }
+                }
+
+                // Step 1: Fetch file list
+                btnEl.disabled = true;
+                btnEl.textContent = '获取文件列表...';
+                let filesData;
+                try {
+                    const qs = []; if (dsConfig) qs.push('config=' + encodeURIComponent(dsConfig));
+                    const listRes = await fetch(`/api/downloads/dataset-files/${encodeURIComponent(repoId)}?${qs.join('&')}`);
+                    if (!listRes.ok) {
+                        filesData = null;
+                    } else {
+                        filesData = await listRes.json();
+                    }
+                } catch (e) {
+                    filesData = null;
+                }
+
+                // If no files found or listing failed, do direct download
+                if (!filesData || !filesData.total_files) {
+                    btnEl.textContent = '下载中...';
+                    try {
+                        const res = await fetch('/api/downloads/dataset', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ repo_id: repoId, name: dsName, config: dsConfig || null })
+                        });
+                        const d = await res.json();
+                        if (d.status === 'started') {
+                            showStatus('📥 ' + d.message, 'success');
+                        } else {
+                            showStatus('❌ ' + (d.detail || '启动失败'), 'error');
+                        }
+                    } catch (e) { showStatus('❌ 网络错误', 'error'); }
+                    btnEl.disabled = false;
+                    btnEl.textContent = '一键下载';
+                    return;
+                }
+
+                // If only one file, download directly without popup
+                if (filesData.total_files === 1) {
+                    const onlyFile = filesData.all_files[0];
+                    btnEl.textContent = '下载中...';
+                    try {
+                        const res = await fetch('/api/downloads/dataset', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ repo_id: repoId, name: dsName, split: onlyFile.split, target_file: onlyFile.rfilename, config: dsConfig || null })
+                        });
+                        const d = await res.json();
+                        if (d.status === 'started') {
+                            showStatus('📥 ' + d.message, 'success');
+                        } else {
+                            showStatus('❌ ' + (d.detail || '启动失败'), 'error');
+                        }
+                    } catch (e) { showStatus('❌ 网络错误', 'error'); }
+                    btnEl.disabled = false;
+                    btnEl.textContent = '一键下载';
+                    return;
+                }
+
+                // Multiple files — show selection popup
+                btnEl.disabled = false;
+                btnEl.textContent = '一键下载';
+                showDatasetFilePopup(filesData, repoId, dsName, dsConfig);
+            });
+        });
+    }
+
+    function showConfigSelectionPopup(cfgData, repoId, dsName, btnEl) {
+        const configs = cfgData.configs || [];
+        let rowsHtml = configs.map((c, i) => `
+            <label style="display:flex; align-items:center; gap:0.5rem; padding:0.4rem 0.6rem; cursor:pointer; font-size:0.8rem; border-radius:6px; border:1px solid var(--border-color); margin-bottom:0.25rem;">
+                <input type="radio" name="dsconfig" value="${escapeHtml(c.name)}" ${i === 0 ? 'checked' : ''}>
+                <span style="font-weight:600;">${escapeHtml(c.label || c.name)}</span>
+                ${c.description ? `<span style="font-size:0.7rem; color:var(--text-secondary);">${escapeHtml(c.description)}</span>` : ''}
+            </label>
+        `).join('');
+
+        const overlay = document.createElement('div');
+        overlay.className = 'dataset-preview-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+        overlay.innerHTML = `<div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;width:100%;max-width:500px;box-shadow:0 10px 30px rgba(0,0,0,0.5);">
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:15px 20px;border-bottom:1px solid var(--border-color);">
+                <div>
+                    <h3 style="margin:0; font-size:1rem;">选择数据集配置</h3>
+                    <div style="font-size:0.72rem; color:var(--text-secondary); margin-top:0.15rem;">${escapeHtml(repoId)} 包含多个配置</div>
+                </div>
+                <button class="dataset-preview-close" style="background:transparent;border:none;color:var(--text-secondary);cursor:pointer;font-size:1.2rem;">✖</button>
+            </div>
+            <div style="padding:0.8rem 1rem; max-height:50vh; overflow-y:auto;">
+                ${rowsHtml}
+            </div>
+            <div style="padding:0.8rem 1rem; border-top:1px solid var(--border-color); display:flex; gap:0.5rem; justify-content:flex-end;">
+                <button class="btn-secondary dataset-preview-close" style="font-size:0.8rem;">取消</button>
+                <button class="btn-primary dsconfig-confirm" style="font-size:0.8rem;">确认并继续</button>
+            </div>
+        </div>`;
+        document.body.appendChild(overlay);
+
+        overlay.querySelectorAll('.dataset-preview-close').forEach(b => {
+            b.addEventListener('click', () => overlay.remove());
+        });
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+        overlay.querySelector('.dsconfig-confirm').addEventListener('click', () => {
+            const selected = overlay.querySelector('input[name="dsconfig"]:checked');
+            if (!selected) { showStatus('⚠️ 请选择一个配置', 'error'); return; }
+            const chosenConfig = selected.value;
+            overlay.remove();
+            // Re-trigger the download with the chosen config
+            btnEl.dataset.config = chosenConfig;
+            btnEl.click();
+        });
+    }
+
+    function showDatasetFilePopup(filesData, repoId, dsName, dsConfig) {
+        const bySplit = filesData.by_split || {};
+        const splitNames = Object.keys(bySplit);
+
+        // Build file checkboxes grouped by split
+        let rowsHtml = '';
+        let rowIdx = 0;
+        splitNames.forEach(sp => {
+            const files = bySplit[sp];
+            rowsHtml += `<div style="font-weight:700; font-size:0.75rem; padding:0.35rem 0; color:var(--theme-color); border-bottom:1px solid var(--border-color); margin-bottom:0.2rem;">
+                📂 ${sp} (${files.length} 个文件)
+            </div>`;
+            files.forEach(f => {
+                const id = `dsfile-${rowIdx}`;
+                rowsHtml += `<label style="display:flex; align-items:center; gap:0.4rem; padding:0.25rem 0.4rem; cursor:pointer; font-size:0.78rem; border-radius:4px; hover:bg:var(--bg-inner);">
+                    <input type="checkbox" class="dsfile-check" data-rfilename="${escapeHtml(f.rfilename)}" data-split="${sp}" id="${id}" checked>
+                    <code style="flex:1; font-size:0.7rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(f.basename)}</code>
+                    <span style="font-size:0.65rem; color:var(--text-secondary); white-space:nowrap;">${f.size_str}</span>
+                </label>`;
+                rowIdx++;
+            });
+        });
+
+        // Select-all toggles per split
+        let splitToggles = '';
+        splitNames.forEach(sp => {
+            splitToggles += `<button class="btn-secondary split-toggle-btn" data-split="${sp}" style="font-size:0.65rem; padding:0.1rem 0.4rem;">全选 ${sp}</button>`;
+        });
+
+        const overlay = document.createElement('div');
+        overlay.className = 'dataset-preview-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+        overlay.innerHTML = `<div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;width:100%;max-width:650px;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 10px 30px rgba(0,0,0,0.5);">
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:15px 20px;border-bottom:1px solid var(--border-color);">
+                <div>
+                    <h3 style="margin:0; font-size:1rem;">选择要下载的文件</h3>
+                    <div style="font-size:0.72rem; color:var(--text-secondary); margin-top:0.15rem;">${escapeHtml(repoId)} — 共 ${filesData.total_files} 个数据文件</div>
+                </div>
+                <button class="dataset-preview-close" style="background:transparent;border:none;color:var(--text-secondary);cursor:pointer;font-size:1.2rem;">✖</button>
+            </div>
+            <div style="padding:0.6rem 1rem; display:flex; gap:0.3rem; flex-wrap:wrap; border-bottom:1px solid var(--border-color);">
+                ${splitToggles}
+                <button class="btn-secondary select-all-btn" style="font-size:0.65rem; padding:0.1rem 0.4rem;">全选</button>
+                <button class="btn-secondary deselect-all-btn" style="font-size:0.65rem; padding:0.1rem 0.4rem;">取消全选</button>
+            </div>
+            <div style="flex:1; overflow-y:auto; padding:0.8rem 1rem;" id="dsfile-list">
+                ${rowsHtml}
+            </div>
+            <div style="padding:0.8rem 1rem; border-top:1px solid var(--border-color); display:flex; gap:0.5rem; justify-content:flex-end;">
+                <button class="btn-secondary dataset-preview-close" style="font-size:0.8rem;">取消</button>
+                <button class="btn-primary dsfile-dl-confirm" style="font-size:0.8rem;">下载选中文件</button>
+            </div>
+        </div>`;
+        document.body.appendChild(overlay);
+
+        // Close buttons
+        overlay.querySelectorAll('.dataset-preview-close').forEach(b => {
+            b.addEventListener('click', () => overlay.remove());
+        });
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+        // Select all / deselect all
+        overlay.querySelector('.select-all-btn')?.addEventListener('click', () => {
+            overlay.querySelectorAll('.dsfile-check').forEach(cb => cb.checked = true);
+        });
+        overlay.querySelector('.deselect-all-btn')?.addEventListener('click', () => {
+            overlay.querySelectorAll('.dsfile-check').forEach(cb => cb.checked = false);
+        });
+        // Per-split toggles
+        overlay.querySelectorAll('.split-toggle-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const sp = btn.dataset.split;
+                let allChecked = true;
+                overlay.querySelectorAll('.dsfile-check').forEach(cb => {
+                    if (cb.dataset.split === sp && !cb.checked) allChecked = false;
+                });
+                overlay.querySelectorAll('.dsfile-check').forEach(cb => {
+                    if (cb.dataset.split === sp) cb.checked = !allChecked;
+                });
+            });
+        });
+
+        // Download button
+        overlay.querySelector('.dsfile-dl-confirm').addEventListener('click', async () => {
+            const checked = overlay.querySelectorAll('.dsfile-check:checked');
+            if (checked.length === 0) {
+                showStatus('⚠️ 请至少选择一个文件', 'error');
+                return;
+            }
+            overlay.remove();
+
+            // Download each selected file
+            const total = checked.length;
+            let done = 0;
+            const allFiles = Array.from(checked);
+            for (const cb of allFiles) {
+                const targetFile = cb.dataset.rfilename;
+                const split = cb.dataset.split;
+                const label = `${dsName} [${cb.dataset.rfilename.split('/').pop()}]`;
                 try {
                     const res = await fetch('/api/downloads/dataset', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ repo_id: this.dataset.repo, name: this.dataset.name, config: this.dataset.config || null })
+                        body: JSON.stringify({ repo_id: repoId, name: dsName, split: split, target_file: targetFile, config: dsConfig || null })
                     });
                     const d = await res.json();
+                    done++;
                     if (d.status === 'started') {
-                        showStatus('📥 ' + d.message, 'success');
-                        if (document.getElementById('view-settings-models')?.classList.contains('active') ||
-                            document.getElementById('view-settings')?.classList.contains('active')) {
-                            loadDownloadHistory();
-                        }
+                        showStatus(`📥 [${done}/${total}] ${d.message}`, 'success');
                     } else {
-                        showStatus('❌ ' + (d.detail || '启动失败'), 'error');
-                        this.disabled = false;
-                        this.textContent = '一键下载';
+                        showStatus(`❌ [${done}/${total}] ${d.detail || '失败'}`, 'error');
                     }
                 } catch (e) {
-                    showStatus('❌ 网络错误', 'error');
-                    this.disabled = false;
-                    this.textContent = '一键下载';
+                    done++;
+                    showStatus(`❌ [${done}/${total}] 网络错误`, 'error');
                 }
-            });
+            }
         });
     }
 
@@ -2544,20 +3180,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 pre.style.cssText = 'background:#1a1b26;color:#a9b1d6;padding:15px;border-radius:8px;overflow:auto;max-height:60vh;white-space:pre-wrap;font-size:12px;margin:0;';
                 pre.textContent = JSON.stringify(data.samples || [], null, 2);
 
-                const div = document.createElement('div');
-                div.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+                const overlay = document.createElement('div');
+                overlay.className = 'dataset-preview-overlay';
+                overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
 
                 const content = document.createElement('div');
                 content.style.cssText = 'background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;width:100%;max-width:800px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,0.5);';
                 content.innerHTML = `
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
                         <h3 style="margin:0;font-size:1.1rem;">预览前 ${(data.samples || []).length} 条数据</h3>
-                        <button onclick="this.closest('[style*=\\'position:fixed\\']').remove()" style="background:transparent;border:none;color:var(--text-secondary);cursor:pointer;font-size:1.2rem;padding:0 5px;">✖</button>
+                        <button class="dataset-preview-close" style="background:transparent;border:none;color:var(--text-secondary);cursor:pointer;font-size:1.2rem;padding:0 5px;">✖</button>
                     </div>
                 `;
                 content.appendChild(pre);
-                div.appendChild(content);
-                document.body.appendChild(div);
+                overlay.appendChild(content);
+                overlay.addEventListener('click', function(e) {
+                    if (e.target === overlay) overlay.remove();
+                });
+                overlay.querySelector('.dataset-preview-close').addEventListener('click', function() {
+                    overlay.remove();
+                });
+                document.body.appendChild(overlay);
             });
         });
         container.querySelectorAll('[data-action="edit"]').forEach(btn => {
@@ -2714,7 +3357,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 ? `${(cfg.param_count_estimate / 1e6).toFixed(1)}M 参数` : '';
             const configJson = typeof cfg.config_json === 'string' ? JSON.parse(cfg.config_json) : cfg.config_json;
             document.getElementById('scratch-preview-layers').textContent =
-                `层数: ${configJson.num_layers || '?'} | 隐藏维度: ${configJson.hidden_size || '?'} | 头数: ${configJson.num_heads || '?'}`;
+                `层数: ${configJson.num_layers || '?'} | 隐藏维度: ${configJson.hidden_size || '?'} | 头数: ${configJson.num_attention_heads || configJson.num_heads || '?'}`;
             document.getElementById('scratch-config-json').textContent = JSON.stringify(configJson, null, 2);
             preview.style.display = 'block';
         } catch (e) {
@@ -2736,7 +3379,8 @@ document.addEventListener('DOMContentLoaded', () => {
             weight_decay: parseFloat(document.getElementById('scratch-weight-decay')?.value) || 0.01,
             warmup_steps: parseInt(document.getElementById('scratch-warmup')?.value) || 500,
             gradient_accumulation: parseInt(document.getElementById('scratch-grad-accum')?.value) || 1,
-            max_steps: parseInt(document.getElementById('scratch-max-steps')?.value) || -1
+            max_steps: parseInt(document.getElementById('scratch-max-steps')?.value) || -1,
+            val_ratio: 0.1
         };
 
         // Get config name for the run name
@@ -2803,7 +3447,8 @@ document.addEventListener('DOMContentLoaded', () => {
             epochs: parseInt(document.getElementById('train-epochs')?.value) || 3,
             batch_size: parseInt(document.getElementById('train-batch')?.value) || 4,
             gradient_accumulation: parseInt(document.getElementById('train-grad-accum')?.value) || 1,
-            max_steps: parseInt(document.getElementById('train-max-steps')?.value) || -1
+            max_steps: parseInt(document.getElementById('train-max-steps')?.value) || -1,
+            val_ratio: 0.1
         };
 
         try {
@@ -2916,8 +3561,31 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function handleTrainingProgress(data) {
-        if (data.status === 'initializing' || data.status === 'loading_model') {
-            document.getElementById('monitor-run-name').textContent = data.status === 'initializing' ? '正在初始化...' : '正在加载模型...';
+        if (data.status === 'initializing' || data.status === 'loading_model' ||
+            data.stage === 'loading_data' || data.stage === 'preparing' || data.status === 'building_model') {
+            const label = data.label || (data.status === 'initializing' ? '正在初始化...' : '正在准备...');
+            const nameEl = document.getElementById('monitor-run-name');
+            if (nameEl) nameEl.textContent = label;
+            // Also update progress bar if we have progress info
+            const progBar = document.getElementById('monitor-progress-bar');
+            if (progBar && data.progress != null) {
+                progBar.style.width = Math.round(data.progress * 100) + '%';
+            }
+            return;
+        }
+        if (data.status === 'validating') {
+            // Epoch-end validation with PPL
+            document.getElementById('monitor-val-loss').textContent = data.val_loss != null ? data.val_loss.toFixed(4) : '--';
+            const pplEl = document.getElementById('monitor-val-ppl');
+            if (pplEl && data.val_ppl != null) {
+                pplEl.textContent = data.val_ppl.toFixed(1);
+                const pplColor = data.val_ppl < 20 ? 'var(--success)' : data.val_ppl < 60 ? '#f59e0b' : 'var(--error)';
+                pplEl.style.color = pplColor;
+            }
+            // Also update training loss
+            if (data.train_loss != null) {
+                document.getElementById('monitor-loss').textContent = data.train_loss.toFixed(4);
+            }
             return;
         }
         currentTrainingRunId = data.run_id;
@@ -2925,8 +3593,10 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('monitor-loss').textContent = data.loss != null ? data.loss.toFixed(4) : '--';
         document.getElementById('monitor-grad-norm').textContent = data.grad_norm != null ? data.grad_norm.toFixed(4) : '--';
         document.getElementById('monitor-lr').textContent = data.learning_rate != null ? data.learning_rate.toExponential(2) : '--';
-        document.getElementById('monitor-epoch').textContent = data.epoch != null ? data.epoch : '--';
-        document.getElementById('monitor-step').textContent = data.global_step != null ? data.global_step : '--';
+        const epochStr = data.epoch != null ? `${data.epoch}/${data.total_epochs || '?'}` : '--';
+        const stepStr = data.global_step != null ? (data.steps_per_epoch ? `${data.global_step} (${data.step}/${data.steps_per_epoch}/ep)` : `${data.global_step}`) : '--';
+        document.getElementById('monitor-epoch').textContent = epochStr;
+        document.getElementById('monitor-step').textContent = stepStr;
         document.getElementById('monitor-status-badge').textContent = '训练中';
         document.getElementById('monitor-status-badge').className = 'task-type-badge';
 
@@ -2968,20 +3638,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function handleTrainingComplete(data) {
         const badge = document.getElementById('monitor-status-badge');
-        badge.textContent = data.aborted ? '已中止' : '已完成';
-        badge.className = data.aborted ? 'task-type-badge longrun' : 'task-type-badge oneshot';
+        const wasAbortSave = data.aborted_saved;
+        badge.textContent = wasAbortSave ? '已中止(已保存)' : data.aborted ? '已中止' : '已完成';
+        badge.className = wasAbortSave ? 'task-type-badge oneshot' : data.aborted ? 'task-type-badge longrun' : 'task-type-badge oneshot';
         document.getElementById('monitor-pause-btn').style.display = 'none';
         document.getElementById('monitor-resume-btn').style.display = 'none';
         document.getElementById('monitor-step-btn').style.display = 'none';
         document.getElementById('monitor-abort-btn').style.display = 'none';
+        document.getElementById('monitor-abort-save-btn').style.display = 'none';
 
         const testBtn = document.getElementById('monitor-test-btn');
         if (testBtn) {
-            testBtn.style.display = data.aborted ? 'none' : 'inline-flex';
+            testBtn.style.display = (data.aborted && !wasAbortSave) ? 'none' : 'inline-flex';
             testBtn.onclick = () => openTestModelModal(data.run_id);
         }
 
-        document.getElementById('monitor-run-name').textContent = `运行 #${data.run_id} — ${data.aborted ? '已中止' : '已完成'}`;
+        document.getElementById('monitor-run-name').textContent = `运行 #${data.run_id} — ${badge.textContent}`;
         showStatus(data.aborted ? '⏹ 训练已中止' : `✅ 训练完成! 最佳Loss: ${data.best_loss}`, data.aborted ? 'error' : 'success');
         drawLossChart();
     }
@@ -3048,9 +3720,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                 </div>
                 <div style="display:flex; gap:0.4rem; align-items:center;">
-                    ${r.status === 'completed' ? `<button class="download-action-btn test-run-btn" data-id="${r.id}" title="测试模型" style="color:var(--theme-color)">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
-                    </button>` : ''}
+                    ${r.status === 'completed' ? `
+                        <button class="download-action-btn test-run-btn" data-id="${r.id}" title="对话测试" style="color:var(--theme-color)">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+                        </button>
+                        <button class="download-action-btn eval-ppl-btn" data-id="${r.id}" title="PPL 评估" style="color:#f59e0b; font-size:0.7rem; font-weight:700;">PPL</button>
+                    ` : ''}
                     <button class="download-action-btn delete" data-id="${r.id}" title="删除">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                     </button>
@@ -3072,6 +3747,76 @@ document.addEventListener('DOMContentLoaded', () => {
                 openTestModelModal(btn.dataset.id);
             });
         });
+        container.querySelectorAll('.eval-ppl-btn').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const runId = btn.dataset.id;
+                btn.disabled = true; btn.textContent = '...';
+                try {
+                    const res = await fetch(`/api/training/runs/${runId}/eval-ppl`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({})
+                    });
+                    const d = await res.json();
+                    if (d.status === 'started') {
+                        showStatus('📊 ' + d.message, 'success');
+                        // Poll for result
+                        btn.textContent = 'PPL';
+                        pollPPLResult(runId, btn);
+                    } else {
+                        showStatus('❌ ' + (d.detail || '启动失败'), 'error');
+                        btn.disabled = false; btn.textContent = 'PPL';
+                    }
+                } catch (e) {
+                    showStatus('❌ 网络错误', 'error');
+                    btn.disabled = false; btn.textContent = 'PPL';
+                }
+            });
+        });
+    }
+
+    async function pollPPLResult(runId, btn) {
+        for (let i = 0; i < 120; i++) {
+            await new Promise(r => setTimeout(r, 2000));
+            try {
+                const res = await fetch(`/api/training/runs/${runId}/eval-ppl`);
+                if (!res.ok) continue; // not ready yet
+                const d = await res.json();
+                const m = d.metrics_json;
+                if (m && m.ppl !== undefined) {
+                    showPPLResult(runId, m);
+                    btn.disabled = false;
+                    return;
+                }
+            } catch (e) { /* keep polling */ }
+        }
+        btn.disabled = false;
+        showStatus('⚠️ PPL 评估超时，请稍后查看结果', 'error');
+    }
+
+    function showPPLResult(runId, metrics) {
+        const pplColor = metrics.ppl < 20 ? 'var(--success)' : metrics.ppl < 60 ? '#f59e0b' : 'var(--error)';
+        const pplLevel = metrics.ppl < 15 ? '优秀' : metrics.ppl < 30 ? '良好' : metrics.ppl < 60 ? '一般' : '较差';
+        const overlay = document.createElement('div');
+        overlay.className = 'dataset-preview-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+        overlay.innerHTML = `<div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;width:100%;max-width:450px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,0.5); text-align:center;">
+            <h3 style="margin:0 0 1rem;">📊 PPL 评估结果</h3>
+            <div style="font-size:2.5rem; font-weight:800; color:${pplColor}; margin-bottom:0.5rem;">${metrics.ppl}</div>
+            <div style="font-size:0.9rem; color:${pplColor}; margin-bottom:1.5rem;">困惑度 — ${pplLevel}</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.6rem; font-size:0.8rem; text-align:left; margin-bottom:1rem;">
+                <div><span style="color:var(--text-secondary);">评估窗口:</span> ${metrics.num_windows}</div>
+                <div><span style="color:var(--text-secondary);">总 Tokens:</span> ${(metrics.total_tokens_processed/1e3).toFixed(0)}K</div>
+                <div><span style="color:var(--text-secondary);">平均 NLL:</span> ${metrics.avg_nll}</div>
+                <div><span style="color:var(--text-secondary);">评估耗时:</span> ${metrics.eval_time_seconds}s</div>
+                <div><span style="color:var(--text-secondary);">方法:</span> ${metrics.method||'sliding_window'}</div>
+                <div><span style="color:var(--text-secondary);">窗口大小:</span> ${metrics.stride||'?'}/${metrics.max_length||'?'}</div>
+            </div>
+            <button class="btn-primary dataset-preview-close" style="width:100%;">关闭</button>
+        </div>`;
+        document.body.appendChild(overlay);
+        overlay.querySelector('.dataset-preview-close').addEventListener('click', () => overlay.remove());
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
     }
 
     let currentTestRunId = null;

@@ -2053,3 +2053,28 @@ input:checked + .slider::before { transform: translateX(16px); }
 .bench-q-header:hover > span:last-child {
     color: var(--theme-color);
 }
+
+/* Architecture Visualization */
+.arch-viz { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
+.viz-block {
+    display: flex; align-items: center; gap: 2px; padding: 2px 4px;
+    border: 1px solid var(--border-color); border-radius: 6px;
+    background: var(--bg-panel);
+}
+.viz-block-label {
+    font-size: 0.58rem; color: var(--text-secondary); min-width: 22px;
+    text-align: right; margin-right: 4px;
+}
+.viz-node {
+    padding: 2px 8px; border-radius: 4px; font-weight: 600;
+    font-size: 0.62rem; white-space: nowrap;
+}
+.viz-embed  { background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
+.viz-attn   { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+.viz-ffn    { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+.viz-norm   { background: #f3e8ff; color: #6b21a8; border: 1px solid #d8b4fe; }
+.viz-ssm    { background: #cffafe; color: #155e75; border: 1px solid #67e8f9; }
+.viz-adaln  { background: #fce7f3; color: #9d174d; border: 1px solid #f9a8d4; }
+.viz-output { background: #e5e7eb; color: #374151; border: 1px solid #d1d5db; }
+.viz-arrow  { color: var(--text-secondary); font-size: 0.65rem; padding: 0 2px; }
+.viz-down   { padding: 1px 0; }
