@@ -27,7 +27,9 @@
       "Bash(curl -s http://127.0.0.1:8000/api/plugins)",
       "Bash(git checkout *)",
       "Bash(python *)",
-      "Bash(curl *)"
+      "Bash(curl *)",
+      "Bash(rm core/__pycache__/training_engine.cpython-*.pyc)",
+      "Bash(rm plugins/open-agc-train/__pycache__/engine.cpython-*.pyc)"
     ]
   }
 }
