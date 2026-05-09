@@ -1,0 +1,3 @@
+[submodule "plugins/open-agc-train"]
+	path = plugins/open-agc-train
+	url = https://github.com/deanwinchester/open-agc-train.git
