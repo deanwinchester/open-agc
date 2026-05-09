@@ -19,7 +19,15 @@
       "Bash(sed -i 's/from core.model_architectures import/from .architectures import/g' engine.py)",
       "Bash(sed -i 's/from core.paths import get_data_path/# get_data_path replaced by self.db_path/g' engine.py)",
       "Bash(sed -i 's/from core.llm_client import LLMClient/try:\\\\n    from core.llm_client import LLMClient\\\\nexcept ImportError:\\\\n    LLMClient = None/g' eval.py)",
-      "Bash(gh auth *)"
+      "Bash(gh auth *)",
+      "Bash(curl -sI \"https://raw.githubusercontent.com/deanwinchester/open-agc-plugins/master/marketplace.json\")",
+      "Bash(curl -sI \"https://api.github.com/repos/deanwinchester/open-agc-plugins\")",
+      "Bash(sed -n '3001,3145p')",
+      "Read(//tmp/**)",
+      "Bash(curl -s http://127.0.0.1:8000/api/plugins)",
+      "Bash(git checkout *)",
+      "Bash(python *)",
+      "Bash(curl *)"
     ]
   }
 }

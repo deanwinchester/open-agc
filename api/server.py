@@ -39,8 +39,12 @@ from dotenv import load_dotenv, set_key
 
 from core.paths import get_data_path, get_skills_dir
 from core.llamacpp_manager import get_llamacpp_manager
-from core.llm_client import load_config
-from core.plugin_manager import discover_plugins, list_plugins, get_plugin
+from core.training_engine import get_training_engine, _training_available
+from core.plugin_manager import discover_plugins, list_plugins, list_all_plugins, unload_plugin, toggle_plugin, install_from_git, fetch_marketplace
+
+# ── Route modules ──
+from api.routes.benchmark import router as benchmark_router, init_benchmark_routes
+from api.routes.downloads import router as downloads_router, init_download_routes
 
 # Load environment variables
 env_file = get_data_path(".env")
@@ -64,20 +68,8 @@ for var in ["no_proxy", "NO_PROXY"]:
         os.environ[var] = f"{current.rstrip(',')},{local_hosts}"
 
 app = FastAPI(title="Open-AGC UI Server")
-
-# ── Serve static frontend ──
-_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_static_dir = os.path.join(_BASE_DIR, "static")
-if os.path.isdir(_static_dir):
-    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
-
-@app.get("/")
-async def root():
-    from fastapi.responses import FileResponse
-    index_path = os.path.join(_static_dir, "index.html")
-    if os.path.exists(index_path):
-        return FileResponse(index_path)
-    return {"detail": "index.html not found"}
+app.include_router(benchmark_router)
+app.include_router(downloads_router)
 
 # Store the main event loop for cross-thread WebSocket broadcasts
 _main_event_loop: asyncio.AbstractEventLoop = None
@@ -92,20 +84,15 @@ DB_PATH = get_data_path("chat_history.db")
 
 # ── Plugin Discovery ──
 _plugins_dir = os.path.abspath(os.path.join(os.path.dirname(DB_PATH), "..", "plugins"))
-_plugins = discover_plugins(
-    plugins_dir=_plugins_dir,
-    broadcast_fn=None,  # set later after WebSocket init
-    server_config=load_config(),
-)
+_plugins = discover_plugins(plugins_dir=_plugins_dir, broadcast_fn=None, server_config=load_config() if "load_config" in dir() else {})
 
 def _mount_plugins(app, plugins):
-    """Mount plugin routers and static files onto the FastAPI app."""
     for p in plugins:
         inst = p.instance
-        if inst.router:
+        if inst and inst.router:
             app.include_router(inst.router, prefix=f"/api/plugin/{p.name}")
             print(f"[Server] Mounted plugin router: {p.name}")
-        if inst.static_dir and os.path.isdir(inst.static_dir):
+        if inst and inst.static_dir and os.path.isdir(inst.static_dir):
             from fastapi.staticfiles import StaticFiles
             app.mount(f"/static/plugins/{p.name}", StaticFiles(directory=inst.static_dir), name=f"plugin_{p.name}_static")
             print(f"[Server] Mounted plugin static: {p.name}")
@@ -113,76 +100,3302 @@ def _mount_plugins(app, plugins):
 _mount_plugins(app, _plugins)
 print(f"[Server] Loaded {len(_plugins)} plugin(s)")
 
-@app.get("/api/plugins")
-async def get_plugins():
-    """List all plugins (loaded + disk) with state info."""
-    from core.plugin_manager import list_all_plugins
+def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            user_query TEXT NOT NULL,
+            status TEXT DEFAULT 'running',
+            task_type TEXT DEFAULT 'oneshot',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            result_summary TEXT,
+            output_files TEXT DEFAULT '[]',
+            schedule_cron TEXT,
+            schedule_enabled INTEGER DEFAULT 0,
+            next_run_at DATETIME,
+            last_run_at DATETIME,
+            run_count INTEGER DEFAULT 0,
+            max_resume_count INTEGER DEFAULT 10,
+            resume_count INTEGER DEFAULT 0,
+            context_snapshot TEXT,
+            interruption_reason TEXT
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS task_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            step_number INTEGER NOT NULL,
+            tool_name TEXT NOT NULL,
+            tool_label TEXT,
+            args_preview TEXT,
+            result_preview TEXT,
+            full_result TEXT,
+            success INTEGER DEFAULT 1,
+            thinking_content TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS downloads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT NOT NULL DEFAULT 'model',
+            label TEXT NOT NULL DEFAULT '',
+            repo_id TEXT,
+            filename TEXT,
+            source TEXT DEFAULT 'huggingface',
+            url TEXT,
+            target_path TEXT NOT NULL DEFAULT '',
+            partial_path TEXT NOT NULL DEFAULT '',
+            total_size INTEGER DEFAULT 0,
+            downloaded_bytes INTEGER DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'downloading',
+            progress REAL DEFAULT 0.0,
+            error_message TEXT DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS model_configs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            architecture TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            param_count_estimate INTEGER DEFAULT 0,
+            is_custom INTEGER DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS datasets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'upload',
+            source_path TEXT NOT NULL DEFAULT '',
+            storage_path TEXT NOT NULL DEFAULT '',
+            format TEXT DEFAULT 'jsonl',
+            sample_count INTEGER DEFAULT 0,
+            statistics_json TEXT,
+            train_split REAL DEFAULT 0.8,
+            val_split REAL DEFAULT 0.1,
+            test_split REAL DEFAULT 0.1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS training_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            model_config_id INTEGER,
+            dataset_id INTEGER,
+            base_model_id TEXT NOT NULL DEFAULT '',
+            base_model_source TEXT DEFAULT 'huggingface',
+            training_params_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT DEFAULT 'pending',
+            checkpoint_dir TEXT,
+            current_epoch REAL DEFAULT 0,
+            current_step INTEGER DEFAULT 0,
+            total_steps INTEGER DEFAULT 0,
+            best_loss REAL,
+            total_time_seconds REAL DEFAULT 0,
+            error_message TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS training_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            epoch INTEGER DEFAULT 0,
+            step INTEGER DEFAULT 0,
+            global_step INTEGER DEFAULT 0,
+            loss REAL,
+            grad_norm REAL,
+            learning_rate REAL,
+            act_mean REAL,
+            act_std REAL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (run_id) REFERENCES training_runs(id) ON DELETE CASCADE
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS benchmark_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model_id TEXT NOT NULL,
+            model_source TEXT DEFAULT 'online',
+            benchmark_type TEXT NOT NULL,
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            num_questions INTEGER DEFAULT 0,
+            avg_latency_ms REAL DEFAULT 0,
+            tokens_per_second REAL DEFAULT 0,
+            status TEXT DEFAULT 'completed',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # Ensure datasets storage directory exists
+    datasets_dir = os.path.join(os.path.dirname(DB_PATH), "datasets")
+    os.makedirs(datasets_dir, exist_ok=True)
+
+    # Migrate: add new columns if they don't exist yet
+    try:
+        cursor.execute("ALTER TABLE downloads ADD COLUMN category TEXT DEFAULT 'model'")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN task_type TEXT DEFAULT 'oneshot'")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN schedule_cron TEXT")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN schedule_enabled INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN next_run_at DATETIME")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN last_run_at DATETIME")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN run_count INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN max_resume_count INTEGER DEFAULT 10")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN resume_count INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN context_snapshot TEXT")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN interruption_reason TEXT")
+    except Exception:
+        pass
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def reconcile_downloads():
+    """On startup, scan .partial files and reconcile DB records."""
+    from core.llamacpp_manager import get_llamacpp_manager
+    manager = get_llamacpp_manager()
+    models_dir = manager.models_dir
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # 1. Find all .partial files
+    partial_files = {}
+    if os.path.exists(models_dir):
+        for f in os.listdir(models_dir):
+            if f.endswith(".partial"):
+                partial_path = os.path.join(models_dir, f)
+                gguf_path = partial_path[:-len(".partial")]
+                if os.path.exists(gguf_path):
+                    try:
+                        os.remove(partial_path)
+                    except OSError:
+                        pass
+                else:
+                    partial_files[f] = partial_path
+
+    # 2. Fetch existing DB records
+    cursor.execute("SELECT id, partial_path, target_path, status FROM downloads")
+    existing = {row[1]: {"id": row[0], "target_path": row[2], "status": row[3]}
+                for row in cursor.fetchall()}
+
+    # 3. Reconcile .partial files with DB
+    for partial_name, partial_path in partial_files.items():
+        file_size = os.path.getsize(partial_path)
+        if partial_path in existing:
+            rec = existing[partial_path]
+            if rec["status"] == "downloading":
+                cursor.execute(
+                    "UPDATE downloads SET status='paused', downloaded_bytes=?, "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (file_size, rec["id"])
+                )
+                cursor.execute(
+                    "UPDATE downloads SET progress="
+                    "CASE WHEN total_size > 0 THEN CAST(downloaded_bytes AS REAL) / total_size ELSE 0 END "
+                    "WHERE id=?", (rec["id"],)
+                )
+        else:
+            label = partial_name.replace(".partial", "")
+            target_path = os.path.join(models_dir, label)
+            cursor.execute(
+                '''INSERT INTO downloads (type, label, filename, target_path, partial_path,
+                   downloaded_bytes, progress, status, source)
+                   VALUES ('model', ?, ?, ?, ?, ?, 0.0, 'paused', 'huggingface')''',
+                (f"{label} (待恢复)", label, target_path, partial_path, file_size)
+            )
+            cursor.execute(
+                "UPDATE downloads SET progress="
+                "CASE WHEN total_size > 0 THEN CAST(downloaded_bytes AS REAL) / total_size ELSE 0 END "
+                "WHERE id=last_insert_rowid()"
+            )
+
+    # 4. Mark orphaned DB records
+    cursor.execute(
+        "SELECT id, partial_path, target_path, status FROM downloads "
+        "WHERE status IN ('downloading', 'paused')"
+    )
+    for row in cursor.fetchall():
+        rec_id, partial_path, target_path, status = row
+        if partial_path and not os.path.exists(partial_path):
+            if target_path and os.path.exists(target_path):
+                cursor.execute(
+                    "UPDATE downloads SET status='completed', progress=1.0, "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (rec_id,)
+                )
+            else:
+                cursor.execute(
+                    "UPDATE downloads SET status='failed', "
+                    "error_message='Server restart - partial file lost', "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (rec_id,)
+                )
+
+    conn.commit()
+    conn.close()
+
+reconcile_downloads()
+
+# Task helper functions
+def create_task(title: str, user_query: str, task_type: str = 'oneshot',
+                schedule_cron: str = None, schedule_enabled: bool = False) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    next_run = None
+    if schedule_cron and schedule_enabled:
+        try:
+            from croniter import croniter
+            next_run = croniter(schedule_cron, datetime.now(timezone.utc)).get_next(datetime).strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            pass
+    cursor.execute(
+        "INSERT INTO tasks (title, user_query, task_type, schedule_cron, schedule_enabled, next_run_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (title, user_query, task_type, schedule_cron, 1 if schedule_enabled else 0, next_run)
+    )
+    task_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return task_id
+
+def update_task_status(task_id: int, status: str, result_summary: str = None,
+                       interruption_reason: str = None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    fields = ["status=?", "updated_at=CURRENT_TIMESTAMP"]
+    params = [status]
+    if result_summary is not None:
+        fields.append("result_summary=?")
+        params.append(result_summary)
+    if interruption_reason is not None:
+        fields.append("interruption_reason=?")
+        params.append(interruption_reason)
+    params.append(task_id)
+    cursor.execute(f"UPDATE tasks SET {', '.join(fields)} WHERE id=?", params)
+    conn.commit()
+    conn.close()
+
+def update_task_type(task_id: int, task_type: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE tasks SET task_type=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (task_type, task_id))
+    conn.commit()
+    conn.close()
+
+def save_task_context(task_id: int, messages: list):
+    """Save agent conversation messages as a JSON snapshot for resume."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    # Only keep last 30 messages to avoid huge snapshots
+    snapshot = json.dumps(messages[-30:], ensure_ascii=False)
+    cursor.execute("UPDATE tasks SET context_snapshot=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                   (snapshot, task_id))
+    conn.commit()
+    conn.close()
+
+def get_task_context(task_id: int) -> list:
+    """Load saved conversation context for a task."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT context_snapshot FROM tasks WHERE id=?", (task_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row and row[0]:
+        try:
+            return json.loads(row[0])
+        except Exception:
+            pass
+    return []
+
+def increment_task_resume(task_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE tasks SET resume_count = resume_count + 1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
+    conn.commit()
+    conn.close()
+
+def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: str = None,
+                  args_preview: str = None, result_preview: str = None, full_result: str = None,
+                  success: bool = True, thinking_content: str = None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO task_steps (task_id, step_number, tool_name, tool_label, args_preview, result_preview, full_result, success, thinking_content) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (task_id, step_number, tool_name, tool_label, args_preview, result_preview, full_result, 1 if success else 0, thinking_content)
+    )
+    conn.commit()
+    conn.close()
+
+# ==========================================
+# Download record helpers
+# ==========================================
+
+def create_download_record(type_: str, label: str, repo_id: str = None,
+                           filename: str = None, source: str = "huggingface",
+                           url: str = None, target_path: str = "",
+                           partial_path: str = "", total_size: int = 0) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        '''INSERT INTO downloads (type, label, repo_id, filename, source, url,
+           target_path, partial_path, total_size, downloaded_bytes, status, progress)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'downloading', 0.0)''',
+        (type_, label, repo_id, filename, source, url, target_path, partial_path, total_size)
+    )
+    download_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return download_id
+
+
+def update_download_progress(download_id: int, progress: float,
+                              downloaded_bytes: int = None,
+                              status: str = None, error_message: str = None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    fields = ["progress=?", "updated_at=CURRENT_TIMESTAMP"]
+    params = [progress]
+    if downloaded_bytes is not None:
+        fields.append("downloaded_bytes=?")
+        params.append(downloaded_bytes)
+    if status is not None:
+        fields.append("status=?")
+        params.append(status)
+    if error_message is not None:
+        fields.append("error_message=?")
+        params.append(error_message)
+    params.append(download_id)
+    cursor.execute(f"UPDATE downloads SET {', '.join(fields)} WHERE id=?", params)
+    conn.commit()
+    conn.close()
+
+
+def get_download_record(download_id: int) -> Optional[Dict]:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM downloads WHERE id=?", (download_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return None
+
+
+def list_download_records(status_filter: str = None) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    if status_filter:
+        cursor.execute("SELECT * FROM downloads WHERE status=? ORDER BY created_at DESC",
+                       (status_filter,))
+    else:
+        cursor.execute("SELECT * FROM downloads ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_download_record(download_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM downloads WHERE id=?", (download_id,))
+    conn.commit()
+    conn.close()
+
+
+# ==========================================
+# Connected WebSocket clients (for background task push)
+# ==========================================
+connected_websockets: list = []  # List of active WebSocket connections
+
+def _broadcast_to_websockets(data: dict):
+    """Send data to all connected WebSocket clients."""
+    import asyncio
+    dead = []
+    for ws in connected_websockets:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(ws.send_json(data), loop=loop)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        try: connected_websockets.remove(ws)
+        except ValueError: pass
+
+# ==========================================
+# Llama download progress tracking
+# ==========================================
+_llamacpp_download_state = {
+    "active": False,
+    "type": "",      # "binary" or "model"
+    "label": "",     # human-readable label
+    "progress": 0.0, # 0.0 .. 1.0
+    "stage": "",     # "downloading", "extracting", "complete", "error"
+    "error": ""      # error message if stage == "error"
+}
+
+# In-memory install state for training deps (survives page refresh, lost on server restart)
+_training_install_state = {
+    "active": False,
+    "stage": "",      # "installing", "complete", "error"
+    "label": "",
+    "progress": 0.0,
+    "current_pkg": "",
+    "error": ""
+}
+
+def save_message(role: str, content: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO messages (role, content) VALUES (?, ?)", (role, content))
+    conn.commit()
+    conn.close()
+
+# Mount the static directory
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+async def read_index():
+    return FileResponse("static/index.html")
+
+@app.get("/api/files/{file_path:path}")
+async def get_sandbox_file(file_path: str):
+    """Serve files dynamically from the current sandbox directory to the UI."""
+    config = load_config()
+    sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+    full_path = os.path.abspath(os.path.join(sandbox_dir, file_path))
+    if not full_path.startswith(os.path.abspath(sandbox_dir)):
+        raise HTTPException(status_code=403, detail="Forbidden directory traversal")
+    if not os.path.exists(full_path) or not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(full_path)
+
+# --- Configuration System ---
+CONFIG_PATH = get_data_path("config.json")
+
+def load_config() -> dict:
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
     return {
-        "plugins": list_all_plugins(_plugins_dir),
-        "plugins_dir": os.path.abspath(_plugins_dir)
+        "api_keys": {
+            "ollama": "http://localhost:11434",
+            "llamacpp": "http://localhost:8080/v1",
+            "sglang": "http://localhost:8009/v1",
+            "vllm": "http://localhost:8000/v1",
+            "huggingface": ""
+        },
+        "default_model": "sglang/Qwen/Qwen3.5-9B-Instruct",
+        "fallback_models": ["ollama/qwen3.5:9b"],
+        "disabled_skills": [],
+        "sandbox_mode": True,
+        "sandbox_dir": os.path.abspath(os.path.join(os.getcwd(), "workspace")),
+        "llamacpp_ctx_size": 32768,
+        "browser_headless": False,
+        "http_proxy": "",
+        "heartbeat_enabled": False,
+        "heartbeat_interval": 60,
+        "email_listener_enabled": False,
+        "email_account": "",
+        "email_password": "",
+        "email_imap_server": "",
+        "email_smtp_server": "",
+        "owner_email": ""
+    }
+
+class ConfigUpdate(BaseModel):
+    api_keys: Dict[str, str]
+    default_model: str
+    fallback_models: List[str]
+    disabled_skills: List[str]
+    sandbox_mode: bool
+    sandbox_dir: str
+    llamacpp_ctx_size: int = 32768
+    browser_headless: bool = False
+    http_proxy: str = ""
+    heartbeat_enabled: bool
+    heartbeat_interval: int
+    email_listener_enabled: bool
+    email_account: str
+    email_password: str
+    email_imap_server: str
+    email_smtp_server: str
+    owner_email: str
+
+@app.get("/api/settings")
+async def get_settings():
+    """Return current configuration."""
+    config = load_config()
+    
+    # Mask API keys before sending to frontend
+    masked_keys = {}
+    for k, v in config.get("api_keys", {}).items():
+        if v:
+            masked_keys[k] = f"{v[:3]}...{v[-3:]}" if len(v) > 6 else "***"
+        else:
+            masked_keys[k] = ""
+            
+    return {
+        "api_keys_masked": masked_keys,
+        "default_model": config.get("default_model", "moonshot/kimi-latest"),
+        "fallback_models": config.get("fallback_models", []),
+        "disabled_skills": config.get("disabled_skills", []),
+        "sandbox_mode": config.get("sandbox_mode", True),
+        "sandbox_dir": config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace"))),
+        "llamacpp_ctx_size": config.get("llamacpp_ctx_size", 32768),
+        "browser_headless": config.get("browser_headless", False),
+        "http_proxy": config.get("http_proxy", ""),
+        "heartbeat_enabled": config.get("heartbeat_enabled", False),
+        "heartbeat_interval": config.get("heartbeat_interval", 60),
+        "email_listener_enabled": config.get("email_listener_enabled", False),
+        "email_account": config.get("email_account", ""),
+        "email_password": ("***" if config.get("email_password") else ""),
+        "email_imap_server": config.get("email_imap_server", ""),
+        "email_smtp_server": config.get("email_smtp_server", ""),
+        "owner_email": config.get("owner_email", "")
+    }
+
+@app.post("/api/settings")
+async def update_settings(config_update: ConfigUpdate):
+    """Update JSON config and set env vars dynamically."""
+    config = load_config()
+    env_file = get_data_path(".env")
+    if not os.path.exists(env_file):
+        open(env_file, 'a').close()
+
+    # Mapping from our internal provider key to litellm's expected env var name
+    PROVIDER_ENV_MAP = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "gemini": "GEMINI_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "kimi": "MOONSHOT_API_KEY",
+        "glm": "ZAI_API_KEY",
+        "minimax": "MINIMAX_API_KEY",
+        "ollama": "OLLAMA_API_BASE",
+        "huggingface": "HF_TOKEN"
+    }
+
+    try:
+        # Update keys
+        current_keys = config.get("api_keys", {})
+        for provider, new_key in config_update.api_keys.items():
+            if new_key and not new_key.endswith("***"):
+                current_keys[provider] = new_key
+                env_key_name = PROVIDER_ENV_MAP.get(provider, f"{provider.upper()}_API_KEY")
+                set_key(env_file, env_key_name, new_key)
+                os.environ[env_key_name] = new_key
+
+        # Set China-specific API base URLs for litellm
+        if current_keys.get("kimi"):
+            os.environ["MOONSHOT_API_BASE"] = "https://api.moonshot.cn/v1"
+            set_key(env_file, "MOONSHOT_API_BASE", "https://api.moonshot.cn/v1")
+        if current_keys.get("minimax"):
+            os.environ["MINIMAX_API_BASE"] = "https://api.minimax.io/v1"
+            set_key(env_file, "MINIMAX_API_BASE", "https://api.minimax.io/v1")
+
+        config["api_keys"] = current_keys
+        config["default_model"] = config_update.default_model
+        config["fallback_models"] = config_update.fallback_models
+        config["disabled_skills"] = config_update.disabled_skills
+        config["sandbox_mode"] = config_update.sandbox_mode
+        config["sandbox_dir"] = os.path.abspath(config_update.sandbox_dir) if config_update.sandbox_dir else os.path.abspath(os.path.join(os.getcwd(), "workspace"))
+        config["llamacpp_ctx_size"] = config_update.llamacpp_ctx_size
+        config["browser_headless"] = config_update.browser_headless
+        config["http_proxy"] = config_update.http_proxy
+        config["heartbeat_enabled"] = config_update.heartbeat_enabled
+        config["heartbeat_interval"] = config_update.heartbeat_interval
+        config["email_listener_enabled"] = config_update.email_listener_enabled
+        config["email_account"] = config_update.email_account
+        if config_update.email_password != "***":
+            config["email_password"] = config_update.email_password
+        config["email_imap_server"] = config_update.email_imap_server
+        config["email_smtp_server"] = config_update.email_smtp_server
+        config["owner_email"] = config_update.owner_email
+        
+        set_key(env_file, "DEFAULT_MODEL", config_update.default_model)
+        os.environ["DEFAULT_MODEL"] = config_update.default_model
+
+        # Save to JSON
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4)
+            
+        load_dotenv(override=True)
+        return {"status": "success", "message": "Settings updated successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+import requests
+@app.get("/api/provider-models")
+async def get_provider_models(provider: str):
+    """Query the actual provider API to get a list of available models, or fallback to defaults."""
+    config = load_config()
+    api_keys = config.get("api_keys", {})
+    models = []
+    
+    if provider == "gemini":
+        key = api_keys.get("gemini")
+        if key:
+            try:
+                res = requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={key}", timeout=5)
+                if res.status_code == 200:
+                    models = [m["name"].replace("models/", "gemini/") for m in res.json().get("models", []) if "gemini" in m["name"] or "pro" in m["name"] or "flash" in m["name"]]
+            except Exception: pass
+    elif provider == "openai":
+        key = api_keys.get("openai")
+        if key:
+            try:
+                headers = {"Authorization": f"Bearer {key}"}
+                res = requests.get("https://api.openai.com/v1/models", headers=headers, timeout=5)
+                if res.status_code == 200:
+                    models = [m["id"] for m in res.json().get("data", []) if "gpt" in m["id"]]
+            except Exception: pass
+    elif provider == "llamacpp":
+        manager = get_llamacpp_manager()
+        models = [f"llamacpp/{m}" for m in manager.list_models()]
+        if not models:
+            models = ["llamacpp/local-model (Not Installed)"]
+    elif provider == "deepseek":
+        key = api_keys.get("deepseek")
+        if key:
+            try:
+                headers = {"Authorization": f"Bearer {key}"}
+                res = requests.get("https://api.deepseek.com/v1/models", headers=headers, timeout=5)
+                if res.status_code == 200:
+                    models = [f"deepseek/{m['id']}" for m in res.json().get("data", [])]
+            except Exception: pass
+    elif provider == "ollama":
+        base_url = api_keys.get("ollama", "http://localhost:11434")
+        if not base_url.startswith("http"):
+            base_url = "http://" + base_url
+        try:
+            res = requests.get(f"{base_url.rstrip('/')}/api/tags", timeout=5)
+            if res.status_code == 200:
+                models = [f"ollama/{m['name']}" for m in res.json().get("models", [])]
+        except Exception: pass
+    elif provider == "sglang":
+        base_url = api_keys.get("sglang", "http://localhost:8009/v1")
+        if not base_url.startswith("http"):
+            base_url = "http://" + base_url
+        try:
+            res = requests.get(f"{base_url.rstrip('/')}/models", timeout=5)
+            if res.status_code == 200:
+                models = [f"sglang/{m['id']}" for m in res.json().get("data", [])]
+        except Exception: pass
+    elif provider == "vllm":
+        base_url = api_keys.get("vllm", "http://localhost:8000/v1")
+        if not base_url.startswith("http"):
+            base_url = "http://" + base_url
+        try:
+            res = requests.get(f"{base_url.rstrip('/')}/models", timeout=5)
+            if res.status_code == 200:
+                models = [f"vllm/{m['id']}" for m in res.json().get("data", [])]
+        except Exception: pass
+
+    # Fallback default models if API call fails or key not set
+    # Model names include litellm provider prefix as required by litellm.completion()
+    if not models:
+        defaults = {
+            'openai': ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],
+            'anthropic': ['claude-3-5-sonnet-20240620', 'claude-3-opus-20240229', 'claude-3-haiku-20240307'],
+            'deepseek': ['deepseek/deepseek-chat', 'deepseek/deepseek-reasoner'],
+            'gemini': ['gemini/gemini-1.5-pro', 'gemini/gemini-2.5-pro-preview-05-06'],
+            'kimi': ['moonshot/kimi-k2.5', 'moonshot/kimi-latest', 'moonshot/moonshot-v1-8k', 'moonshot/moonshot-v1-32k', 'moonshot/moonshot-v1-128k'],
+            'glm': ['zai/glm-4.7', 'zai/glm-4.5', 'zai/glm-4.5-flash', 'zai/glm-4.5-air'],
+            'minimax': ['minimax/MiniMax-M2.1'],
+            'ollama': ['ollama/qwen2.5:7b', 'ollama/llama3.1:8b', 'ollama/deepseek-r1:8b', 'ollama/llama3.3:70b'],
+            'llamacpp': ['llamacpp/local-model (需先下载 GGUF 模型)'],
+            'sglang': ['sglang/Qwen/Qwen3.5-9B-Instruct', 'sglang/Qwen/Qwen2.5-7B-Instruct'],
+            'vllm': ['vllm/Qwen/Qwen3.5-9B-Instruct']
+        }
+        models = defaults.get(provider, [])
+        
+    models.sort()
+    return {"models": models}
+
+class PullRequest(BaseModel):
+    model_name: str
+    tool: str = "huggingface" # "huggingface" or "modelscope"
+
+@app.post("/api/sglang/pull")
+async def pull_model(req: PullRequest):
+    """Pull local models via huggingface-cli or modelscope."""
+    try:
+        if req.tool == "modelscope":
+            cmd = ["modelscope", "download", "--model", req.model_name]
+        else:
+            cmd = ["huggingface-cli", "download", req.model_name]
+            
+        import subprocess
+        # Simply run in blocking mode or background depending on requirements
+        # Here we do a blocking subprocess call, which might block the API 
+        # but it's okay for a local GUI utility unless the user wants background downloading.
+        # Alternatively, returning immediately and logging to a file.
+        subprocess.Popen(cmd)
+        return {"status": "success", "message": f"Downloading {req.model_name} in background..."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/llamacpp/status")
+async def get_llamacpp_status():
+    """Get the status of the local llama-server (includes download progress)."""
+    manager = get_llamacpp_manager()
+    return {
+        "installed": manager.is_binary_installed(),
+        "running": manager.is_running(),
+        "models": manager.list_models(),
+        "port": manager.port,
+        "download": _llamacpp_download_state
+    }
+
+@app.post("/api/llamacpp/setup")
+async def setup_llamacpp():
+    """Download and install the llama-server binary (runs in background with progress)."""
+    global _llamacpp_download_state
+
+    if _llamacpp_download_state["active"]:
+        raise HTTPException(status_code=409, detail="下载任务正在进行中")
+
+    _llamacpp_download_state = {
+        "active": True,
+        "type": "binary",
+        "label": "正在下载 llama.cpp 二进制文件...",
+        "progress": 0.0,
+        "stage": "downloading",
+        "error": ""
+    }
+
+    manager = get_llamacpp_manager()
+    bin_path = manager.exe_path
+    db_download_id = create_download_record(
+        type_="binary",
+        label="llama.cpp 二进制文件",
+        source="binary",
+        url="https://api.github.com/repos/ggerganov/llama.cpp/releases/latest",
+        target_path=bin_path
+    )
+    _llamacpp_download_state["download_id"] = db_download_id
+
+    def run_download():
+        global _llamacpp_download_state
+        dl_id = db_download_id
+        try:
+            def progress_cb(ratio):
+                _llamacpp_download_state["progress"] = ratio
+                update_download_progress(dl_id, ratio)
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": "binary",
+                    "label": "正在下载 llama.cpp 二进制文件...",
+                    "progress": ratio,
+                    "stage": "downloading"
+                })
+
+            manager2 = get_llamacpp_manager()
+            _llamacpp_download_state["stage"] = "extracting"
+            _llamacpp_download_state["label"] = "正在解压..."
+            _broadcast_to_websockets({
+                "type": "llamacpp_download",
+                "task": "binary",
+                "label": "正在解压 llama.cpp...",
+                "progress": 1.0,
+                "stage": "extracting"
+            })
+
+            success = manager2.download_binary(progress_callback=progress_cb)
+            if success:
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "complete", "progress": 1.0}
+                update_download_progress(dl_id, 1.0, status="completed")
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": "binary",
+                    "label": "llama.cpp 安装完成",
+                    "progress": 1.0,
+                    "stage": "complete"
+                })
+            else:
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载失败"}
+                update_download_progress(dl_id, 0.0, status="failed", error_message="下载失败")
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": "binary",
+                    "label": "安装失败",
+                    "progress": 0.0,
+                    "stage": "error",
+                    "error": "下载失败"
+                })
+        except Exception as e:
+            _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
+            update_download_progress(dl_id, 0.0, status="failed", error_message=str(e))
+            _broadcast_to_websockets({
+                "type": "llamacpp_download",
+                "task": "binary",
+                "label": f"安装失败: {e}",
+                "progress": 0.0,
+                "stage": "error",
+                "error": str(e)
+            })
+
+    thread = threading.Thread(target=run_download, daemon=True)
+    thread.start()
+    return {"status": "started", "message": "开始下载安装 llama.cpp"}
+
+class ModelDownloadRequest(BaseModel):
+    url: str
+    filename: str
+
+@app.post("/api/llamacpp/download-model")
+async def download_llamacpp_model(req: ModelDownloadRequest):
+    """Download a GGUF model."""
+    manager = get_llamacpp_manager()
+    success = manager.download_model(req.url, req.filename)
+    if success:
+        return {"status": "success", "message": f"Model {req.filename} downloaded successfully"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to download model")
+
+class ModelSearchRequest(BaseModel):
+    query: str
+    source: str = "huggingface"  # "huggingface" or "modelscope"
+
+@app.post("/api/llamacpp/search-models")
+async def search_llamacpp_models(req: ModelSearchRequest):
+    """Search for GGUF models by name from HuggingFace or ModelScope."""
+    manager = get_llamacpp_manager()
+    if req.source == "modelscope":
+        results = manager.search_ms_models(req.query)
+    else:
+        results = manager.search_hf_models(req.query)
+    return {"status": "success", "models": results}
+
+class ModelFilesRequest(BaseModel):
+    repo_id: str
+    source: str = "huggingface"
+
+@app.post("/api/llamacpp/model-files")
+async def get_llamacpp_model_files(req: ModelFilesRequest):
+    """List GGUF files in a model repository (HF or ModelScope)."""
+    manager = get_llamacpp_manager()
+    if req.source == "modelscope":
+        files = manager.get_ms_model_files(req.repo_id)
+    else:
+        files = manager.get_hf_model_files(req.repo_id)
+    return {"status": "success", "files": files}
+
+class ModelDownloadHFRequest(BaseModel):
+    repo_id: str
+    filename: str
+    source: str = "huggingface"
+
+@app.post("/api/llamacpp/download-from-hf")
+async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
+    """Download a GGUF model from HuggingFace or ModelScope (runs in background with progress, supports resume)."""
+    global _llamacpp_download_state
+
+    if _llamacpp_download_state["active"]:
+        raise HTTPException(status_code=409, detail="下载任务正在进行中")
+
+    short_name = req.filename.split("/")[-1]
+    source_label = "ModelScope" if req.source == "modelscope" else "HuggingFace"
+
+    # Check for existing partial file to report initial progress
+    manager = get_llamacpp_manager()
+    partial_path = os.path.join(manager.models_dir, short_name + ".partial")
+    target_path = os.path.join(manager.models_dir, short_name)
+    resume_offset = 0
+    if os.path.exists(partial_path):
+        resume_offset = os.path.getsize(partial_path)
+        initial_label = f"续传 {short_name} (已下载 {resume_offset / 1024**2:.0f} MB)..."
+    else:
+        initial_label = f"正在从 {source_label} 下载 {short_name}..."
+
+    # Try to get total size via HEAD request before starting thread
+    total_size = 0
+    try:
+        if req.source == "modelscope":
+            head_url = f"{manager.MS_API_BASE}/models/{req.repo_id}/resolve/master/{req.filename}"
+        else:
+            head_url = f"https://huggingface.co/{req.repo_id}/resolve/main/{req.filename}"
+        head_resp = requests.head(head_url, timeout=10)
+        total_size = int(head_resp.headers.get("Content-Length", 0))
+    except Exception:
+        pass
+
+    # Create persistent DB record
+    db_download_id = create_download_record(
+        type_="model",
+        label=f"{short_name} ({source_label})",
+        repo_id=req.repo_id,
+        filename=req.filename,
+        source=req.source,
+        target_path=target_path,
+        partial_path=partial_path,
+        total_size=total_size
+    )
+
+    _llamacpp_download_state = {
+        "active": True,
+        "type": "model",
+        "label": initial_label,
+        "progress": 0.0,
+        "stage": "downloading",
+        "error": "",
+        "repo_id": req.repo_id,
+        "filename": req.filename,
+        "source": req.source,
+        "resume_offset": resume_offset,
+        "download_id": db_download_id
+    }
+
+    def run_download():
+        global _llamacpp_download_state
+        dl_id = db_download_id
+        try:
+            def progress_cb(ratio):
+                _llamacpp_download_state["progress"] = ratio
+                update_download_progress(dl_id, ratio)
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": "model",
+                    "label": f"正在下载 {short_name}...",
+                    "progress": ratio,
+                    "stage": "downloading"
+                })
+
+            manager2 = get_llamacpp_manager()
+            if req.source == "modelscope":
+                success = manager2.download_model_from_ms(req.repo_id, req.filename, progress_callback=progress_cb)
+            else:
+                success = manager2.download_model_from_hf(req.repo_id, req.filename, progress_callback=progress_cb)
+
+            if success:
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "complete", "progress": 1.0}
+                update_download_progress(dl_id, 1.0, status="completed")
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": "model",
+                    "label": f"{short_name} 下载完成",
+                    "progress": 1.0,
+                    "stage": "complete"
+                })
+            else:
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载中断，可重新下载自动续传"}
+                update_download_progress(dl_id, 0.0, status="failed", error_message="下载中断，可重新下载自动续传")
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": "model",
+                    "label": f"{short_name} 下载中断 (已保存进度，可重新下载续传)",
+                    "progress": 0.0,
+                    "stage": "error",
+                    "error": "下载中断，可重新下载自动续传"
+                })
+        except Exception as e:
+            _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
+            update_download_progress(dl_id, 0.0, status="failed", error_message=str(e))
+            _broadcast_to_websockets({
+                "type": "llamacpp_download",
+                "task": "model",
+                "label": f"下载失败: {e}",
+                "progress": 0.0,
+                "stage": "error",
+                "error": str(e)
+            })
+
+    thread = threading.Thread(target=run_download, daemon=True)
+    thread.start()
+    return {"status": "started", "message": f"开始从 {source_label} 下载 {short_name}", "resume_offset": resume_offset}
+
+# ==========================================
+# Download History API
+# ==========================================
+
+@app.get("/api/downloads")
+async def get_downloads(status: str = None):
+    """List all download records with optional status filter."""
+    records = list_download_records(status_filter=status)
+    return {"downloads": records}
+
+
+class ResumeDownloadResponse(BaseModel):
+    status: str
+    message: str
+    download_id: int = None
+
+
+@app.post("/api/downloads/{download_id}/resume")
+async def resume_download(download_id: int):
+    """Resume a paused or failed download."""
+    global _llamacpp_download_state
+
+    if _llamacpp_download_state["active"]:
+        raise HTTPException(status_code=409, detail="下载任务正在进行中")
+
+    record = get_download_record(download_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Download record not found")
+    if record["status"] not in ("paused", "failed"):
+        raise HTTPException(status_code=400, detail=f"Cannot resume download in status '{record['status']}'")
+
+    partial_path = record["partial_path"]
+    resume_offset = os.path.getsize(partial_path) if partial_path and os.path.exists(partial_path) else 0
+    short_name = (record["filename"] or record["label"] or "file").split("/")[-1]
+
+    _llamacpp_download_state = {
+        "active": True,
+        "type": record["type"],
+        "label": f"续传 {short_name}",
+        "progress": record["progress"] or 0.0,
+        "stage": "downloading",
+        "error": "",
+        "repo_id": record["repo_id"],
+        "filename": record["filename"],
+        "source": record["source"],
+        "resume_offset": resume_offset,
+        "download_id": download_id
+    }
+
+    update_download_progress(download_id, record["progress"] or 0.0,
+                             downloaded_bytes=resume_offset,
+                             status="downloading", error_message="")
+
+    def run_resume():
+        global _llamacpp_download_state
+        dl_id = download_id
+        try:
+            def progress_cb(ratio):
+                _llamacpp_download_state["progress"] = ratio
+                update_download_progress(dl_id, ratio)
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": record["type"],
+                    "label": f"续传 {short_name}...",
+                    "progress": ratio,
+                    "stage": "downloading"
+                })
+
+            manager = get_llamacpp_manager()
+            if record["type"] == "binary":
+                success = manager.download_binary(progress_callback=progress_cb)
+            elif record["source"] == "modelscope":
+                success = manager.download_model_from_ms(
+                    record["repo_id"], record["filename"], progress_callback=progress_cb
+                )
+            else:
+                success = manager.download_model_from_hf(
+                    record["repo_id"], record["filename"], progress_callback=progress_cb
+                )
+
+            if success:
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "complete", "progress": 1.0}
+                update_download_progress(dl_id, 1.0, status="completed")
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": record["type"],
+                    "label": f"{short_name} 下载完成",
+                    "progress": 1.0,
+                    "stage": "complete"
+                })
+            else:
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载失败"}
+                update_download_progress(dl_id, 0.0, status="failed", error_message="下载失败")
+                _broadcast_to_websockets({
+                    "type": "llamacpp_download",
+                    "task": record["type"],
+                    "label": f"{short_name} 下载失败",
+                    "progress": 0.0,
+                    "stage": "error",
+                    "error": "下载失败"
+                })
+        except Exception as e:
+            _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
+            update_download_progress(dl_id, 0.0, status="failed", error_message=str(e))
+            _broadcast_to_websockets({
+                "type": "llamacpp_download",
+                "task": record["type"],
+                "label": f"续传失败: {e}",
+                "progress": 0.0,
+                "stage": "error",
+                "error": str(e)
+            })
+
+    thread = threading.Thread(target=run_resume, daemon=True)
+    thread.start()
+    return {"status": "started", "message": f"Resuming download of {short_name}", "download_id": download_id}
+
+
+@app.delete("/api/downloads/{download_id}")
+async def delete_download(download_id: int):
+    """Delete a download record and its associated .partial file."""
+    record = get_download_record(download_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Download record not found")
+
+    partial_path = record.get("partial_path", "")
+    if partial_path and os.path.exists(partial_path):
+        try:
+            os.remove(partial_path)
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"Failed to delete partial file: {e}")
+
+    delete_download_record(download_id)
+    return {"status": "success", "message": "Download record deleted"}
+
+
+# ==========================================
+# --- Model Config Endpoints ---
+
+@app.get("/api/training/model-configs")
+async def list_model_configs():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM model_configs ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return {"configs": [dict(r) for r in rows]}
+
+
+class ModelConfigRequest(BaseModel):
+    name: str
+    architecture: str
+    config_json: str
+    param_count_estimate: int = 0
+
+
+@app.post("/api/training/model-configs")
+async def create_model_config(req: ModelConfigRequest):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO model_configs (name, architecture, config_json, param_count_estimate) VALUES (?, ?, ?, ?)",
+        (req.name, req.architecture, req.config_json, req.param_count_estimate)
+    )
+    config_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return {"status": "success", "id": config_id}
+
+
+@app.get("/api/training/model-configs/{config_id}")
+async def get_model_config(config_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM model_configs WHERE id=?", (config_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Config not found")
+    return dict(row)
+
+
+@app.delete("/api/training/model-configs/{config_id}")
+async def delete_model_config(config_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM model_configs WHERE id=?", (config_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+
+class EstimateRequest(BaseModel):
+    architecture: str
+    config_json: str
+
+
+@app.post("/api/training/model-configs/estimate")
+async def estimate_model(req: EstimateRequest):
+    """Estimate parameter count, FLOPs, and memory for a model config.
+
+    Supports: gpt_decoder, llama, bert_encoder, moe, mamba_ssm, diffusion_dit
+    """
+    import json, math
+    config = json.loads(req.config_json)
+    arch = req.architecture
+
+    num_layers = config.get("num_layers", 12)
+    hidden_size = config.get("hidden_size", 768)
+    num_heads = config.get("num_attention_heads", 12)
+    intermediate_size = config.get("intermediate_size", hidden_size * 4)
+    vocab_size = config.get("vocab_size", 50000)
+    max_seq_len = config.get("max_seq_len", config.get("max_seq_length", 2048))
+    head_dim = hidden_size // num_heads
+
+    # Normalization
+    norm_type = config.get("norm_type", "layer_norm")
+    norm_eps = config.get("rms_norm_eps", 1e-6)
+    if norm_type == "rms_norm":
+        norm_params = hidden_size  # gain only (no bias)
+    else:
+        norm_params = 2 * hidden_size  # weight + bias
+
+    # Position encoding
+    pos_encoding = config.get("pos_encoding", "rope")
+    tie_embeddings = config.get("tie_word_embeddings", False)
+
+    # Embedding
+    embed_params = vocab_size * hidden_size
+    if pos_encoding == "learned":
+        embed_params += max_seq_len * hidden_size
+
+    # Architecture-specific computation
+    if arch in ("gpt_decoder", "llama"):
+        # ── Attention: Q/K/V/O projections ──
+        kv_heads = int(config.get("kv_heads", num_heads))
+        qkv_bias = config.get("qkv_bias", False)
+        q_params = hidden_size * (hidden_size + (hidden_size if qkv_bias else 0))
+        k_params = hidden_size * (kv_heads * head_dim + (kv_heads * head_dim if qkv_bias else 0))
+        v_params = hidden_size * (kv_heads * head_dim + (kv_heads * head_dim if qkv_bias else 0))
+        o_params = hidden_size * (hidden_size + (hidden_size if qkv_bias else 0))
+        attn_params = q_params + k_params + v_params + o_params
+
+        # ── FFN ──
+        activation = config.get("activation", "gelu")
+        if activation in ("swiglu", "silu"):
+            # gate_proj + up_proj + down_proj
+            ffn_params = 3 * hidden_size * intermediate_size
+        else:
+            # fc1 + fc2
+            ffn_params = 2 * hidden_size * intermediate_size
+
+        # ── Norms ──
+        norm_position = config.get("norm_position", "pre_norm")
+        norms_per_layer = 3 if norm_position == "sandwich_norm" else 2
+        norm_layer_params = norms_per_layer * norm_params
+
+        layer_params = attn_params + ffn_params + norm_layer_params
+        total_params = embed_params + num_layers * layer_params
+
+        # LM head + final norm
+        if not tie_embeddings:
+            total_params += hidden_size * vocab_size
+        total_params += norm_params
+
+    elif arch == "bert_encoder":
+        attn_params = 4 * hidden_size * hidden_size
+        ffn_params = 2 * hidden_size * intermediate_size
+        norms_per_layer = 2
+        layer_params = attn_params + ffn_params + norms_per_layer * norm_params
+        total_params = embed_params + num_layers * layer_params
+        # Segment embeddings + pooler
+        total_params += 2 * hidden_size  # token_type_embeddings
+        total_params += hidden_size * hidden_size + hidden_size  # pooler
+        # LM head
+        total_params += hidden_size * vocab_size
+
+    elif arch == "moe":
+        kv_heads = int(config.get("kv_heads", num_heads))
+        attn_params = (hidden_size * hidden_size +  # Q
+                       hidden_size * kv_heads * head_dim +  # K
+                       hidden_size * kv_heads * head_dim +  # V
+                       hidden_size * hidden_size)  # O
+
+        num_experts = config.get("num_experts", 8)
+        # Each expert: gate + up + down (SwiGLU-style = 3 matrices)
+        expert_ffn = 3 * hidden_size * intermediate_size
+        # Router/gate
+        router_params = hidden_size * num_experts
+        ffn_params_per_layer = num_experts * expert_ffn + router_params
+
+        layer_params = attn_params + ffn_params_per_layer + 2 * norm_params
+        total_params = embed_params + num_layers * layer_params
+        if not tie_embeddings:
+            total_params += hidden_size * vocab_size
+        total_params += norm_params
+
+    elif arch == "mamba_ssm":
+        d_state = config.get("d_state", 16)
+        d_conv = config.get("d_conv", 4)
+        expand_factor = config.get("expand_factor", 2)
+        inner_dim = int(expand_factor * hidden_size)
+        dt_rank = config.get("dt_rank", -1)
+        if dt_rank <= 0:
+            dt_rank = max(1, math.ceil(hidden_size / 16))
+
+        # in_proj: x -> (z, x, dt) = inner_dim + inner_dim + dt_rank
+        in_proj = hidden_size * (2 * inner_dim + dt_rank)
+        # conv1d: depthwise separable
+        conv_params = inner_dim * d_conv * 2
+        # SSM: dt_proj + A_log + D
+        ssm_params = dt_rank * inner_dim + inner_dim + inner_dim
+        # out_proj
+        out_proj = inner_dim * hidden_size
+        # Norms: 2 per block
+        norm_mamba_params = 2 * norm_params
+
+        layer_params = in_proj + conv_params + ssm_params + out_proj + norm_mamba_params
+        total_params = embed_params + num_layers * layer_params
+        if not tie_embeddings:
+            total_params += hidden_size * vocab_size
+        total_params += norm_params
+
+    elif arch == "diffusion_dit":
+        patch_size = config.get("patch_size", 2)
+        in_channels = config.get("in_channels", 4)
+        out_channels = config.get("out_channels", in_channels)
+        # Patch embedding
+        patch_embed_params = (patch_size * patch_size * in_channels) * hidden_size
+        # Positional
+        pos_params = max_seq_len * hidden_size  # sin-cos or learned
+
+        kv_heads = int(config.get("kv_heads", num_heads))
+        attn_params = (hidden_size * hidden_size +
+                       hidden_size * kv_heads * head_dim +
+                       hidden_size * kv_heads * head_dim +
+                       hidden_size * hidden_size)
+        # SwiGLU FFN
+        ffn_params = 3 * hidden_size * intermediate_size
+        # AdaLN: 6 modulation vectors per layer (scale, shift, gate) * 2
+        adaln_params = 6 * hidden_size
+        # Cross-attention (conditional)
+        cross_attn_params = 4 * hidden_size * hidden_size
+
+        layer_params = attn_params + ffn_params + adaln_params + cross_attn_params
+        total_params = (patch_embed_params + pos_params +
+                        num_layers * layer_params +
+                        hidden_size * out_channels * patch_size * patch_size)  # final proj
+
+    else:
+        # Generic GPT-decoder fallback
+        attn_params = 4 * hidden_size * hidden_size
+        activation = config.get("activation", "gelu")
+        swiglu_factor = 3 if activation in ("swiglu",) else 2
+        ffn_params = swiglu_factor * hidden_size * intermediate_size
+        layer_params = attn_params + ffn_params + 2 * norm_params
+        total_params = embed_params + num_layers * layer_params + norm_params
+        if not tie_embeddings:
+            total_params += hidden_size * vocab_size
+
+    # ── FLOPs estimates ──
+    flops_per_token = 2 * total_params  # ~2 FLOPs per param per token for matmul-dominated nets
+    # Attention: QK^T + softmax + AV computations
+    attn_flops_per_token = 4 * num_layers * hidden_size * hidden_size
+    flops_per_forward = flops_per_token * max_seq_len + attn_flops_per_token * max_seq_len
+
+    # ── Memory estimates (fp32) ──
+    fp32_bytes = total_params * 4
+    memory_mb = round(fp32_bytes / (1024 * 1024))
+    # Training: model * 4 (params + grads + optimizer states + activations)
+    training_memory_mb = round(fp32_bytes * 4 / (1024 * 1024))
+
+    return {
+        "total_params": total_params,
+        "total_params_formatted": (
+            f"{total_params / 1e6:.1f}M" if total_params < 1e9
+            else f"{total_params / 1e9:.2f}B"
+        ),
+        "flops_per_forward": round(flops_per_forward),
+        "flops_per_token": round(flops_per_token),
+        "embed_params": embed_params,
+        "per_layer_params": round(total_params / num_layers) if num_layers else 0,
+        "num_layers": num_layers,
+        "architecture": arch,
+        "memory_mb": memory_mb,
+        "training_memory_mb": training_memory_mb,
     }
 
 
+# --- Code Generation Endpoints ---
+
+class CodeGenRequest(BaseModel):
+    architecture: str
+    config_json: str
+
+
+@app.post("/api/training/model-configs/generate-code")
+async def generate_model_code(req: CodeGenRequest):
+    """Generate model.py source code and config.json from a model designer config."""
+    import json
+    config = json.loads(req.config_json)
+    try:
+        from core.model_codegen import generate_model_code as _gen_code, \
+            generate_hf_config, generate_tokenizer_config
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Code generator not available: {e}")
+
+    model_code = _gen_code(config, req.architecture)
+    hf_cfg = generate_hf_config(config, req.architecture)
+    tok_cfg = generate_tokenizer_config(config)
+
+    return {
+        "status": "ok",
+        "model_code": model_code,
+        "config_json": hf_cfg,
+        "tokenizer_config": tok_cfg,
+    }
+
+
+@app.get("/api/training/model-configs/schema/{architecture}")
+async def get_architecture_schema(architecture: str):
+    """Return the JSON schema of configurable fields for an architecture."""
+    base_schema = {
+        "type": "object",
+        "properties": {
+            "num_layers": {"type": "integer", "default": 12, "min": 1, "max": 200, "label": "层数"},
+            "hidden_size": {"type": "integer", "default": 768, "min": 64, "max": 32768, "step": 64, "label": "隐藏维度"},
+            "num_attention_heads": {"type": "integer", "default": 12, "min": 1, "max": 128, "label": "注意力头数"},
+            "intermediate_size": {"type": "integer", "default": 3072, "label": "中间层维度"},
+            "vocab_size": {"type": "integer", "default": 50000, "min": 1000, "label": "词表大小"},
+            "max_seq_length": {"type": "integer", "default": 2048, "min": 128, "label": "最大序列长度"},
+            "attention_type": {"type": "string", "enum": ["scaled_dot", "flash_attn", "mqa", "gqa"], "label": "注意力类型"},
+            "norm_position": {"type": "string", "enum": ["pre_norm", "post_norm", "sandwich_norm"], "label": "归一化位置"},
+            "norm_type": {"type": "string", "enum": ["layer_norm", "rms_norm"], "label": "归一化类型"},
+            "pos_encoding": {"type": "string", "enum": ["rope", "learned", "sinusoidal", "alibi", "none"], "label": "位置编码"},
+            "activation": {"type": "string", "enum": ["gelu", "silu", "swiglu", "relu", "gelu_new"], "label": "激活函数"},
+            "tie_word_embeddings": {"type": "boolean", "label": "绑定嵌入权重"},
+            "rope_theta": {"type": "number", "default": 10000.0, "label": "RoPE theta"},
+            "rms_norm_eps": {"type": "number", "default": 1e-6, "label": "RMSNorm epsilon"},
+        },
+    }
+
+    arch_specific = {
+        "moe": {
+            "num_experts": {"type": "integer", "default": 8, "min": 2, "label": "专家数量"},
+            "active_experts": {"type": "integer", "default": 2, "min": 1, "label": "激活专家数"},
+            "router_type": {"type": "string", "enum": ["topk", "switch", "expert_choice"], "label": "路由类型"},
+            "expert_capacity_factor": {"type": "number", "default": 1.25, "label": "容量因子"},
+            "aux_loss_weight": {"type": "number", "default": 0.02, "label": "辅助损失权重"},
+            "shared_expert": {"type": "boolean", "label": "共享专家"},
+        },
+        "mamba_ssm": {
+            "d_state": {"type": "integer", "default": 16, "label": "状态维度"},
+            "d_conv": {"type": "integer", "default": 4, "label": "卷积核"},
+            "dt_rank": {"type": "integer", "default": -1, "label": "dt秩"},
+            "expand_factor": {"type": "number", "default": 2, "label": "扩展比"},
+        },
+        "diffusion_dit": {
+            "patch_size": {"type": "integer", "default": 2, "label": "Patch大小"},
+            "in_channels": {"type": "integer", "default": 4, "label": "输入通道"},
+            "out_channels": {"type": "integer", "default": 4, "label": "输出通道"},
+        },
+    }
+
+    schema = dict(base_schema)
+    extra = arch_specific.get(architecture, {})
+    schema["properties"] = {**schema["properties"], **extra}
+    return {"architecture": architecture, "schema": schema}
+
+
+# --- Export Endpoint ---
+
+@app.post("/api/training/model-configs/export")
+async def export_model_package(req: CodeGenRequest):
+    """Export a complete training package as a downloadable zip."""
+    import json, zipfile, io as _io
+    config = json.loads(req.config_json)
+    arch = req.architecture
+
+    try:
+        from core.model_codegen import (
+            generate_model_code as _gen_code,
+            generate_hf_config,
+            generate_tokenizer_config,
+        )
+        from core import model_architectures
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Code generator not available: {e}")
+
+    model_code = _gen_code(config, arch)
+    hf_cfg = generate_hf_config(config, arch)
+    tok_cfg = generate_tokenizer_config(config)
+
+    train_code = _generate_train_script(config, arch)
+
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("exported_model/model.py", model_code)
+        zf.writestr("exported_model/config.json", json.dumps(hf_cfg, indent=2, ensure_ascii=False))
+        zf.writestr("exported_model/tokenizer_config.json", json.dumps(tok_cfg, indent=2, ensure_ascii=False))
+        zf.writestr("exported_model/train.py", train_code)
+
+    buf.seek(0)
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        buf, media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=model_{arch}.zip"}
+    )
+
+
+def _generate_train_script(config: dict, arch: str) -> str:
+    """Generate a minimal training script for the exported model."""
+    vocab_size = config.get("vocab_size", 50000)
+    hidden_size = config.get("hidden_size", 768)
+    num_layers = config.get("num_layers", 12)
+    max_seq_len = config.get("max_seq_length", 2048)
+    return f'''"""
+Auto-generated training script — {arch}
+Generated by Open-AGC Model Designer
+Usage: python train.py --data ./data.jsonl --output ./checkpoints
+"""
+import argparse
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from model import create_model
+
+
+class JsonlDataset(Dataset):
+    def __init__(self, path, max_len={max_seq_len}):
+        import json
+        self.samples = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                    text = d.get("text", d.get("output", str(d)))
+                    if isinstance(text, str):
+                        self.samples.append(text[:max_len])
+                except Exception:
+                    pass
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+
+def train(args):
+    model, _ = create_model()
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    model = model.to(device)
+    model.train()
+
+    ds = JsonlDataset(args.data)
+    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=list)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
+                                   weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=len(loader) * args.epochs)
+
+    print(f"Model: {arch}")
+    total = sum(p.numel() for p in model.parameters())
+    print(f"Parameters: {{total/1e6:.1f}}M")
+    print(f"Training on {{device}} for {{args.epochs}} epochs")
+
+    for epoch in range(args.epochs):
+        total_loss = 0
+        for step, batch in enumerate(loader):
+            if not batch:
+                continue
+            x = model.tokenizer(batch, return_tensors="pt", padding=True,
+                                truncation=True, max_length={max_seq_len})
+            x = {{k: v.to(device) for k, v in x.items()}}
+            optimizer.zero_grad()
+            outputs = model(**x, labels=x["input_ids"])
+            loss = outputs.loss
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            optimizer.step()
+            scheduler.step()
+            total_loss += loss.item()
+            if step % args.log_every == 0:
+                print(f"Epoch {{epoch+1}} Step {{step}} Loss {{loss.item():.4f}}")
+        avg = total_loss / max(len(loader), 1)
+        print(f"Epoch {{epoch+1}} Avg Loss {{avg:.4f}}")
+
+    if args.output:
+        import os
+        os.makedirs(args.output, exist_ok=True)
+        ckpt_path = f"{{args.output}}/model.pth"
+        torch.save(model.state_dict(), ckpt_path)
+        print(f"Saved checkpoint to {{ckpt_path}}")
+
+
+
+# ── Plugin Management Endpoints ──
+@app.get("/api/plugins")
+async def get_plugins():
+    return {"plugins": list_all_plugins(_plugins_dir), "plugins_dir": os.path.abspath(_plugins_dir)}
+
 @app.post("/api/plugins/scan")
 async def scan_plugins():
-    """Re-scan plugins directory for new plugins."""
     global _plugins
-    from core.plugin_manager import discover_plugins
-    _plugins = discover_plugins(
-        plugins_dir=_plugins_dir,
-        broadcast_fn=_broadcast_to_websockets,
-        server_config=load_config(),
-    )
+    _plugins = discover_plugins(plugins_dir=_plugins_dir, broadcast_fn=_broadcast_to_websockets if "_broadcast_to_websockets" in dir() else None, server_config=load_config())
     _mount_plugins(app, _plugins)
     return {"status": "ok", "count": len(_plugins), "plugins": list_plugins()}
 
-
 @app.post("/api/plugins/{name}/toggle")
-async def toggle_plugin(name: str):
-    """Enable or disable a plugin."""
-    from core.plugin_manager import toggle_plugin
+async def plugin_toggle(name: str):
     new_state = toggle_plugin(name, _plugins_dir)
     return {"status": "ok", "enabled": new_state.get("enabled", True)}
 
-
 @app.post("/api/plugins/install")
-async def install_plugin(req: Request):
-    """Install a plugin from Git URL."""
+async def plugin_install(req: Request):
     import json as _json
     body = await req.json()
-    name = body.get("name", "")
-    url = body.get("url", "")
-    if not name or not url:
-        raise HTTPException(status_code=400, detail="name and url required")
-    from core.plugin_manager import install_from_git
+    name, url = body.get("name", ""), body.get("url", "")
+    if not name or not url: raise HTTPException(status_code=400, detail="name and url required")
     ok = install_from_git(name, url, _plugins_dir)
-    if not ok:
-        raise HTTPException(status_code=500, detail="Install failed — check server logs")
+    if not ok: raise HTTPException(status_code=500, detail="Install failed")
     return {"status": "ok", "message": f"Plugin {name} installed"}
 
+@app.delete("/api/plugins/{name}")
+async def plugin_delete(name: str):
+    import shutil
+    d = os.path.join(_plugins_dir, name)
+    if not os.path.isdir(d): raise HTTPException(status_code=404, detail=f"Plugin not found: {name}")
+    unload_plugin(name); shutil.rmtree(d)
+    return {"status": "ok", "message": f"Plugin {name} deleted"}
 
 @app.get("/api/marketplace")
 async def get_marketplace():
-    """Fetch the remote plugin marketplace index."""
-    from core.plugin_manager import fetch_marketplace
     data = fetch_marketplace()
     return {"marketplace": data}
 
 
-@app.delete("/api/plugins/{name}")
-async def delete_plugin(name: str):
-    """Delete a plugin directory (uninstall)."""
-    import shutil
-    plugin_dir = os.path.join(_plugins_dir, name)
-    if not os.path.isdir(plugin_dir):
-        raise HTTPException(status_code=404, detail=f"Plugin not found: {name}")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=f"Train {arch} model")
+    parser.add_argument("--data", required=True, help="Training data (JSONL)")
+    parser.add_argument("--output", default="./checkpoints", help="Output directory")
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--log-every", type=int, default=50)
+    parser.add_argument("--cpu", action="store_true")
+    args = parser.parse_args()
+    train(args)
+'''
+
+
+# --- Dataset Endpoints ---
+
+@app.get("/api/training/datasets")
+async def list_datasets():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM datasets ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return {"datasets": [dict(r) for r in rows]}
+
+
+@app.post("/api/training/datasets/upload")
+async def upload_dataset(file: UploadFile = File(...), name: str = Form(...)):
+    """Upload a dataset file (JSONL/CSV/Parquet)."""
+    dataset_dir = os.path.join(os.path.dirname(DB_PATH), "datasets")
+    os.makedirs(dataset_dir, exist_ok=True)
+
+    # Determine format and storage path
+    ext = os.path.splitext(file.filename)[1].lower()
+    fmt = "jsonl"
+    if ext == ".csv":
+        fmt = "csv"
+    elif ext in (".parquet", ".pq"):
+        fmt = "parquet"
+
+    storage_dir = os.path.join(dataset_dir, f"ds_{int(_time.time())}")
+    os.makedirs(storage_dir, exist_ok=True)
+    storage_path = os.path.join(storage_dir, file.filename)
+
+    content = await file.read()
+    with open(storage_path, "wb") as f:
+        f.write(content)
+
+    # Count samples
+    sample_count = 0
     try:
-        from core.plugin_manager import unload_plugin
-        unload_plugin(name)
-        shutil.rmtree(plugin_dir)
-        return {"status": "ok", "message": f"Plugin {name} deleted"}
+        if fmt == "jsonl":
+            with open(storage_path, "r", encoding="utf-8") as f:
+                sample_count = sum(1 for line in f if line.strip())
+        elif fmt == "csv":
+            import csv as csv_mod
+            with open(storage_path, "r", encoding="utf-8") as f:
+                reader = csv_mod.reader(f)
+                sample_count = sum(1 for _ in reader) - 1  # minus header
+        elif fmt == "parquet":
+            try:
+                import pandas as pd
+                df = pd.read_parquet(storage_path)
+                sample_count = len(df)
+            except ImportError:
+                pass
+    except Exception:
+        pass
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO datasets (name, source, source_path, storage_path, format, sample_count) VALUES (?, 'upload', ?, ?, ?, ?)",
+        (name or file.filename, file.filename, storage_path, fmt, sample_count)
+    )
+    ds_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return {"status": "success", "id": ds_id, "sample_count": sample_count}
+
+
+class HFImportRequest(BaseModel):
+    repo_id: str
+    name: str = ""
+
+
+@app.post("/api/training/datasets/from-hf")
+async def import_dataset_from_hf(req: HFImportRequest):
+    """Import a dataset from HuggingFace datasets library."""
+    if not _training_available:
+        raise HTTPException(status_code=400, detail="Training dependencies not installed")
+
+    dataset_dir = os.path.join(os.path.dirname(DB_PATH), "datasets")
+    os.makedirs(dataset_dir, exist_ok=True)
+
+    try:
+        from datasets import load_dataset
+        ds = load_dataset(req.repo_id, split="train")
+        sample_count = len(ds)
+
+        storage_dir = os.path.join(dataset_dir, f"ds_{int(_time.time())}")
+        os.makedirs(storage_dir, exist_ok=True)
+        storage_path = os.path.join(storage_dir, "data.jsonl")
+        ds.to_json(storage_path)
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO datasets (name, source, source_path, storage_path, format, sample_count) VALUES (?, 'huggingface', ?, ?, 'jsonl', ?)",
+            (req.name or req.repo_id, req.repo_id, storage_path, sample_count)
+        )
+        ds_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return {"status": "success", "id": ds_id, "sample_count": sample_count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/training/datasets/{ds_id}")
+async def get_dataset_detail(ds_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM datasets WHERE id=?", (ds_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return dict(row)
+
+
+@app.get("/api/training/datasets/{ds_id}/preview")
+async def preview_dataset(ds_id: int, n: int = 5):
+    record = await get_dataset_detail(ds_id)
+    path = record.get("storage_path", "")
+    fmt = record.get("format", "jsonl")
+    samples = []
+    try:
+        if fmt == "jsonl" and os.path.exists(path):
+            import json
+            with open(path, "r", encoding="utf-8") as f:
+                for i, line in enumerate(f):
+                    if i >= n:
+                        break
+                    if line.strip():
+                        samples.append(json.loads(line))
+        elif fmt == "csv" and os.path.exists(path):
+            import csv as csv_mod
+            with open(path, "r", encoding="utf-8") as f:
+                reader = csv_mod.DictReader(f)
+                for i, row in enumerate(reader):
+                    if i >= n:
+                        break
+                    samples.append(row)
+    except Exception:
+        pass
+    return {"samples": samples}
+
+
+class SplitRequest(BaseModel):
+    train: float = 0.8
+    val: float = 0.1
+    test: float = 0.1
+
+
+@app.post("/api/training/datasets/{ds_id}/split")
+async def update_dataset_split(ds_id: int, req: SplitRequest):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE datasets SET train_split=?, val_split=?, test_split=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (req.train, req.val, req.test, ds_id)
+    )
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+
+@app.delete("/api/training/datasets/{ds_id}")
+async def delete_dataset(ds_id: int):
+    record = await get_dataset_detail(ds_id)
+    storage = record.get("storage_path", "")
+    if storage:
+        import shutil
+        parent = os.path.dirname(storage)
+        if os.path.exists(parent):
+            shutil.rmtree(parent, ignore_errors=True)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM datasets WHERE id=?", (ds_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+
+# --- Dataset Editor ---
+
+class CreateDatasetRequest(BaseModel):
+    name: str
+    samples: str  # JSONL content, one JSON object per line
+
+
+@app.post("/api/training/datasets/create")
+async def create_dataset_from_editor(req: CreateDatasetRequest):
+    """Create a new dataset from user-edited JSONL content."""
+    dataset_dir = os.path.join(os.path.dirname(DB_PATH), "datasets")
+    os.makedirs(dataset_dir, exist_ok=True)
+    storage_dir = os.path.join(dataset_dir, f"ds_{int(_time.time())}")
+    os.makedirs(storage_dir, exist_ok=True)
+    storage_path = os.path.join(storage_dir, "data.jsonl")
+
+    # Validate and count
+    count = 0
+    with open(storage_path, "w", encoding="utf-8") as f:
+        for line in req.samples.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                json.loads(line)
+            except json.JSONDecodeError:
+                import shutil
+                shutil.rmtree(storage_dir, ignore_errors=True)
+                raise HTTPException(status_code=400, detail=f"JSON 格式错误: {line[:80]}...")
+            f.write(line + "\n")
+            count += 1
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO datasets (name, source, source_path, storage_path, format, sample_count) VALUES (?, 'manual', ?, ?, 'jsonl', ?)",
+        (req.name, "手动创建", storage_path, count)
+    )
+    ds_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return {"status": "success", "id": ds_id, "sample_count": count}
+
+
+class EditDatasetRequest(BaseModel):
+    samples: str  # JSONL content
+
+
+@app.put("/api/training/datasets/{ds_id}")
+async def edit_dataset(ds_id: int, req: EditDatasetRequest):
+    """Overwrite an existing dataset with edited content."""
+    record = await get_dataset_detail(ds_id)
+    storage_path = record.get("storage_path", "")
+    if not storage_path or not os.path.exists(os.path.dirname(storage_path)):
+        raise HTTPException(status_code=404, detail="Dataset storage not found")
+
+    count = 0
+    with open(storage_path, "w", encoding="utf-8") as f:
+        for line in req.samples.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                json.loads(line)
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail=f"JSON 格式错误: {line[:80]}...")
+            f.write(line + "\n")
+            count += 1
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE datasets SET sample_count=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                   (count, ds_id))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "sample_count": count}
+
+
+# --- Base Models for Fine-tuning ---
+
+@app.get("/api/training/base-models")
+async def list_base_models():
+    """List available GGUF + HuggingFace-cached + trained models for fine-tuning."""
+    models = []
+    manager = get_llamacpp_manager()
+    for f in manager.list_models():
+        models.append({"id": f"llamacpp/{f}", "name": f.replace('.gguf',''), "source": "gguf",
+                        "path": os.path.join(manager.models_dir, f)})
+    hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
+    if os.path.exists(hf_cache):
+        for d in os.listdir(hf_cache):
+            if d.startswith("models--"):
+                name = d.replace("models--","").replace("--","/")
+                models.append({"id": name, "name": name, "source": "huggingface",
+                                "path": os.path.join(hf_cache, d)})
+    models.append({"id": "Qwen/Qwen3.5-9B-Instruct", "name": "Qwen3.5-9B (SGLang)", "source": "huggingface", "path": ""})
+
+    # Include trained/finetuned models
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, name, checkpoint_dir FROM training_runs "
+            "WHERE status='completed' AND checkpoint_dir IS NOT NULL "
+            "ORDER BY updated_at DESC LIMIT 20"
+        )
+        for row in cursor.fetchall():
+            ckpt = row["checkpoint_dir"]
+            if ckpt and os.path.isdir(ckpt):
+                models.append({
+                    "id": f"trained/run_{row['id']}",
+                    "name": f"🎓 {row['name']}",
+                    "source": "trained",
+                    "path": ckpt,
+                })
+        conn.close()
+    except Exception as e:
+        print(f"[BaseModels] Failed to list trained models: {e}")
+
+    return {"models": models}
+
+
+# --- Scan Import ---
+
+def _try_populate_benchmark_from_file(fpath, bench_type):
+    """Try to read a JSONL/CSV/Parquet file and populate the benchmark cache."""
+    import json as _json
+    ext = os.path.splitext(fpath)[1].lower()
+    questions = []
+    try:
+        if ext == ".jsonl":
+            with open(fpath, "r", encoding="utf-8") as f:
+                first_line = f.readline().strip()
+                if not first_line:
+                    return False
+                sample = _json.loads(first_line)
+            # Auto-detect question/answer field names
+            q_field = a_field = None
+            for qk in ["question", "prompt", "input", "text", "query", "instruction"]:
+                if qk in sample: q_field = qk; break
+            for ak in ["answer", "solution", "output", "response", "completion", "target"]:
+                if ak in sample: a_field = ak; break
+            if not q_field or not a_field:
+                return False
+            with open(fpath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line: continue
+                    try:
+                        d = _json.loads(line)
+                        questions.append({
+                            "question": str(d.get(q_field, "")),
+                            "answer": str(d.get(a_field, "")),
+                            "subject": d.get("subject", bench_type),
+                        })
+                    except _json.JSONDecodeError:
+                        continue
+        elif ext == ".csv":
+            import csv as _csv, io as _io
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                reader = _csv.DictReader(f)
+                for row in reader:
+                    q = row.get("question") or row.get("prompt") or row.get("input") or ""
+                    a = row.get("answer") or row.get("solution") or row.get("output") or ""
+                    if q and a:
+                        questions.append({"question": q, "answer": a, "subject": bench_type})
+        elif ext == ".parquet":
+            df = None
+            try:
+                import pyarrow.parquet as pq
+                df = pq.read_table(fpath).to_pandas()
+            except ImportError:
+                try:
+                    import pandas as pd
+                    df = pd.read_parquet(fpath)
+                except ImportError:
+                    print(f"[Benchmark] Auto-import {bench_type}: need pyarrow or pandas for parquet")
+                    return False
+            if df is None or len(df) == 0:
+                return False
+            # Auto-detect question/answer columns
+            cols = list(df.columns)
+            q_col = a_col = None
+            for qk in ["question", "prompt", "input", "text", "query", "instruction", "problem_statement"]:
+                if qk in cols: q_col = qk; break
+            for ak in ["answer", "solution", "output", "response", "completion", "target"]:
+                if ak in cols: a_col = ak; break
+            if not q_col or not a_col:
+                return False
+            subj_col = "subject" if "subject" in cols else None
+            for _, row in df.iterrows():
+                questions.append({
+                    "question": str(row[q_col])[:4000],
+                    "answer": str(row[a_col])[:2000],
+                    "subject": str(row[subj_col]) if subj_col and not pd.isna(row[subj_col]) else bench_type,
+                })
+        else:
+            return False
+    except Exception as e:
+        print(f"[Benchmark] Auto-import {bench_type} from {fpath}: {e}")
+        return False
+
+    if not questions:
+        return False
+    bench_dir = os.path.join(os.path.dirname(DB_PATH), "benchmarks", bench_type)
+    os.makedirs(bench_dir, exist_ok=True)
+    cache_file = os.path.join(bench_dir, "questions.json")
+    with open(cache_file, "w", encoding="utf-8") as f:
+        _json.dump(questions, f, ensure_ascii=False)
+    return True
+
+
+@app.post("/api/training/datasets/scan-import")
+async def scan_import_datasets():
+    """Scan data/datasets/ for new JSONL/CSV/Parquet files and auto-import them."""
+    import glob
+    dataset_dir = os.path.join(os.path.dirname(DB_PATH), "datasets")
+    imported = 0
+    bench_populated = []
+    # Benchmark type → filename keywords (order matters: longer match first)
+    bench_keywords = {
+        "hellaswag": ["hellaswag"],
+        "swe_bench": ["swe_bench", "swe-bench"],
+        "mmlu": ["mmlu"],
+        "hle": ["hle"],
+    }
+    for ext in ["jsonl", "csv", "parquet"]:
+        for fpath in glob.glob(os.path.join(dataset_dir, f"*.{ext}")):
+            fname = os.path.basename(fpath)
+            # Check if already imported
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM datasets WHERE storage_path=?", (fpath,))
+            if cursor.fetchone():
+                conn.close()
+                # Still try to populate benchmark cache even if already imported
+                fname_lower = fname.lower()
+                for btype, keywords in bench_keywords.items():
+                    if btype not in bench_populated:
+                        for kw in keywords:
+                            if kw in fname_lower:
+                                if _try_populate_benchmark_from_file(fpath, btype):
+                                    bench_populated.append(btype)
+                                break
+                continue
+            # Count samples
+            count = 0
+            try:
+                if ext == "jsonl":
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        count = sum(1 for l in f if l.strip())
+                elif ext == "csv":
+                    import csv as csv_mod
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        count = sum(1 for _ in csv_mod.reader(f)) - 1
+                elif ext == "parquet":
+                    try:
+                        import pyarrow.parquet as pq
+                        count = pq.read_metadata(fpath).num_rows
+                    except ImportError:
+                        try:
+                            import pandas as pd
+                            count = len(pd.read_parquet(fpath))
+                        except ImportError:
+                            count = -1  # signal: needs deps
+            except Exception:
+                count = 0
+            cursor.execute(
+                "INSERT INTO datasets (name,source,source_path,storage_path,format,sample_count) VALUES (?,'manual',?,?,?,?)",
+                (fname, fname, fpath, ext, count))
+            conn.commit(); conn.close()
+            imported += 1
+            # Auto-populate benchmark cache if filename matches known benchmark
+            fname_lower = fname.lower()
+            for btype, keywords in bench_keywords.items():
+                if btype not in bench_populated:
+                    for kw in keywords:
+                        if kw in fname_lower:
+                            if _try_populate_benchmark_from_file(fpath, btype):
+                                bench_populated.append(btype)
+                            break
+    return {"status": "success", "imported": imported, "benchmarks_populated": bench_populated}
+
+
+# ── Training Runs API ────────────────────────────────────────────
+
+class CreateTrainingRunRequest(BaseModel):
+    name: str
+    model_config_id: Optional[int] = None
+    dataset_id: Optional[int] = None
+    base_model_id: str = ""
+    base_model_source: str = "huggingface"
+    training_params_json: str = "{}"
+    val_ratio: float = 0.1  # 10% validation split by default
+
+
+@app.post("/api/training/runs")
+async def create_training_run(req: CreateTrainingRunRequest):
+    """Create and start a training run (scratch or fine-tune)."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO training_runs (name, model_config_id, dataset_id, base_model_id, base_model_source, training_params_json, status) VALUES (?,?,?,?,?,?, 'pending')",
+        (req.name, req.model_config_id, req.dataset_id, req.base_model_id, req.base_model_source, req.training_params_json)
+    )
+    run_id = cursor.lastrowid
+    conn.commit()
+
+    # Fetch the full record to pass to engine
+    cursor.execute("SELECT * FROM training_runs WHERE id=?", (run_id,))
+    run_record = dict(cursor.fetchone())
+    conn.close()
+
+    engine = get_training_engine()
+    if engine.is_available():
+        ok = engine.start_training(run_id, run_record)
+        if ok:
+            return {"status": "started", "run_id": run_id}
+        else:
+            # Training already active — leave run as pending
+            return {"status": "queued", "run_id": run_id, "detail": "另一个训练已在运行中"}
+    else:
+        return {"status": "error", "detail": "训练环境不可用（依赖未安装）"}
+
+
+@app.get("/api/training/runs")
+async def list_training_runs():
+    """List all training runs."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM training_runs ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return {"runs": [dict(r) for r in rows]}
+
+
+@app.get("/api/training/runs/{run_id}")
+async def get_training_run(run_id: int):
+    """Get a single training run by ID."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM training_runs WHERE id=?", (run_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="训练运行不存在")
+    return dict(row)
+
+
+@app.delete("/api/training/runs/{run_id}")
+async def delete_training_run(run_id: int):
+    """Delete a training run and its metrics."""
+    engine = get_training_engine()
+    state = engine.get_state()
+    if state.get("run_id") == run_id and state.get("active"):
+        engine.abort_training()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM training_metrics WHERE run_id=?", (run_id,))
+    cursor.execute("DELETE FROM training_runs WHERE id=?", (run_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "deleted"}
+
+
+class TestModelRequest(BaseModel):
+    prompt: str
+    max_length: int = 200
+    temperature: float = 0.7
+
+@app.post("/api/training/runs/{run_id}/test-chat")
+async def test_trained_model(run_id: int, req: TestModelRequest):
+    """Test a trained model with a prompt."""
+    import os
+    import torch
+    from core.paths import get_data_path
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    
+    save_dir = os.path.join(get_data_path("models"), "trained", f"run_{run_id}")
+    if not os.path.exists(save_dir):
+        raise HTTPException(status_code=404, detail="训练好的模型尚未保存或不存在")
+        
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(save_dir)
+        model = AutoModelForCausalLM.from_pretrained(
+            save_dir,
+            device_map="auto" if torch.cuda.is_available() else None,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+        )
+        
+        inputs = tokenizer(req.prompt, return_tensors="pt")
+        if torch.cuda.is_available():
+            inputs = {k: v.to("cuda") for k, v in inputs.items()}
+            
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=req.max_length,
+            temperature=req.temperature,
+            do_sample=req.temperature > 0,
+            pad_token_id=tokenizer.eos_token_id
+        )
+        
+        text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        # return the generated text minus the prompt if it included it
+        if text.startswith(req.prompt):
+            text = text[len(req.prompt):].strip()
+            
+        return {"response": text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"模型推理失败: {str(e)}")
+
+
+# --- Model Evaluation (PPL, BLEU, ROUGE) ---
+
+class EvalPPLRequest(BaseModel):
+    dataset_path: str = ""       # optional: path to custom JSONL dataset
+    max_samples: int = 500
+    stride: int = 512
+    max_length: int = 1024
+    dataset_id: Optional[int] = None  # use a dataset from the datasets table
+
+
+@app.post("/api/training/runs/{run_id}/eval-ppl")
+async def eval_model_ppl(run_id: int, req: EvalPPLRequest):
+    """Run PPL evaluation on a trained model."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM training_runs WHERE id=? AND status='completed'", (run_id,))
+    run = cursor.fetchone()
+    conn.close()
+    if not run:
+        raise HTTPException(status_code=404, detail="训练运行不存在或未完成")
+    save_dir = run["checkpoint_dir"]
+    if not save_dir or not os.path.isdir(save_dir):
+        raise HTTPException(status_code=400,
+                            detail=f"模型目录不存在: {save_dir}")
+
+    # Resolve dataset path — auto-use validation split if available
+    dataset_path = req.dataset_path
+    # Auto-detect validation set saved during training
+    if not dataset_path and save_dir:
+        val_file = os.path.join(save_dir, "validation.jsonl")
+        if os.path.exists(val_file):
+            dataset_path = val_file
+    if not dataset_path and req.dataset_id:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM datasets WHERE id=?", (req.dataset_id,))
+        ds = cursor.fetchone()
+        conn.close()
+        if ds and ds["storage_path"]:
+            dataset_path = ds["storage_path"]
+
+    result_holder = {}
+
+    def run_eval():
+        try:
+            from core.eval_engine import compute_ppl
+            kwargs = {"model_path": save_dir, "max_samples": req.max_samples,
+                      "stride": req.stride, "max_length": req.max_length}
+            if dataset_path and os.path.exists(dataset_path):
+                kwargs["dataset_path"] = dataset_path
+            result = compute_ppl(**kwargs)
+            # Save result
+            conn2 = sqlite3.connect(DB_PATH)
+            conn2.cursor().execute(
+                "INSERT INTO benchmark_results (model_id,model_source,benchmark_type,metrics_json,num_questions,avg_latency_ms,tokens_per_second) VALUES (?,?,?,?,?,?,?)",
+                (f"trained/run_{run_id}", "trained", "ppl",
+                 json.dumps(result, ensure_ascii=False), result.get("num_windows", 0),
+                 result.get("eval_time_seconds", 0) * 1000, 0))
+            conn2.commit(); conn2.close()
+            result_holder["result"] = result
+        except Exception as e:
+            result_holder["error"] = str(e)
+
+    threading.Thread(target=run_eval, daemon=True).start()
+    return {"status": "started", "message": f"开始 PPL 评估 (run_{run_id})..."}
+
+
+@app.get("/api/training/runs/{run_id}/eval-ppl")
+async def get_eval_ppl_result(run_id: int):
+    """Get the latest PPL evaluation result for a training run."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM benchmark_results WHERE model_id=? AND benchmark_type='ppl' ORDER BY created_at DESC LIMIT 1",
+        (f"trained/run_{run_id}",))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="未找到 PPL 评估结果")
+    d = dict(row)
+    d["metrics_json"] = json.loads(d["metrics_json"]) if isinstance(d["metrics_json"], str) else d["metrics_json"]
+    return d
+
+
+class EvalMetricsRequest(BaseModel):
+    model_path: str = ""          # path to HF model dir, or run_id as "run_<id>"
+    dataset_path: str = ""        # JSONL with input/output pairs
+    dataset_id: Optional[int] = None
+    max_samples: int = 100
+
+
+@app.post("/api/training/eval-metrics")
+async def eval_generation_metrics(req: EvalMetricsRequest):
+    """Run BLEU/ROUGE evaluation on a model with reference-hypothesis data."""
+    # Resolve model path
+    model_path = req.model_path
+    if model_path.startswith("run_"):
+        run_id = int(model_path.replace("run_", ""))
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT checkpoint_dir FROM training_runs WHERE id=?", (run_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row and row["checkpoint_dir"]:
+            model_path = row["checkpoint_dir"]
+        else:
+            raise HTTPException(status_code=404, detail="训练运行不存在或模型目录为空")
+
+    # Resolve dataset
+    dataset_path = req.dataset_path
+    if not dataset_path and req.dataset_id:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT storage_path FROM datasets WHERE id=?", (req.dataset_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            dataset_path = row["storage_path"]
+
+    if not dataset_path:
+        raise HTTPException(status_code=400, detail="请提供评测数据集 (dataset_path 或 dataset_id)")
+
+    from core.eval_engine import compute_generation_metrics
+    result = compute_generation_metrics(model_path, dataset_path, req.max_samples)
+    return {"status": "ok", "metrics": result}
+
+
+@app.post("/api/training/runs/{run_id}/{action}")
+async def control_training_run(run_id: int, action: str):
+    """Control a training run: pause, resume, step, abort."""
+    engine = get_training_engine()
+    state = engine.get_state()
+    if state.get("run_id") != run_id:
+        raise HTTPException(status_code=400, detail="该运行不是当前活动运行")
+    action_map = {
+        "pause": engine.pause_training,
+        "resume": engine.resume_training,
+        "step": engine.step_training,
+        "abort": engine.abort_training,
+        "abort_save": engine.abort_and_save_training,
+    }
+    if action not in action_map:
+        raise HTTPException(status_code=400, detail=f"未知操作: {action}")
+    ok = action_map[action]()
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"无法执行 {action}，当前状态: {state.get('status')}")
+    # Update DB status (skip for abort_save — engine handles it)
+    if action != "abort_save":
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        new_status = engine.get_state()["status"]
+        cursor.execute("UPDATE training_runs SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (new_status, run_id))
+        conn.commit()
+        conn.close()
+    # Map internal status to frontend-expected action result
+    status_map = {"pause": "paused", "resume": "resumed", "step": "stepping", "abort": "aborted", "abort_save": "aborting_save"}
+    return {"status": status_map.get(action, new_status)}
+
+
+class LlamaControlRequest(BaseModel):
+    action: str
+    model: Optional[str] = None
+
+@app.post("/api/llamacpp/control")
+async def control_llamacpp(req: LlamaControlRequest):
+    """Control the llama-server process."""
+    import time
+    manager = get_llamacpp_manager()
+    if req.action == "start":
+        if not req.model:
+            raise HTTPException(status_code=400, detail="Model filename required to start")
+        success = manager.start(req.model)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to start llama-server process")
+        return {"status": "success", "message": "Server start command issued"}
+    elif req.action == "stop":
+        manager.stop()
+        return {"status": "success", "message": "Server stop command issued"}
+    elif req.action == "restart":
+        manager.stop()
+        time.sleep(1)
+        if req.model:
+            manager.start(req.model)
+        return {"status": "success", "message": "Server restart command issued"}
+    else:
+        raise HTTPException(status_code=400, detail="Invalid action")
+
+@app.get("/api/skills")
+async def get_skills():
+    """List available skills with details."""
+    from core.skill_manager import SkillManager
+    manager = SkillManager()
+    skills = manager.list_skills()
+    
+    config = load_config()
+    disabled = config.get("disabled_skills", [])
+    
+    for s in skills:
+        s["enabled"] = s.get("filename", "") not in disabled
+    
+    return {"skills": skills}
+
+
+@app.post("/api/skills/import")
+async def import_skill(data: dict):
+    """Import a skill file with security validation."""
+    from core.skill_manager import SkillManager
+    manager = SkillManager()
+    
+    filename = data.get("filename", "")
+    content = data.get("content", "")
+    force = data.get("force", False)
+    
+    if not filename or not content:
+        raise HTTPException(status_code=400, detail="filename and content are required")
+    
+    result = manager.import_skill(filename, content, force=force)
+    return result
+
+
+@app.post("/api/skills/validate")
+async def validate_skill(data: dict):
+    """Validate a skill for security without importing."""
+    from core.memory_store import get_memory_store, LongTermMemory
+    from core.skill_manager import get_skill_manager
+    from core.llamacpp_manager import get_llamacpp_manager
+    manager = SkillManager()
+    content = data.get("content", "")
+    return manager.validate_skill(content)
+
+
+@app.get("/api/skills/{filename}")
+async def get_skill_content(filename: str):
+    """Get the content of a specific skill."""
+    filepath = os.path.join(get_skills_dir(), filename)
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="Skill not found")
+    with open(filepath, 'r', encoding='utf-8') as f:
+        return {"filename": filename, "content": f.read()}
+
+
+@app.delete("/api/skills/{filename}")
+async def delete_skill(filename: str):
+    """Delete a skill file."""
+    from core.skill_manager import SkillManager
+    manager = SkillManager()
+    if manager.delete_skill(filename):
+        return {"success": True, "message": f"Skill '{filename}' deleted."}
+    raise HTTPException(status_code=404, detail="Skill not found")
+
+
+@app.get("/api/memories")
+async def get_memories(category: str = None, query: str = None):
+    """Search or list memories."""
+    from core.memory_store import MemoryStore
+    store = MemoryStore(db_path=get_data_path("memory.db"))
+    
+    if query:
+        results = store.search_memories(query, top_k=10, category=category)
+        return {"memories": results, "type": "search"}
+    else:
+        results = store.get_all_memories(category=category, limit=50)
+        return {"memories": results, "type": "all"}
+
+
+@app.get("/api/memories/categories")
+async def get_memory_categories():
+    """Get memory category summary."""
+    from core.memory_store import MemoryStore
+    store = MemoryStore(db_path=get_data_path("memory.db"))
+    return {"categories": store.get_categories_summary()}
+
+@app.get("/api/history")
+async def get_history():
+    """Retrieve chat history."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT role, content FROM messages ORDER BY id ASC")
+    rows = cursor.fetchall()
+    conn.close()
+    return {"history": [{"role": row["role"], "content": row["content"]} for row in rows]}
+
+# ==========================================
+# Task Management API
+# ==========================================
+
+@app.get("/api/tasks")
+async def get_tasks(status: str = None, q: str = None):
+    """List tasks with optional status filter and search."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    query = "SELECT t.*, (SELECT COUNT(*) FROM task_steps WHERE task_id = t.id) as step_count FROM tasks t"
+    conditions = []
+    params = []
+    
+    if status and status != 'all':
+        if status == 'scheduled':
+            conditions.append("t.task_type = 'scheduled'")
+        else:
+            conditions.append("t.status = ?")
+            params.append(status)
+    if q:
+        conditions.append("(t.title LIKE ? OR t.user_query LIKE ?)")
+        params.extend([f"%{q}%", f"%{q}%"])
+    
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY t.created_at DESC LIMIT 100"
+    
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    tasks = []
+    for row in rows:
+        tasks.append({
+            "id": row["id"],
+            "title": row["title"],
+            "user_query": row["user_query"],
+            "status": row["status"],
+            "task_type": row["task_type"] if "task_type" in row.keys() else "oneshot",
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "result_summary": row["result_summary"],
+            "step_count": row["step_count"],
+            "schedule_cron": row["schedule_cron"] if "schedule_cron" in row.keys() else None,
+            "schedule_enabled": bool(row["schedule_enabled"]) if "schedule_enabled" in row.keys() else False,
+            "next_run_at": row["next_run_at"] if "next_run_at" in row.keys() else None,
+            "resume_count": row["resume_count"] if "resume_count" in row.keys() else 0
+        })
+    return {"tasks": tasks}
+
+@app.get("/api/tasks/{task_id}")
+async def get_task_detail(task_id: int):
+    """Get task detail with all steps."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+    task_row = cursor.fetchone()
+    if not task_row:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    cursor.execute("SELECT * FROM task_steps WHERE task_id = ? ORDER BY step_number ASC", (task_id,))
+    step_rows = cursor.fetchall()
+    conn.close()
+    
+    output_files = []
+    try:
+        output_files = json.loads(task_row["output_files"] or "[]")
+    except Exception:
+        pass
+    
+    steps = []
+    for s in step_rows:
+        steps.append({
+            "step_number": s["step_number"],
+            "tool_name": s["tool_name"],
+            "tool_label": s["tool_label"],
+            "args_preview": s["args_preview"],
+            "result_preview": s["result_preview"],
+            "success": bool(s["success"]),
+            "thinking_content": s["thinking_content"],
+            "created_at": s["created_at"]
+        })
+    
+    task_type = "oneshot"
+    try:
+        task_type = task_row["task_type"] or "oneshot"
+    except Exception:
+        pass
+
+    return {
+        "task": {
+            "id": task_row["id"],
+            "title": task_row["title"],
+            "user_query": task_row["user_query"],
+            "status": task_row["status"],
+            "task_type": task_type,
+            "created_at": task_row["created_at"],
+            "updated_at": task_row["updated_at"],
+            "result_summary": task_row["result_summary"],
+            "output_files": output_files,
+            "steps": steps,
+            "schedule_cron": task_row["schedule_cron"] if "schedule_cron" in task_row.keys() else None,
+            "schedule_enabled": bool(task_row["schedule_enabled"]) if "schedule_enabled" in task_row.keys() else False,
+            "next_run_at": task_row["next_run_at"] if "next_run_at" in task_row.keys() else None,
+            "last_run_at": task_row["last_run_at"] if "last_run_at" in task_row.keys() else None,
+            "run_count": task_row["run_count"] if "run_count" in task_row.keys() else 0,
+            "resume_count": task_row["resume_count"] if "resume_count" in task_row.keys() else 0,
+            "max_resume_count": task_row["max_resume_count"] if "max_resume_count" in task_row.keys() else 10,
+            "interruption_reason": task_row["interruption_reason"] if "interruption_reason" in task_row.keys() else None
+        }
+    }
+
+@app.post("/api/tasks/{task_id}/interrupt")
+async def interrupt_task(task_id: int):
+    """Mark a task as interrupted by user."""
+    update_task_status(task_id, "interrupted", interruption_reason="user")
+    return {"status": "success", "message": "Task marked as interrupted"}
+
+@app.delete("/api/tasks/{task_id}")
+async def delete_task(task_id: int):
+    """Delete a task and its steps."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM task_steps WHERE task_id = ?", (task_id,))
+    cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "message": "Task deleted"}
+
+# ==========================================
+# Scheduled Task API
+# ==========================================
+
+class ScheduleTaskRequest(BaseModel):
+    title: str
+    user_query: str
+    schedule_cron: str
+    enabled: bool = True
+
+@app.post("/api/tasks/schedule")
+async def create_scheduled_task(req: ScheduleTaskRequest):
+    """Create a new scheduled task with cron expression."""
+    # Validate cron expression
+    try:
+        from croniter import croniter
+        if not croniter.is_valid(req.schedule_cron):
+            raise HTTPException(status_code=400, detail="Invalid cron expression")
+    except ImportError:
+        raise HTTPException(status_code=500, detail="croniter not installed")
+
+    task_id = create_task(
+        title=req.title,
+        user_query=req.user_query,
+        task_type='scheduled',
+        schedule_cron=req.schedule_cron,
+        schedule_enabled=req.enabled
+    )
+    # Set initial status to 'scheduled' instead of 'running'
+    update_task_status(task_id, 'scheduled')
+    return {"status": "success", "task_id": task_id}
+
+@app.post("/api/tasks/{task_id}/toggle-schedule")
+async def toggle_schedule(task_id: int):
+    """Toggle schedule enabled/disabled."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT schedule_enabled, schedule_cron FROM tasks WHERE id=?", (task_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Task not found")
+    new_state = 0 if row["schedule_enabled"] else 1
+    next_run = None
+    if new_state and row["schedule_cron"]:
+        try:
+            from croniter import croniter
+            next_run = croniter(row["schedule_cron"], datetime.now(timezone.utc)).get_next(datetime).strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            pass
+    cursor.execute("UPDATE tasks SET schedule_enabled=?, next_run_at=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                   (new_state, next_run, 'scheduled' if new_state else 'paused', task_id))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "enabled": bool(new_state)}
+
+@app.put("/api/tasks/{task_id}/schedule")
+async def update_schedule(task_id: int, req: ScheduleTaskRequest):
+    """Update schedule configuration."""
+    try:
+        from croniter import croniter
+        if not croniter.is_valid(req.schedule_cron):
+            raise HTTPException(status_code=400, detail="Invalid cron expression")
+    except ImportError:
+        raise HTTPException(status_code=500, detail="croniter not installed")
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    next_run = None
+    if req.enabled:
+        try:
+            from croniter import croniter as ci
+            next_run = ci(req.schedule_cron, datetime.now(timezone.utc)).get_next(datetime).strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            pass
+    cursor.execute(
+        "UPDATE tasks SET title=?, user_query=?, schedule_cron=?, schedule_enabled=?, next_run_at=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (req.title, req.user_query, req.schedule_cron, 1 if req.enabled else 0, next_run, task_id)
+    )
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+# Initialize a global agent instance
+# In a real multi-user system, this would be per-session
+# We'll instantiate per connection for simplicity and state isolation in this demo
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    connected_websockets.append(websocket)
+
+    # Push current download state to the newly connected client
+    if _llamacpp_download_state.get("active"):
+        await websocket.send_json({
+            "type": "llamacpp_download",
+            "task": _llamacpp_download_state.get("type", ""),
+            "label": _llamacpp_download_state.get("label", ""),
+            "progress": _llamacpp_download_state.get("progress", 0.0),
+            "stage": _llamacpp_download_state.get("stage", ""),
+            "error": _llamacpp_download_state.get("error", "")
+        })
+
+    # Flag to track whether this connection is still alive
+    ws_alive = True
+
+    async def _safe_send(data: dict):
+        """Send JSON via WebSocket, silently ignore if connection is dead."""
+        nonlocal ws_alive
+        if not ws_alive:
+            return
+        try:
+            await websocket.send_json(data)
+        except Exception:
+            ws_alive = False
+
+    # We will maintain conversation history for this session here
+    # Load recent chat history from DB instead of starting empty
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        # Load the last 20 messages for working context
+        cursor.execute("SELECT role, content FROM (SELECT * FROM messages ORDER BY id DESC LIMIT 20) ORDER BY id ASC")
+        rows = cursor.fetchall()
+        conn.close()
+        
+        # LLMs strict require 'assistant' not 'agent'
+        session_history = []
+        for row in rows:
+            role = row["role"]
+            if role == "agent":
+                role = "assistant"
+            session_history.append({"role": role, "content": row["content"]})
+    except Exception as e:
+        print(f"Failed to load chat history: {e}")
+        session_history = []
+    last_query = ""  # Track last query for retry
+    agent_is_running = False
+    receive_task = None # Persistent receive_task to avoid concurrency issues
+    
+    async def run_agent_with_progress(query: str, model: str = None, agent_profile_name: str = None, is_heartbeat: bool = False, images: list = None):
+        """Run agent in a thread and push progress to WebSocket via a Queue."""
+        nonlocal session_history, last_query, agent_is_running, receive_task, ws_alive
+        if not is_heartbeat:
+            last_query = query
+            
+        if agent_is_running:
+            return "BUSY"
+            
+        agent_is_running = True
+        ws_task_id = None  # Track task_id for this run
+        task_has_tools = False  # Only create task if tools are called
+        
+        try:
+            import queue as thread_queue
+            progress_queue = thread_queue.Queue()
+            has_taken_action = False
+
+            def progress_callback(event: dict):
+                nonlocal has_taken_action, ws_task_id, task_has_tools
+                """Thread-safe: push progress events from thread pool into queue."""
+                if is_heartbeat:
+                    if event.get("event") == "tool_start":
+                        has_taken_action = True
+                    if not has_taken_action and event.get("event") in ["thinking", "model_switched"]:
+                        return
+
+                # Auto-create task on first tool_start
+                if event.get("event") == "tool_start" and not task_has_tools and not is_heartbeat:
+                    task_has_tools = True
+                    try:
+                        title = query[:60] + ('...' if len(query) > 60 else '')
+                        ws_task_id = create_task(title, query)
+                    except Exception as e:
+                        print(f"[Task] Failed to create task: {e}")
+
+                # Record task steps
+                if ws_task_id and event.get("event") == "tool_start":
+                    try:
+                        add_task_step(
+                            task_id=ws_task_id,
+                            step_number=event.get("step", 0),
+                            tool_name=event.get("tool", ""),
+                            tool_label=event.get("tool_label", ""),
+                            args_preview=event.get("args_preview", "")
+                        )
+                    except Exception as e:
+                        print(f"[Task] Failed to add step: {e}")
+
+                if ws_task_id and event.get("event") == "tool_done":
+                    try:
+                        # Update the step with result
+                        conn = sqlite3.connect(DB_PATH)
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=?",
+                            (event.get("result_preview", ""), event.get("result_preview", ""),
+                             1 if event.get("success") else 0, ws_task_id, event.get("step", 0))
+                        )
+                        conn.commit()
+                        conn.close()
+                    except Exception as e:
+                        print(f"[Task] Failed to update step: {e}")
+
+                # Attach task_id to the event so frontend can track it
+                if ws_task_id:
+                    event["task_id"] = ws_task_id
+
+                progress_queue.put(event)
+            
+            current_model = model or os.getenv("DEFAULT_MODEL", "moonshot/kimi-latest")
+
+            # Auto-start llama-server if using a llamacpp model
+            if "llamacpp/" in current_model:
+                lm = get_llamacpp_manager()
+                if not lm.is_running():
+                    model_filename = current_model.replace("llamacpp/", "")
+                    await _safe_send({
+                        "type": "status",
+                        "message": f"正在启动 llama-server 并加载 {model_filename}..."
+                    })
+                    lm.start(model_filename)
+                    for i in range(120):
+                        await asyncio.sleep(0.5)
+                        if lm.is_running():
+                            await _safe_send({
+                                "type": "status",
+                                "message": "llama-server 就绪，开始处理..."
+                            })
+                            break
+                    else:
+                        await _safe_send({
+                            "type": "status",
+                            "message": "llama-server 启动失败，请检查模型文件"
+                        })
+                        agent_is_running = False
+                        return
+
+            agent = OpenAGCAgent(model=current_model)
+            
+            # Inject custom agent profile prompt if specified
+            if agent_profile_name and agent_profile_name != "default":
+                config = load_config()
+                profiles_raw = config.get("agent_profiles", [])
+                try:
+                    profiles = json.loads(profiles_raw) if isinstance(profiles_raw, str) else profiles_raw
+                    for p in profiles:
+                        if isinstance(p, dict) and p.get("name") == agent_profile_name and p.get("prompt"):
+                            agent.system_prompt_base = f"【角色设定: {p['name']}】\n{p['prompt']}\n\n---\n" + agent.system_prompt_base
+                            if p.get("model"):
+                                agent.llm.default_model = p["model"]
+                            break
+                except Exception as e:
+                    print(f"Failed to load agent profile {agent_profile_name}: {e}")
+            
+            # Inject previous session history
+            if session_history:
+                agent.messages.extend(session_history)
+            
+            loop = asyncio.get_event_loop()
+            
+            import concurrent.futures
+            agent_future = loop.run_in_executor(
+                None, 
+                lambda: agent.run_turn(query, False, progress_callback, images=images)
+            )
+            
+            # Handle agent progress and check for interruption
+            while not agent_future.done() and ws_alive:
+                if receive_task is None:
+                    receive_task = asyncio.create_task(websocket.receive_text())
+
+                done, pending = await asyncio.wait(
+                    [receive_task],
+                    timeout=0.15,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                if receive_task in done:
+                    try:
+                        data = receive_task.result()
+                        user_msg = json.loads(data)
+                        if user_msg.get("type") == "interrupt":
+                            agent.is_interrupted = True
+                            if ws_task_id:
+                                update_task_status(ws_task_id, "interrupted", interruption_reason="user")
+                        receive_task = None
+                    except WebSocketDisconnect:
+                        ws_alive = False
+                        agent.is_interrupted = True
+                        receive_task = None
+                    except Exception:
+                        receive_task = None
+
+                # Drain the thread-safe queue (no cross-thread race)
+                while True:
+                    try:
+                        event = progress_queue.get_nowait()
+                        await _safe_send({
+                            "type": "progress",
+                            **event
+                        })
+                    except thread_queue.Empty:
+                        break
+
+            while not progress_queue.empty():
+                try:
+                    event = progress_queue.get_nowait()
+                    await _safe_send({
+                        "type": "progress",
+                        **event
+                    })
+                except Exception:
+                    break
+            
+            response = await agent_future
+            session_history = agent.messages[1:]
+            
+            # Detect max_iterations hit for longrun auto-resume
+            is_max_iter = response and response.startswith("[MAX_ITERATIONS_REACHED]")
+            
+            if ws_task_id:
+                summary = response[:200] if response else ""
+                if is_max_iter:
+                    # Save context for potential resume
+                    save_task_context(ws_task_id, agent.messages[1:])
+                    update_task_status(ws_task_id, "interrupted", summary, interruption_reason="max_iterations")
+                    # Auto-detect as longrun if not already
+                    try:
+                        conn_tmp = sqlite3.connect(DB_PATH)
+                        cur_tmp = conn_tmp.cursor()
+                        cur_tmp.execute("SELECT task_type FROM tasks WHERE id=?", (ws_task_id,))
+                        row_tmp = cur_tmp.fetchone()
+                        conn_tmp.close()
+                        if row_tmp and row_tmp[0] == 'oneshot':
+                            update_task_type(ws_task_id, 'longrun')
+                    except Exception:
+                        pass
+                else:
+                    update_task_status(ws_task_id, "completed", summary)
+            
+            return response
+        except Exception as e:
+            if ws_task_id:
+                update_task_status(ws_task_id, "failed", str(e)[:200], interruption_reason="error")
+            raise
+        finally:
+            agent_is_running = False
+
+    try:
+        while True:
+            config = load_config()
+            heartbeat_enabled = config.get("heartbeat_enabled", False)
+            heartbeat_interval = config.get("heartbeat_interval", 60)
+            
+            try:
+                # Wait for user message with timeout for heartbeat
+                if receive_task is None:
+                    receive_task = asyncio.create_task(websocket.receive_text())
+                
+                timeout = heartbeat_interval if heartbeat_enabled else None
+                
+                # Check if we already have a finished receive_task result from a previous agent run_turn interrupt
+                if receive_task.done():
+                    data = receive_task.result()
+                    receive_task = None 
+                else:
+                    done, pending = await asyncio.wait([receive_task], timeout=timeout)
+                    if receive_task in done:
+                        data = receive_task.result()
+                        receive_task = None
+                    else:
+                        raise asyncio.TimeoutError()
+                
+                user_msg = json.loads(data)
+                msg_type = user_msg.get("type", "query")
+                
+                if msg_type == "retry":
+                    query = user_msg.get("query", last_query)
+                    retry_model = user_msg.get("model", None)
+                    agent_profile_name = user_msg.get("agent_name", None)
+                    ws_images = user_msg.get("images", None)
+                    if not query.strip():
+                        continue
+                else:
+                    query = user_msg.get("query", "")
+                    retry_model = None
+                    agent_profile_name = user_msg.get("agent_name", None)
+                    ws_images = user_msg.get("images", None)
+                    if not query.strip():
+                        continue
+
+                    # Save user message to DB
+                    save_message("user", query)
+
+                is_heartbeat = False
+            except asyncio.TimeoutError:
+                if not heartbeat_enabled or agent_is_running:
+                    continue
+                # Trigger Heartbeat
+                query = "【系统指令】后台巡视时间已到。请检查系统状态、后台任务或之前的计划是否需要继续。如果一切正常无需操作，请且仅回复 'HEARTBEAT_OK'。"
+                retry_model = None
+                agent_profile_name = None
+                ws_images = None
+                is_heartbeat = True
+
+            if not is_heartbeat:
+                # Send immediate acknowledgment
+                await _safe_send({
+                    "type": "status",
+                    "message": "Agent is thinking..."
+                })
+            
+            try:
+                response = await run_agent_with_progress(query, retry_model, agent_profile_name, is_heartbeat=is_heartbeat, images=ws_images)
+                
+                if response == "BUSY":
+                    continue
+                    
+                if is_heartbeat and response and response.strip() == "HEARTBEAT_OK":
+                    # Silent heartbeat, do nothing
+                    continue
+                    
+                # Save agent response to DB
+                save_message("agent", response)
+
+                # Send the final response
+                await _safe_send({
+                    "type": "message",
+                    "role": "agent",
+                    "content": response
+                })
+                
+            except Exception as e:
+                err_str = str(e).lower()
+                error_msg = f"Agent Encountered Error: {str(e)}"
+                if "api_key" in err_str or "authentication" in err_str or "not found" in err_str or "key" in err_str:
+                    error_msg += "\n\n---\n**💡 提示：您似乎尚未配置此模型的 API Key！**\n\n以 Kimi 为例，请前往 [Moonshot 开放平台](https://platform.moonshot.cn/console/api-keys) 免费申请一个 API Key，然后在左侧边栏的「设置 - 模型配置」中填入并保存即可开始对话！"
+                
+                save_message("system", error_msg)
+                await _safe_send({
+                    "type": "error",
+                    "content": error_msg,
+                    "original_query": query if not is_heartbeat else ""
+                })
+                
+    except WebSocketDisconnect:
+        print("Client disconnected")
+        if websocket in connected_websockets:
+            connected_websockets.remove(websocket)
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        if websocket in connected_websockets:
+            connected_websockets.remove(websocket)
+
+def start_email_listener():
+    def email_listener_loop():
+        from core.email_service import fetch_emails, send_email
+        from agent.agent import OpenAGCAgent
+        while True:
+            try:
+                config = load_config()
+                if config.get("email_listener_enabled") and config.get("email_account") and config.get("email_password") and config.get("email_imap_server"):
+                    owner = config.get("owner_email", "")
+                    if owner:
+                        criteria = f'UNSEEN FROM "{owner}"'
+                        emails = fetch_emails(
+                            config["email_imap_server"],
+                            config["email_account"],
+                            config["email_password"],
+                            criteria=criteria,
+                            limit=5,
+                            mark_seen=True
+                        )
+                        for e in emails:
+                            print(f"[Email Listener] Found new command from owner: {e['subject']}")
+                            save_message("system", f"🔔 已收到来自主人 ({owner}) 的新邮件指令:\n主题: {e['subject']}")
+                            
+                            agent = OpenAGCAgent(model=config.get("default_model", "gpt-4o"))
+                            prompt = f"I received a new email instruction from my owner ({owner}).\nSubject: {e['subject']}\nBody: {e['body']}\nPlease execute this instruction, and then I will automatically email them the result."
+                            
+                            try:
+                                response = agent.run_turn(prompt)
+                            except Exception as ex:
+                                response = f"Failed to execute instructions: {ex}"
+                                
+                            success = send_email(
+                                config["email_smtp_server"],
+                                config["email_account"],
+                                config["email_password"],
+                                owner,
+                                f"Re: {e['subject']} - Task Completed",
+                                f"Task Summary:\n\n{response}"
+                            )
+                            if success:
+                                save_message("system", f"📧 已将执行结果回传至主人邮箱: {owner}")
+                            else:
+                                save_message("system", f"⚠️ 邮件回复发送失败，请检查 SMTP 配置。")
+            except Exception as e:
+                print(f"Email listener error: {e}")
+            _time.sleep(60)
+
+    threading.Thread(target=email_listener_loop, daemon=True).start()
+
+# ==========================================
+# Task Scheduler (Background Thread)
+# ==========================================
+
+async def _ws_send_safe(ws, message):
+    """Send a message via WebSocket, ignoring connection errors."""
+    try:
+        await ws.send_json(message)
+    except Exception:
+        pass
+
+
+def _broadcast_to_websockets(message: dict):
+    """Send a message to all connected WebSocket clients (best-effort). Thread-safe."""
+    global _main_event_loop
+    loop = _main_event_loop
+    if loop is None or loop.is_closed() or not loop.is_running():
+        return
+    for ws in list(connected_websockets):
+        try:
+            asyncio.run_coroutine_threadsafe(_ws_send_safe(ws, message), loop)
+        except Exception:
+            pass
+
+
+# Wire up Training Engine broadcast
+get_training_engine().set_broadcast_fn(_broadcast_to_websockets)
+
+# Wire route modules to shared state
+init_benchmark_routes(
+    db_path=DB_PATH,
+    download_state=_llamacpp_download_state,
+    install_state=_training_install_state,
+    broadcast_fn=_broadcast_to_websockets,
+    get_engine=get_training_engine,
+    get_llamacpp=get_llamacpp_manager,
+    load_config=load_config
+)
+init_download_routes(
+    db_path=DB_PATH,
+    download_state=_llamacpp_download_state,
+    install_state=_training_install_state,
+    broadcast_fn=_broadcast_to_websockets,
+    training_avail=_training_available,
+    get_llamacpp=get_llamacpp_manager,
+    load_config=load_config
+)
 
 
 def _run_background_task(task_id: int, user_query: str, context_messages: list = None,
@@ -349,4 +3562,5 @@ def start_task_scheduler():
     threading.Thread(target=scheduler_loop, daemon=True).start()
 
 # Start background listeners
+start_email_listener()
 start_task_scheduler()

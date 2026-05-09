@@ -287,7 +287,9 @@ def list_all_plugins(plugins_dir: str = "plugins") -> List[dict]:
             "author": p.manifest.get("author", ""),
         })
         seen.add(p.name)
-    # Scan disk for unloaded plugins
+    # Scan disk for unloaded plugins (create dir if missing)
+    if not os.path.isdir(plugins_dir):
+        os.makedirs(plugins_dir, exist_ok=True)
     if os.path.isdir(plugins_dir):
         for entry in os.listdir(plugins_dir):
             d = os.path.join(plugins_dir, entry)
@@ -399,7 +401,7 @@ def fetch_marketplace(url: str = "", logger: Callable = None) -> dict:
     """Fetch the remote marketplace index. Returns the JSON data or empty dict."""
     logger = logger or print
     if not url:
-        url = "https://raw.githubusercontent.com/deanwinchester/open-agc-plugins/main/marketplace.json"
+        url = "https://raw.githubusercontent.com/deanwinchester/open-agc-plugins/master/marketplace.json"
     try:
         import urllib.request
         with urllib.request.urlopen(url, timeout=15) as resp:
