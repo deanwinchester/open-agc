@@ -83,10 +83,7 @@
                             </svg>
                         </button>
                     </div>
-                    <nav class="nav-item active" data-view="chat" id="nav-chat">
-                        <span class="nav-dot"></span>
-                        <span>当前会话</span>
-                    </nav>
+                    <div id="session-list"></div>
                 </div>
 
                 <!-- 任务 Section -->
@@ -576,18 +573,17 @@
             <div class="view" id="view-settings-mcp">
                 <header class="view-header">
                     <h1>🔌 Agents & MCP</h1>
-                    <p class="view-desc">配置多智能体角色与 Model Context Protocol 外部服务。</p>
+                    <p class="view-desc">管理智能体角色，为每个角色配置提示词和模型。</p>
                 </header>
                 <div class="settings-body">
                     <section class="card">
                         <div class="card-header">
-                            <h2>🎭 多智能体配置</h2>
-                            <p class="card-desc">配置不同的智能体角色，可以分配不同的系统提示词。</p>
+                            <h2>🎭 智能体管理</h2>
+                            <p class="card-desc">创建和管理不同的智能体角色，可在聊天界面中切换使用。</p>
                         </div>
                         <div class="field">
-                            <label>Agent Profiles (JSON Array)</label>
-                            <textarea id="agents-config-input" class="input-styled" rows="6"
-                                placeholder='[{"name": "默认助手", "prompt": "You are a helpful assistant."}]'></textarea>
+                            <button id="new-agent-btn" class="btn-primary" style="margin-bottom:0.75rem;">+ 新建 Agent</button>
+                            <div id="agent-list-container" style="display:flex; flex-direction:column; gap:0.5rem;"></div>
                         </div>
                     </section>
                     <section class="card">
@@ -613,9 +609,51 @@
                                 <polyline points="17 21 17 13 7 13 7 21"></polyline>
                                 <polyline points="7 3 7 8 15 8"></polyline>
                             </svg>
-                            保存设置
+                            保存 MCP 设置
                         </button>
                     </div>
+                </div>
+            </div>
+
+            <!-- Agent Edit Modal -->
+            <div id="agent-modal" class="modal-overlay" style="display:none;">
+                <div class="modal-content" style="max-width:520px;">
+                    <div class="modal-header">
+                        <h2 id="agent-modal-title">新建 Agent</h2>
+                        <button class="modal-close" id="agent-modal-close">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="field">
+                            <label>名称 <span style="color:#e74c3c;">*</span></label>
+                            <input id="agent-name-input" class="input-styled" placeholder="例如: 代码助手" />
+                        </div>
+                        <div class="field">
+                            <label>系统提示词 <span style="color:#e74c3c;">*</span></label>
+                            <textarea id="agent-prompt-input" class="input-styled" rows="4" placeholder="你是一个专业的代码助手，擅长..."></textarea>
+                        </div>
+                        <div class="field">
+                            <label>绑定模型</label>
+                            <select id="agent-model-select" class="input-styled">
+                                <option value="">使用默认模型</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label>Temperature</label>
+                            <div style="display:flex; align-items:center; gap:0.5rem;">
+                                <input id="agent-temp-input" type="range" min="0" max="2" step="0.1" value="0.7" style="flex:1;" />
+                                <span id="agent-temp-display" style="min-width:2rem; text-align:right; font-size:0.85rem;">0.7</span>
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label>Max Tokens</label>
+                            <input id="agent-maxtokens-input" type="number" class="input-styled" value="4096" placeholder="4096" />
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button id="agent-modal-cancel" class="btn-secondary">取消</button>
+                        <button id="agent-modal-save" class="btn-primary">保存</button>
+                    </div>
+                    <input id="agent-edit-original-name" type="hidden" value="" />
                 </div>
             </div>
 
@@ -915,6 +953,7 @@
                         </div>
                     </section>
                     <div class="global-actions">
+                        <button id="ai-design-btn" class="btn-primary" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);">🤖 AI 设计</button>
                         <button id="estimate-model-btn" class="btn-primary">估算参数量</button>
                         <button id="gen-code-btn" class="btn-secondary" style="font-size:0.8rem;">生成代码</button>
                         <button id="export-model-btn" class="btn-secondary" style="font-size:0.8rem;">导出训练包</button>
@@ -1550,6 +1589,46 @@
     </div>
 
     <script src="/static/app.js"></script>
+
+    <!-- AI Design Modal -->
+    <div id="ai-design-modal" class="modal-overlay" style="display:none;">
+        <div class="modal-content" style="max-width:560px;">
+            <div class="modal-header">
+                <h2>🤖 AI 模型设计</h2>
+                <button class="modal-close" id="ai-design-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="field">
+                    <label>选择 Agent</label>
+                    <select id="ai-design-agent" class="input-styled">
+                        <option value="default">默认智能体</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label>需求描述 <span style="color:#e74c3c;">*</span></label>
+                    <textarea id="ai-design-requirements" class="input-styled" rows="5"
+                        placeholder="例如：设计一个轻量级的文本生成模型，参数量控制在 100M 以内，支持 2048 上下文长度，使用 GQA 注意力机制。"></textarea>
+                </div>
+                <div id="ai-design-progress" style="display:none;">
+                    <div style="display:flex; align-items:center; gap:0.5rem; margin-top:0.5rem; padding:0.75rem; background:var(--bg-secondary); border-radius:8px;">
+                        <div class="spinner" style="width:18px;height:18px;border:2px solid var(--border-color);border-top-color:var(--theme-color);border-radius:50%;animation:spin 0.8s linear infinite;"></div>
+                        <span id="ai-design-status" style="font-size:0.85rem; color:var(--text-secondary);">AI 正在思考设计方案...</span>
+                    </div>
+                </div>
+                <div id="ai-design-result" style="display:none; margin-top:0.75rem;">
+                    <div class="field">
+                        <label>设计结果预览</label>
+                        <pre id="ai-design-result-json" style="background:var(--bg-secondary); padding:0.75rem; border-radius:6px; font-size:0.78rem; max-height:200px; overflow:auto; white-space:pre-wrap; word-break:break-all;"></pre>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="ai-design-cancel" class="btn-secondary">取消</button>
+                <button id="ai-design-submit" class="btn-primary">开始设计</button>
+                <button id="ai-design-apply" class="btn-save" style="display:none;">应用到设计器</button>
+            </div>
+        </div>
+    </div>
 </body>
 
 </html>

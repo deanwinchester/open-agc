@@ -104,11 +104,23 @@ def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+
+    # Sessions table (new)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
+            session_id INTEGER DEFAULT 1,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -187,6 +199,17 @@ def init_db():
     # Ensure datasets storage directory exists
     datasets_dir = os.path.join(os.path.dirname(DB_PATH), "datasets")
     os.makedirs(datasets_dir, exist_ok=True)
+
+    # Migrate existing databases
+    # Add session_id to messages if missing
+    try:
+        cursor.execute("ALTER TABLE messages ADD COLUMN session_id INTEGER DEFAULT 1")
+    except Exception:
+        pass
+    # Ensure at least one default session exists
+    cursor.execute("SELECT COUNT(*) FROM sessions")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("INSERT INTO sessions (name) VALUES (?)", ("默认会话",))
 
     # Migrate: add new columns if they don't exist yet
     try:
@@ -525,10 +548,11 @@ _llamacpp_download_state = {
 
 
 
-def save_message(role: str, content: str):
+def save_message(role: str, content: str, session_id: int = 1):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO messages (role, content) VALUES (?, ?)", (role, content))
+    cursor.execute("INSERT INTO messages (role, content, session_id) VALUES (?, ?, ?)", (role, content, session_id))
+    cursor.execute("UPDATE sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
     conn.commit()
     conn.close()
 
@@ -1385,15 +1409,254 @@ async def get_memory_categories():
     return {"categories": store.get_categories_summary()}
 
 @app.get("/api/history")
-async def get_history():
-    """Retrieve chat history."""
+async def get_history(session_id: int = None):
+    """Retrieve chat history. Optionally filter by session_id."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT role, content FROM messages ORDER BY id ASC")
+    if session_id:
+        cursor.execute("SELECT role, content FROM messages WHERE session_id=? ORDER BY id ASC", (session_id,))
+    else:
+        cursor.execute("SELECT role, content FROM messages ORDER BY id ASC")
     rows = cursor.fetchall()
     conn.close()
     return {"history": [{"role": row["role"], "content": row["content"]} for row in rows]}
+
+
+# ==========================================
+# Session Management API
+# ==========================================
+
+@app.get("/api/sessions")
+async def get_sessions():
+    """List all sessions, ordered by most recent first."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT s.*, (SELECT COUNT(*) FROM messages WHERE session_id=s.id) as message_count
+        FROM sessions s ORDER BY s.updated_at DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return {"sessions": [dict(r) for r in rows]}
+
+@app.post("/api/sessions")
+async def create_session(body: dict = {}):
+    """Create a new session."""
+    name = body.get("name", None)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    if not name:
+        # Auto-name: "会话 N"
+        cursor.execute("SELECT COUNT(*) FROM sessions")
+        count = cursor.fetchone()[0] + 1
+        name = f"会话 {count}"
+    cursor.execute("INSERT INTO sessions (name) VALUES (?)", (name,))
+    session_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return {"session": {"id": session_id, "name": name}}
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: int):
+    """Delete a session and its messages."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
+    cursor.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+@app.put("/api/sessions/{session_id}")
+async def rename_session(session_id: int, body: dict = {}):
+    """Rename a session."""
+    name = body.get("name", "会话")
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE sessions SET name=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (name, session_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ==========================================
+# Agent & Models API
+# ==========================================
+
+def _load_agents():
+    """Load agent profiles from config.json."""
+    config = load_config()
+    raw = config.get("agent_profiles", [])
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return []
+    return list(raw) if isinstance(raw, list) else []
+
+def _save_agents(agents: list):
+    """Save agent profiles to config.json."""
+    config = load_config()
+    config["agent_profiles"] = agents
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+@app.get("/api/agents")
+async def get_agents():
+    """List all agent profiles."""
+    return {"agents": _load_agents()}
+
+@app.post("/api/agents")
+async def create_agent(body: dict):
+    """Create a new agent profile."""
+    agents = _load_agents()
+    name = body.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Agent name is required")
+    if any(a.get("name") == name for a in agents):
+        raise HTTPException(status_code=400, detail="Agent name already exists")
+    agents.append({
+        "name": name,
+        "prompt": body.get("prompt", ""),
+        "model": body.get("model", ""),
+        "temperature": body.get("temperature", 0.7),
+        "max_tokens": body.get("max_tokens", 4096),
+    })
+    _save_agents(agents)
+    return {"ok": True, "agents": agents}
+
+@app.put("/api/agents/{agent_name}")
+async def update_agent(agent_name: str, body: dict):
+    """Update an existing agent profile."""
+    agents = _load_agents()
+    for a in agents:
+        if a.get("name") == agent_name:
+            if "name" in body and body["name"].strip():
+                a["name"] = body["name"].strip()
+            if "prompt" in body:
+                a["prompt"] = body["prompt"]
+            if "model" in body:
+                a["model"] = body["model"]
+            if "temperature" in body:
+                a["temperature"] = body["temperature"]
+            if "max_tokens" in body:
+                a["max_tokens"] = body["max_tokens"]
+            _save_agents(agents)
+            return {"ok": True, "agents": agents}
+    raise HTTPException(status_code=404, detail="Agent not found")
+
+@app.delete("/api/agents/{agent_name}")
+async def delete_agent(agent_name: str):
+    """Delete an agent profile."""
+    agents = _load_agents()
+    agents = [a for a in agents if a.get("name") != agent_name]
+    _save_agents(agents)
+    return {"ok": True, "agents": agents}
+
+@app.get("/api/models/available")
+async def get_available_models():
+    """Return available models from config + local inference servers."""
+    config = load_config()
+    models = []
+    if config.get("default_model"):
+        models.append(config["default_model"])
+    for fb in config.get("fallback_models", []):
+        if fb not in models:
+            models.append(fb)
+    # Add local models from LlamaCpp
+    try:
+        from core.llamacpp_manager import get_llamacpp_manager
+        lm = get_llamacpp_manager()
+        for m in lm.list_models():
+            mname = f"llamacpp/{m}" if not m.startswith("llamacpp/") else m
+            if mname not in models:
+                models.append(mname)
+    except Exception:
+        pass
+    # Add config custom models
+    for cm in config.get("models", []):
+        if cm not in models:
+            models.append(cm)
+    return {"models": models}
+
+
+# ==========================================
+# AI Model Designer API
+# ==========================================
+
+DESIGN_PROMPT_TEMPLATE = """You are a model architecture expert. Based on the user's requirements below, design a neural network model architecture and provide the hyperparameters.
+
+Requirements: {requirements}
+
+Output ONLY valid JSON (no markdown, no explanation) with this exact structure:
+{{
+  "architecture": "gpt_decoder|llama|bert_encoder|moe|diffusion_dit|mamba_ssm",
+  "params": {{
+    "num_layers": <int>,
+    "hidden_dim": <int>,
+    "num_attn_heads": <int>,
+    "intermediate_dim": <int>,
+    "vocab_size": <int>,
+    "max_seq_len": <int>,
+    "attn_type": "scaled_dot|flash_attn|mqa|gqa",
+    "norm_position": "pre|post|sandwich",
+    "norm_type": "rms|l|batch",
+    "pos_encoding": "rope|alibi|learned|none",
+    "activation": "gelu|swiglu|relu|silu",
+    "dropout": <float 0-1>,
+    "head_dim": <int>,
+    "rope_theta": <float>,
+    "use_bias": <bool>,
+    "init_range": <float>
+  }},
+  "explanation": "<brief explanation of design choices>"
+}}
+
+Choose reasonable defaults for any unspecified parameters. Match the architecture to the use case."""
+
+@app.post("/api/agent-design")
+async def agent_design(body: dict = {}):
+    """Use an agent to generate model design parameters from a natural language requirement."""
+    agent_name = body.get("agent_name", "default")
+    requirements = body.get("requirements", "").strip()
+    if not requirements:
+        raise HTTPException(status_code=400, detail="Requirements cannot be empty")
+
+    # Load agent profile
+    config = load_config()
+    profile_model = None
+    profile_prompt = ""
+    if agent_name != "default":
+        agents_raw = config.get("agent_profiles", [])
+        agents = json.loads(agents_raw) if isinstance(agents_raw, str) else agents_raw
+        for a in agents:
+            if isinstance(a, dict) and a.get("name") == agent_name:
+                profile_prompt = a.get("prompt", "")
+                profile_model = a.get("model", None)
+                break
+
+    # Determine which model to use
+    model = profile_model or config.get("default_model", "moonshot/kimi-latest")
+
+    # Build the design prompt
+    system_prompt = profile_prompt + "\n\n" + DESIGN_PROMPT_TEMPLATE.format(requirements=requirements) if profile_prompt else DESIGN_PROMPT_TEMPLATE.format(requirements=requirements)
+
+    # Make a simple LLM call
+    try:
+        from core.llm_client import LLMClient
+        client = LLMClient(default_model=model)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Please design a model for this requirement: {requirements}"}
+        ]
+        response, actual_model = client.chat(messages=messages, tools=None)
+        reply = response.choices[0].message.content or ""
+        return {"response": reply, "model_used": actual_model}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI design failed: {str(e)}")
+
 
 # ==========================================
 # Task Management API
@@ -1620,6 +1883,9 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_websockets.append(websocket)
 
+    # Read session_id from query parameter, default to 1
+    ws_session_id = int(websocket.query_params.get("session_id", "1"))
+
     # Push current download state to the newly connected client
     if _llamacpp_download_state.get("active"):
         await websocket.send_json({
@@ -1650,11 +1916,11 @@ async def websocket_endpoint(websocket: WebSocket):
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        # Load the last 20 messages for working context
-        cursor.execute("SELECT role, content FROM (SELECT * FROM messages ORDER BY id DESC LIMIT 20) ORDER BY id ASC")
+        # Load the last 20 messages for the current session
+        cursor.execute("SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 20) ORDER BY id ASC", (ws_session_id,))
         rows = cursor.fetchall()
         conn.close()
-        
+
         # LLMs strict require 'assistant' not 'agent'
         session_history = []
         for row in rows:
@@ -1671,7 +1937,7 @@ async def websocket_endpoint(websocket: WebSocket):
     
     async def run_agent_with_progress(query: str, model: str = None, agent_profile_name: str = None, is_heartbeat: bool = False, images: list = None):
         """Run agent in a thread and push progress to WebSocket via a Queue."""
-        nonlocal session_history, last_query, agent_is_running, receive_task, ws_alive
+        nonlocal session_history, last_query, agent_is_running, receive_task, ws_alive, ws_session_id
         if not is_heartbeat:
             last_query = query
             
@@ -1922,7 +2188,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         continue
 
                     # Save user message to DB
-                    save_message("user", query)
+                    save_message("user", query, ws_session_id)
 
                 is_heartbeat = False
             except asyncio.TimeoutError:
@@ -1953,7 +2219,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
                     
                 # Save agent response to DB
-                save_message("agent", response)
+                save_message("agent", response, ws_session_id)
 
                 # Send the final response
                 await _safe_send({
@@ -1968,7 +2234,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if "api_key" in err_str or "authentication" in err_str or "not found" in err_str or "key" in err_str:
                     error_msg += "\n\n---\n**💡 提示：您似乎尚未配置此模型的 API Key！**\n\n以 Kimi 为例，请前往 [Moonshot 开放平台](https://platform.moonshot.cn/console/api-keys) 免费申请一个 API Key，然后在左侧边栏的「设置 - 模型配置」中填入并保存即可开始对话！"
                 
-                save_message("system", error_msg)
+                save_message("system", error_msg, ws_session_id)
                 await _safe_send({
                     "type": "error",
                     "content": error_msg,
@@ -2071,7 +2337,7 @@ init_benchmark_routes(
 init_download_routes(
     db_path=DB_PATH,
     download_state=_llamacpp_download_state,
-    install_state={},
+    install_state={"active": False, "stage": "idle", "label": "", "progress": 0, "error": ""},
     broadcast_fn=_broadcast_to_websockets,
     training_avail=False,
     get_llamacpp=get_llamacpp_manager,

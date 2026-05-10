@@ -238,6 +238,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const imageBtn = document.getElementById('image-btn');
     const imagePreviewBar = document.getElementById('image-preview-bar');
     let pendingImages = [];  // Array of base64 data URLs
+    let currentSessionId = parseInt(localStorage.getItem('lastSessionId') || '1');
+    let sessions = [];
     const sendBtn = document.getElementById('send-btn');
     const stopBtn = document.getElementById('stop-btn');
     const themeToggle = document.getElementById('theme-toggle');
@@ -294,7 +296,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Load view-specific data
         if (viewId === 'settings-models') { loadSettingsConfig(); loadDownloadHistory(); }
         if (viewId === 'settings-skills') loadSkillsConfig();
-        if (viewId === 'settings-mcp') loadMcpConfig();
+        if (viewId === 'settings-mcp') loadAgents();
         if (viewId === 'settings-plugins') loadPluginManager();
         if (viewId === 'tasks') loadTasks();
         if (viewId === 'downloads') loadDownloadsView();
@@ -312,6 +314,28 @@ document.addEventListener('DOMContentLoaded', () => {
         const navItem = e.target.closest('.nav-item[data-view]');
         if (navItem) {
             switchView(navItem.dataset.view);
+        }
+        // Session item click
+        const sessionItem = e.target.closest('.session-item');
+        if (sessionItem && !e.target.closest('.session-rename-btn') && !e.target.closest('.session-delete-btn')) {
+            switchSession(parseInt(sessionItem.dataset.sessionId));
+        }
+        // Session rename
+        if (e.target.closest('.session-rename-btn')) {
+            const item = e.target.closest('.session-item');
+            const nameEl = item.querySelector('.session-name');
+            const oldName = sessions.find(s => s.id === parseInt(item.dataset.sessionId))?.name || '';
+            const newName = prompt('重命名会话:', oldName);
+            if (newName && newName !== oldName) {
+                renameSession(parseInt(item.dataset.sessionId), newName);
+            }
+        }
+        // Session delete
+        if (e.target.closest('.session-delete-btn')) {
+            const item = e.target.closest('.session-item');
+            if (confirm('确定删除此会话？')) {
+                deleteSession(parseInt(item.dataset.sessionId));
+            }
         }
     });
 
@@ -347,6 +371,104 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ==========================================
+    // Session Management
+    // ==========================================
+    async function loadSessions() {
+        try {
+            const res = await fetch('/api/sessions');
+            const data = await res.json();
+            sessions = data.sessions || [];
+            renderSessionList();
+        } catch (e) {
+            console.error('Failed to load sessions', e);
+        }
+    }
+
+    function renderSessionList() {
+        const container = document.getElementById('session-list');
+        if (!container) return;
+        container.innerHTML = sessions.map(s => `
+            <div class="session-item${s.id === currentSessionId ? ' active' : ''}" data-session-id="${s.id}">
+                <span class="session-name" title="${s.name}">${s.name}</span>
+                <span class="session-actions">
+                    <button class="session-rename-btn" title="重命名">✎</button>
+                    <button class="session-delete-btn" title="删除">×</button>
+                </span>
+            </div>
+        `).join('');
+    }
+
+    async function switchSession(sessionId) {
+        if (sessionId === currentSessionId) return;
+        currentSessionId = sessionId;
+        switchView('chat');
+        localStorage.setItem('lastSessionId', sessionId);
+        // Reconnect WebSocket with new session_id
+        if (ws) ws.close();
+        connectWebSocket();
+        // Reload history for this session
+        chatContainer.innerHTML = '';
+        try {
+            const res = await fetch(`/api/history?session_id=${sessionId}`);
+            const data = await res.json();
+            if (data.history && data.history.length > 0) {
+                chatContainer.innerHTML = '';
+                data.history.forEach(msg => appendMessage(msg.content, msg.role));
+            } else {
+                appendMessage('*控制台*', 'system');
+            }
+        } catch (e) {
+            console.error('Failed to load session history', e);
+            appendMessage('*控制台*', 'system');
+        }
+        renderSessionList();
+    }
+
+    async function createSession() {
+        try {
+            const res = await fetch('/api/sessions', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+            const data = await res.json();
+            await loadSessions();
+            await switchSession(data.session.id);
+        } catch (e) {
+            console.error('Failed to create session', e);
+        }
+    }
+
+    async function deleteSession(sessionId) {
+        if (sessions.length <= 1) return; // Don't delete the last session
+        try {
+            await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+            if (currentSessionId === sessionId) {
+                // Switch to the first available session
+                const next = sessions.find(s => s.id !== sessionId);
+                if (next) await switchSession(next.id);
+            }
+            await loadSessions();
+        } catch (e) {
+            console.error('Failed to delete session', e);
+        }
+    }
+
+    async function renameSession(sessionId, newName) {
+        if (!newName.trim()) return;
+        try {
+            await fetch(`/api/sessions/${sessionId}`, {
+                method: 'PUT',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({name: newName.trim()})
+            });
+            if (sessionId === currentSessionId) {
+                const s = sessions.find(s => s.id === sessionId);
+                if (s) s.name = newName.trim();
+            }
+            renderSessionList();
+        } catch (e) {
+            console.error('Failed to rename session', e);
+        }
+    }
+
+    // ==========================================
     // Fetch Initial Data
     // ==========================================
     async function fetchInitialData() {
@@ -357,7 +479,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 currentModelBadge.textContent = data.default_model || 'gpt-4o';
             }
 
-            const historyRes = await fetch('/api/history');
+            // Load sessions
+            await loadSessions();
+
+            // Load messages for the current session
+            const historyRes = await fetch(`/api/history?session_id=${currentSessionId}`);
             if (historyRes.ok) {
                 const data = await historyRes.json();
                 if (data.history && data.history.length > 0) {
@@ -377,7 +503,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================
     function connectWebSocket() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        const wsUrl = `${protocol}//${window.location.host}/ws?session_id=${currentSessionId}`;
         ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
@@ -1051,7 +1177,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if ((!text && pendingImages.length === 0) || !isConnected || isAgentThinking) return;
         const msgImages = [...pendingImages];
         appendMessage(text || '[图片]', 'user', msgImages);
-        const msg = { query: text || '请分析这张图片' };
+        const agentSelector = document.getElementById('agent-selector');
+        const msg = {
+            query: text || '请分析这张图片',
+            session_id: currentSessionId,
+            agent_name: agentSelector ? agentSelector.value : 'default'
+        };
         if (msgImages.length > 0) {
             msg.images = msgImages;
             pendingImages = [];
@@ -1265,6 +1396,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Settings event listeners (deferred setup)
     function initSettingsListeners() {
+        // Agent modal listeners
+        document.getElementById('new-agent-btn')?.addEventListener('click', () => openAgentModal(null));
+        document.getElementById('agent-modal-close')?.addEventListener('click', closeAgentModal);
+        document.getElementById('agent-modal-cancel')?.addEventListener('click', closeAgentModal);
+        document.getElementById('agent-modal-save')?.addEventListener('click', saveAgentFromModal);
+        document.getElementById('agent-temp-input')?.addEventListener('input', (e) => {
+            document.getElementById('agent-temp-display').textContent = e.target.value;
+        });
+        document.getElementById('agent-modal')?.addEventListener('click', (e) => {
+            if (e.target === e.currentTarget) closeAgentModal();
+        });
+
         document.getElementById('provider-select')?.addEventListener('change', (e) => {
             fetchModels(e.target.value);
         });
@@ -1320,7 +1463,6 @@ document.addEventListener('DOMContentLoaded', () => {
             email_imap_server: document.getElementById('email-imap-input')?.value?.trim() || '',
             email_smtp_server: document.getElementById('email-smtp-input')?.value?.trim() || '',
             owner_email: document.getElementById('owner-email-input')?.value?.trim() || '',
-            agent_profiles: document.getElementById('agents-config-input')?.value?.trim() || '[]',
             mcp_servers: document.getElementById('mcp-config-input')?.value?.trim() || '{}'
         };
 
@@ -1479,22 +1621,338 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // MCP Config loader
-    async function loadMcpConfig() {
+    // Agent Management
+    async function loadAgents() {
         try {
-            const res = await fetch('/api/settings');
+            const res = await fetch('/api/agents');
             const data = await res.json();
-            if (data.agent_profiles) {
-                const el = document.getElementById('agents-config-input');
-                if (el) el.value = typeof data.agent_profiles === 'string' ? data.agent_profiles : JSON.stringify(data.agent_profiles, null, 2);
-            }
-            if (data.mcp_servers) {
-                const el = document.getElementById('mcp-config-input');
-                if (el) el.value = typeof data.mcp_servers === 'string' ? data.mcp_servers : JSON.stringify(data.mcp_servers, null, 2);
+            renderAgentList(data.agents || []);
+            populateAgentSelector(data.agents || []);
+            // Also load available models for the modal
+            loadAvailableModels();
+            // Load MCP config
+            const settingsRes = await fetch('/api/settings');
+            const settingsData = await settingsRes.json();
+            const mcpEl = document.getElementById('mcp-config-input');
+            if (mcpEl && settingsData.mcp_servers) {
+                mcpEl.value = typeof settingsData.mcp_servers === 'string' ? settingsData.mcp_servers : JSON.stringify(settingsData.mcp_servers, null, 2);
             }
         } catch (e) {
-            console.error('Failed to load MCP config:', e);
+            console.error('Failed to load agents:', e);
         }
+    }
+
+    function renderAgentList(agents) {
+        const container = document.getElementById('agent-list-container');
+        if (!container) return;
+        if (!agents.length) {
+            container.innerHTML = '<div class="empty-state"><p>暂无 Agent，点击上方按钮创建</p></div>';
+            return;
+        }
+        container.innerHTML = agents.map((a, i) => `
+            <div class="agent-card" data-index="${i}">
+                <div class="agent-card-info">
+                    <div class="agent-card-name">${a.name}</div>
+                    <div class="agent-card-model">${a.model || '使用默认模型'}</div>
+                    <div class="agent-card-prompt">${(a.prompt || '').substring(0, 80)}${(a.prompt || '').length > 80 ? '...' : ''}</div>
+                </div>
+                <div class="agent-card-actions">
+                    <button class="agent-edit-btn" data-name="${a.name}" title="编辑">✎</button>
+                    <button class="agent-delete-btn" data-name="${a.name}" title="删除">×</button>
+                </div>
+            </div>
+        `).join('');
+        // Attach edit/delete handlers
+        container.querySelectorAll('.agent-edit-btn').forEach(btn => {
+            btn.addEventListener('click', () => openAgentModal(btn.dataset.name));
+        });
+        container.querySelectorAll('.agent-delete-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                if (confirm(`确定删除 Agent "${btn.dataset.name}"？`)) {
+                    const res = await fetch(`/api/agents/${encodeURIComponent(btn.dataset.name)}`, { method: 'DELETE' });
+                    if (res.ok) await loadAgents();
+                }
+            });
+        });
+    }
+
+    function populateAgentSelector(agents) {
+        const sel = document.getElementById('agent-selector');
+        if (!sel) return;
+        sel.innerHTML = '<option value="default">默认智能体</option>';
+        agents.forEach(a => {
+            const opt = document.createElement('option');
+            opt.value = a.name;
+            opt.textContent = a.name;
+            sel.appendChild(opt);
+        });
+    }
+
+    async function loadAvailableModels() {
+        try {
+            const res = await fetch('/api/models/available');
+            const data = await res.json();
+            const sel = document.getElementById('agent-model-select');
+            if (!sel) return;
+            sel.innerHTML = '<option value="">使用默认模型</option>';
+            (data.models || []).forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m;
+                opt.textContent = m;
+                sel.appendChild(opt);
+            });
+        } catch (e) {
+            console.error('Failed to load models:', e);
+        }
+    }
+
+    let editingAgentName = null;
+
+    function openAgentModal(name) {
+        editingAgentName = name;
+        document.getElementById('agent-modal-title').textContent = name ? '编辑 Agent' : '新建 Agent';
+        document.getElementById('agent-name-input').value = '';
+        document.getElementById('agent-prompt-input').value = '';
+        document.getElementById('agent-model-select').value = '';
+        document.getElementById('agent-temp-input').value = '0.7';
+        document.getElementById('agent-temp-display').textContent = '0.7';
+        document.getElementById('agent-maxtokens-input').value = '4096';
+        document.getElementById('agent-edit-original-name').value = name || '';
+
+        if (name) {
+            // Load existing agent data
+            fetch('/api/agents').then(r => r.json()).then(data => {
+                const agent = (data.agents || []).find(a => a.name === name);
+                if (agent) {
+                    document.getElementById('agent-name-input').value = agent.name || '';
+                    document.getElementById('agent-prompt-input').value = agent.prompt || '';
+                    document.getElementById('agent-model-select').value = agent.model || '';
+                    document.getElementById('agent-temp-input').value = agent.temperature ?? 0.7;
+                    document.getElementById('agent-temp-display').textContent = agent.temperature ?? 0.7;
+                    document.getElementById('agent-maxtokens-input').value = agent.max_tokens || 4096;
+                }
+            });
+        }
+        document.getElementById('agent-modal').style.display = 'flex';
+    }
+
+    function closeAgentModal() {
+        document.getElementById('agent-modal').style.display = 'none';
+        editingAgentName = null;
+    }
+
+    async function saveAgentFromModal() {
+        const name = document.getElementById('agent-name-input').value.trim();
+        const prompt = document.getElementById('agent-prompt-input').value.trim();
+        if (!name || !prompt) { alert('名称和提示词不能为空'); return; }
+        const data = {
+            name,
+            prompt,
+            model: document.getElementById('agent-model-select').value,
+            temperature: parseFloat(document.getElementById('agent-temp-input').value) || 0.7,
+            max_tokens: parseInt(document.getElementById('agent-maxtokens-input').value) || 4096,
+        };
+        const originalName = document.getElementById('agent-edit-original-name').value;
+        try {
+            let res;
+            if (originalName) {
+                res = await fetch(`/api/agents/${encodeURIComponent(originalName)}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+            } else {
+                res = await fetch('/api/agents', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+            }
+            if (res.ok) {
+                closeAgentModal();
+                await loadAgents();
+            } else {
+                const err = await res.json();
+                alert('保存失败: ' + (err.detail || '未知错误'));
+            }
+        } catch (e) {
+            alert('网络错误');
+        }
+    }
+
+    // ==========================================
+    // AI Model Designer
+    // ==========================================
+    let aiDesignResult = null;
+
+    function openAIDesignModal() {
+        aiDesignResult = null;
+        document.getElementById('ai-design-requirements').value = '';
+        document.getElementById('ai-design-result').style.display = 'none';
+        document.getElementById('ai-design-progress').style.display = 'none';
+        document.getElementById('ai-design-submit').style.display = '';
+        document.getElementById('ai-design-apply').style.display = 'none';
+        // Populate agent selector from loaded agents
+        const sel = document.getElementById('ai-design-agent');
+        if (sel) {
+            sel.innerHTML = '<option value="default">默认智能体</option>';
+            sessions.forEach(s => {}); // not used here
+            // Load from /api/agents
+            fetch('/api/agents').then(r => r.json()).then(data => {
+                (data.agents || []).forEach(a => {
+                    const opt = document.createElement('option');
+                    opt.value = a.name;
+                    opt.textContent = a.name;
+                    sel.appendChild(opt);
+                });
+            });
+        }
+        document.getElementById('ai-design-modal').style.display = 'flex';
+    }
+
+    function closeAIDesignModal() {
+        document.getElementById('ai-design-modal').style.display = 'none';
+    }
+
+    let aiDesignAbort = null;
+
+    async function submitAIDesign() {
+        const agent = document.getElementById('ai-design-agent').value;
+        const requirements = document.getElementById('ai-design-requirements').value.trim();
+        if (!requirements) { alert('请输入需求描述'); return; }
+
+        document.getElementById('ai-design-submit').style.display = 'none';
+        document.getElementById('ai-design-cancel').textContent = '取消';
+        document.getElementById('ai-design-progress').style.display = '';
+        document.getElementById('ai-design-result').style.display = 'none';
+
+        const statusEl = document.getElementById('ai-design-status');
+        const statusMsgs = [
+            '正在连接 AI 模型...',
+            'AI 正在分析需求...',
+            'AI 正在设计模型架构...',
+            '即将完成，请稍候...',
+        ];
+        let msgIdx = 0;
+        statusEl.textContent = statusMsgs[0];
+        const statusTimer = setInterval(() => {
+            msgIdx = Math.min(msgIdx + 1, statusMsgs.length - 1);
+            statusEl.textContent = statusMsgs[msgIdx];
+        }, 8000);
+
+        aiDesignAbort = new AbortController();
+        const timeout = setTimeout(() => aiDesignAbort.abort(), 120000);
+
+        try {
+            const res = await fetch('/api/agent-design', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ agent_name: agent, requirements }),
+                signal: aiDesignAbort.signal
+            });
+            if (!res.ok) {
+                const err = await res.json();
+                throw new Error(err.detail || '设计失败');
+            }
+            const data = await res.json();
+            const reply = data.response || '';
+
+            clearInterval(statusTimer);
+            clearTimeout(timeout);
+
+            // Try to extract JSON from the response
+            let jsonStr = reply;
+            // Strip markdown code blocks
+            const jsonMatch = reply.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch) jsonStr = jsonMatch[1];
+            // Try to find {...} if the response has extra text
+            const braceMatch = jsonStr.match(/\{[\s\S]*\}/);
+            if (braceMatch) jsonStr = braceMatch[0];
+
+            try {
+                aiDesignResult = JSON.parse(jsonStr);
+            } catch (e) {
+                // Show raw text if JSON parsing fails
+                aiDesignResult = null;
+                document.getElementById('ai-design-result-json').textContent = reply;
+                document.getElementById('ai-design-result').style.display = '';
+                statusEl.textContent = '⚠️ 返回格式异常，请手动查看原始输出';
+                document.getElementById('ai-design-apply').style.display = 'none';
+                document.getElementById('ai-design-cancel').textContent = '关闭';
+                return;
+            }
+
+            document.getElementById('ai-design-result-json').textContent = JSON.stringify(aiDesignResult, null, 2);
+            document.getElementById('ai-design-result').style.display = '';
+            document.getElementById('ai-design-progress').style.display = 'none';
+            statusEl.textContent = '✅ 设计完成';
+            document.getElementById('ai-design-apply').style.display = '';
+            document.getElementById('ai-design-cancel').textContent = '关闭';
+        } catch (e) {
+            clearInterval(statusTimer);
+            clearTimeout(timeout);
+            document.getElementById('ai-design-progress').style.display = 'none';
+            if (e.name === 'AbortError') {
+                statusEl.textContent = '⏱️ 请求超时，请重试或简化需求描述';
+            } else {
+                statusEl.textContent = '❌ ' + e.message;
+            }
+            document.getElementById('ai-design-submit').style.display = '';
+            document.getElementById('ai-design-apply').style.display = 'none';
+            document.getElementById('ai-design-cancel').textContent = '关闭';
+        }
+    }
+
+    function applyAIDesignToForm() {
+        if (!aiDesignResult) return;
+        const arch = aiDesignResult.architecture;
+        const params = aiDesignResult.params || {};
+
+        // Set architecture
+        if (arch) {
+            currentSelectedArch = arch;
+            document.querySelectorAll('.arch-option').forEach(btn => {
+                btn.classList.toggle('selected', btn.dataset.arch === arch);
+            });
+        }
+
+        // Fill form fields (template mode fields)
+        const fieldMap = {
+            'num_layers': 'hp-num-layers',
+            'hidden_dim': 'hp-hidden-size',
+            'num_attn_heads': 'hp-num-heads',
+            'intermediate_dim': 'hp-intermediate',
+            'vocab_size': 'hp-vocab-size',
+            'max_seq_len': 'hp-max-seq',
+            'dropout': 'hp-attn-dropout',
+            'head_dim': 'hp-head-dim',
+            'rope_theta': 'hp-rope-theta',
+            'init_range': 'hp-init-range',
+        };
+        for (const [key, id] of Object.entries(fieldMap)) {
+            const el = document.getElementById(id);
+            if (el && params[key] !== undefined) el.value = params[key];
+        }
+
+        // Select dropdowns
+        const selectMap = {
+            'attn_type': 'hp-attention-type',
+            'norm_position': 'hp-norm-position',
+            'norm_type': 'hp-norm-type',
+            'pos_encoding': 'hp-pos-encoding',
+            'activation': 'hp-activation',
+        };
+        for (const [key, id] of Object.entries(selectMap)) {
+            const el = document.getElementById(id);
+            if (el && params[key]) el.value = params[key];
+        }
+
+        // Trigger form update — arch visibility, viz, and estimation
+        if (typeof updateArchFieldVisibility === 'function') updateArchFieldVisibility();
+        if (typeof renderArchitectureViz === 'function') renderArchitectureViz();
+        if (typeof estimateModel === 'function') estimateModel();
+
+        closeAIDesignModal();
     }
 
     // ==========================================
@@ -1866,10 +2324,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme) htmlElement.setAttribute('data-theme', savedTheme);
 
-    document.getElementById('new-chat-btn').addEventListener('click', () => {
+    document.getElementById('new-chat-btn').addEventListener('click', async () => {
         switchView('chat');
-        chatContainer.innerHTML = '';
-        appendMessage('*控制台*', 'system');
+        await createSession();
+        // Reconnect WebSocket with new session_id
+        ws.close();
+        connectWebSocket();
     });
 
     // ==========================================
@@ -2989,6 +3449,14 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('layer-preset-gpt')?.addEventListener('click', () => applyComponentPreset('gpt'));
         document.getElementById('layer-preset-llama')?.addEventListener('click', () => applyComponentPreset('llama'));
         document.getElementById('layer-preset-clear')?.addEventListener('click', () => { componentLayers = []; renderLayerEditor(); });
+        document.getElementById('ai-design-btn')?.addEventListener('click', openAIDesignModal);
+        document.getElementById('ai-design-modal-close')?.addEventListener('click', closeAIDesignModal);
+        document.getElementById('ai-design-cancel')?.addEventListener('click', closeAIDesignModal);
+        document.getElementById('ai-design-submit')?.addEventListener('click', submitAIDesign);
+        document.getElementById('ai-design-apply')?.addEventListener('click', applyAIDesignToForm);
+        document.getElementById('ai-design-modal')?.addEventListener('click', (e) => {
+            if (e.target === e.currentTarget) closeAIDesignModal();
+        });
         document.getElementById('estimate-model-btn')?.addEventListener('click', estimateModel);
         document.getElementById('gen-code-btn')?.addEventListener('click', generateCode);
         document.getElementById('export-model-btn')?.addEventListener('click', exportModelPackage);
@@ -4493,6 +4961,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initLlamaListeners();
     fetchInitialData();
     connectWebSocket();
+    loadAgents();  // populate agent selector in header
     updateInputState();
     updateTaskBadge();
     refreshLlamaStatus();
