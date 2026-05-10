@@ -37,13 +37,14 @@ class PluginInstance:
     """Returned by init_plugin()."""
     def __init__(self, name: str = "", router=None, static_dir: str = None,
                  on_load: Callable = None, on_unload: Callable = None,
-                 state: dict = None):
+                 state: dict = None, router_prefix: str = None):
         self.name = name
         self.router = router
         self.static_dir = static_dir
         self.on_load = on_load
         self.on_unload = on_unload
         self.state = state or {}
+        self.router_prefix = router_prefix
 
     def __repr__(self):
         return f"PluginInstance({self.name})"
