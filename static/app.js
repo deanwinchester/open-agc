@@ -36,7 +36,7 @@ async function loadPlugins() {
 
 function renderPluginMenu(plugin) {
     const menu = plugin.menu;
-    const sidebar = document.querySelector('.sidebar-nav');
+    const sidebar = document.querySelector('.sidebar-content');
     if (!sidebar) return;
     // Check if section already exists
     let section = sidebar.querySelector(`[data-plugin="${plugin.name}"]`);
@@ -45,16 +45,23 @@ function renderPluginMenu(plugin) {
         section = document.createElement('div');
         section.className = 'sidebar-section';
         section.dataset.plugin = plugin.name;
-        section.innerHTML = `<div class="sidebar-section-header" data-section="${menu.section}">
-            <span>${menu.icon || '📦'} ${label}</span>
-            <span class="sidebar-arrow">▼</span>
-        </div><div class="sidebar-section-body"></div>`;
+        section.innerHTML = `<div class="sidebar-section-header collapsible collapsed" data-section="${menu.section}">
+            <div class="section-icon-title">
+                <span class="section-toggle-icon">▶</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;">
+                    <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+                    <path d="M2 17l10 5 10-5"></path>
+                    <path d="M2 12l10 5 10-5"></path>
+                </svg>
+                <span>${label}</span>
+            </div>
+        </div><div class="sidebar-subnav" style="display:none;"></div>`;
         sidebar.appendChild(section);
     }
-    const body = section.querySelector('.sidebar-section-body');
+    const body = section.querySelector('.sidebar-subnav');
     if (!body || !menu.views) return;
     body.innerHTML = menu.views.map(v =>
-        `<div class="sidebar-item" data-view="${v.id}">${v.label}</div>`
+        `<nav class="nav-item" data-view="${v.id}"><span class="nav-dot"></span><span>${v.label}</span></nav>`
     ).join('');
 }
 
@@ -272,12 +279,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================
     // Navigation System
     // ==========================================
-    const navItems = document.querySelectorAll('.nav-item[data-view]');
     const views = document.querySelectorAll('.view');
 
     function switchView(viewId) {
         views.forEach(v => v.classList.remove('active'));
-        navItems.forEach(n => n.classList.remove('active'));
+        document.querySelectorAll('.nav-item[data-view]').forEach(n => n.classList.remove('active'));
 
         const targetView = document.getElementById('view-' + viewId);
         const targetNav = document.querySelector(`.nav-item[data-view="${viewId}"]`);
@@ -301,10 +307,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (viewId === 'training-benchmark') { loadBenchmarkView(); checkAndOfferTrainingInstall(); }
     }
 
-    navItems.forEach(item => {
-        item.addEventListener('click', () => {
-            switchView(item.dataset.view);
-        });
+    // Event delegation for sidebar nav items (handles static + dynamically added)
+    document.querySelector('.sidebar-content')?.addEventListener('click', (e) => {
+        const navItem = e.target.closest('.nav-item[data-view]');
+        if (navItem) {
+            switchView(navItem.dataset.view);
+        }
     });
 
     // ==========================================
@@ -882,7 +890,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================
     // UI Helpers
     // ==========================================
-    function appendMessage(content, role) {
+    function appendMessage(content, role, images) {
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${role}`;
 
@@ -908,9 +916,19 @@ document.addEventListener('DOMContentLoaded', () => {
             formattedContent = marked.parse(content);
         }
 
+        // Render images inline if provided
+        let imagesHtml = '';
+        if (images && images.length > 0) {
+            imagesHtml = '<div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px;">' +
+                images.map(url =>
+                    `<img src="${url}" style="max-width:200px; max-height:200px; border-radius:8px; border:1px solid var(--border-color); object-fit:contain;">`
+                ).join('') +
+                '</div>';
+        }
+
         messageDiv.innerHTML = `
             <div class="avatar">${avatarSvg}</div>
-            <div class="content">${formattedContent}</div>
+            <div class="content">${imagesHtml}${formattedContent}</div>
         `;
 
         chatContainer.appendChild(messageDiv);
@@ -1031,10 +1049,11 @@ document.addEventListener('DOMContentLoaded', () => {
     function handleSend() {
         const text = messageInput.value.trim();
         if ((!text && pendingImages.length === 0) || !isConnected || isAgentThinking) return;
-        appendMessage(text || '[图片]', 'user');
+        const msgImages = [...pendingImages];
+        appendMessage(text || '[图片]', 'user', msgImages);
         const msg = { query: text || '请分析这张图片' };
-        if (pendingImages.length > 0) {
-            msg.images = [...pendingImages];
+        if (msgImages.length > 0) {
+            msg.images = msgImages;
             pendingImages = [];
             renderImagePreviews();
         }
@@ -2986,20 +3005,20 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('monitor-abort-btn')?.addEventListener('click', () => trainingControl('abort'));
         document.getElementById('monitor-abort-save-btn')?.addEventListener('click', () => trainingControl('abort_save'));
 
-        // Collapsible sidebar section toggle
-        document.querySelectorAll('.sidebar-section-header.collapsible').forEach(header => {
-            header.addEventListener('click', () => {
-                const section = header.closest('.sidebar-section');
-                const subnav = section?.querySelector('.sidebar-subnav');
-                const isCollapsed = header.classList.contains('collapsed');
-                if (isCollapsed) {
-                    header.classList.remove('collapsed');
-                    if (subnav) subnav.style.display = '';
-                } else {
-                    header.classList.add('collapsed');
-                    if (subnav) subnav.style.display = 'none';
-                }
-            });
+        // Collapsible sidebar section toggle (event delegation for static + dynamic)
+        document.querySelector('.sidebar-content')?.addEventListener('click', (e) => {
+            const header = e.target.closest('.sidebar-section-header.collapsible');
+            if (!header) return;
+            const section = header.closest('.sidebar-section');
+            const subnav = section?.querySelector('.sidebar-subnav');
+            const isCollapsed = header.classList.contains('collapsed');
+            if (isCollapsed) {
+                header.classList.remove('collapsed');
+                if (subnav) subnav.style.display = '';
+            } else {
+                header.classList.add('collapsed');
+                if (subnav) subnav.style.display = 'none';
+            }
         });
 
         // Auto-install training deps if not available

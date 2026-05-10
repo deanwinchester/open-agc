@@ -29,7 +29,9 @@
       "Bash(python *)",
       "Bash(curl *)",
       "Bash(rm core/__pycache__/training_engine.cpython-*.pyc)",
-      "Bash(rm plugins/open-agc-train/__pycache__/engine.cpython-*.pyc)"
+      "Bash(rm plugins/open-agc-train/__pycache__/engine.cpython-*.pyc)",
+      "Bash(grep -rn \"datasets/upload\\\\|datasets/from-hf\\\\|datasets/create\\\\|datasets/{id}$\" /Users/lhh/workspace/open-agc/api/ /Users/lhh/workspace/open-agc/plugins/ --include=\"*.py\")",
+      "Bash(grep *)"
     ]
   }
 }

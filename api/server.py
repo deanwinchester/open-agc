@@ -89,8 +89,9 @@ def _mount_plugins(app, plugins):
     for p in plugins:
         inst = p.instance
         if inst and inst.router:
-            app.include_router(inst.router, prefix=f"/api/plugin/{p.name}")
-            print(f"[Server] Mounted plugin router: {p.name}")
+            prefix = inst.router_prefix or f"/api/plugin/{p.name}"
+            app.include_router(inst.router, prefix=prefix)
+            print(f"[Server] Mounted plugin router: {p.name} -> {prefix}")
         if inst and inst.static_dir and os.path.isdir(inst.static_dir):
             from fastapi.staticfiles import StaticFiles
             app.mount(f"/static/plugins/{p.name}", StaticFiles(directory=inst.static_dir), name=f"plugin_{p.name}_static")
