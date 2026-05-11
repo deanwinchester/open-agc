@@ -39,7 +39,13 @@
       "Bash(venv/bin/python *)",
       "Bash(venv/bin/pip show *)",
       "Bash(/Users/lhh/workspace/open-agc/.venv/bin/pip install *)",
-      "Bash(/Users/lhh/workspace/open-agc/.venv/bin/python *)"
+      "Bash(/Users/lhh/workspace/open-agc/.venv/bin/python *)",
+      "Bash(npm --version)",
+      "Bash(npm init *)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(npx vite *)",
+      "Bash(pip list *)"
     ]
   }
 }

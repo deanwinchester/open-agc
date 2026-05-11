@@ -49,3 +49,13 @@ models/
 
 # Sandbox
 workspace/
+
+# Node.js / Vite build (optional frontend optimization)
+node_modules/
+package-lock.json
+
+# IDE - VSCode
+.vscode/
+*.sw?
+*.pyc
+__pycache__/
