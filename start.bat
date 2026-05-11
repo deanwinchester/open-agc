@@ -24,6 +24,16 @@ if exist "requirements.txt" (
     call python -m pip install -r requirements.txt
 )
 
+:: Optional: build & minify frontend with Vite (Node.js required)
+where npm >nul 2>nul
+if not errorlevel 1 (
+    if exist "package.json" (
+        echo Building frontend assets...
+        call npm install --silent 2>nul
+        call npm run build --silent 2>nul
+    )
+)
+
 :: Start the server
 if "%PORT%"=="" (
     :: Default to 8000, if occupied (approximated check via python), find a free one

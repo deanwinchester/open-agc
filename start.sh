@@ -29,6 +29,13 @@ if [ -f "requirements.txt" ]; then
     pip install -r requirements.txt
 fi
 
+# Optional: build & minify frontend with Vite (Node.js required)
+if command -v npm &> /dev/null && [ -f "package.json" ]; then
+    echo "Building frontend assets..."
+    npm install --silent 2>/dev/null
+    npm run build --silent 2>/dev/null
+fi
+
 # Start the server
 if [ -z "$PORT" ]; then
     # Default to 8000, if occupied, find a free one
