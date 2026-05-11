@@ -45,7 +45,9 @@
       "Bash(npm install *)",
       "Bash(npm run *)",
       "Bash(npx vite *)",
-      "Bash(pip list *)"
+      "Bash(pip list *)",
+      "Bash(git *)",
+      "Bash(/d/GitHub/open-agc/static/dist/open-agc.min.js)"
     ]
   }
 }

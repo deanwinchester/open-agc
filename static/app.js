@@ -169,6 +169,14 @@ function initApp() {
 
     state.ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
+      // Dispatch to plugin listeners first (they can handle training, benchmark, etc.)
+      var listeners = window._pluginWsListeners || [];
+      if (listeners.length && (data.type || '').indexOf('training') === 0) {
+        console.debug('[app] dispatching', data.type, 'to', listeners.length, 'listener(s)');
+      }
+      for (var i = 0; i < listeners.length; i++) {
+        try { listeners[i](data); } catch(e) { console.error('Plugin WS listener error:', e); }
+      }
       handleServerMessage(data);
     };
 
@@ -196,10 +204,25 @@ function initApp() {
 
   window.connectWebSocket = connectWebSocket;
 
+  // Generic plugin message type registry — plugins register their
+  // WebSocket message types here so the main app won't auto-switch
+  // to chat view when those messages arrive.
+  window._pluginWsTypes = new Set();
+  window.registerWsMessageType = function(type) {
+    if (type) window._pluginWsTypes.add(type);
+  };
+  // Plugin WebSocket message listener registry
+  window._pluginWsListeners = [];
+  window.addWsListener = function(fn) {
+    window._pluginWsListeners.push(fn);
+  };
+
   function handleServerMessage(data) {
     const isBackground = data.background === true;
 
-    if (!isBackground && data.type !== 'llamacpp_download'
+    if (!isBackground
+      && !window._pluginWsTypes.has(data.type)
+      && data.type !== 'llamacpp_download'
       && document.querySelector('.view.active')?.id !== 'view-chat') {
       switchView('chat');
     }

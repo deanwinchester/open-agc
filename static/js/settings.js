@@ -526,6 +526,7 @@ export function initAIDesignListeners() {
   document.getElementById('ai-design-modal')?.addEventListener('click', (e) => {
     if (e.target === e.currentTarget) closeAIDesignModal();
   });
+  document.getElementById('ai-design-modal-close')?.addEventListener('click', closeAIDesignModal);
   document.getElementById('ai-design-cancel')?.addEventListener('click', closeAIDesignModal);
 }
 

@@ -81,9 +81,16 @@ async def _capture_event_loop():
 # Initialize Database
 DB_PATH = get_data_path("chat_history.db")
 
+# Lazy broadcast wrapper: _broadcast_to_websockets is defined later in this file
+# (at line ~2314), so we resolve it dynamically via globals().
+def _plugin_broadcast(data):
+    f = globals().get('_broadcast_to_websockets')
+    if f:
+        f(data)
+
 # ── Plugin Discovery ──
 _plugins_dir = os.path.abspath(os.path.join(os.path.dirname(DB_PATH), "..", "plugins"))
-_plugins = discover_plugins(plugins_dir=_plugins_dir, broadcast_fn=None, server_config=load_config() if "load_config" in dir() else {})
+_plugins = discover_plugins(plugins_dir=_plugins_dir, broadcast_fn=_plugin_broadcast, server_config=load_config() if "load_config" in dir() else {})
 
 def _mount_plugins(app, plugins):
     for p in plugins:
