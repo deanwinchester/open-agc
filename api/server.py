@@ -2100,6 +2100,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 while True:
                     try:
                         event = progress_queue.get_nowait()
+                        event["session_id"] = ws_session_id
                         await _safe_send({
                             "type": "progress",
                             **event
@@ -2110,6 +2111,7 @@ async def websocket_endpoint(websocket: WebSocket):
             while not progress_queue.empty():
                 try:
                     event = progress_queue.get_nowait()
+                    event["session_id"] = ws_session_id
                     await _safe_send({
                         "type": "progress",
                         **event

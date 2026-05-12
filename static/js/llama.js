@@ -186,52 +186,79 @@ export async function loadDownloadHistory() {
 // ===================== Search Results Rendering =====================
 
 export function renderSearchResults(models, container, filesDiv) {
+  const source = document.getElementById('llama-source-select')?.value || 'huggingface';
   let html = '';
   models.forEach(m => {
     const dl = (m.downloads || 0).toLocaleString();
-    html += `
-      <div class="search-result-item" style="padding:0.5rem; border:1px solid var(--border-color);
-        border-radius:6px; margin-bottom:0.4rem; cursor:pointer; transition: background 0.2s;"
-        onmouseenter="this.style.background='var(--surface-hover)'"
-        onmouseleave="this.style.background=''"
-        data-repo="${m.repo_id}">
-        <div style="font-weight:600; font-size:0.9rem;">${m.repo_id}</div>
-        <div style="font-size:0.75rem; color:var(--text-secondary); margin-top:0.15rem;">
-          作者: ${m.author || '未知'} | ⬇ ${dl} | 👍 ${m.likes || 0}
-        </div>
-      </div>`;
+    html +=
+      '<div class="search-result-item" data-repo="' + m.repo_id + '"'
+      + ' style="border:1px solid var(--border-color);border-radius:6px;margin-bottom:0.4rem;overflow:hidden;">'
+      + '<div class="search-result-header"'
+      + ' style="padding:0.6rem;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">'
+      + '<div>'
+      + '<div style="font-weight:600;font-size:0.85rem;">' + m.repo_id + '</div>'
+      + '<div style="font-size:0.72rem;color:var(--text-secondary);margin-top:0.15rem;">'
+      + '作者: ' + (m.author || '未知') + ' | ⬇ ' + dl + ' | 👍 ' + (m.likes || 0)
+      + '</div></div>'
+      + '<span class="search-result-arrow" style="font-size:0.7rem;color:var(--text-secondary);">▶</span>'
+      + '</div>'
+      + '<div class="search-result-files" style="display:none;border-top:1px solid var(--border-color);padding:0.5rem;"></div>'
+      + '</div>';
   });
   container.innerHTML = html;
 
-  container.querySelectorAll('.search-result-item').forEach(item => {
-    item.addEventListener('click', async () => {
-      const repo = item.dataset.repo;
-      container.querySelectorAll('.search-result-item').forEach(el => {
+  container.querySelectorAll('.search-result-item').forEach(function(item) {
+    var header = item.querySelector('.search-result-header');
+    header.addEventListener('click', async function() {
+      var filesEl = item.querySelector('.search-result-files');
+      var arrow = item.querySelector('.search-result-arrow');
+      var repo = item.dataset.repo;
+
+      // Collapse all other items
+      container.querySelectorAll('.search-result-files').forEach(function(f) {
+        if (f !== filesEl) { f.style.display = 'none'; f.innerHTML = ''; }
+      });
+      container.querySelectorAll('.search-result-arrow').forEach(function(a) {
+        if (a !== arrow) a.textContent = '▶';
+      });
+      container.querySelectorAll('.search-result-item').forEach(function(el) {
         el.style.borderColor = 'var(--border-color)';
       });
-      item.style.borderColor = 'var(--theme-color)';
 
-      filesDiv.innerHTML = '<span class="field-hint">加载文件列表中...</span>';
+      // Toggle this item
+      if (filesEl.style.display !== 'none' && filesEl.innerHTML) {
+        filesEl.style.display = 'none';
+        arrow.textContent = '▶';
+        return;
+      }
+      filesEl.style.display = '';
+      arrow.textContent = '▼';
+      item.style.borderColor = 'var(--theme-color)';
+      filesEl.innerHTML = '<span style="font-size:0.75rem;color:var(--text-secondary);">加载文件列表中...</span>';
+
       try {
-        const res = await fetch('/api/llamacpp/list-files', {
+        var res = await fetch('/api/llamacpp/model-files', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ repo })
+          body: JSON.stringify({ repo_id: repo, source: source })
         });
-        const data = await res.json();
+        var data = await res.json();
         if (data.status !== 'success' || !data.files.length) {
-          filesDiv.innerHTML = '<span class="field-hint">未找到 GGUF 文件</span>';
+          filesEl.innerHTML = '<span style="font-size:0.75rem;color:var(--text-secondary);">未找到 GGUF 文件</span>';
           return;
         }
-        filesDiv.innerHTML = data.files.map(f => {
-          const gb = (f.size / 1e9).toFixed(2);
-          return `<div class="download-action-btn" style="display:inline-flex; margin:0.2rem; padding:0.25rem 0.6rem; font-size:0.75rem;"
-            onclick="window.startModelDownload && window.startModelDownload('${repo}', '${f.filename}')">
-            📥 ${f.filename} (${gb}GB)
-          </div>`;
+        filesEl.innerHTML = data.files.map(function(f) {
+          var size = f.size || (f.size_bytes ? (f.size_bytes > 1e9 ? (f.size_bytes/1e9).toFixed(2)+' GB' : (f.size_bytes/1e6).toFixed(1)+' MB') : '?');
+          return '<div style="padding:0.35rem 0.5rem;font-size:0.75rem;border:1px solid var(--border-color);'
+            + 'border-radius:4px;margin-bottom:0.25rem;display:flex;justify-content:space-between;align-items:center;">'
+            + '<span style="word-break:break-all;flex:1;">' + f.filename + '</span>'
+            + '<span style="color:var(--text-secondary);margin:0 0.5rem;white-space:nowrap;font-size:0.7rem;">' + size + '</span>'
+            + '<button style="padding:0.15rem 0.4rem;font-size:0.7rem;border:1px solid var(--theme-color);background:var(--theme-color);color:#fff;border-radius:3px;cursor:pointer;white-space:nowrap;"'
+            + ' onclick="event.stopPropagation();window.startModelDownload&&window.startModelDownload(\'' + repo + '\',\'' + f.filename + '\',\'' + source + '\')">下载</button>'
+            + '</div>';
         }).join('');
       } catch (e) {
-        filesDiv.innerHTML = '<span class="field-hint">加载失败</span>';
+        filesEl.innerHTML = '<span style="font-size:0.75rem;color:var(--error);">加载失败</span>';
       }
     });
   });
