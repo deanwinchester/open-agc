@@ -153,6 +153,7 @@ function initApp() {
   // =============================================
   let wsReconnectAttempt = 0;
   let wsReconnectTimer = null;
+  window._wsReconnectTimer = null;  // exposed so sessions.js can clear it
 
   function connectWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -162,6 +163,8 @@ function initApp() {
     state.ws.onopen = () => {
       state.isConnected = true;
       wsReconnectAttempt = 0;
+      wsReconnectTimer = null;
+      window._wsReconnectTimer = null;
       updateInputState();
       refreshLlamaStatus();
       loadDownloadHistory();
@@ -182,9 +185,16 @@ function initApp() {
 
     state.ws.onclose = () => {
       state.isConnected = false;
+      // Skip reconnect if this was an intentional close (e.g. session switch)
+      if (window._intentionalClose) {
+        window._intentionalClose = false;
+        updateInputState();
+        return;
+      }
       const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempt), 30000);
       wsReconnectAttempt++;
       wsReconnectTimer = setTimeout(connectWebSocket, delay);
+      window._wsReconnectTimer = wsReconnectTimer;
       updateInputState();
     };
 
@@ -219,6 +229,19 @@ function initApp() {
 
   function handleServerMessage(data) {
     const isBackground = data.background === true;
+    // Route progress/message/status events to the correct session
+    const evtSession = data.session_id != null ? data.session_id : (data.task_session_id != null ? data.task_session_id : null);
+    const isForCurrentSession = evtSession == null || evtSession === state.currentSessionId;
+    // Cache off-session messages in the session chat cache
+    if (evtSession != null && !isForCurrentSession && (data.type === 'message' || data.type === 'progress')) {
+      window._sessionChatCache = window._sessionChatCache || {};
+      // Store raw events for the session — will be replayed on switch
+      if (!window._sessionChatCache['_evt_' + evtSession]) window._sessionChatCache['_evt_' + evtSession] = [];
+      window._sessionChatCache['_evt_' + evtSession].push({type: data.type, data: data});
+      // Update task badge to show cross-session activity
+      if (data.type === 'progress') updateTaskBadge();
+      return;
+    }
 
     if (!isBackground
       && !window._pluginWsTypes.has(data.type)
@@ -228,16 +251,16 @@ function initApp() {
     }
 
     if (data.type === 'status') {
-      if (!isBackground) showThinkingStatus(t('agent_thinking'));
+      if (!isBackground && isForCurrentSession) showThinkingStatus(t('agent_thinking'));
     } else if (data.type === 'progress') {
-      if (data.task_id && !isBackground) state.currentTaskId = data.task_id;
-      if (!isBackground) handleProgressEvent(data);
+      if (data.task_id && !isBackground && isForCurrentSession) state.currentTaskId = data.task_id;
+      if (!isBackground && isForCurrentSession) handleProgressEvent(data);
       if (isBackground) updateTaskBadge();
     } else if (data.type === 'message') {
-      if (!isBackground) { hideThinkingStatus(); hideProgressContainer(); }
+      if (!isBackground && isForCurrentSession) { hideThinkingStatus(); hideProgressContainer(); }
       appendMessage(data.content, data.role || 'agent');
-      if (!isBackground && state.wasVoiceQuery) { speakText(data.content); state.wasVoiceQuery = false; }
-      if (!isBackground) { state.isAgentThinking = false; state.currentTaskId = null; updateInputState(); }
+      if (!isBackground && isForCurrentSession && state.wasVoiceQuery) { speakText(data.content); state.wasVoiceQuery = false; }
+      if (!isBackground && isForCurrentSession) { state.isAgentThinking = false; state.currentTaskId = null; updateInputState(); }
       updateTaskBadge();
     } else if (data.type === 'error') {
       if (!isBackground) {
@@ -281,6 +304,7 @@ function initApp() {
     return progressContainer;
   }
 
+  window.handleProgressEvent = handleProgressEvent;
   function handleProgressEvent(data) {
     const event = data.event;
 
@@ -700,12 +724,13 @@ function initApp() {
   // =============================================
   // Model Download (called from llama search results)
   // =============================================
-  window.startModelDownload = async function(repo, filename) {
+  window.startModelDownload = async function(repo, filename, source) {
+    source = source || 'huggingface';
     try {
-      const res = await fetch('/api/llamacpp/download-model', {
+      const res = await fetch('/api/llamacpp/download-from-hf', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repo, filename })
+        body: JSON.stringify({ repo_id: repo, filename: filename, source: source })
       });
       const data = await res.json();
       if (data.status === 'started' || data.status === 'downloading') {

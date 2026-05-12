@@ -6,6 +6,8 @@ export function switchView(viewId) {
   const views = document.querySelectorAll('.view');
   views.forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-item[data-view]').forEach(n => n.classList.remove('active'));
+  // Clear session item highlight when switching views
+  document.querySelectorAll('.session-item.active').forEach(s => s.classList.remove('active'));
 
   const targetView = document.getElementById('view-' + viewId);
   const targetNav = document.querySelector(`.nav-item[data-view="${viewId}"]`);

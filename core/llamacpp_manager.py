@@ -212,7 +212,7 @@ class LlamaCppManager:
                         size_str = f"{size_bytes / 1024:.1f} KB"
                     else:
                         size_str = f"{size_bytes} B"
-                    files.append({"filename": fname, "size": size_str})
+                    files.append({"filename": fname, "size": size_str, "size_bytes": size_bytes})
             return files
         except Exception as e:
             print(f"[LlamaCPP] HF model files failed: {e}")
@@ -282,7 +282,7 @@ class LlamaCppManager:
                         size_str = f"{size_bytes / 1024:.1f} KB"
                     else:
                         size_str = f"{size_bytes} B"
-                    files.append({"filename": fname, "size": size_str})
+                    files.append({"filename": fname, "size": size_str, "size_bytes": size_bytes})
             return files
         except Exception as e:
             print(f"[LlamaCPP] ModelScope file listing failed: {e}")
