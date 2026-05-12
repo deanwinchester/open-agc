@@ -39,6 +39,12 @@ class SaveSkillTool(BaseTool):
         result = manager.import_skill(skill_filename, skill_content, force=True)
         
         if result["success"]:
+            # Rebuild the skill index so progressive retrieval can find it
+            try:
+                from core.skill_store import SkillStore
+                SkillStore().build_index()
+            except Exception as e:
+                print(f"[SaveSkill] Index rebuild failed: {e}")
             return f"技能 {skill_filename} 保存成功！已载入系统的技能图鉴中。"
         else:
             return f"技能保存失败：{result['message']}"
