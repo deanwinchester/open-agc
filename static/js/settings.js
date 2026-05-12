@@ -240,6 +240,9 @@ async function saveSettings() {
 
 // ===================== Skills =====================
 
+let _allSkills = []; // cache for client-side search
+let _skillsInitDone = false;
+
 export async function loadSkillsConfig() {
   if (state.skillsLoaded) return;
   const container = document.getElementById('skills-config-container');
@@ -249,40 +252,114 @@ export async function loadSkillsConfig() {
   try {
     const res = await fetch('/api/skills');
     const data = await res.json();
-    container.innerHTML = '';
-    if (!data.skills || data.skills.length === 0) {
-      container.innerHTML = '<div class="empty-state"><p>暂无可管理的技能</p></div>';
-      return;
-    }
-    data.skills.forEach(s => {
-      const isChecked = s.enabled ? 'checked' : '';
-      const icon = s.type === 'md' ? '📄' : '🐍';
-      const displayName = s.name && s.name !== 'undefined' ? s.name : (s.filename || 'Undefined Skill');
-      const div = document.createElement('div');
-      div.className = 'skill-row';
-      div.innerHTML = `
-        <div class="skill-info">
-          <strong>${icon} ${displayName}</strong>
-          <small>${s.type === 'md' ? 'Markdown Prompt' : '大模型技能'}</small>
-        </div>
-        <div class="skill-actions">
-          <button class="btn-secondary btn-edit-skill" style="padding: 0.2rem 0.6rem; font-size: 0.85rem;" data-filename="${s.filename}">编辑</button>
-          <label class="switch">
-            <input type="checkbox" class="skill-toggle" data-name="${s.filename || s.name}" ${isChecked}>
-            <span class="slider"></span>
-          </label>
-        </div>
-      `;
-      container.appendChild(div);
-    });
-    container.querySelectorAll('.btn-edit-skill').forEach(btn => {
-      btn.addEventListener('click', () => openEditSkillModal(btn.dataset.filename));
-    });
+    _allSkills = data.skills || [];
+    renderSkills(_allSkills);
     state.skillsLoaded = true;
+
+    // One-time init for search and modal listeners
+    if (!_skillsInitDone) {
+      initSkillsUI();
+      _skillsInitDone = true;
+    }
   } catch (e) {
     container.innerHTML = '<div class="empty-state"><p style="color:var(--error)">加载技能列表失败</p></div>';
   }
 }
+
+function initSkillsUI() {
+  const searchInput = document.getElementById('skills-search-input');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      const q = e.target.value.toLowerCase().trim();
+      if (!q) { renderSkills(_allSkills); return; }
+      const filtered = _allSkills.filter(s => {
+        const name = (s.name || s.filename || '').toLowerCase();
+        return name.includes(q);
+      });
+      renderSkills(filtered);
+    });
+  }
+  document.getElementById('edit-skill-close')?.addEventListener('click', closeEditSkillModal);
+  document.getElementById('edit-skill-close2')?.addEventListener('click', closeEditSkillModal);
+  document.getElementById('edit-skill-save')?.addEventListener('click', saveSkillEdit);
+  document.getElementById('delete-skill-cancel')?.addEventListener('click', closeDeleteSkillModal);
+  document.getElementById('delete-skill-confirm')?.addEventListener('click', confirmDeleteSkill);
+}
+
+function renderSkills(skills) {
+  const container = document.getElementById('skills-config-container');
+  if (!container) return;
+  container.innerHTML = '';
+
+  // Update count
+  const countEl = document.getElementById('skills-count');
+  if (countEl) {
+    const total = _allSkills.length;
+    const shown = skills.length;
+    countEl.textContent = shown < total ? `显示 ${shown}/${total} 个技能` : `共 ${total} 个技能`;
+  }
+
+  if (!skills || skills.length === 0) {
+    container.innerHTML = '<div class="empty-state"><p>暂无可管理的技能</p></div>';
+    return;
+  }
+
+  skills.forEach(s => {
+    const isChecked = s.enabled ? 'checked' : '';
+    const icon = s.type === 'md' ? '📄' : '🐍';
+    const displayName = s.name && s.name !== 'undefined' ? s.name : (s.filename || 'Undefined Skill');
+    const sizeStr = s.size ? formatSize(s.size) : '';
+    const metaParts = [];
+    if (s.type === 'md') metaParts.push('Markdown');
+    if (s.type === 'py') metaParts.push('Python');
+    if (sizeStr) metaParts.push(sizeStr);
+    if (s.lines) metaParts.push(`${s.lines} 行`);
+    if (s.usage_count != null && s.usage_count > 0) metaParts.push(`使用 ${s.usage_count} 次`);
+    if (s.success_rate != null && s.usage_count > 0) metaParts.push(`成功率 ${(s.success_rate * 100).toFixed(0)}%`);
+    const metaStr = metaParts.join(' · ');
+
+    const div = document.createElement('div');
+    div.className = 'skill-row';
+    div.dataset.filename = s.filename;
+    div.innerHTML = `
+      <div class="skill-info">
+        <strong>${icon} ${displayName}</strong>
+        <small>${metaStr || (s.type === 'md' ? 'Markdown Prompt' : '大模型技能')}</small>
+      </div>
+      <div class="skill-actions">
+        <button class="btn-text btn-delete-skill" title="删除技能" data-filename="${s.filename}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          </svg>
+        </button>
+        <button class="btn-secondary btn-edit-skill" style="padding: 0.2rem 0.6rem; font-size: 0.85rem;" data-filename="${s.filename}">编辑</button>
+        <label class="switch">
+          <input type="checkbox" class="skill-toggle" data-name="${s.filename || s.name}" ${isChecked}>
+          <span class="slider"></span>
+        </label>
+      </div>
+    `;
+    container.appendChild(div);
+  });
+
+  // Event listeners
+  container.querySelectorAll('.btn-edit-skill').forEach(btn => {
+    btn.addEventListener('click', () => openEditSkillModal(btn.dataset.filename));
+  });
+  container.querySelectorAll('.btn-delete-skill').forEach(btn => {
+    btn.addEventListener('click', () => openDeleteSkillModal(btn.dataset.filename));
+  });
+}
+
+function formatSize(bytes) {
+  if (!bytes) return '';
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+// ---- Edit Skill ----
 
 function openEditSkillModal(filename) {
   if (!filename) return;
@@ -298,43 +375,82 @@ function openEditSkillModal(filename) {
     .catch(() => { editSkillContent.value = '读取网络错误。'; });
 }
 
-export function initSkillsModalListeners() {
-  document.getElementById('edit-skill-close')?.addEventListener('click', () => {
-    document.getElementById('edit-skill-modal').classList.remove('show');
-  });
-  document.getElementById('edit-skill-save')?.addEventListener('click', async () => {
-    const filename = document.getElementById('edit-skill-filename').textContent;
-    const content = document.getElementById('edit-skill-content').value;
-    const saveBtn = document.getElementById('edit-skill-save');
-    const ogText = saveBtn.textContent;
-    saveBtn.textContent = '保存中...';
-    saveBtn.disabled = true;
-    try {
-      const res = await fetch('/api/skills/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename, content, force: true })
-      });
-      const data = await res.json();
-      if (data.success) {
-        saveBtn.textContent = '✓ 已保存';
-        state.skillsLoaded = false;
-        setTimeout(() => {
-          document.getElementById('edit-skill-modal').classList.remove('show');
-          saveBtn.textContent = ogText;
-          saveBtn.disabled = false;
-        }, 1000);
-      } else {
-        alert('保存失败: ' + data.message);
+function closeEditSkillModal() {
+  document.getElementById('edit-skill-modal').classList.remove('show');
+}
+
+async function saveSkillEdit() {
+  const filename = document.getElementById('edit-skill-filename').textContent;
+  const content = document.getElementById('edit-skill-content').value;
+  const saveBtn = document.getElementById('edit-skill-save');
+  const ogText = saveBtn.textContent;
+  saveBtn.textContent = '保存中...';
+  saveBtn.disabled = true;
+  try {
+    const res = await fetch('/api/skills/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename, content, force: true })
+    });
+    const data = await res.json();
+    if (data.success) {
+      saveBtn.textContent = '✓ 已保存';
+      state.skillsLoaded = false;
+      setTimeout(() => {
+        document.getElementById('edit-skill-modal').classList.remove('show');
         saveBtn.textContent = ogText;
         saveBtn.disabled = false;
-      }
-    } catch (e) {
-      alert('保存时发生网络错误');
+        loadSkillsConfig(); // Refresh list
+      }, 800);
+    } else {
+      alert('保存失败: ' + data.message);
       saveBtn.textContent = ogText;
       saveBtn.disabled = false;
     }
-  });
+  } catch (e) {
+    alert('保存时发生网络错误');
+    saveBtn.textContent = ogText;
+    saveBtn.disabled = false;
+  }
+}
+
+// ---- Delete Skill ----
+
+let _deleteTargetFilename = null;
+
+function openDeleteSkillModal(filename) {
+  _deleteTargetFilename = filename;
+  document.getElementById('delete-skill-name').textContent = filename;
+  document.getElementById('delete-skill-modal').classList.add('show');
+}
+
+function closeDeleteSkillModal() {
+  _deleteTargetFilename = null;
+  document.getElementById('delete-skill-modal').classList.remove('show');
+}
+
+async function confirmDeleteSkill() {
+  const filename = _deleteTargetFilename;
+  if (!filename) return;
+  const confirmBtn = document.getElementById('delete-skill-confirm');
+  confirmBtn.textContent = '删除中...';
+  confirmBtn.disabled = true;
+  try {
+    const res = await fetch(`/api/skills/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) {
+      state.skillsLoaded = false;
+      closeDeleteSkillModal();
+      loadSkillsConfig(); // Refresh list
+    } else {
+      alert('删除失败: ' + (data.detail || '未知错误'));
+    }
+  } catch (e) {
+    alert('删除时发生网络错误');
+  } finally {
+    confirmBtn.textContent = '确认删除';
+    confirmBtn.disabled = false;
+  }
 }
 
 // ===================== Agents =====================

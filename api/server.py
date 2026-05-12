@@ -1391,6 +1391,12 @@ async def delete_skill(filename: str):
     from core.skill_manager import SkillManager
     manager = SkillManager()
     if manager.delete_skill(filename):
+        # Rebuild SkillStore index so deleted skill no longer appears in retrieval
+        try:
+            from core.skill_store import SkillStore
+            SkillStore().build_index()
+        except Exception as e:
+            print(f"[API] SkillStore index rebuild after deletion failed: {e}")
         return {"success": True, "message": f"Skill '{filename}' deleted."}
     raise HTTPException(status_code=404, detail="Skill not found")
 

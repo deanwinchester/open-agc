@@ -7,7 +7,7 @@ import { escapeHtml, showStatus, t, initI18n, formatTimeAgo, formatTime } from '
 import { switchView, initNavigation } from './js/navigation.js';
 import { loadPlugins, loadPluginManager, loadMarketplace } from './js/plugins.js';
 import { loadSessions, createSession, switchSession, deleteSession, renameSession } from './js/sessions.js';
-import { initSettingsListeners, loadSkillsConfig, loadAgents, openAIDesignModal, closeAIDesignModal, initAIDesignListeners, initSkillsModalListeners } from './js/settings.js';
+import { initSettingsListeners, loadSkillsConfig, loadAgents, openAIDesignModal, closeAIDesignModal, initAIDesignListeners } from './js/settings.js';
 import { initTaskFilters, initScheduleModal, loadTasks, updateTaskBadge } from './js/tasks.js';
 import { refreshLlamaStatus, loadDownloadHistory, initLlamaListeners, renderSearchResults } from './js/llama.js';
 
@@ -55,7 +55,6 @@ function initApp() {
   initNavigation();
   loadPlugins();
   initSettingsListeners();
-  initSkillsModalListeners();
   initAIDesignListeners();
   initTaskFilters();
   initScheduleModal();
