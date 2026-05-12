@@ -57,7 +57,8 @@
       "WebFetch(domain:open.manus.ai)",
       "WebFetch(domain:fier-ai.github.io)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "WebFetch(domain:manus.im)"
+      "WebFetch(domain:manus.im)",
+      "PowerShell(Select-String *)"
     ]
   }
 }

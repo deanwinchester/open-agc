@@ -555,10 +555,16 @@
             <div class="view" id="view-settings-skills">
                 <header class="view-header">
                     <h1>🛠 技能管理</h1>
-                    <p class="view-desc">控制 Agent 可调用的技能开关，关闭的技能不会被加载。</p>
+                    <p class="view-desc">管理 Agent 的技能库 — 可编辑、删除、启用/禁用技能。</p>
                 </header>
                 <div class="settings-body">
                     <section class="card">
+                        <div class="skills-toolbar">
+                            <div class="skills-search-wrapper">
+                                <input type="text" id="skills-search-input" class="input-styled" placeholder="搜索技能名称或关键词..." style="flex:1; min-width:200px;">
+                            </div>
+                            <span id="skills-count" class="skills-count"></span>
+                        </div>
                         <div class="skills-list" id="skills-config-container">
                             <div class="loading-indicator">
                                 <div class="spinner"></div>
@@ -566,6 +572,42 @@
                             </div>
                         </div>
                     </section>
+                </div>
+            </div>
+
+            <!-- Skill Edit Modal -->
+            <div class="modal-overlay" id="edit-skill-modal">
+                <div class="modal-box" style="max-width: 700px; width: 92%;">
+                    <div class="modal-header">
+                        <h3>✏️ 编辑技能: <span id="edit-skill-filename"></span></h3>
+                        <button class="icon-btn" id="edit-skill-close" title="关闭">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                <line x1="18" y1="6" x2="6" y2="18"></line>
+                                <line x1="6" y1="6" x2="18" y2="18"></line>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="field" style="margin-top: 1rem;">
+                        <textarea id="edit-skill-content" class="input-styled"
+                            style="width: 100%; height: 400px; font-family: monospace; resize: vertical; box-sizing: border-box;"
+                            spellcheck="false"></textarea>
+                    </div>
+                    <div class="modal-actions" style="margin-top: 1rem; justify-content: flex-end;">
+                        <button class="btn-secondary" id="edit-skill-close2">取消</button>
+                        <button class="btn-primary" id="edit-skill-save">保存更改</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Skill Delete Confirmation Modal -->
+            <div class="modal-overlay" id="delete-skill-modal">
+                <div class="modal-box" style="max-width: 420px; width: 90%;">
+                    <h3 style="color: var(--error, #e74c3c);">⚠️ 确认删除</h3>
+                    <p style="margin: 1rem 0;">确定要删除技能 <strong id="delete-skill-name"></strong> 吗？此操作不可撤销。</p>
+                    <div class="modal-actions" style="margin-top: 1.5rem;">
+                        <button class="btn-secondary" id="delete-skill-cancel">取消</button>
+                        <button class="btn-danger" id="delete-skill-confirm" style="background: var(--error, #e74c3c); color: white; border: none; padding: 0.5rem 1.2rem; border-radius: 6px; cursor: pointer;">确认删除</button>
+                    </div>
                 </div>
             </div>
 
@@ -748,22 +790,6 @@
             <div class="modal-actions">
                 <button class="btn-secondary" id="perm-modal-close">关闭</button>
                 <button class="btn-primary" id="perm-modal-copy">复制命令</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Edit Skill Dialog -->
-    <div class="modal-overlay" id="edit-skill-modal">
-        <div class="modal-box" style="max-width: 600px; width: 90%;">
-            <h3>✏️ 编辑技能: <span id="edit-skill-filename"></span></h3>
-            <div class="field" style="margin-top: 1rem;">
-                <textarea id="edit-skill-content" class="input-styled"
-                    style="width: 100%; height: 300px; font-family: monospace; resize: vertical; box-sizing: border-box;"
-                    spellcheck="false"></textarea>
-            </div>
-            <div class="modal-actions" style="margin-top: 1rem;">
-                <button class="btn-secondary" id="edit-skill-close">取消</button>
-                <button class="btn-primary" id="edit-skill-save">保存更改</button>
             </div>
         </div>
     </div>
