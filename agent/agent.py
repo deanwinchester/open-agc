@@ -406,7 +406,10 @@ class OpenAGCAgent:
                     else:
                         if tool_instance:
                             try:
-                                result = tool_instance.execute(**function_args)
+                                result = tool_instance.execute(
+                                    interrupt_check=lambda: self.is_interrupted,
+                                    **function_args
+                                )
                             except Exception as e:
                                 result = f"Error executing tool: {str(e)}"
                         else:

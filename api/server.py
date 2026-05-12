@@ -39,6 +39,7 @@ from dotenv import load_dotenv, set_key
 
 from core.paths import get_data_path, get_skills_dir
 from core.llamacpp_manager import get_llamacpp_manager
+from tools.shell import interrupt_shell
 from core.plugin_manager import discover_plugins, list_plugins, list_all_plugins, unload_plugin, toggle_plugin, install_from_git, fetch_marketplace
 
 # ── Route modules ──
@@ -2086,6 +2087,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         user_msg = json.loads(data)
                         if user_msg.get("type") == "interrupt":
                             agent.is_interrupted = True
+                            interrupt_shell()
                             if ws_task_id:
                                 update_task_status(ws_task_id, "interrupted", interruption_reason="user")
                         receive_task = None
