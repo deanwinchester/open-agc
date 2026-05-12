@@ -191,7 +191,7 @@ def load_plugin(name: str, plugins_dir: str = "plugins",
         return None
 
     # Build context
-    data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(plugins_dir))), "data")
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(plugins_dir)), "data")
     db_dir = os.path.join(data_dir, "plugins", name)
     os.makedirs(db_dir, exist_ok=True)
 
