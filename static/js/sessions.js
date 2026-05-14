@@ -15,15 +15,21 @@ export async function loadSessions() {
 function renderSessionList() {
   const container = document.getElementById('session-list');
   if (!container) return;
-  container.innerHTML = state.sessions.map(s => `
-    <div class="session-item${s.id === state.currentSessionId ? ' active' : ''}" data-session-id="${s.id}">
-      <span class="session-name" title="${s.name}">${s.name}</span>
-      <span class="session-actions">
-        <button class="session-rename-btn" title="重命名">✎</button>
-        <button class="session-delete-btn" title="删除">×</button>
-      </span>
-    </div>
-  `).join('');
+  container.innerHTML = state.sessions.map(s => {
+    const isDefault = s.id === 1;
+    const deleteBtn = isDefault
+      ? `<button class="session-clear-btn" title="清空数据">⟳</button>`
+      : `<button class="session-delete-btn" title="删除">×</button>`;
+    return `
+      <div class="session-item${s.id === state.currentSessionId ? ' active' : ''}" data-session-id="${s.id}">
+        <span class="session-name" title="${s.name}">${s.name}</span>
+        <span class="session-actions">
+          <button class="session-rename-btn" title="重命名">✎</button>
+          ${deleteBtn}
+        </span>
+      </div>
+    `;
+  }).join('');
 }
 
 export async function switchSession(sessionId) {
@@ -34,6 +40,7 @@ export async function switchSession(sessionId) {
   }
   var prevId = state.currentSessionId;
   state.currentSessionId = sessionId;
+  state.settingsLoaded = false;  // Reload settings for new session's email config
   window.switchView?.('chat');
   localStorage.setItem('lastSessionId', sessionId);
   // Don't close WebSocket — the agent task keeps running regardless of which
@@ -95,7 +102,12 @@ export async function createSession() {
 export async function deleteSession(sessionId) {
   if (state.sessions.length <= 1) return;
   try {
-    await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+    const res = await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json();
+      alert(err.detail || '删除失败');
+      return;
+    }
     if (state.currentSessionId === sessionId) {
       const next = state.sessions.find(s => s.id !== sessionId);
       if (next) await switchSession(next.id);
@@ -103,6 +115,28 @@ export async function deleteSession(sessionId) {
     await loadSessions();
   } catch (e) {
     console.error('Failed to delete session', e);
+  }
+}
+
+export async function clearSession(sessionId) {
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/clear`, { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      // Clear chat DOM cache and reload
+      if (window._sessionChatCache) {
+        delete window._sessionChatCache[sessionId];
+        delete window._sessionChatCache['_evt_' + sessionId];
+      }
+      if (state.currentSessionId === sessionId) {
+        const chatContainer = document.getElementById('chat-container');
+        if (chatContainer) chatContainer.innerHTML = '';
+        window.appendMessage?.('*控制台 — 数据已清空*', 'system');
+      }
+      alert('会话数据已清空');
+    }
+  } catch (e) {
+    console.error('Failed to clear session', e);
   }
 }
 

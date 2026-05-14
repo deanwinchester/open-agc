@@ -318,8 +318,8 @@ class BrowserAutomationTool:
             
         return f"Error: 不支持的浏览器动作 '{action}'"
 
-    def execute(self, action: str, url: str = "", selector: str = "", text: str = "", 
-                key: str = "", path: str = "", wait_time: int = 1) -> str:
+    def execute(self, action: str, url: str = "", selector: str = "", text: str = "",
+                key: str = "", path: str = "", wait_time: int = 1, **kwargs) -> str:
         """执行浏览器自动化相关操作，代理到后台线程"""
         if action == "close":
             if self.thread and self.thread.is_alive():

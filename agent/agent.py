@@ -35,7 +35,8 @@ class OpenAGCAgent:
     Supports real-time progress callbacks for task tracking.
     Features smart memory with TF-IDF semantic retrieval.
     """
-    def __init__(self, model: str = "gpt-4o"):
+    def __init__(self, model: str = "gpt-4o", session_id: Optional[int] = None):
+        self.session_id = session_id
         self.llm = LLMClient(default_model=model)
         # Load config to check disabled skills
         disabled_skills = []
@@ -74,14 +75,21 @@ class OpenAGCAgent:
         self.token_budget = TokenBudget(config=budget_cfg if budget_cfg else None)
 
         # Initialize smart memory store before reflection/knowledge engines
-        self.memory_store = MemoryStore(db_path=get_data_path("memory.db"))
+        self.memory_store = MemoryStore(
+            db_path=get_data_path("memory.db"),
+            session_id=self.session_id
+        )
 
         self.reflection_engine = ReflectionEngine(
             db_path=get_data_path("agent.db"),
             memory_store=self.memory_store,
             llm_client=self.llm,
+            session_id=self.session_id,
         )
-        self.knowledge_graph = KnowledgeGraph(db_path=get_data_path("agent.db"))
+        self.knowledge_graph = KnowledgeGraph(
+            db_path=get_data_path("agent.db"),
+            session_id=self.session_id,
+        )
 
         self.system_prompt_base = (
             f"你是 Open-AGC，一个强大的 AI 智能体，能够执行终端命令、运行 Python 代码、"
@@ -121,7 +129,10 @@ class OpenAGCAgent:
         ]
         
         # Instantiate tools (MemoryTool shares the same store)
-        memory_tool = MemoryTool(db_path=get_data_path("memory.db"))
+        memory_tool = MemoryTool(
+            db_path=get_data_path("memory.db"),
+            session_id=self.session_id
+        )
         self.available_tools = {
             "execute_shell": ShellTool(),
             "read_file": ReadFileTool(),
@@ -154,7 +165,11 @@ class OpenAGCAgent:
         }
 
         # Load auto-generated tools (persisted from previous sessions)
-        user_gen_dir = os.path.join(get_skills_dir(), "user_generated")
+        # Store in data/auto_tools/{session_id} to isolate per session
+        if self.session_id is not None:
+            user_gen_dir = get_data_path(f"auto_tools/{self.session_id}")
+        else:
+            user_gen_dir = get_data_path("auto_tools")
         init_auto_tools(user_gen_dir)
         loaded = load_all_dynamic_tools(user_gen_dir)
         for tool_name, tool_instance in loaded.items():
@@ -659,7 +674,7 @@ class OpenAGCAgent:
         recent_context = "\n".join([_msg_text(m) for m in self.messages[-3:] if m["role"] == "user"])
         memory_context = ""
         try:
-            results = self.memory_store.search(recent_context, top_k=3)
+            results = self.memory_store.search_memories(recent_context, top_k=3)
             if results:
                 memory_context = "\n".join([f"- {r['content']} (Type: {r['memory_type']})" for r in results])
         except Exception as e:

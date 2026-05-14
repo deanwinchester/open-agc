@@ -1,6 +1,6 @@
 // View navigation system
 import { state } from './state.js';
-import { switchSession, renameSession, deleteSession } from './sessions.js';
+import { switchSession, renameSession, deleteSession, clearSession } from './sessions.js';
 
 export function switchView(viewId) {
   const views = document.querySelectorAll('.view');
@@ -55,7 +55,7 @@ export function initNavigation() {
     const sessionId = parseInt(sessionItem.dataset.sessionId);
 
     // Session click (switch to this session)
-    if (!e.target.closest('.session-rename-btn') && !e.target.closest('.session-delete-btn')) {
+    if (!e.target.closest('.session-rename-btn') && !e.target.closest('.session-delete-btn') && !e.target.closest('.session-clear-btn')) {
       switchSession(sessionId);
       return;
     }
@@ -70,10 +70,18 @@ export function initNavigation() {
       return;
     }
 
-    // Delete
+    // Delete (non-default sessions)
     if (e.target.closest('.session-delete-btn')) {
       if (confirm('确定删除此会话？')) {
         deleteSession(sessionId);
+      }
+      return;
+    }
+
+    // Clear data (default session only)
+    if (e.target.closest('.session-clear-btn')) {
+      if (confirm('确定清空默认会话的所有数据？（会话本身将保留）')) {
+        clearSession(sessionId);
       }
     }
   });

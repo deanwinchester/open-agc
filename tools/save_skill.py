@@ -31,7 +31,7 @@ class SaveSkillTool(BaseTool):
             },
         }
 
-    def execute(self, skill_filename: str, skill_content: str) -> str:
+    def execute(self, skill_filename: str, skill_content: str, **kwargs) -> str:
         from core.skill_manager import SkillManager
         manager = SkillManager()
         

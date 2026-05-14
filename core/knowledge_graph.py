@@ -33,8 +33,9 @@ NPM_INSTALL_PATTERN = re.compile(r'npm\s+install\s+(\S+)', re.IGNORECASE)
 class KnowledgeGraph:
     """Lightweight knowledge graph for entity-relation extraction and retrieval."""
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, session_id: Optional[int] = None):
         self.db_path = db_path
+        self.session_id = session_id  # None = global/unfiltered
         self._init_db()
 
     def _init_db(self):
@@ -70,6 +71,17 @@ class KnowledgeGraph:
                 CREATE INDEX IF NOT EXISTS idx_relations_type
                 ON kg_relations(relation_type)
             """)
+
+            # Add session_id columns for session isolation
+            try:
+                conn.execute("ALTER TABLE kg_entities ADD COLUMN session_id INTEGER DEFAULT 1")
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE kg_relations ADD COLUMN session_id INTEGER DEFAULT 1")
+            except Exception:
+                pass
+
             conn.commit()
 
     # ------------------------------------------------------------------
@@ -180,22 +192,22 @@ class KnowledgeGraph:
                 if not name or len(name) < 2:
                     continue
                 cur = conn.execute(
-                    "SELECT id, confidence FROM kg_entities WHERE name = ? AND type = ?",
-                    (name, etype)
+                    "SELECT id, confidence FROM kg_entities WHERE name = ? AND type = ? AND session_id = ?",
+                    (name, etype, self.session_id or 1)
                 ).fetchone()
                 if cur:
                     # Update existing
                     new_conf = min(1.0, cur[1] + 0.1)
                     conn.execute(
-                        "UPDATE kg_entities SET last_seen = ?, confidence = ? WHERE id = ?",
-                        (now, new_conf, cur[0])
+                        "UPDATE kg_entities SET last_seen = ?, confidence = ? WHERE id = ? AND session_id = ?",
+                        (now, new_conf, cur[0], self.session_id or 1)
                     )
                     entity_ids.append(cur[0])
                 else:
                     cur = conn.execute(
-                        "INSERT INTO kg_entities (name, type, first_seen, last_seen, confidence) "
-                        "VALUES (?, ?, ?, ?, 0.5)",
-                        (name, etype, now, now)
+                        "INSERT INTO kg_entities (name, type, first_seen, last_seen, confidence, session_id) "
+                        "VALUES (?, ?, ?, ?, 0.5, ?)",
+                        (name, etype, now, now, self.session_id or 1)
                     )
                     entity_ids.append(cur.lastrowid)
 
@@ -234,8 +246,13 @@ class KnowledgeGraph:
     # Retrieval
     # ------------------------------------------------------------------
 
-    def retrieve_context(self, query: str, top_k: int = 5) -> List[Dict]:
-        """Search entities by keyword match, return top matching entities with relations."""
+    def retrieve_context(self, query: str, top_k: int = 5,
+                         session_id: Optional[int] = None) -> List[Dict]:
+        """Search entities by keyword match, return top matching entities with relations.
+
+        Args:
+            session_id: Override the instance's session_id filter.
+        """
         # Extract keywords from query
         keywords = re.findall(r'[一-鿿\w]+', query.lower())
         keywords = [k for k in keywords if len(k) > 1]
@@ -245,7 +262,13 @@ class KnowledgeGraph:
 
         # Build LIKE pattern for any keyword match
         like_clauses = " OR ".join("e.name LIKE ?" for _ in keywords[:5])
-        params = tuple(f"%{kw}%" for kw in keywords[:5])
+        params = list(f"%{kw}%" for kw in keywords[:5])
+
+        # Session isolation
+        effective_session = session_id if session_id is not None else self.session_id
+        if effective_session is not None:
+            like_clauses = f"({like_clauses}) AND e.session_id = ?"
+            params.append(effective_session)
 
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute(f"""
@@ -254,7 +277,7 @@ class KnowledgeGraph:
                 WHERE {like_clauses}
                 ORDER BY e.confidence DESC, e.last_seen DESC
                 LIMIT ?
-            """, params + (top_k,)).fetchall()
+            """, params + [top_k]).fetchall()
 
             results = []
             for row in rows:
@@ -300,11 +323,18 @@ class KnowledgeGraph:
 
     def get_stats(self) -> Dict:
         """Get knowledge graph statistics."""
+        sess = self.session_id or 1
         with sqlite3.connect(self.db_path) as conn:
-            entities = conn.execute("SELECT COUNT(*) FROM kg_entities").fetchone()[0]
-            relations = conn.execute("SELECT COUNT(*) FROM kg_relations").fetchone()[0]
+            entities = conn.execute(
+                "SELECT COUNT(*) FROM kg_entities WHERE session_id = ?", (sess,)
+            ).fetchone()[0]
+            relations = conn.execute(
+                "SELECT COUNT(*) FROM kg_relations r "
+                "JOIN kg_entities e ON e.id = r.source_id WHERE e.session_id = ?", (sess,)
+            ).fetchone()[0]
             by_type = conn.execute(
-                "SELECT type, COUNT(*) FROM kg_entities GROUP BY type ORDER BY COUNT(*) DESC"
+                "SELECT type, COUNT(*) FROM kg_entities WHERE session_id = ? "
+                "GROUP BY type ORDER BY COUNT(*) DESC", (sess,)
             ).fetchall()
         return {
             "total_entities": entities,
