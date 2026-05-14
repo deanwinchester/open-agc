@@ -58,7 +58,10 @@
       "WebFetch(domain:fier-ai.github.io)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:manus.im)",
-      "PowerShell(Select-String *)"
+      "PowerShell(Select-String *)",
+      "WebFetch(domain:nousresearch.com)",
+      "PowerShell(python -c \"import py_compile; py_compile.compile\\('core/memory_store.py', doraise=True\\); print\\('memory_store OK'\\)\")",
+      "PowerShell(python -c \"import py_compile; py_compile.compile\\('tools/memory.py', doraise=True\\); print\\('OK'\\)\")"
     ]
   }
 }

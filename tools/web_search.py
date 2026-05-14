@@ -183,7 +183,7 @@ class WebSearchTool(BaseTool):
             },
         }
 
-    def execute(self, query: str, max_results: int = 5) -> str:
+    def execute(self, query: str, max_results: int = 5, **kwargs) -> str:
         errors = []
 
         for engine_name, engine_fn in SEARCH_ENGINES:

@@ -39,7 +39,7 @@ class MacSystemTool(BaseTool):
             }
         }
 
-    def execute(self, action: str, message: str = "", title: str = "Panda (Open-AGC)") -> str:
+    def execute(self, action: str, message: str = "", title: str = "Panda (Open-AGC)", **kwargs) -> str:
         try:
             if action == "notify":
                 if not message:

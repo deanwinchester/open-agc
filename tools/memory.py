@@ -9,10 +9,11 @@ class MemoryTool:
     支持记忆层次：core（核心事实）、working（工作记忆）、episode（事件记录）。
     """
 
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str = None, session_id=None):
         if db_path is None:
             db_path = get_data_path("memory.db")
-        self.store = MemoryStore(db_path=db_path)
+        self.session_id = session_id
+        self.store = MemoryStore(db_path=db_path, session_id=session_id)
 
         # Migrate from old markdown format if it exists
         old_md_path = get_data_path("memory.md")
@@ -21,7 +22,7 @@ class MemoryTool:
 
     def execute(self, action: str, content: str = "", query: str = "",
                 category: str = "", memory_type: str = "",
-                importance: int = 1) -> str:
+                importance: int = 1, **kwargs) -> str:
         """
         Execute memory operations.
 
@@ -33,6 +34,8 @@ class MemoryTool:
             memory_type: Memory type: 'core', 'working', or 'episode'
             importance: Priority level 1-5 (for 'add')
         """
+        cross_session = kwargs.get("session_id")  # LLM can specify target session
+
         if action == "search":
             search_query = query or content
             if not search_query:
@@ -41,7 +44,8 @@ class MemoryTool:
             results = self.store.search_memories(
                 search_query, top_k=5,
                 category=category or None,
-                memory_type=memory_type or None
+                memory_type=memory_type or None,
+                session_id=cross_session
             )
             if not results:
                 return "没有找到相关记忆。"
@@ -84,7 +88,8 @@ class MemoryTool:
             memories = self.store.get_all_memories(
                 category=category or None,
                 memory_type=memory_type or None,
-                limit=20
+                limit=20,
+                session_id=cross_session
             )
             if not memories:
                 return "还没有存储任何记忆。"
@@ -186,6 +191,10 @@ class MemoryTool:
                         "importance": {
                             "type": "integer",
                             "description": "优先级 1-5（用于 'add'，默认 1）。",
+                        },
+                        "session_id": {
+                            "type": "integer",
+                            "description": "跨会话查询时指定目标会话ID。留空则默认搜索当前会话。",
                         },
                     },
                     "required": ["action"],

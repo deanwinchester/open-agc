@@ -83,12 +83,13 @@ class MemoryStore:
     Supports memory hierarchy: core, working, episode.
     """
 
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str = None, session_id: Optional[int] = None):
         if db_path is None:
             from core.paths import get_data_path
             db_path = get_data_path("memory.db")
         os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else ".", exist_ok=True)
         self.db_path = db_path
+        self.session_id = session_id  # None = global/unfiltered
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -130,6 +131,17 @@ class MemoryStore:
                 conn.execute("ALTER TABLE memories ADD COLUMN memory_type TEXT NOT NULL DEFAULT 'episode'")
                 conn.commit()
 
+            # Add session_id column for session isolation
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN session_id INTEGER DEFAULT 1")
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE conversations ADD COLUMN session_id INTEGER DEFAULT 1")
+            except Exception:
+                pass
+            conn.commit()
+
             # Create FTS5 virtual table if not exists
             try:
                 conn.execute("""
@@ -148,7 +160,10 @@ class MemoryStore:
             self._sync_fts(conn)
 
     def _sync_fts(self, conn: sqlite3.Connection):
-        """Ensure FTS index is in sync with the memories table."""
+        """Ensure FTS index is in sync with the memories table.
+        When session_id is set, only sync entries for the current session
+        to avoid touching other sessions' FTS index entries.
+        """
         try:
             # Get all memory IDs in FTS
             fts_ids = set()
@@ -158,12 +173,28 @@ class MemoryStore:
             except Exception:
                 pass
 
-            # Get all memory IDs in main table
-            rows = conn.execute("SELECT id, content, keywords FROM memories").fetchall()
+            # Get memory IDs — scoped to current session when applicable
+            if self.session_id is not None:
+                rows = conn.execute(
+                    "SELECT id, content, keywords FROM memories WHERE session_id = ?",
+                    (self.session_id,)
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT id, content, keywords FROM memories").fetchall()
             main_ids = {r[0] for r in rows}
 
-            # Remove stale FTS entries
-            stale = fts_ids - main_ids
+            # Remove stale FTS entries — only for current session's IDs
+            if self.session_id is not None:
+                stale = fts_ids & main_ids  # IDs in FTS that are for current session
+                # Check which of those no longer exist in memories
+                still_exist = set()
+                for mid in stale:
+                    row = conn.execute("SELECT id FROM memories WHERE id = ?", (mid,)).fetchone()
+                    if row:
+                        still_exist.add(mid)
+                stale = stale - still_exist
+            else:
+                stale = fts_ids - main_ids
             for sid in stale:
                 try:
                     conn.execute("DELETE FROM memories_fts WHERE rowid = ?", (sid,))
@@ -200,8 +231,8 @@ class MemoryStore:
         with self._get_conn() as conn:
             cursor = conn.execute(
                 "INSERT INTO memories (category, memory_type, content, keywords, "
-                "created_at, updated_at, importance) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (category, memory_type, content, keywords, now, now, importance)
+                "created_at, updated_at, importance, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (category, memory_type, content, keywords, now, now, importance, self.session_id or 1)
             )
             mid = cursor.lastrowid
 
@@ -263,16 +294,20 @@ class MemoryStore:
 
         try:
             with self._get_conn() as conn:
-                rows = conn.execute("""
+                sql = """
                     SELECT m.id, m.category, m.memory_type, m.content, m.keywords,
                            m.created_at, m.access_count, m.importance,
                            bm25(memories_fts) as score
                     FROM memories_fts fts
                     JOIN memories m ON fts.rowid = m.id
                     WHERE memories_fts MATCH ?
-                    ORDER BY score ASC
-                    LIMIT 1
-                """, (fts_query,)).fetchall()
+                """
+                params = [fts_query]
+                if self.session_id is not None:
+                    sql += " AND m.session_id = ?"
+                    params.append(self.session_id)
+                sql += " ORDER BY score ASC LIMIT 1"
+                rows = conn.execute(sql, params).fetchall()
 
                 if rows:
                     row = rows[0]
@@ -292,8 +327,14 @@ class MemoryStore:
 
     def search_memories(self, query: str, top_k: int = 5,
                         category: str = None,
-                        memory_type: str = None) -> List[Dict]:
-        """Search for relevant memories using FTS5 BM25 ranking."""
+                        memory_type: str = None,
+                        session_id: Optional[int] = None) -> List[Dict]:
+        """Search for relevant memories using FTS5 BM25 ranking.
+
+        Args:
+            session_id: Override the instance's session_id filter.
+                        Pass None to use instance default, -1 for global (all sessions).
+        """
         fts_query = _build_fts_query(query)
         if not fts_query:
             return []
@@ -317,6 +358,12 @@ class MemoryStore:
                 if memory_type:
                     sql += " AND m.memory_type = ?"
                     params.append(memory_type)
+
+                # Session isolation
+                effective_session = session_id if session_id is not None else self.session_id
+                if effective_session is not None and effective_session != -1:
+                    sql += " AND m.session_id = ?"
+                    params.append(effective_session)
 
                 # BM25 scores are negative, lower = better
                 # Boost core memories by adjusting final sort
@@ -368,8 +415,13 @@ class MemoryStore:
 
     def get_all_memories(self, category: str = None,
                          memory_type: str = None,
-                         limit: int = 50) -> List[Dict]:
-        """Get all memories, optionally filtered by category and/or type."""
+                         limit: int = 50,
+                         session_id: Optional[int] = None) -> List[Dict]:
+        """Get all memories, optionally filtered by category and/or type.
+
+        Args:
+            session_id: Override the instance's session_id filter.
+        """
         with self._get_conn() as conn:
             sql = ("SELECT id, category, memory_type, content, keywords, "
                    "created_at, access_count, importance FROM memories WHERE 1=1")
@@ -381,6 +433,11 @@ class MemoryStore:
             if memory_type:
                 sql += " AND memory_type = ?"
                 params.append(memory_type)
+
+            effective_session = session_id if session_id is not None else self.session_id
+            if effective_session is not None:
+                sql += " AND session_id = ?"
+                params.append(effective_session)
 
             sql += " ORDER BY updated_at DESC LIMIT ?"
             params.append(limit)
@@ -396,6 +453,13 @@ class MemoryStore:
 
     def delete_memory(self, memory_id: int) -> bool:
         with self._get_conn() as conn:
+            if self.session_id is not None:
+                row = conn.execute(
+                    "SELECT id FROM memories WHERE id = ? AND session_id = ?",
+                    (memory_id, self.session_id)
+                ).fetchone()
+                if not row:
+                    return False
             conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             try:
                 conn.execute("DELETE FROM memories_fts WHERE rowid = ?", (memory_id,))
@@ -411,26 +475,38 @@ class MemoryStore:
         now = datetime.now().isoformat()
         with self._get_conn() as conn:
             conn.execute(
-                "INSERT INTO conversations (summary, category, messages_json, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (summary, category, json.dumps(messages, ensure_ascii=False), now)
+                "INSERT INTO conversations (summary, category, messages_json, created_at, session_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (summary, category, json.dumps(messages, ensure_ascii=False), now, self.session_id or 1)
             )
             conn.commit()
 
     def get_categories_summary(self) -> Dict[str, int]:
         """Get count of memories per category."""
         with self._get_conn() as conn:
-            rows = conn.execute(
-                "SELECT category, COUNT(*) FROM memories GROUP BY category"
-            ).fetchall()
+            if self.session_id is not None:
+                rows = conn.execute(
+                    "SELECT category, COUNT(*) FROM memories WHERE session_id = ? GROUP BY category",
+                    (self.session_id,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT category, COUNT(*) FROM memories GROUP BY category"
+                ).fetchall()
         return {cat: count for cat, count in rows}
 
     def get_type_summary(self) -> Dict[str, int]:
         """Get count of memories per memory_type."""
         with self._get_conn() as conn:
-            rows = conn.execute(
-                "SELECT memory_type, COUNT(*) FROM memories GROUP BY memory_type"
-            ).fetchall()
+            if self.session_id is not None:
+                rows = conn.execute(
+                    "SELECT memory_type, COUNT(*) FROM memories WHERE session_id = ? GROUP BY memory_type",
+                    (self.session_id,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT memory_type, COUNT(*) FROM memories GROUP BY memory_type"
+                ).fetchall()
         return {mt: count for mt, count in rows}
 
     def consolidate(self, llm_client=None) -> str:
@@ -440,9 +516,15 @@ class MemoryStore:
         Otherwise does simple dedup.
         """
         with self._get_conn() as conn:
-            rows = conn.execute(
-                "SELECT id, content FROM memories ORDER BY created_at"
-            ).fetchall()
+            if self.session_id is not None:
+                rows = conn.execute(
+                    "SELECT id, content FROM memories WHERE session_id = ? ORDER BY created_at",
+                    (self.session_id,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, content FROM memories ORDER BY created_at"
+                ).fetchall()
 
         if len(rows) < 2:
             return "记忆条目不足，无需整理。"

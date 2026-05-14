@@ -22,7 +22,14 @@ const providers = [
 export async function loadSettingsConfig() {
   if (state.settingsLoaded) return;
   try {
-    const data = await cachedFetch('/api/settings');
+    const sid = state.currentSessionId || 1;
+    // Update email section label with current session name
+    const label = document.getElementById('email-session-label');
+    if (label) {
+      const sn = state.sessions.find(s => s.id === sid);
+      label.textContent = sn ? sn.name : ('会话 ' + sid);
+    }
+    const data = await cachedFetch(`/api/settings?session_id=${sid}`);
 
     buildApiKeysGrid(data.api_keys_masked || {});
     buildModelSelection(data);
@@ -199,6 +206,7 @@ async function saveSettings() {
     email_imap_server: document.getElementById('email-imap-input')?.value?.trim() || '',
     email_smtp_server: document.getElementById('email-smtp-input')?.value?.trim() || '',
     owner_email: document.getElementById('owner-email-input')?.value?.trim() || '',
+    session_id: state.currentSessionId || 1,
     mcp_servers: document.getElementById('mcp-config-input')?.value?.trim() || '{}'
   };
 

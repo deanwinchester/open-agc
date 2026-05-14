@@ -47,16 +47,19 @@ Respond in JSON format:
 class ReflectionEngine:
     """Manages task reflection, trajectory storage, and experience retrieval."""
 
-    def __init__(self, db_path: str, memory_store=None, llm_client=None):
+    def __init__(self, db_path: str, memory_store=None, llm_client=None,
+                 session_id: Optional[int] = None):
         """
         Args:
             db_path: Path to SQLite database for trajectories.
             memory_store: MemoryStore instance for storing/retrieving reflections.
             llm_client: LLMClient instance for generating reflections.
+            session_id: Session scope for isolation (None = global).
         """
         self.db_path = db_path
         self.memory_store = memory_store
         self.llm_client = llm_client
+        self.session_id = session_id
         self._init_db()
 
     def _init_db(self):
@@ -80,6 +83,13 @@ class ReflectionEngine:
                 CREATE INDEX IF NOT EXISTS idx_trajectories_created
                 ON task_trajectories(created_at)
             """)
+
+            # Add session_id column for session isolation
+            try:
+                conn.execute("ALTER TABLE task_trajectories ADD COLUMN session_id INTEGER DEFAULT 1")
+            except Exception:
+                pass
+
             conn.commit()
 
     def _extract_tool_sequence(self, messages: List[Dict]) -> str:
@@ -200,17 +210,21 @@ class ReflectionEngine:
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.execute(
                 "INSERT INTO task_trajectories "
-                "(task_input, tool_sequence, success, duration_seconds, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "(task_input, tool_sequence, success, duration_seconds, created_at, session_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (task_input[:500], tool_sequence, 1 if success else 0,
-                 duration_seconds, datetime.now().isoformat())
+                 duration_seconds, datetime.now().isoformat(), self.session_id or 1)
             )
             conn.commit()
             return cur.lastrowid
 
-    def retrieve_experience(self, query: str, top_k: int = 2) -> Dict:
+    def retrieve_experience(self, query: str, top_k: int = 2,
+                            session_id: Optional[int] = None) -> Dict:
         """
         Retrieve relevant past experiences for a new task.
+
+        Args:
+            session_id: Override the instance's session_id filter.
 
         Returns:
           {
@@ -219,6 +233,7 @@ class ReflectionEngine:
           }
         """
         result: Dict[str, Any] = {"reflections": [], "trajectories": []}
+        effective_session = session_id if session_id is not None else self.session_id
 
         # Retrieve reflections from MemoryStore
         if self.memory_store:
@@ -250,9 +265,12 @@ class ReflectionEngine:
                             SELECT task_input, tool_sequence, success, created_at
                             FROM task_trajectories
                             WHERE task_input LIKE ?
+                        """ + (" AND session_id = ?" if effective_session is not None else "") + """
                             ORDER BY created_at DESC
                             LIMIT ?
-                        """, (f"%{query[:30]}%", top_k)).fetchall()
+                        """, (f"%{query[:30]}%",
+                              *((effective_session,) if effective_session is not None else ()),
+                              top_k)).fetchall()
                 except Exception:
                     pass
 
@@ -262,9 +280,10 @@ class ReflectionEngine:
                         SELECT task_input, tool_sequence, success, created_at
                         FROM task_trajectories
                         WHERE success = 1
+                    """ + (" AND session_id = ?" if effective_session is not None else "") + """
                         ORDER BY created_at DESC
                         LIMIT ?
-                    """, (top_k,)).fetchall()
+                    """, (*((effective_session,) if effective_session is not None else ()), top_k)).fetchall()
 
                 result["trajectories"] = [
                     {
@@ -306,10 +325,13 @@ class ReflectionEngine:
 
     def get_stats(self) -> Dict:
         """Get reflection engine statistics."""
+        sess = self.session_id or 1
         with sqlite3.connect(self.db_path) as conn:
-            total = conn.execute("SELECT COUNT(*) FROM task_trajectories").fetchone()[0]
+            total = conn.execute(
+                "SELECT COUNT(*) FROM task_trajectories WHERE session_id = ?", (sess,)
+            ).fetchone()[0]
             successes = conn.execute(
-                "SELECT COUNT(*) FROM task_trajectories WHERE success = 1"
+                "SELECT COUNT(*) FROM task_trajectories WHERE success = 1 AND session_id = ?", (sess,)
             ).fetchone()[0]
         reflections = 0
         if self.memory_store:

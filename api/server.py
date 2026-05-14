@@ -264,6 +264,33 @@ def init_db():
         cursor.execute("ALTER TABLE tasks ADD COLUMN interruption_reason TEXT")
     except Exception:
         pass
+
+    # Email columns for per-session email binding
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN email_enabled INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN email_account TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN email_password TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN email_imap_server TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN email_smtp_server TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN owner_email TEXT DEFAULT ''")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -637,12 +664,13 @@ class ConfigUpdate(BaseModel):
     email_imap_server: str
     email_smtp_server: str
     owner_email: str
+    session_id: Optional[int] = None  # Target session for email config
 
 @app.get("/api/settings")
-async def get_settings():
-    """Return current configuration."""
+async def get_settings(session_id: int = None):
+    """Return current configuration. If session_id provided, include per-session email config."""
     config = load_config()
-    
+
     # Mask API keys before sending to frontend
     masked_keys = {}
     for k, v in config.get("api_keys", {}).items():
@@ -650,7 +678,26 @@ async def get_settings():
             masked_keys[k] = f"{v[:3]}...{v[-3:]}" if len(v) > 6 else "***"
         else:
             masked_keys[k] = ""
-            
+
+    # Fetch per-session email config if session_id given
+    sess_email = {}
+    if session_id is not None:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute(
+                "SELECT email_enabled, email_account, email_password, email_imap_server, "
+                "email_smtp_server, owner_email FROM sessions WHERE id=?", (session_id,))
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                sess_email = dict(row)
+                sess_email["email_listener_enabled"] = bool(sess_email.pop("email_enabled", 0))
+                if sess_email.get("email_password"):
+                    sess_email["email_password"] = "***"
+        except Exception as e:
+            print(f"[Settings] Session email load error: {e}")
+
     return {
         "api_keys_masked": masked_keys,
         "default_model": config.get("default_model", "moonshot/kimi-latest"),
@@ -663,12 +710,12 @@ async def get_settings():
         "http_proxy": config.get("http_proxy", ""),
         "heartbeat_enabled": config.get("heartbeat_enabled", False),
         "heartbeat_interval": config.get("heartbeat_interval", 60),
-        "email_listener_enabled": config.get("email_listener_enabled", False),
-        "email_account": config.get("email_account", ""),
-        "email_password": ("***" if config.get("email_password") else ""),
-        "email_imap_server": config.get("email_imap_server", ""),
-        "email_smtp_server": config.get("email_smtp_server", ""),
-        "owner_email": config.get("owner_email", "")
+        "email_listener_enabled": sess_email.get("email_listener_enabled", config.get("email_listener_enabled", False)),
+        "email_account": sess_email.get("email_account", config.get("email_account", "")),
+        "email_password": sess_email.get("email_password", ("***" if config.get("email_password") else "")),
+        "email_imap_server": sess_email.get("email_imap_server", config.get("email_imap_server", "")),
+        "email_smtp_server": sess_email.get("email_smtp_server", config.get("email_smtp_server", "")),
+        "owner_email": sess_email.get("owner_email", config.get("owner_email", ""))
     }
 
 @app.post("/api/settings")
@@ -728,6 +775,31 @@ async def update_settings(config_update: ConfigUpdate):
         config["email_imap_server"] = config_update.email_imap_server
         config["email_smtp_server"] = config_update.email_smtp_server
         config["owner_email"] = config_update.owner_email
+
+        # Save per-session email config when session_id is provided
+        if config_update.session_id is not None:
+            try:
+                db_conn = sqlite3.connect(DB_PATH)
+                email_password_val = config_update.email_password
+                if email_password_val == "***":
+                    # Keep existing password when masked
+                    cur = db_conn.execute(
+                        "SELECT email_password FROM sessions WHERE id=?",
+                        (config_update.session_id,))
+                    row = cur.fetchone()
+                    email_password_val = row[0] if row and row[0] else ""
+                db_conn.execute(
+                    "UPDATE sessions SET email_enabled=?, email_account=?, email_password=?, "
+                    "email_imap_server=?, email_smtp_server=?, owner_email=?, "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (1 if config_update.email_listener_enabled else 0,
+                     config_update.email_account, email_password_val,
+                     config_update.email_imap_server, config_update.email_smtp_server,
+                     config_update.owner_email, config_update.session_id))
+                db_conn.commit()
+                db_conn.close()
+            except Exception as e:
+                print(f"[Settings] Session email save error: {e}")
         
         set_key(env_file, "DEFAULT_MODEL", config_update.default_model)
         os.environ["DEFAULT_MODEL"] = config_update.default_model
@@ -1453,45 +1525,127 @@ async def get_sessions():
     """)
     rows = cursor.fetchall()
     conn.close()
-    return {"sessions": [dict(r) for r in rows]}
+    sessions = []
+    for r in rows:
+        s = dict(r)
+        # Mask email password in response
+        if s.get("email_password"):
+            s["email_password"] = "***"
+        sessions.append(s)
+    return {"sessions": sessions}
 
 @app.post("/api/sessions")
 async def create_session(body: dict = {}):
-    """Create a new session."""
+    """Create a new session, optionally with email config."""
     name = body.get("name", None)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     if not name:
-        # Auto-name: "会话 N"
         cursor.execute("SELECT COUNT(*) FROM sessions")
         count = cursor.fetchone()[0] + 1
         name = f"会话 {count}"
-    cursor.execute("INSERT INTO sessions (name) VALUES (?)", (name,))
+    # Build INSERT with optional email fields
+    fields = ["name"]
+    values = [name]
+    email_fields = ["email_enabled", "email_account", "email_password",
+                    "email_imap_server", "email_smtp_server", "owner_email"]
+    for f in email_fields:
+        if f in body:
+            fields.append(f)
+            values.append(body[f])
+    placeholders = ",".join("?" * len(fields))
+    sql = f"INSERT INTO sessions ({','.join(fields)}) VALUES ({placeholders})"
+    cursor.execute(sql, values)
     session_id = cursor.lastrowid
     conn.commit()
     conn.close()
     return {"session": {"id": session_id, "name": name}}
 
+def _cascade_cleanup_session(session_id: int):
+    """Clean up all session-associated data from memory, KG, trajectories, and auto-tools."""
+    try:
+        mem_conn = sqlite3.connect(get_data_path("memory.db"))
+        mem_conn.execute("DELETE FROM memories WHERE session_id=?", (session_id,))
+        mem_conn.commit()
+        mem_conn.close()
+    except Exception as e:
+        print(f"[CleanupSession] Memory error: {e}")
+
+    try:
+        kg_conn = sqlite3.connect(get_data_path("agent.db"))
+        kg_conn.execute(
+            "DELETE FROM kg_relations WHERE source_id IN "
+            "(SELECT id FROM kg_entities WHERE session_id=?)", (session_id,))
+        kg_conn.execute("DELETE FROM kg_entities WHERE session_id=?", (session_id,))
+        kg_conn.execute("DELETE FROM task_trajectories WHERE session_id=?", (session_id,))
+        kg_conn.commit()
+        kg_conn.close()
+    except Exception as e:
+        print(f"[CleanupSession] KG error: {e}")
+
+    try:
+        import shutil
+        auto_tools_dir = get_data_path(f"auto_tools/{session_id}")
+        if os.path.exists(auto_tools_dir):
+            shutil.rmtree(auto_tools_dir)
+    except Exception as e:
+        print(f"[CleanupSession] Auto-tools error: {e}")
+
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: int):
-    """Delete a session and its messages."""
+    """Delete a session and all associated data. Default session (id=1) cannot be deleted."""
+    if session_id == 1:
+        raise HTTPException(status_code=403, detail="默认会话不可删除，只能强制清空数据。请使用 clear 端点。")
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
     cursor.execute("DELETE FROM sessions WHERE id=?", (session_id,))
     conn.commit()
     conn.close()
+
+    _cascade_cleanup_session(session_id)
+    return {"ok": True}
+
+
+@app.post("/api/sessions/{session_id}/clear")
+async def clear_session(session_id: int):
+    """Clear all data for a session without deleting the session itself."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
+    conn.execute("UPDATE sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
+    conn.commit()
+    conn.close()
+
+    _cascade_cleanup_session(session_id)
     return {"ok": True}
 
 @app.put("/api/sessions/{session_id}")
-async def rename_session(session_id: int, body: dict = {}):
-    """Rename a session."""
-    name = body.get("name", "会话")
+async def update_session(session_id: int, body: dict = {}):
+    """Update a session's name and/or email config."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("UPDATE sessions SET name=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (name, session_id))
+    # Build dynamic UPDATE SET clause
+    updates = []
+    params = []
+    if "name" in body:
+        updates.append("name=?")
+        params.append(body["name"])
+    email_fields = ["email_enabled", "email_account", "email_password",
+                    "email_imap_server", "email_smtp_server", "owner_email"]
+    for f in email_fields:
+        if f in body:
+            updates.append(f"{f}=?")
+            params.append(body[f])
+    if updates:
+        updates.append("updated_at=CURRENT_TIMESTAMP")
+        params.append(session_id)
+        sql = f"UPDATE sessions SET {','.join(updates)} WHERE id=?"
+        cursor.execute(sql, params)
     conn.commit()
     conn.close()
+    return {"ok": True}
     return {"ok": True}
 
 
@@ -2047,7 +2201,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         agent_is_running = False
                         return
 
-            agent = OpenAGCAgent(model=current_model)
+            agent = OpenAGCAgent(model=current_model, session_id=ws_session_id)
             
             # Inject custom agent profile prompt if specified
             if agent_profile_name and agent_profile_name != "default":
@@ -2274,42 +2428,68 @@ def start_email_listener():
         while True:
             try:
                 config = load_config()
-                if config.get("email_listener_enabled") and config.get("email_account") and config.get("email_password") and config.get("email_imap_server"):
-                    owner = config.get("owner_email", "")
-                    if owner:
-                        criteria = f'UNSEEN FROM "{owner}"'
+                # Query all sessions with email enabled
+                try:
+                    conn = sqlite3.connect(DB_PATH)
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute(
+                        "SELECT id, email_account, email_password, email_imap_server, "
+                        "email_smtp_server, owner_email FROM sessions "
+                        "WHERE email_enabled=1 AND email_account!='' AND "
+                        "email_password!='' AND email_imap_server!=''"
+                    ).fetchall()
+                    conn.close()
+                except Exception:
+                    rows = []
+
+                for row in rows:
+                    sess_id = row["id"]
+                    try:
+                        owner = row["owner_email"] or ""
+                        criteria = f'UNSEEN FROM "{owner}"' if owner else 'UNSEEN'
                         emails = fetch_emails(
-                            config["email_imap_server"],
-                            config["email_account"],
-                            config["email_password"],
+                            row["email_imap_server"],
+                            row["email_account"],
+                            row["email_password"],
                             criteria=criteria,
                             limit=5,
                             mark_seen=True
                         )
                         for e in emails:
-                            print(f"[Email Listener] Found new command from owner: {e['subject']}")
-                            save_message("system", f"🔔 已收到来自主人 ({owner}) 的新邮件指令:\n主题: {e['subject']}")
-                            
-                            agent = OpenAGCAgent(model=config.get("default_model", "gpt-4o"))
+                            print(f"[Email Listener] Session {sess_id}: new command from {owner}: {e['subject']}")
+                            save_message("system",
+                                f"📧 已收到来自主人 ({owner}) 的新邮件指令:\n主题: {e['subject']}",
+                                session_id=sess_id)
+
+                            agent = OpenAGCAgent(
+                                model=config.get("default_model", "gpt-4o"),
+                                session_id=sess_id
+                            )
                             prompt = f"I received a new email instruction from my owner ({owner}).\nSubject: {e['subject']}\nBody: {e['body']}\nPlease execute this instruction, and then I will automatically email them the result."
-                            
+
                             try:
                                 response = agent.run_turn(prompt)
                             except Exception as ex:
                                 response = f"Failed to execute instructions: {ex}"
-                                
+
                             success = send_email(
-                                config["email_smtp_server"],
-                                config["email_account"],
-                                config["email_password"],
+                                row["email_smtp_server"],
+                                row["email_account"],
+                                row["email_password"],
                                 owner,
                                 f"Re: {e['subject']} - Task Completed",
                                 f"Task Summary:\n\n{response}"
                             )
                             if success:
-                                save_message("system", f"📧 已将执行结果回传至主人邮箱: {owner}")
+                                save_message("system",
+                                    f"📧 已将执行结果回传至主人邮箱: {owner}",
+                                    session_id=sess_id)
                             else:
-                                save_message("system", f"⚠️ 邮件回复发送失败，请检查 SMTP 配置。")
+                                save_message("system",
+                                    f"⚠️ 邮件回复发送失败，请检查 SMTP 配置。",
+                                    session_id=sess_id)
+                    except Exception as e:
+                        print(f"[Email Listener] Session {sess_id} error: {e}")
             except Exception as e:
                 print(f"Email listener error: {e}")
             _time.sleep(60)
