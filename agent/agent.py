@@ -9,6 +9,7 @@ import os
 from core.paths import get_data_path, get_skills_dir
 
 from core.llm_client import LLMClient, build_user_message, extract_screenshot_data
+from core.logger import SessionLogger
 from core.memory_store import MemoryStore
 from core.skill_store import SkillStore
 from core.token_budget import TokenBudget, estimate_messages_tokens
@@ -23,6 +24,7 @@ from tools.web_search import WebSearchTool
 from tools.system_mac import MacSystemTool
 from tools.save_skill import SaveSkillTool
 from tools.browser import BrowserAutomationTool
+from tools.download import DownloadTool
 from tools.email_tool import SearchEmailTool, SendEmailTool
 from tools.auto_tool import (DynamicTool, load_all_dynamic_tools,
                               generate_tool_code, validate_tool_code,
@@ -35,8 +37,10 @@ class OpenAGCAgent:
     Supports real-time progress callbacks for task tracking.
     Features smart memory with TF-IDF semantic retrieval.
     """
-    def __init__(self, model: str = "gpt-4o", session_id: Optional[int] = None):
+    def __init__(self, model: str = "gpt-4o", session_id: Optional[int] = None,
+                 logger: Optional[SessionLogger] = None):
         self.session_id = session_id
+        self.logger = logger
         self.llm = LLMClient(default_model=model)
         # Load config to check disabled skills
         disabled_skills = []
@@ -145,7 +149,8 @@ class OpenAGCAgent:
             "save_learned_skill": SaveSkillTool(),
             "browser_automation": BrowserAutomationTool(headless=self.browser_headless),
             "search_emails": SearchEmailTool(),
-            "send_email": SendEmailTool()
+            "send_email": SendEmailTool(),
+            "queue_download": DownloadTool()
         }
 
         # Tool display names (Chinese-friendly)
@@ -161,7 +166,8 @@ class OpenAGCAgent:
             "save_learned_skill": "保存技能",
             "browser_automation": "虚拟浏览器控制",
             "search_emails": "搜索邮件",
-            "send_email": "发送邮件"
+            "send_email": "发送邮件",
+            "queue_download": "下载文件"
         }
 
         # Load auto-generated tools (persisted from previous sessions)
@@ -664,6 +670,9 @@ class OpenAGCAgent:
         self.messages.append(build_user_message(user_input, images))
         _task_start = _time.time()
 
+        if self.logger:
+            self.logger.log_user_query(user_input)
+
         # Auto-retrieve relevant memories for this query
         def _msg_text(m):
             c = m.get("content", "")
@@ -894,11 +903,18 @@ class OpenAGCAgent:
                                     interrupt_check=lambda: self.is_interrupted,
                                     **function_args
                                 )
+                                tool_success = True
                             except Exception as e:
                                 result = f"Error executing tool: {str(e)}"
+                                tool_success = False
                         else:
                             result = f"Error: Tool {function_name} not found."
-                    
+                            tool_success = False
+
+                    if self.logger:
+                        self.logger.log_tool_call(function_name, function_args)
+                        self.logger.log_tool_result(function_name, str(result), tool_success)
+
                     result_str = str(result)
 
                     # Context Compaction: compress long tool results to preserve context window
@@ -973,6 +989,8 @@ class OpenAGCAgent:
             # 2. Check if model provided a text response (final answer)
             if message.content:
                 final_answer = message.content
+                if self.logger:
+                    self.logger.log_agent_response(final_answer)
                 # Auto-extract & save memories in background thread
                 thread = threading.Thread(
                     target=self._auto_save_memories,

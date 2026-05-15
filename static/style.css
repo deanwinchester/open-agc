@@ -788,6 +788,129 @@ body {
     border-top-color: var(--theme-color);
 }
 
+/* Panda thinking animations */
+.panda-thinking-icon {
+    flex-shrink: 0;
+    line-height: 0;
+}
+.panda-eat {
+    animation: pandaEat 1s ease-in-out infinite;
+}
+.panda-roll {
+    animation: pandaRoll 1.2s ease-in-out infinite;
+}
+@keyframes pandaEat {
+    0%   { transform: translateY(0) rotate(0deg); }
+    15%  { transform: translateY(-6px) rotate(-5deg); }
+    30%  { transform: translateY(-2px) rotate(0deg); }
+    50%  { transform: translateY(-8px) rotate(5deg); }
+    65%  { transform: translateY(-3px) rotate(0deg); }
+    80%  { transform: translateY(-5px) rotate(-3deg); }
+    100% { transform: translateY(0) rotate(0deg); }
+}
+@keyframes pandaRoll {
+    0%   { transform: rotate(0deg) scale(1); }
+    20%  { transform: rotate(25deg) scale(1.08); }
+    40%  { transform: rotate(-20deg) scale(1.04); }
+    60%  { transform: rotate(10deg) scale(1.06); }
+    80%  { transform: rotate(-8deg) scale(1.02); }
+    100% { transform: rotate(0deg) scale(1); }
+}
+
+/* Inline collapsible progress card */
+.progress-inline {
+    margin: 0.4rem 0 0.8rem 3rem;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-inner);
+    overflow: hidden;
+    transition: border-color 0.3s;
+}
+.progress-inline.completed {
+    border-color: var(--success, #10b981);
+}
+.progress-inline-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.55rem 0.9rem;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+}
+.progress-inline-header:hover {
+    background: var(--hover-bg, rgba(0,0,0,0.03));
+}
+.progress-inline-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.progress-title {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.progress-toggle-icon {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    transition: transform 0.2s;
+}
+.progress-toggle-icon.expanded {
+    transform: rotate(0deg);
+}
+.progress-toggle-icon.collapsed {
+    transform: rotate(0deg);
+}
+.progress-inline-right {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+.btn-resume-task {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #fff;
+    background: var(--theme-color, #10b981);
+    border: none;
+    border-radius: 6px;
+    padding: 0.25rem 0.65rem;
+    cursor: pointer;
+    transition: opacity 0.15s;
+    white-space: nowrap;
+}
+.btn-resume-task:hover {
+    opacity: 0.85;
+}
+.btn-resume-task:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+.btn-resume-task-detail {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #fff;
+    background: var(--theme-color, #10b981);
+    border: none;
+    border-radius: 8px;
+    padding: 0.45rem 1rem;
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+.btn-resume-task-detail:hover {
+    opacity: 0.85;
+}
+.btn-resume-task-detail:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+.progress-inline-steps {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+    border-top: 1px solid var(--border-color);
+}
+
 /* Input Area */
 .input-container {
     padding: 1.25rem 2rem;
@@ -1385,10 +1508,39 @@ textarea {
     gap: 0.3rem;
 }
 
+.chat-unread-badge {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: var(--error, #ef4444);
+    color: #fff;
+    font-size: 0.7rem;
+    font-weight: 700;
+    line-height: 1;
+    margin-left: auto;
+}
+
 .key-field label {
     font-size: 0.82rem;
     font-weight: 600;
     color: var(--text-primary);
+}
+
+.key-help-link {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--accent, #10b981);
+    text-decoration: none;
+    margin-left: 0.3rem;
+    opacity: 0.7;
+    transition: opacity 0.15s;
+}
+.key-help-link:hover {
+    opacity: 1;
 }
 
 .key-input-wrapper {

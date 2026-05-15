@@ -5,6 +5,7 @@ import { cachedFetch } from './cache.js';
 // ===================== Settings =====================
 
 const providers = [
+  { key: "deepseek", label: "DeepSeek" },
   { key: "kimi", label: "Kimi (Moonshot)" },
   { key: "ollama", label: "Ollama (本地/Local)" },
   { key: "llamacpp", label: "Llama.cpp (本地/Local)" },
@@ -13,7 +14,6 @@ const providers = [
   { key: "openai", label: "OpenAI" },
   { key: "anthropic", label: "Anthropic" },
   { key: "gemini", label: "Google Gemini" },
-  { key: "deepseek", label: "DeepSeek" },
   { key: "glm", label: "GLM (智谱)" },
   { key: "minimax", label: "MiniMax" },
   { key: "huggingface", label: "HuggingFace Token" }
@@ -57,6 +57,10 @@ function buildApiKeysGrid(maskedKeys) {
   const grid = document.getElementById('api-keys-container');
   if (!grid) return;
   grid.innerHTML = '';
+  const helpLinks = {
+    deepseek: 'https://platform.deepseek.com/api-docs',
+    kimi: 'https://platform.moonshot.cn/docs',
+  };
   providers.forEach(p => {
     const mask = maskedKeys[p.key] || '';
     const hasSaved = mask.length > 0;
@@ -65,10 +69,14 @@ function buildApiKeysGrid(maskedKeys) {
     if (p.key === 'sglang') placeholder = '默认 http://localhost:8009/v1';
     if (p.key === 'vllm') placeholder = '默认 http://localhost:8000/v1';
 
+    const helpHtml = helpLinks[p.key]
+      ? ` <a href="${helpLinks[p.key]}" target="_blank" class="key-help-link" title="${p.label} 配置文档">?</a>`
+      : '';
+
     const wrapper = document.createElement('div');
     wrapper.className = 'key-field';
     wrapper.innerHTML = `
-      <label>${p.label}</label>
+      <label>${p.label}${helpHtml}</label>
       <div class="key-input-wrapper">
         <input type="password" id="key-${p.key}" placeholder="${hasSaved ? mask : placeholder}" autocomplete="new-password" spellcheck="false">
         <button type="button" class="toggle-visibility" data-target="key-${p.key}" title="显示/隐藏">

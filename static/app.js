@@ -242,11 +242,21 @@ function initApp() {
       return;
     }
 
+    // Increment unread badge if user is not on chat view
     if (!isBackground
-      && !window._pluginWsTypes.has(data.type)
-      && data.type !== 'llamacpp_download'
+      && (data.type === 'message' || data.type === 'status' || data.type === 'progress')
       && document.querySelector('.view.active')?.id !== 'view-chat') {
-      switchView('chat');
+      const badge = document.getElementById('chat-unread-badge');
+      if (badge) {
+        const cur = parseInt(badge.textContent) || 0;
+        badge.textContent = cur + 1;
+        badge.style.display = 'flex';
+      }
+    }
+
+    if (data.type === 'history_steps') {
+      renderHistorySteps(data);
+      return;
     }
 
     if (data.type === 'status') {
@@ -282,35 +292,97 @@ function initApp() {
   // =============================================
   // Progress Tracking UI
   // =============================================
-  let progressContainer = null;
+  // Inline collapsible progress card system
+  // =============================================
+  let progressInline = null;       // Current .progress-inline element
+  let progressStepsEl = null;     // .progress-inline-steps container
   let progressSteps = {};
   let progressStepData = {};
+  let progressStepCount = 0;
 
   function ensureProgressContainer() {
-    if (!progressContainer) {
+    if (!progressInline) {
       hideThinkingStatus();
-      progressContainer = document.createElement('div');
-      progressContainer.className = 'progress-container';
-      progressContainer.innerHTML = `
-        <div class="progress-header">
-          <div class="progress-spinner"></div>
-          <span class="progress-title">${t('working')}</span>
+      progressInline = document.createElement('div');
+      progressInline.className = 'progress-inline';
+      progressInline.innerHTML = `
+        <div class="progress-inline-header" id="progress-inline-header">
+          <div class="progress-inline-left">
+            <div class="progress-spinner"></div>
+            <span class="progress-title">${t('working')}</span>
+          </div>
+          <span class="progress-toggle-icon collapsed">▸</span>
         </div>
-        <div class="progress-steps"></div>`;
-      chatContainer.appendChild(progressContainer);
+        <div class="progress-inline-steps" id="progress-inline-steps"></div>`;
+      progressStepsEl = progressInline.querySelector('.progress-inline-steps');
+
+      // Toggle collapse/expand on header click
+      const header = progressInline.querySelector('.progress-inline-header');
+      header.addEventListener('click', function() {
+        const steps = progressInline.querySelector('.progress-inline-steps');
+        const icon = progressInline.querySelector('.progress-toggle-icon');
+        const isCollapsed = steps.style.maxHeight === '0px' || !steps.style.maxHeight;
+        if (isCollapsed) {
+          steps.style.maxHeight = steps.scrollHeight + 'px';
+          icon.classList.remove('collapsed');
+          icon.classList.add('expanded');
+          icon.textContent = '▾';
+        } else {
+          steps.style.maxHeight = '0px';
+          icon.classList.remove('expanded');
+          icon.classList.add('collapsed');
+          icon.textContent = '▸';
+        }
+      });
+
+      // Insert after last user message
+      const userMsgs = chatContainer.querySelectorAll('.message.user');
+      const lastUser = userMsgs[userMsgs.length - 1];
+      if (lastUser) {
+        lastUser.insertAdjacentElement('afterend', progressInline);
+      } else {
+        chatContainer.appendChild(progressInline);
+      }
       scrollToBottom();
     }
-    return progressContainer;
+    return progressInline;
+  }
+
+  function finishProgressContainer() {
+    if (!progressInline) return;
+    progressInline.classList.add('completed');
+    const titleEl = progressInline.querySelector('.progress-title');
+    const count = progressStepCount;
+    if (titleEl) titleEl.textContent = `✨ 执行完成 · ${count} 步`;
+    const spinnerEl = progressInline.querySelector('.progress-spinner');
+    if (spinnerEl) spinnerEl.style.display = 'none';
+
+    // Auto-collapse on finish
+    const steps = progressInline.querySelector('.progress-inline-steps');
+    const icon = progressInline.querySelector('.progress-toggle-icon');
+    if (steps) steps.style.maxHeight = '0px';
+    if (icon) { icon.classList.add('collapsed'); icon.classList.remove('expanded'); icon.textContent = '▸'; }
+
+    // Update step count badge in header
+    const headerText = progressInline.querySelector('.progress-title');
+    if (headerText) headerText.textContent = `✨ 执行完成 · ${count} 步`;
+
+    // Reset for next turn
+    progressInline = null;
+    progressStepsEl = null;
+    progressSteps = {};
+    progressStepCount = 0;
+    // Keep progressStepData for detail panel
   }
 
   window.handleProgressEvent = handleProgressEvent;
   function handleProgressEvent(data) {
     const event = data.event;
+    const stepsEl = ensureProgressContainer() ? progressStepsEl : null;
+    if (!stepsEl) return;
 
     if (event === 'thinking') {
       if (data.content) {
-        ensureProgressContainer();
-        const stepsEl = progressContainer.querySelector('.progress-steps');
         let thinkEl = document.getElementById(`progress-thought-${data.iteration || 0}`);
         if (!thinkEl) {
           thinkEl = document.createElement('div');
@@ -323,10 +395,9 @@ function initApp() {
               <span class="step-detail">${escapeHtml(data.content)}</span>
             </div>`;
           stepsEl.appendChild(thinkEl);
-
           const thinkKey = `thought-${data.iteration || 0}`;
           progressStepData[thinkKey] = { type: 'thinking', label: '思考过程', content: data.content, iteration: data.iteration };
-          thinkEl.addEventListener('click', () => showStepDetail(thinkKey));
+          thinkEl.addEventListener('click', (e) => { e.stopPropagation(); showStepDetail(thinkKey); });
         } else {
           const detailEl = thinkEl.querySelector('.step-detail');
           if (detailEl) detailEl.textContent = data.content;
@@ -340,8 +411,6 @@ function initApp() {
     }
 
     if (event === 'model_switched') {
-      ensureProgressContainer();
-      const stepsEl = progressContainer.querySelector('.progress-steps');
       const switchNote = document.createElement('div');
       switchNote.className = 'progress-step model-switch';
       switchNote.innerHTML = `<span class="step-icon">🔄</span><span class="step-text">模型已切换: ${data.from} → <strong>${data.to}</strong></span>`;
@@ -351,8 +420,7 @@ function initApp() {
     }
 
     if (event === 'tool_start') {
-      ensureProgressContainer();
-      const stepsEl = progressContainer.querySelector('.progress-steps');
+      progressStepCount++;
       const stepEl = document.createElement('div');
       stepEl.className = 'progress-step running';
       stepEl.id = `progress-step-${data.step}`;
@@ -364,14 +432,16 @@ function initApp() {
         </div>`;
       stepsEl.appendChild(stepEl);
       progressSteps[data.step] = stepEl;
-
       progressStepData[data.step] = {
         type: 'tool', step: data.step, tool: data.tool,
         tool_label: data.tool_label || data.tool,
         args_preview: data.args_preview || '', full_args: data.args_preview || '',
         result_preview: '', full_result: '', success: null, status: 'running'
       };
-      stepEl.addEventListener('click', () => showStepDetail(data.step));
+      stepEl.addEventListener('click', (e) => { e.stopPropagation(); showStepDetail(data.step); });
+      // Update title with step count
+      const title = progressInline.querySelector('.progress-title');
+      if (title) title.textContent = `🐼 执行中 · ${progressStepCount} 步`;
       scrollToBottom();
       return;
     }
@@ -442,15 +512,82 @@ function initApp() {
   detailPanelClose.addEventListener('click', closeDetailPanel);
 
   function hideProgressContainer() {
-    if (progressContainer) {
-      progressContainer.classList.add('completed');
-      const titleEl = progressContainer.querySelector('.progress-title');
-      if (titleEl) titleEl.textContent = t('done');
-      const spinnerEl = progressContainer.querySelector('.progress-spinner');
-      if (spinnerEl) spinnerEl.style.display = 'none';
-      progressContainer = null;
-      progressSteps = {};
+    finishProgressContainer();
+  }
+
+  function renderHistorySteps(data) {
+    // Render past execution steps as a completed progress-inline card
+    const steps = data.steps || [];
+    if (!steps.length) return;
+
+    const historyCard = document.createElement('div');
+    historyCard.className = 'progress-inline completed';
+    const stepCount = steps.length;
+    historyCard.innerHTML = `
+      <div class="progress-inline-header">
+        <div class="progress-inline-left">
+          <span class="progress-title">⚡ 上次执行 · ${stepCount} 步</span>
+        </div>
+        <div class="progress-inline-right">
+          ${data.task_status === 'interrupted'
+            ? `<button class="btn-resume-task" data-task-id="${data.task_id}" title="继续执行">▶ 继续</button>`
+            : ''}
+          <span class="progress-toggle-icon collapsed">▸</span>
+        </div>
+      </div>
+      <div class="progress-inline-steps"></div>`;
+
+    const stepsEl = historyCard.querySelector('.progress-inline-steps');
+    steps.forEach((s, i) => {
+      const stepEl = document.createElement('div');
+      stepEl.className = `progress-step ${s.success ? 'done' : 'failed'}`;
+      stepEl.innerHTML = `
+        <span class="step-icon">${s.success ? '✅' : '❌'}</span>
+        <div class="step-body">
+          <span class="step-label">${s.step_number}. ${s.tool_label || s.tool_name}</span>
+          ${s.args_preview ? `<span class="step-detail">${escapeHtml(s.args_preview)}</span>` : ''}
+          ${s.result_preview ? `<span class="step-detail">${escapeHtml(s.result_preview)}</span>` : ''}
+        </div>`;
+      stepsEl.appendChild(stepEl);
+    });
+
+    // Insert after last user message
+    const userMsgs = chatContainer.querySelectorAll('.message.user');
+    const lastUser = userMsgs[userMsgs.length - 1];
+    if (lastUser) {
+      lastUser.insertAdjacentElement('afterend', historyCard);
+    } else {
+      chatContainer.appendChild(historyCard);
     }
+
+    // Toggle collapse/expand
+    historyCard.querySelector('.progress-inline-header').addEventListener('click', function(e) {
+      if (e.target.closest('.btn-resume-task')) return;
+      const st = historyCard.querySelector('.progress-inline-steps');
+      const ic = historyCard.querySelector('.progress-toggle-icon');
+      const collapsed = st.style.maxHeight === '0px' || !st.style.maxHeight;
+      st.style.maxHeight = collapsed ? st.scrollHeight + 'px' : '0px';
+      ic.classList.toggle('collapsed', !collapsed);
+      ic.classList.toggle('expanded', collapsed);
+      ic.textContent = collapsed ? '▾' : '▸';
+    });
+
+    // Resume button handler
+    const resumeBtn = historyCard.querySelector('.btn-resume-task');
+    if (resumeBtn) {
+      resumeBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        const taskId = resumeBtn.dataset.taskId;
+        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+          state.ws.send(JSON.stringify({ type: 'resume', task_id: parseInt(taskId) }));
+          resumeBtn.textContent = '⏳ 恢复中...';
+          resumeBtn.disabled = true;
+          historyCard.remove();
+        }
+      });
+    }
+
+    scrollToBottom();
   }
 
   // =============================================
@@ -521,12 +658,19 @@ function initApp() {
       avatarSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>`;
     } else {
       avatarSvg = `<svg width="20" height="20" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="50" cy="50" r="45" fill="#f4f6f5" stroke="#1a1c1e" stroke-width="6"/>
-        <circle cx="25" cy="25" r="14" fill="#1a1c1e"/><circle cx="75" cy="25" r="14" fill="#1a1c1e"/>
-        <circle cx="35" cy="45" r="10" fill="#1a1c1e"/><circle cx="65" cy="45" r="10" fill="#1a1c1e"/>
-        <circle cx="35" cy="43" r="3.5" fill="#fff"/><circle cx="65" cy="43" r="3.5" fill="#fff"/>
-        <ellipse cx="50" cy="62" rx="5" ry="3.5" fill="#1a1c1e"/>
-        <path d="M44 68 C 50 73, 50 73, 56 68" stroke="#1a1c1e" stroke-width="3" stroke-linecap="round"/></svg>`;
+        <ellipse cx="25" cy="22" rx="15" ry="16" fill="#1a1a1a"/>
+        <ellipse cx="75" cy="22" rx="15" ry="16" fill="#1a1a1a"/>
+        <ellipse cx="50" cy="55" rx="42" ry="40" fill="#f5f5f0"/>
+        <ellipse cx="35" cy="50" rx="14" ry="12" fill="#1a1a1a" transform="rotate(-6 35 50)"/>
+        <ellipse cx="65" cy="50" rx="14" ry="12" fill="#1a1a1a" transform="rotate(6 65 50)"/>
+        <circle cx="37" cy="47" r="5.5" fill="#fff"/>
+        <circle cx="63" cy="47" r="5.5" fill="#fff"/>
+        <circle cx="39" cy="46" r="2.2" fill="#1a1a1a"/>
+        <circle cx="61" cy="46" r="2.2" fill="#1a1a1a"/>
+        <circle cx="40" cy="45" r="0.8" fill="#fff"/>
+        <circle cx="62" cy="45" r="0.8" fill="#fff"/>
+        <ellipse cx="50" cy="60" rx="4" ry="3" fill="#1a1a1a"/>
+        <path d="M46 65 C 49 68, 51 68, 54 65" stroke="#1a1a1a" stroke-width="2.5" stroke-linecap="round" fill="none"/></svg>`;
     }
 
     let formattedContent = content;
@@ -563,7 +707,27 @@ function initApp() {
     if (!currentStatusBubble) {
       currentStatusBubble = document.createElement('div');
       currentStatusBubble.className = 'status-bubble';
-      currentStatusBubble.innerHTML = `<div class="spinner"></div><span>${text}</span>`;
+      // Random panda animation: 0 = eating bamboo, 1 = rolling
+      const animClass = Math.random() < 0.5 ? 'panda-eat' : 'panda-roll';
+      currentStatusBubble.innerHTML = `
+        <div class="panda-thinking-icon ${animClass}">
+          <svg width="32" height="32" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <ellipse cx="25" cy="22" rx="15" ry="16" fill="#1a1a1a"/>
+            <ellipse cx="75" cy="22" rx="15" ry="16" fill="#1a1a1a"/>
+            <ellipse cx="50" cy="55" rx="42" ry="40" fill="#f5f5f0"/>
+            <ellipse cx="35" cy="50" rx="14" ry="12" fill="#1a1a1a" transform="rotate(-6 35 50)"/>
+            <ellipse cx="65" cy="50" rx="14" ry="12" fill="#1a1a1a" transform="rotate(6 65 50)"/>
+            <circle cx="37" cy="47" r="5.5" fill="#fff"/>
+            <circle cx="63" cy="47" r="5.5" fill="#fff"/>
+            <circle cx="39" cy="46" r="2.2" fill="#1a1a1a"/>
+            <circle cx="61" cy="46" r="2.2" fill="#1a1a1a"/>
+            <circle cx="40" cy="45" r="0.8" fill="#fff"/>
+            <circle cx="62" cy="45" r="0.8" fill="#fff"/>
+            <ellipse cx="50" cy="60" rx="4" ry="3" fill="#1a1a1a"/>
+            <path d="M46 65 C 49 68, 51 68, 54 65" stroke="#1a1a1a" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+          </svg>
+        </div>
+        <span>${text}</span>`;
       chatContainer.appendChild(currentStatusBubble);
       scrollToBottom();
     } else {
@@ -658,6 +822,11 @@ function initApp() {
   function handleSend() {
     const text = messageInput.value.trim();
     if ((!text && state.pendingImages.length === 0) || !state.isConnected || state.isAgentThinking) return;
+    // Reset progress state for new turn
+    progressInline = null;
+    progressStepsEl = null;
+    progressSteps = {};
+    progressStepCount = 0;
     const msgImages = [...state.pendingImages];
     appendMessage(text || '[图片]', 'user', msgImages);
     const agentSelector = document.getElementById('agent-selector');

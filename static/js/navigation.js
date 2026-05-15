@@ -15,6 +15,12 @@ export function switchView(viewId) {
   if (targetView) targetView.classList.add('active');
   if (targetNav) targetNav.classList.add('active');
 
+  // Clear chat unread badge when entering chat
+  if (viewId === 'chat') {
+    const badge = document.getElementById('chat-unread-badge');
+    if (badge) { badge.textContent = '0'; badge.style.display = 'none'; }
+  }
+
   // Load view-specific data — these are attached to window by app.js
   const w = window;
   if (viewId === 'settings-models') { w.loadSettingsConfig?.(); w.loadDownloadHistory?.(); }
