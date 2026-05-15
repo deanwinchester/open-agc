@@ -1,13 +1,9 @@
-"""
-DownloadTool — Queue downloads via system download manager.
-Supports resume on partial downloads via LlamaCppManager.
-"""
 import threading
 from typing import Optional
 
-
 class DownloadTool:
     """Queue a download in the background. Returns immediately, does NOT block."""
+
 
     def __init__(self, models_dir: str = None):
         self.models_dir = models_dir

@@ -7,7 +7,6 @@ import glob
 import shutil
 import sys
 import traceback
-
 class BrowserAutomationTool:
     """
     基于 Playwright 的隔离沙盒浏览器控制工具。

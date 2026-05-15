@@ -35,12 +35,8 @@ datas = [
     ('api', 'api'),
 ]
 
-# Only bundle essential data files, NOT the entire data/ directory
-# (data/ may contain large cloned repos, databases, etc.)
-essential_data_files = ['data/config.json', 'data/memory.md']
-for f in essential_data_files:
-    if os.path.exists(f):
-        datas.append((f, 'data'))
+# Do NOT bundle data/config.json or data/memory.md as they contain sensitive user data.
+# These will be created in the user's data directory on first launch.
 
 # Add .env.example
 if os.path.exists('.env.example'):
@@ -92,7 +88,7 @@ a = Analysis(
         'api.server',
         'agent.agent',
         'core.llm_client',
-        'core.sglang_manager',
+
         'tools.shell',
         'tools.filesystem',
         'tools.python_repl',

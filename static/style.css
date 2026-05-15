@@ -833,10 +833,12 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.55rem 0.9rem;
+    padding: 0.7rem 1rem;
+    min-height: 38px;
     cursor: pointer;
     user-select: none;
     transition: background 0.15s;
+    background: var(--bg-inner);
 }
 .progress-inline-header:hover {
     background: var(--hover-bg, rgba(0,0,0,0.03));

@@ -230,7 +230,7 @@ function initApp() {
     const isBackground = data.background === true;
     // Route progress/message/status events to the correct session
     const evtSession = data.session_id != null ? data.session_id : (data.task_session_id != null ? data.task_session_id : null);
-    const isForCurrentSession = evtSession == null || evtSession === state.currentSessionId;
+    const isForCurrentSession = evtSession == null || evtSession == state.currentSessionId;
     // Cache off-session messages in the session chat cache
     if (evtSession != null && !isForCurrentSession && (data.type === 'message' || data.type === 'progress')) {
       window._sessionChatCache = window._sessionChatCache || {};
@@ -306,14 +306,15 @@ function initApp() {
       progressInline = document.createElement('div');
       progressInline.className = 'progress-inline';
       progressInline.innerHTML = `
-        <div class="progress-inline-header" id="progress-inline-header">
+        <div class="progress-inline-header" id="progress-inline-header" style="min-height: 40px;">
           <div class="progress-inline-left">
             <div class="progress-spinner"></div>
             <span class="progress-title">${t('working')}</span>
+            <span class="progress-current-step" style="margin-left: 8px; color: var(--text-secondary); opacity: 0.8; font-size: 0.8rem;"></span>
           </div>
           <span class="progress-toggle-icon collapsed">▸</span>
         </div>
-        <div class="progress-inline-steps" id="progress-inline-steps"></div>`;
+        <div class="progress-inline-steps" id="progress-inline-steps" style="max-height: none;"></div>`;
       progressStepsEl = progressInline.querySelector('.progress-inline-steps');
 
       // Toggle collapse/expand on header click
@@ -357,11 +358,10 @@ function initApp() {
     const spinnerEl = progressInline.querySelector('.progress-spinner');
     if (spinnerEl) spinnerEl.style.display = 'none';
 
-    // Auto-collapse on finish
-    const steps = progressInline.querySelector('.progress-inline-steps');
-    const icon = progressInline.querySelector('.progress-toggle-icon');
-    if (steps) steps.style.maxHeight = '0px';
-    if (icon) { icon.classList.add('collapsed'); icon.classList.remove('expanded'); icon.textContent = '▸'; }
+    // Don't auto-collapse anymore — let the user see the result!
+    // const steps = progressInline.querySelector('.progress-inline-steps');
+    // if (steps) steps.style.maxHeight = '0px';
+
 
     // Update step count badge in header
     const headerText = progressInline.querySelector('.progress-title');
@@ -432,6 +432,21 @@ function initApp() {
         </div>`;
       stepsEl.appendChild(stepEl);
       progressSteps[data.step] = stepEl;
+
+      // Update current step in header
+      const headerTitle = progressInline.querySelector('.progress-title');
+      const currentStepEl = progressInline.querySelector('.progress-current-step');
+      if (headerTitle) headerTitle.textContent = `⚡ 执行中 · ${progressStepCount} 步`;
+      if (currentStepEl) currentStepEl.textContent = ` : ${data.tool_label || data.tool}`;
+      
+      // Auto-expand on new step
+      const steps = progressInline.querySelector('.progress-inline-steps');
+      const icon = progressInline.querySelector('.progress-toggle-icon');
+      if (steps && (steps.style.maxHeight === '0px' || !steps.style.maxHeight || steps.style.maxHeight === 'none')) {
+          steps.style.maxHeight = 'none'; // Ensure visible
+          if (icon) { icon.classList.remove('collapsed'); icon.classList.add('expanded'); icon.textContent = '▾'; }
+      }
+
       progressStepData[data.step] = {
         type: 'tool', step: data.step, tool: data.tool,
         tool_label: data.tool_label || data.tool,
@@ -524,9 +539,10 @@ function initApp() {
     historyCard.className = 'progress-inline completed';
     const stepCount = steps.length;
     historyCard.innerHTML = `
-      <div class="progress-inline-header">
+      <div class="progress-inline-header" style="min-height: 38px; padding: 0.7rem 1rem;">
         <div class="progress-inline-left">
           <span class="progress-title">⚡ 上次执行 · ${stepCount} 步</span>
+          <span class="progress-current-step" style="margin-left: 8px; color: var(--text-secondary); opacity: 0.8; font-size: 0.8rem;"></span>
         </div>
         <div class="progress-inline-right">
           ${data.task_status === 'interrupted'
@@ -535,9 +551,15 @@ function initApp() {
           <span class="progress-toggle-icon collapsed">▸</span>
         </div>
       </div>
-      <div class="progress-inline-steps"></div>`;
+      <div class="progress-inline-steps" style="max-height: none;"></div>`;
 
     const stepsEl = historyCard.querySelector('.progress-inline-steps');
+    const toggleIcon = historyCard.querySelector('.progress-toggle-icon');
+    if (toggleIcon) {
+      toggleIcon.classList.remove('collapsed');
+      toggleIcon.classList.add('expanded');
+      toggleIcon.textContent = '▾';
+    }
     steps.forEach((s, i) => {
       const stepEl = document.createElement('div');
       stepEl.className = `progress-step ${s.success ? 'done' : 'failed'}`;
@@ -565,11 +587,19 @@ function initApp() {
       if (e.target.closest('.btn-resume-task')) return;
       const st = historyCard.querySelector('.progress-inline-steps');
       const ic = historyCard.querySelector('.progress-toggle-icon');
-      const collapsed = st.style.maxHeight === '0px' || !st.style.maxHeight;
-      st.style.maxHeight = collapsed ? st.scrollHeight + 'px' : '0px';
-      ic.classList.toggle('collapsed', !collapsed);
-      ic.classList.toggle('expanded', collapsed);
-      ic.textContent = collapsed ? '▾' : '▸';
+      const isCurrentlyCollapsed = st.style.maxHeight === '0px';
+      if (isCurrentlyCollapsed) {
+        st.style.maxHeight = st.scrollHeight + 'px';
+      } else {
+        // If it was 'none', first set to scrollHeight so transition works
+        if (st.style.maxHeight === 'none') st.style.maxHeight = st.scrollHeight + 'px';
+        // Force reflow
+        st.offsetHeight;
+        st.style.maxHeight = '0px';
+      }
+      ic.classList.toggle('collapsed', !isCurrentlyCollapsed);
+      ic.classList.toggle('expanded', isCurrentlyCollapsed);
+      ic.textContent = isCurrentlyCollapsed ? '▾' : '▸';
     });
 
     // Resume button handler
@@ -1001,8 +1031,9 @@ function initApp() {
     }
   }
 
-  fetchInitialData();
-  connectWebSocket();
+  fetchInitialData().then(() => {
+    connectWebSocket();
+  });
 }
 
 if (document.readyState === 'loading') {

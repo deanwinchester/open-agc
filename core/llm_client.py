@@ -8,7 +8,7 @@ import litellm
 litellm.num_tokens_logging = False
 litellm.supports_token_counter = False
 from typing import List, Dict, Any, Optional, Tuple
-from litellm.llms.ollama.completion.transformation import OllamaConfig
+
 
 # Optional logging or debugging controls for litellm
 # litellm.set_verbose = True
@@ -116,175 +116,8 @@ def clean_llm_text(text: str) -> str:
         
     return text.strip()
 
-# Patch LiteLLM's OllamaConfig to support the 'thinking' field and robust tool rescue
-class PatchedOllamaConfig(OllamaConfig):
-    # No longer needed as we use clean_llm_text globally
 
 
-    def _rescue_tool_call(self, text: str) -> Optional[Dict[str, Any]]:
-        """Attempt to extract a tool call and optional reasoning from a raw JSON string."""
-        if not text:
-            return None
-        
-        # Find potential JSON block in the text
-        # Handles cases where the model wraps JSON in text or markdown
-        content = text.strip()
-        
-        # Try to find the first '{' and corresponding last '}'
-        start_idx = content.find('{')
-        end_idx = content.rfind('}')
-        
-        if start_idx == -1 or end_idx == -1 or end_idx < start_idx:
-            return None
-            
-        json_str = content[start_idx:end_idx+1]
-        
-        try:
-            data = json.loads(json_str)
-            if not isinstance(data, dict):
-                return None
-            
-            result = None
-            
-            # Format 1: Action/Parameters {"action": "...", "parameters": {...}} or {"action": "...", "action_input": {...}}
-            if "action" in data and ("parameters" in data or "action_input" in data):
-                result = {
-                    "name": data["action"],
-                    "arguments": data.get("parameters") or data.get("action_input")
-                }
-            
-            # Format 2: OpenAI-like but in content {"name": "...", "arguments": {...}}
-            elif "name" in data and ("arguments" in data or "parameters" in data):
-                result = {
-                    "name": data["name"],
-                    "arguments": data.get("arguments") or data.get("parameters")
-                }
-            
-            # Format 3: Tool/Args {"tool": "...", "args": {...}}
-            elif "tool" in data and "args" in data:
-                result = {
-                    "name": data["tool"],
-                    "arguments": data.get("args")
-                }
-            
-            # Format 4: Execution Plan {"execution": {"action_type": "...", ...}}
-            elif "execution" in data and isinstance(data["execution"], dict):
-                exec_data = data["execution"]
-                action = exec_data.get("action_type")
-                
-                if action == "code":
-                    result = {
-                        "name": "execute_python",
-                        "arguments": {"code": exec_data.get("code_content") or exec_data.get("code") or ""}
-                    }
-                elif action == "shell":
-                    result = {
-                        "name": "execute_shell",
-                        "arguments": {"command": exec_data.get("command") or exec_data.get("code_content") or ""}
-                    }
-                elif "name" in exec_data and ("arguments" in exec_data or "parameters" in exec_data):
-                    result = {
-                        "name": exec_data["name"],
-                        "arguments": exec_data.get("arguments") or exec_data.get("parameters")
-                    }
-            
-            # Format 5: Qwen-style internal reasoning {"tool_selection": "..."}
-            elif "tool_selection" in data:
-                result = {
-                    "name": data["tool_selection"],
-                    "arguments": data.get("tool_arguments") or data.get("arguments") or data.get("parameters") or {}
-                }
-
-            if result:
-                # Capture reasoning if present in the same JSON
-                reasoning = data.get("thought") or data.get("reasoning") or data.get("description")
-                if reasoning:
-                    result["reasoning"] = reasoning
-                return result
-
-        except Exception:
-            pass
-        return None
-
-    def transform_response(self, *args, **kwargs):
-        # Call original transform first
-        try:
-            resp = super().transform_response(*args, **kwargs)
-        except Exception as e:
-            # If transform fails, create a skeleton response to try to rescue content
-            print(f"[LLMClient] Ollama transform error: {str(e)}")
-            return None # Fail safely or handle if possible
-            
-        if not resp or not resp.choices:
-            return resp
-
-        # Access raw_response from args (model, raw_response, model_response, ...)
-        raw_response = args[1] if len(args) > 1 else kwargs.get("raw_response")
-        if not raw_response:
-            return resp
-            
-        try:
-            response_json = raw_response.json()
-            thinking_text = response_json.get("thinking", "")
-
-            response_text = response_json.get("response", "") or response_json.get("message", {}).get("content", "")
-            
-            msg = resp.choices[0].message
-            
-            # 1. Always preserve thinking as reasoning_content if it exists
-            if thinking_text and not getattr(msg, 'reasoning_content', None):
-                setattr(msg, 'reasoning_content', thinking_text)
-            
-            # 2. Rescue tool calls if native tool_calls is empty
-            if not getattr(msg, 'tool_calls', None):
-                rescued = None
-                # Try response first (primary output)
-                if response_text:
-                    rescued = self._rescue_tool_call(response_text)
-                
-                # If failed, try thinking (secondary output/fallback)
-                if not rescued and thinking_text:
-                    rescued = self._rescue_tool_call(thinking_text)
-                
-                if rescued:
-                    msg.content = None
-                    msg.tool_calls = [
-                        {
-                            "id": f"call_{str(uuid.uuid4())}",
-                            "type": "function",
-                            "function": {
-                                "name": rescued["name"],
-                                "arguments": json.dumps(rescued["arguments"]) if not isinstance(rescued["arguments"], (str, type(None))) else (rescued["arguments"] or "{}")
-                            }
-                        }
-                    ]
-                    resp.choices[0].finish_reason = "tool_calls"
-                    
-                    if rescued.get("reasoning") and not getattr(msg, 'reasoning_content', None):
-                        setattr(msg, 'reasoning_content', rescued["reasoning"])
-            
-            # 3. Handle fallback if primary response is empty but thinking has content
-            if (not getattr(msg, 'tool_calls', None)) and (not response_text or not response_text.strip()):
-                if thinking_text and (not msg.content or not msg.content.strip()):
-                    msg.content = thinking_text
-                    
-            # Final cleanup for both content and reasoning
-            if msg.content:
-                msg.content = clean_llm_text(msg.content)
-            
-            reasoning = getattr(msg, 'reasoning_content', None)
-            if reasoning:
-                setattr(msg, 'reasoning_content', clean_llm_text(reasoning))
-                
-        except Exception as e:
-            print(f"[LLMClient] Ollama patch warning: {str(e)}")
-            
-        return resp
-
-# Apply the monkeypatch to LiteLLM's internal registry
-import litellm.llms.ollama.completion.transformation as transformation
-transformation.OllamaConfig = PatchedOllamaConfig
-transformation.OllamaChatConfig = PatchedOllamaConfig # Patch Chat config too
 
 
 
@@ -309,9 +142,6 @@ class LLMClient:
             "kimi": "MOONSHOT_API_KEY",
             "glm": "ZAI_API_KEY",
             "minimax": "MINIMAX_API_KEY",
-            "ollama": "OLLAMA_API_BASE",
-            "sglang": "SGLANG_API_BASE",
-            "vllm": "VLLM_API_BASE",
             "llamacpp": "LLAMACPP_API_BASE",
             "huggingface": "HF_TOKEN"
         }
@@ -326,38 +156,12 @@ class LLMClient:
         if config.get("api_keys", {}).get("minimax"):
             os.environ.setdefault("MINIMAX_API_BASE", "https://api.minimax.io/v1")
 
-        # Default Ollama API base and proxy bypass for local connections
-        ollama_base = config.get("api_keys", {}).get("ollama", "http://127.0.0.1:11434")
-        
-        # Resolve localhost to 127.0.0.1 for stability on Windows
-        ollama_base = ollama_base.replace("://localhost", "://127.0.0.1")
-        
-        # Sanitize Ollama URL
-        ollama_base = ollama_base.rstrip("/")
-        suffixes_to_strip = ["/api/generate", "/api/chat", "/api/show", "/api/tags", "/v1"]
-        for suffix in suffixes_to_strip:
-            if ollama_base.endswith(suffix):
-                ollama_base = ollama_base[:-len(suffix)]
-                break
-        
-        # Keep clean OLLAMA_API_BASE in env and as an instance variable
-        self.ollama_api_base = ollama_base
-        os.environ["OLLAMA_API_BASE"] = ollama_base
-        
-        # SGLang API base
-        self.sglang_api_base = config.get("api_keys", {}).get("sglang", "http://localhost:8009/v1")
-        os.environ["SGLANG_API_BASE"] = self.sglang_api_base
-
-        # vLLM API base
-        self.vllm_api_base = config.get("api_keys", {}).get("vllm", "http://localhost:8000/v1")
-        os.environ["VLLM_API_BASE"] = self.vllm_api_base
-
         # llama.cpp API base
         self.llamacpp_api_base = config.get("api_keys", {}).get("llamacpp", "http://localhost:8080/v1")
         os.environ["LLAMACPP_API_BASE"] = self.llamacpp_api_base
         self.llamacpp_ctx_size = config.get("llamacpp_ctx_size", 32768)
 
-        # Ensure local connections bypass proxy (important for Ollama on Windows)
+        # Ensure local connections bypass proxy
         for var in ["no_proxy", "NO_PROXY"]:
             current = os.environ.get(var, "")
             local_hosts = "localhost,127.0.0.1"
@@ -491,14 +295,7 @@ class LLMClient:
             if tools:
                 kwargs["tools"] = tools
             
-            # For Ollama models, explicitly pass api_base to bypass LiteLLM's internal miscalculations
-            # that sometimes lead to 404 errors (appending /api/generate/api/show)
-            if "ollama" in attempt_model:
-                kwargs["api_base"] = self.ollama_api_base
-            if "sglang" in attempt_model:
-                kwargs["api_base"] = self.sglang_api_base
-            if "vllm" in attempt_model:
-                kwargs["api_base"] = self.vllm_api_base
+
             if "llamacpp/" in attempt_model:
                 kwargs["api_base"] = self.llamacpp_api_base
                 if not attempt_model.startswith("openai/"):
@@ -540,13 +337,7 @@ class LLMClient:
             kwargs["tools"] = tools
             
         # For local models, explicitly pass api_base to bypass LiteLLM's internal miscalculations
-        if "ollama" in target_model:
-            kwargs["api_base"] = self.ollama_api_base
-        if "sglang/" in target_model:
-            kwargs["api_base"] = self.sglang_api_base
-        elif "vllm/" in target_model:
-            kwargs["api_base"] = self.vllm_api_base
-        elif "llamacpp/" in target_model:
+        if "llamacpp/" in target_model:
             kwargs["api_base"] = self.llamacpp_api_base
             if not target_model.startswith("openai/"):
                 kwargs["model"] = f"openai/{target_model.replace('llamacpp/', '')}"

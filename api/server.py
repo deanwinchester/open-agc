@@ -58,7 +58,7 @@ litellm.supports_token_counter = False
 litellm._turn_on_debug()
 litellm.set_verbose = True  # Double down on verbosity for terminal logs
 
-# Ensure local connections bypass proxy (important for Ollama on Windows)
+# Ensure local connections bypass proxy
 for var in ["no_proxy", "NO_PROXY"]:
     current = os.environ.get(var, "")
     local_hosts = "localhost,127.0.0.1"
@@ -646,14 +646,11 @@ def load_config() -> dict:
             pass
     return {
         "api_keys": {
-            "ollama": "http://localhost:11434",
             "llamacpp": "http://localhost:8080/v1",
-            "sglang": "http://localhost:8009/v1",
-            "vllm": "http://localhost:8000/v1",
             "huggingface": ""
         },
-        "default_model": "sglang/Qwen/Qwen3.5-9B-Instruct",
-        "fallback_models": ["ollama/qwen3.5:9b"],
+        "default_model": "moonshot/kimi-latest",
+        "fallback_models": ["deepseek/deepseek-chat"],
         "disabled_skills": [],
         "sandbox_mode": True,
         "sandbox_dir": os.path.abspath(os.path.join(os.getcwd(), "workspace")),
@@ -759,7 +756,7 @@ async def update_settings(config_update: ConfigUpdate):
         "kimi": "MOONSHOT_API_KEY",
         "glm": "ZAI_API_KEY",
         "minimax": "MINIMAX_API_KEY",
-        "ollama": "OLLAMA_API_BASE",
+        "llamacpp": "LLAMACPP_API_BASE",
         "huggingface": "HF_TOKEN"
     }
 
@@ -877,33 +874,7 @@ async def get_provider_models(provider: str):
                 if res.status_code == 200:
                     models = [f"deepseek/{m['id']}" for m in res.json().get("data", [])]
             except Exception: pass
-    elif provider == "ollama":
-        base_url = api_keys.get("ollama", "http://localhost:11434")
-        if not base_url.startswith("http"):
-            base_url = "http://" + base_url
-        try:
-            res = requests.get(f"{base_url.rstrip('/')}/api/tags", timeout=5)
-            if res.status_code == 200:
-                models = [f"ollama/{m['name']}" for m in res.json().get("models", [])]
-        except Exception: pass
-    elif provider == "sglang":
-        base_url = api_keys.get("sglang", "http://localhost:8009/v1")
-        if not base_url.startswith("http"):
-            base_url = "http://" + base_url
-        try:
-            res = requests.get(f"{base_url.rstrip('/')}/models", timeout=5)
-            if res.status_code == 200:
-                models = [f"sglang/{m['id']}" for m in res.json().get("data", [])]
-        except Exception: pass
-    elif provider == "vllm":
-        base_url = api_keys.get("vllm", "http://localhost:8000/v1")
-        if not base_url.startswith("http"):
-            base_url = "http://" + base_url
-        try:
-            res = requests.get(f"{base_url.rstrip('/')}/models", timeout=5)
-            if res.status_code == 200:
-                models = [f"vllm/{m['id']}" for m in res.json().get("data", [])]
-        except Exception: pass
+
 
     # Fallback default models if API call fails or key not set
     # Model names include litellm provider prefix as required by litellm.completion()
@@ -916,10 +887,7 @@ async def get_provider_models(provider: str):
             'kimi': ['moonshot/kimi-k2.5', 'moonshot/kimi-latest', 'moonshot/moonshot-v1-8k', 'moonshot/moonshot-v1-32k', 'moonshot/moonshot-v1-128k'],
             'glm': ['zai/glm-4.7', 'zai/glm-4.5', 'zai/glm-4.5-flash', 'zai/glm-4.5-air'],
             'minimax': ['minimax/MiniMax-M2.1'],
-            'ollama': ['ollama/qwen2.5:7b', 'ollama/llama3.1:8b', 'ollama/deepseek-r1:8b', 'ollama/llama3.3:70b'],
             'llamacpp': ['llamacpp/local-model (需先下载 GGUF 模型)'],
-            'sglang': ['sglang/Qwen/Qwen3.5-9B-Instruct', 'sglang/Qwen/Qwen2.5-7B-Instruct'],
-            'vllm': ['vllm/Qwen/Qwen3.5-9B-Instruct']
         }
         models = defaults.get(provider, [])
         
@@ -930,24 +898,7 @@ class PullRequest(BaseModel):
     model_name: str
     tool: str = "huggingface" # "huggingface" or "modelscope"
 
-@app.post("/api/sglang/pull")
-async def pull_model(req: PullRequest):
-    """Pull local models via huggingface-cli or modelscope."""
-    try:
-        if req.tool == "modelscope":
-            cmd = ["modelscope", "download", "--model", req.model_name]
-        else:
-            cmd = ["huggingface-cli", "download", req.model_name]
-            
-        import subprocess
-        # Simply run in blocking mode or background depending on requirements
-        # Here we do a blocking subprocess call, which might block the API 
-        # but it's okay for a local GUI utility unless the user wants background downloading.
-        # Alternatively, returning immediately and logging to a file.
-        subprocess.Popen(cmd)
-        return {"status": "success", "message": f"Downloading {req.model_name} in background..."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/llamacpp/status")
 async def get_llamacpp_status():
@@ -2128,22 +2079,23 @@ async def websocket_endpoint(websocket: WebSocket):
     receive_task = None # Persistent receive_task to avoid concurrency issues
 
     # Replay the most recent task's steps for this session
-    # Only replay if the user hasn't sent new messages after the task
+    # Only replay if the user hasn't sent new messages after the task completed
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT t.id, t.status, t.created_at FROM tasks t "
+            "SELECT t.id, t.status, t.created_at, t.updated_at FROM tasks t "
             "WHERE t.id IN (SELECT DISTINCT task_id FROM task_steps WHERE session_id=?) "
             "ORDER BY t.created_at DESC LIMIT 1",
             (ws_session_id,))
         last_task = cursor.fetchone()
         if last_task:
-            # Only replay if no newer user messages exist after this task
+            # Only replay if no newer user messages exist after the task completed
+            check_time = last_task["updated_at"] or last_task["created_at"]
             newer_msgs = cursor.execute(
                 "SELECT COUNT(*) FROM messages WHERE session_id=? AND role='user' AND timestamp > ?",
-                (ws_session_id, last_task["created_at"])).fetchone()[0]
+                (ws_session_id, check_time)).fetchone()[0]
             if newer_msgs == 0:
                 steps = cursor.execute(
                     "SELECT step_number, tool_name, tool_label, args_preview, "
@@ -2155,7 +2107,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         "type": "history_steps",
                         "task_id": last_task["id"],
                         "task_status": last_task["status"],
-                        "steps": [dict(s) for s in steps]
+                        "steps": [dict(s) for s in steps],
+                        "session_id": ws_session_id
                     })
         conn.close()
     except Exception as e:
@@ -2475,7 +2428,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Send immediate acknowledgment
                 await _safe_send({
                     "type": "status",
-                    "message": "Agent is thinking..."
+                    "message": "Agent is thinking...",
+                    "session_id": ws_session_id
                 })
             
             try:
@@ -2487,15 +2441,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 if is_heartbeat and response and response.strip() == "HEARTBEAT_OK":
                     # Silent heartbeat, do nothing
                     continue
-                    
-                # Save agent response to DB
+                
+                # If it's a heartbeat response that isn't HEARTBEAT_OK, it's a resume or proactive thought.
+                # Ensure it's tagged with the correct session.
                 save_message("agent", response, ws_session_id)
+
 
                 # Send the final response
                 await _safe_send({
                     "type": "message",
                     "role": "agent",
-                    "content": response
+                    "content": response,
+                    "session_id": ws_session_id
                 })
                 
             except Exception as e:
@@ -2508,7 +2465,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 await _safe_send({
                     "type": "error",
                     "content": error_msg,
-                    "original_query": query if not is_heartbeat else ""
+                    "original_query": query if not is_heartbeat else "",
+                    "session_id": ws_session_id
                 })
                 
     except WebSocketDisconnect:
