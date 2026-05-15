@@ -16,7 +16,8 @@ from core.token_budget import TokenBudget, estimate_messages_tokens
 from core.reflection import ReflectionEngine
 from core.knowledge_graph import KnowledgeGraph
 from tools.shell import ShellTool
-from tools.filesystem import ReadFileTool, WriteFileTool
+from tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool
+from tools.search import GrepSearchTool, GlobTool
 from tools.python_repl import PythonREPLTool
 from tools.computer import ComputerTool
 from tools.memory import MemoryTool
@@ -141,6 +142,9 @@ class OpenAGCAgent:
             "execute_shell": ShellTool(),
             "read_file": ReadFileTool(),
             "write_file": WriteFileTool(),
+            "edit_file": EditFileTool(),
+            "search_file_content": GrepSearchTool(),
+            "find_files": GlobTool(),
             "execute_python": PythonREPLTool(),
             "computer_control": ComputerTool(),
             "manage_memory": memory_tool,
@@ -158,6 +162,9 @@ class OpenAGCAgent:
             "execute_shell": "执行终端命令",
             "read_file": "读取文件",
             "write_file": "写入文件",
+            "edit_file": "局部修改文件",
+            "search_file_content": "搜索文件内容",
+            "find_files": "查找文件",
             "execute_python": "运行 Python 代码",
             "computer_control": "操控电脑",
             "manage_memory": "管理记忆",
@@ -841,6 +848,42 @@ class OpenAGCAgent:
             
             # 1. Check if model decided to use tools
             tool_calls = message.tool_calls
+            
+            # --- Tool Call Rescue Logic ---
+            # If the model failed to use the API correctly and returned raw JSON text instead
+            if not tool_calls and message.content:
+                try:
+                    # Look for JSON block wrapped in markdown or raw JSON
+                    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', message.content, re.DOTALL)
+                    json_str = match.group(1) if match else message.content.strip()
+                    
+                    if json_str.startswith('{') and json_str.endswith('}'):
+                        parsed = json.loads(json_str)
+                        # Check if it looks like a tool call signature
+                        if "name" in parsed and "arguments" in parsed:
+                            import uuid
+                            
+                            class MockFunction:
+                                def __init__(self, name, arguments):
+                                    self.name = name
+                                    # LiteLLM expects arguments as stringified JSON
+                                    self.arguments = json.dumps(arguments) if isinstance(arguments, dict) else str(arguments)
+                            
+                            class MockToolCall:
+                                def __init__(self, id, function):
+                                    self.id = id
+                                    self.function = function
+                                    self.type = "function"
+                                    
+                            call_id = f"call_{uuid.uuid4().hex[:10]}"
+                            mock_call = MockToolCall(id=call_id, function=MockFunction(parsed["name"], parsed["arguments"]))
+                            tool_calls = [mock_call]
+                            message.tool_calls = tool_calls  # Patch the original message so history is consistent
+                            if verbose:
+                                print(f"[Agent] 🚨 Rescued raw JSON into tool call: {parsed['name']}")
+                except Exception as e:
+                    pass
+            # ------------------------------
             if tool_calls:
                 screenshot_urls = []
                 for tool_call in tool_calls:
@@ -899,10 +942,15 @@ class OpenAGCAgent:
                     else:
                         if tool_instance:
                             try:
-                                result = tool_instance.execute(
-                                    interrupt_check=lambda: self.is_interrupted,
-                                    **function_args
-                                )
+                                import inspect
+                                sig = inspect.signature(tool_instance.execute)
+                                if 'interrupt_check' in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                                    result = tool_instance.execute(
+                                        interrupt_check=lambda: self.is_interrupted,
+                                        **function_args
+                                    )
+                                else:
+                                    result = tool_instance.execute(**function_args)
                                 tool_success = True
                             except Exception as e:
                                 result = f"Error executing tool: {str(e)}"

@@ -81,6 +81,17 @@ export async function switchSession(sessionId) {
       window.appendMessage?.('*控制台*', 'system');
     }
   }
+  // Reconnect WebSocket to the new session so history_steps are replayed
+  if (prevId !== sessionId && window.connectWebSocket) {
+    window._intentionalClose = true;
+    if (state.ws) state.ws.close();
+    // Clear any pending reconnect timer
+    if (window._wsReconnectTimer) {
+      clearTimeout(window._wsReconnectTimer);
+      window._wsReconnectTimer = null;
+    }
+    window.connectWebSocket();
+  }
   renderSessionList();
 }
 

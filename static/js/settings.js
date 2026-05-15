@@ -7,10 +7,7 @@ import { cachedFetch } from './cache.js';
 const providers = [
   { key: "deepseek", label: "DeepSeek" },
   { key: "kimi", label: "Kimi (Moonshot)" },
-  { key: "ollama", label: "Ollama (本地/Local)" },
   { key: "llamacpp", label: "Llama.cpp (本地/Local)" },
-  { key: "sglang", label: "SGLang (本地/Local)" },
-  { key: "vllm", label: "vLLM (本地/Local)" },
   { key: "openai", label: "OpenAI" },
   { key: "anthropic", label: "Anthropic" },
   { key: "gemini", label: "Google Gemini" },
@@ -65,9 +62,7 @@ function buildApiKeysGrid(maskedKeys) {
     const mask = maskedKeys[p.key] || '';
     const hasSaved = mask.length > 0;
     let placeholder = '请输入密钥...';
-    if (p.key === 'ollama') placeholder = '默认 http://localhost:11434';
-    if (p.key === 'sglang') placeholder = '默认 http://localhost:8009/v1';
-    if (p.key === 'vllm') placeholder = '默认 http://localhost:8000/v1';
+
 
     const helpHtml = helpLinks[p.key]
       ? ` <a href="${helpLinks[p.key]}" target="_blank" class="key-help-link" title="${p.label} 配置文档">?</a>`
@@ -103,9 +98,7 @@ export async function buildModelSelection(data) {
   const dm = data.default_model || '';
   if (dm.startsWith('moonshot/')) selectedProvider = 'kimi';
   else if (dm.startsWith('llamacpp/')) selectedProvider = 'llamacpp';
-  else if (dm.startsWith('ollama/')) selectedProvider = 'ollama';
-  else if (dm.startsWith('sglang/')) selectedProvider = 'sglang';
-  else if (dm.startsWith('vllm/')) selectedProvider = 'vllm';
+
   else if (dm.startsWith('zai/')) selectedProvider = 'glm';
   else if (dm.startsWith('minimax/')) selectedProvider = 'minimax';
   else if (dm.startsWith('gemini/')) selectedProvider = 'gemini';
@@ -145,7 +138,7 @@ export async function fetchModels(provider, modelToSelect = null) {
   }
   const pullGroup = document.getElementById('pull-model-group');
   if (pullGroup) {
-    pullGroup.style.display = (provider === 'sglang' || provider === 'ollama') ? 'block' : 'none';
+    pullGroup.style.display = 'none';
   }
 }
 

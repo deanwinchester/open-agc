@@ -202,16 +202,7 @@ def main():
     safe_print(f"  http://localhost:{port}")
     safe_print("=" * 40)
 
-    # Start SGLang background service if available
-    try:
-        from core.sglang_manager import get_sglang_manager
-        sglang = get_sglang_manager()
-        # Default as requested: Qwen3.5-9B-Instruct on port 8009
-        sglang.model = "Qwen/Qwen3.5-9B-Instruct" 
-        sglang.port = 8009
-        threading.Thread(target=sglang.start, daemon=True).start()
-    except Exception as e:
-        safe_print(f"  [!] Failed to initialize SGLang: {e}")
+
 
     # Start server in background thread
     server_thread = threading.Thread(target=start_server, args=(port,), daemon=True)
