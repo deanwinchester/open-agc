@@ -177,9 +177,9 @@
         "需要",
         "搜索"
       ],
-      "usage_count": 2,
-      "success_rate": 0.9,
-      "last_used": "2026-05-14T14:10:44.981013"
+      "usage_count": 7,
+      "success_rate": 0.6780510000000001,
+      "last_used": "2026-05-15T17:28:35.936052"
     },
     {
       "filename": "file_organizer.md",
@@ -211,9 +211,9 @@
         "或按",
         "归类"
       ],
-      "usage_count": 0,
+      "usage_count": 2,
       "success_rate": 1.0,
-      "last_used": null
+      "last_used": "2026-05-15T16:22:32.440525"
     },
     {
       "filename": "git_workflow.md",
@@ -251,9 +251,9 @@
         "需要",
         "作流"
       ],
-      "usage_count": 5,
-      "success_rate": 0.8343900000000001,
-      "last_used": "2026-05-14T13:45:57.290804"
+      "usage_count": 7,
+      "success_rate": 0.8658559,
+      "last_used": "2026-05-15T16:22:32.439021"
     },
     {
       "filename": "system_monitor.md",
@@ -324,9 +324,9 @@
         "需要",
         "取数"
       ],
-      "usage_count": 0,
+      "usage_count": 1,
       "success_rate": 1.0,
-      "last_used": null
+      "last_used": "2026-05-15T16:15:02.884251"
     },
     {
       "filename": "xiaohongshu_content_generator.md",

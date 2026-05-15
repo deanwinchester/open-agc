@@ -41,16 +41,19 @@
             <div class="sidebar-header">
                 <div class="logo">
                     <svg class="logo-svg" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <circle cx="50" cy="50" r="45" fill="#f4f6f5" stroke="#1a1c1e" stroke-width="8" />
-                        <circle cx="25" cy="25" r="16" fill="#1a1c1e" />
-                        <circle cx="75" cy="25" r="16" fill="#1a1c1e" />
-                        <circle cx="35" cy="45" r="12" fill="#1a1c1e" />
-                        <circle cx="65" cy="45" r="12" fill="#1a1c1e" />
-                        <circle cx="35" cy="42" r="4" fill="#ffffff" />
-                        <circle cx="65" cy="42" r="4" fill="#ffffff" />
-                        <ellipse cx="50" cy="62" rx="6" ry="4" fill="#1a1c1e" />
-                        <path d="M44 70 C 50 75, 50 75, 56 70" stroke="#1a1c1e" stroke-width="4"
-                            stroke-linecap="round" />
+                        <ellipse cx="25" cy="22" rx="15" ry="16" fill="#1a1a1a"/>
+                        <ellipse cx="75" cy="22" rx="15" ry="16" fill="#1a1a1a"/>
+                        <ellipse cx="50" cy="55" rx="42" ry="40" fill="#f5f5f0"/>
+                        <ellipse cx="35" cy="50" rx="14" ry="12" fill="#1a1a1a" transform="rotate(-6 35 50)"/>
+                        <ellipse cx="65" cy="50" rx="14" ry="12" fill="#1a1a1a" transform="rotate(6 65 50)"/>
+                        <circle cx="37" cy="47" r="5.5" fill="#fff"/>
+                        <circle cx="63" cy="47" r="5.5" fill="#fff"/>
+                        <circle cx="39" cy="46" r="2.2" fill="#1a1a1a"/>
+                        <circle cx="61" cy="46" r="2.2" fill="#1a1a1a"/>
+                        <circle cx="40" cy="45" r="0.8" fill="#fff"/>
+                        <circle cx="62" cy="45" r="0.8" fill="#fff"/>
+                        <ellipse cx="50" cy="60" rx="4" ry="3" fill="#1a1a1a"/>
+                        <path d="M46 65 C 49 68, 51 68, 54 65" stroke="#1a1a1a" stroke-width="2.5" stroke-linecap="round" fill="none"/>
                     </svg>
                     <span>Open-AGC</span>
                 </div>
@@ -74,6 +77,7 @@
                                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
                             </svg>
                             <span>会话</span>
+                            <span class="chat-unread-badge" id="chat-unread-badge" style="display:none">0</span>
                         </div>
                         <button class="nav-action-btn" id="new-chat-btn" title="新会话">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -351,6 +355,7 @@
                             <label>默认厂商 & 模型</label>
                             <div class="model-row">
                                 <select id="provider-select" class="select-styled">
+                                    <option value="deepseek">DeepSeek</option>
                                     <option value="kimi">Kimi (Moonshot)</option>
                                     <option value="ollama">Ollama (本地/Local)</option>
                                     <option value="llamacpp">Llama.cpp (本地/Local)</option>
@@ -359,7 +364,6 @@
                                     <option value="openai">OpenAI</option>
                                     <option value="anthropic">Anthropic</option>
                                     <option value="gemini">Google Gemini</option>
-                                    <option value="deepseek">DeepSeek</option>
                                     <option value="glm">GLM (智谱)</option>
                                     <option value="minimax">MiniMax</option>
                                 </select>

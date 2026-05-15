@@ -47,13 +47,31 @@ export function formatTime(isoStr) {
 
 const translations = {
   'zh-CN': {
-    agent_thinking: '熊猫正在思考对策...',
+    agent_thinking: [
+      '🐼 熊猫正在啃竹子思考中...',
+      '🐼 熊猫翻了几个跟头，灵感来了...',
+      '🐼 熊猫挠了挠耳朵，正在琢磨...',
+      '🐼 熊猫眯着眼睛认真分析...',
+      '🐼 熊猫喝了口茶，慢慢想...',
+      '🐼 熊猫打了个滚，思路清晰了...',
+      '🐼 熊猫眨巴眨巴眼睛，有主意了...',
+      '🐼 熊猫抱着竹子在沉思...',
+    ],
     agent_error: '哎呀，熊猫摔了一跤 (发生错误)',
     working: '🐼 执行中...',
     done: '✨ 执行完成'
   },
   'en': {
-    agent_thinking: 'Panda is thinking...',
+    agent_thinking: [
+      '🐼 Panda is munching bamboo and thinking...',
+      '🐼 Panda did a flip and got inspired...',
+      '🐼 Panda is scratching its ear, pondering...',
+      '🐼 Panda is squinting, analyzing carefully...',
+      '🐼 Panda took a tea break, thinking slowly...',
+      '🐼 Panda rolled over, now it all makes sense...',
+      '🐼 Panda blinked, an idea sparked...',
+      '🐼 Panda hugs bamboo, deep in thought...',
+    ],
     agent_error: 'Panda Encountered an Error',
     working: '🐼 Working...',
     done: '✨ Done'
@@ -61,7 +79,10 @@ const translations = {
 };
 
 export function t(key) {
-  return (translations[state.currentLang] || translations['en'])[key] || key;
+  let val = (translations[state.currentLang] || translations['en'])[key];
+  if (!val) return key;
+  if (Array.isArray(val)) return val[Math.floor(Math.random() * val.length)];
+  return val;
 }
 
 export function initI18n() {

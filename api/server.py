@@ -291,6 +291,12 @@ def init_db():
     except Exception:
         pass
 
+    # Add session_id to task_steps for session persistence
+    try:
+        cursor.execute("ALTER TABLE task_steps ADD COLUMN session_id INTEGER DEFAULT 1")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -382,6 +388,24 @@ def reconcile_downloads():
 
 reconcile_downloads()
 
+def reconcile_tasks():
+    """On startup, mark any 'running' tasks as interrupted (server was restarted)."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE tasks SET status='interrupted', interruption_reason='server_restart', "
+            "updated_at=CURRENT_TIMESTAMP WHERE status='running'")
+        count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        if count:
+            print(f"[Startup] Marked {count} running task(s) as interrupted (server restart)")
+    except Exception as e:
+        print(f"[Startup] Task reconciliation error: {e}")
+
+reconcile_tasks()
+
 # Task helper functions
 def create_task(title: str, user_query: str, task_type: str = 'oneshot',
                 schedule_cron: str = None, schedule_enabled: bool = False) -> int:
@@ -461,12 +485,12 @@ def increment_task_resume(task_id: int):
 
 def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: str = None,
                   args_preview: str = None, result_preview: str = None, full_result: str = None,
-                  success: bool = True, thinking_content: str = None):
+                  success: bool = True, thinking_content: str = None, session_id: int = None):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO task_steps (task_id, step_number, tool_name, tool_label, args_preview, result_preview, full_result, success, thinking_content) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (task_id, step_number, tool_name, tool_label, args_preview, result_preview, full_result, 1 if success else 0, thinking_content)
+        "INSERT INTO task_steps (task_id, step_number, tool_name, tool_label, args_preview, result_preview, full_result, success, thinking_content, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (task_id, step_number, tool_name, tool_label, args_preview, result_preview, full_result, 1 if success else 0, thinking_content, session_id)
     )
     conn.commit()
     conn.close()
@@ -2102,6 +2126,40 @@ async def websocket_endpoint(websocket: WebSocket):
     last_query = ""  # Track last query for retry
     agent_is_running = False
     receive_task = None # Persistent receive_task to avoid concurrency issues
+
+    # Replay the most recent task's steps for this session
+    # Only replay if the user hasn't sent new messages after the task
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT t.id, t.status, t.created_at FROM tasks t "
+            "WHERE t.id IN (SELECT DISTINCT task_id FROM task_steps WHERE session_id=?) "
+            "ORDER BY t.created_at DESC LIMIT 1",
+            (ws_session_id,))
+        last_task = cursor.fetchone()
+        if last_task:
+            # Only replay if no newer user messages exist after this task
+            newer_msgs = cursor.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id=? AND role='user' AND timestamp > ?",
+                (ws_session_id, last_task["created_at"])).fetchone()[0]
+            if newer_msgs == 0:
+                steps = cursor.execute(
+                    "SELECT step_number, tool_name, tool_label, args_preview, "
+                    "result_preview, success FROM task_steps "
+                    "WHERE task_id=? ORDER BY step_number",
+                    (last_task["id"],)).fetchall()
+                if steps:
+                    await _safe_send({
+                        "type": "history_steps",
+                        "task_id": last_task["id"],
+                        "task_status": last_task["status"],
+                        "steps": [dict(s) for s in steps]
+                    })
+        conn.close()
+    except Exception as e:
+        print(f"[WS] Task replay error: {e}")
     
     async def run_agent_with_progress(query: str, model: str = None, agent_profile_name: str = None, is_heartbeat: bool = False, images: list = None):
         """Run agent in a thread and push progress to WebSocket via a Queue."""
@@ -2147,7 +2205,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             step_number=event.get("step", 0),
                             tool_name=event.get("tool", ""),
                             tool_label=event.get("tool_label", ""),
-                            args_preview=event.get("args_preview", "")
+                            args_preview=event.get("args_preview", ""),
+                            session_id=ws_session_id
                         )
                     except Exception as e:
                         print(f"[Task] Failed to add step: {e}")
@@ -2201,7 +2260,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         agent_is_running = False
                         return
 
-            agent = OpenAGCAgent(model=current_model, session_id=ws_session_id)
+            from core.logger import SessionLogger
+            session_logger = SessionLogger(
+                log_dir=get_data_path("logs"),
+                session_id=ws_session_id
+            )
+            agent = OpenAGCAgent(model=current_model, session_id=ws_session_id,
+                                 logger=session_logger)
             
             # Inject custom agent profile prompt if specified
             if agent_profile_name and agent_profile_name != "default":
@@ -2253,7 +2318,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         receive_task = None
                     except WebSocketDisconnect:
                         ws_alive = False
-                        agent.is_interrupted = True
+                        # Don't interrupt — let agent finish in background
+                        # Reconnecting clients will replay completed steps
                         receive_task = None
                     except Exception:
                         receive_task = None
@@ -2342,8 +2408,41 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 user_msg = json.loads(data)
                 msg_type = user_msg.get("type", "query")
-                
-                if msg_type == "retry":
+
+                if msg_type == "resume":
+                    # Resume an interrupted task
+                    task_id = user_msg.get("task_id")
+                    if task_id and not agent_is_running:
+                        try:
+                            ctx = get_task_context(task_id)
+                            if ctx:
+                                # Replay steps so the chat shows them
+                                conn2 = sqlite3.connect(DB_PATH)
+                                conn2.row_factory = sqlite3.Row
+                                steps = conn2.execute(
+                                    "SELECT step_number, tool_name, tool_label, args_preview, "
+                                    "result_preview, success FROM task_steps "
+                                    "WHERE task_id=? ORDER BY step_number", (task_id,)).fetchall()
+                                conn2.close()
+                                await _safe_send({
+                                    "type": "history_steps",
+                                    "task_id": task_id,
+                                    "task_status": "resuming",
+                                    "steps": [dict(s) for s in steps]
+                                })
+                                session_history = ctx
+                                query = "继续执行未完成的任务。请检查上面的执行记录，从上次中断的地方继续。"
+                            else:
+                                query = "继续执行未完成的任务。"
+                        except Exception as e:
+                            print(f"[WS] Resume error: {e}")
+                            query = "继续执行未完成的任务。"
+                        retry_model = None
+                        agent_profile_name = None
+                        ws_images = None
+                    else:
+                        continue
+                elif msg_type == "retry":
                     query = user_msg.get("query", last_query)
                     retry_model = user_msg.get("model", None)
                     agent_profile_name = user_msg.get("agent_name", None)

@@ -182,6 +182,9 @@ async function openTaskDetail(taskId) {
       </div>`;
     }
 
+    // Store current task data for resume
+    window._currentTaskDetail = task;
+
     content.innerHTML = `
       <div class="task-detail-meta">
         <span class="task-meta-chip">${statusIcon} ${task.status}</span>
@@ -194,6 +197,11 @@ async function openTaskDetail(taskId) {
         <div class="detail-content-block">${escapeHtml(task.user_query)}</div>
       </div>
       ${scheduleSection}
+      ${task.status === 'interrupted' ? `
+      <div class="detail-section" style="display:flex;align-items:center;gap:1rem">
+        <button class="btn-resume-task-detail" data-task-id="${task.id}">▶ 继续执行</button>
+        <span style="font-size:0.8rem;color:var(--text-secondary)">中断原因: ${task.interruption_reason === 'server_restart' ? '🔌 服务器重启' : task.interruption_reason === 'user' ? '🛑 用户中断' : task.interruption_reason === 'max_iterations' ? '⚠️ 循环上限' : task.interruption_reason || '未知'}</span>
+      </div>` : ''}
       ${task.result_summary ? `
       <div class="detail-section">
         <div class="detail-section-title">执行结果</div>
@@ -220,6 +228,19 @@ async function openTaskDetail(taskId) {
         </div>
       </div>
     `;
+    // Wire up resume button
+    content.querySelector('.btn-resume-task-detail')?.addEventListener('click', function() {
+      const tid = parseInt(this.dataset.taskId);
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({ type: 'resume', task_id: tid }));
+        this.textContent = '⏳ 已发送恢复请求...';
+        this.disabled = true;
+        window.switchView?.('chat');
+      } else {
+        alert('WebSocket 未连接，请刷新页面后重试');
+      }
+    });
+
   } catch (e) {
     content.innerHTML = '<div class="empty-state"><p style="color:var(--error)">加载任务详情失败</p></div>';
   }

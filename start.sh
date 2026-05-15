@@ -53,4 +53,4 @@ echo "http://localhost:$PORT"
 echo "==================================="
 
 # Use python3 consistently
-python3 -m uvicorn api.server:app --host 0.0.0.0 --port "$PORT" --reload-exclude "skills/**" --reload-exclude "data/**"
+python3 -m uvicorn api.server:app --host 0.0.0.0 --port "$PORT"

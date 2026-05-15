@@ -51,6 +51,6 @@ echo Open-AGC is running at:
 echo http://localhost:%PORT%
 echo ===================================
 
-call python -m uvicorn api.server:app --host 0.0.0.0 --port %PORT% --reload-exclude "skills/**" --reload-exclude "data/**"
+python -m uvicorn api.server:app --host 0.0.0.0 --port %PORT%
 
 pause
