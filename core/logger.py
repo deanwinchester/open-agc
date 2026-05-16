@@ -11,9 +11,10 @@ from typing import Optional
 
 
 class SessionLogger:
-    def __init__(self, log_dir: str, session_id: int):
+    def __init__(self, log_dir: str, session_id: int, model: str = None):
         self.session_id = session_id
         self.log_dir = log_dir
+        self.model = model
         os.makedirs(log_dir, exist_ok=True)
         today = datetime.now().strftime("%Y-%m-%d")
         self.log_path = os.path.join(log_dir, f"{today}_{session_id}.jsonl")
@@ -21,6 +22,8 @@ class SessionLogger:
     def _write(self, entry: dict):
         entry.setdefault("ts", datetime.now().isoformat())
         entry.setdefault("session_id", self.session_id)
+        if self.model:
+            entry.setdefault("model", self.model)
         try:
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")

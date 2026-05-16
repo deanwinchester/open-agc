@@ -866,6 +866,10 @@ class OpenAGCAgent:
             response, actual_model = self.llm.chat(messages=self.messages, tools=self.tool_schemas)
             message = response.choices[0].message
             
+            # Update logger with the actual model used for this turn
+            if self.logger:
+                self.logger.model = actual_model
+            
             # Record Token Usage
             usage = getattr(response, 'usage', None)
             if usage:
@@ -873,18 +877,19 @@ class OpenAGCAgent:
                 completion_tokens = getattr(usage, 'completion_tokens', 0)
                 
                 # Smart Provider Detection
-                provider = 'unknown'
-                if '/' in actual_model:
+                model_lower = actual_model.lower()
+                if 'deepseek' in model_lower: provider = 'deepseek'
+                elif 'gpt' in model_lower or 'openai' in model_lower: provider = 'openai'
+                elif 'claude' in model_lower or 'anthropic' in model_lower: provider = 'anthropic'
+                elif 'gemini' in model_lower or 'google' in model_lower: provider = 'gemini'
+                elif 'kimi' in model_lower or 'moonshot' in model_lower: provider = 'kimi'
+                elif 'glm' in model_lower or 'zhipu' in model_lower or 'zai' in model_lower: provider = 'glm'
+                elif 'qwen' in model_lower or 'alibaba' in model_lower: provider = 'qwen'
+                elif 'llama' in model_lower or 'meta' in model_lower: provider = 'llama'
+                elif '/' in actual_model:
                     provider = actual_model.split('/')[0]
                 else:
-                    # Known mappings
-                    model_lower = actual_model.lower()
-                    if 'deepseek' in model_lower: provider = 'deepseek'
-                    elif 'gpt' in model_lower or 'openai' in model_lower: provider = 'openai'
-                    elif 'claude' in model_lower: provider = 'anthropic'
-                    elif 'gemini' in model_lower: provider = 'gemini'
-                    elif 'kimi' in model_lower or 'moonshot' in model_lower: provider = 'kimi'
-                    elif 'glm' in model_lower or 'zai' in model_lower: provider = 'glm'
+                    provider = 'unknown'
                 
                 get_stats_manager().record_usage(
                     provider=provider,

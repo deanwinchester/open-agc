@@ -35,9 +35,20 @@ class DynamicTool(BaseTool):
         }
 
     def execute(self, **kwargs) -> str:
-        if self.fn:
-            return self.fn(**kwargs)
-        return "Error: No execute function bound"
+        if not self.fn:
+            return "Error: No execute function bound"
+            
+        import inspect
+        try:
+            sig = inspect.signature(self.fn)
+            # Only pass arguments that the function accepts
+            valid_args = {}
+            for k, v in kwargs.items():
+                if k in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                    valid_args[k] = v
+            return self.fn(**valid_args)
+        except Exception as e:
+            return f"Error executing dynamic tool: {str(e)}"
 
 
 # Tools directory for persisted auto-generated tools
@@ -67,8 +78,8 @@ Result: {result_summary[:500]}
 
 Generate a Python file with:
 1. A TOOL_SCHEMA dict (OpenAI function-calling format) with a clear name, description, and typed parameters
-2. An execute() function that performs the task deterministically
-3. Minimal required parameters — extract concrete values as parameters
+2. An execute() function that performs the task. The signature MUST be `def execute(..., **kwargs):`.
+3. Minimal required parameters — extract concrete values as parameters. Always include `**kwargs` to handle system arguments.
 
 Rules:
 - The function should be self-contained, using only standard library or common packages
