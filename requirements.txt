@@ -16,3 +16,4 @@ opencv-python
 httptools
 croniter>=2.0.0
 python-multipart>=0.0.18
+mcp>=1.1.2

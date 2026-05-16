@@ -1,11 +1,20 @@
 import threading
 from typing import Optional
 
-class DownloadTool:
+from tools.base import BaseTool
+
+class DownloadTool(BaseTool):
     """Queue a download in the background. Returns immediately, does NOT block."""
+    model_config = {"extra": "allow", "arbitrary_types_allowed": True}
+    
+    name: str = "queue_download"
+    description: str = (
+        "通过系统下载管理器异步下载模型文件。立即返回，下载在后台运行并带有进度追踪。"
+        "支持 HuggingFace, ModelScope 和直接 URL 链接。支持断点续传。"
+    )
 
-
-    def __init__(self, models_dir: str = None):
+    def __init__(self, models_dir: str = None, **kwargs):
+        super().__init__(**kwargs)
         self.models_dir = models_dir
 
     def execute(self, url: str = "", repo_id: str = "", filename: str = "",

@@ -34,7 +34,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Uplo
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from dotenv import load_dotenv, set_key
 
 from core.paths import get_data_path, get_skills_dir
@@ -143,6 +143,8 @@ def init_db():
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             result_summary TEXT,
             output_files TEXT DEFAULT '[]',
+            total_tokens INTEGER DEFAULT 0,
+            total_cost REAL DEFAULT 0.0,
             schedule_cron TEXT,
             schedule_enabled INTEGER DEFAULT 0,
             next_run_at DATETIME,
@@ -204,6 +206,20 @@ def init_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS token_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            session_id INTEGER,
+            task_id INTEGER,
+            provider TEXT,
+            model TEXT,
+            prompt_tokens INTEGER DEFAULT 0,
+            completion_tokens INTEGER DEFAULT 0,
+            total_tokens INTEGER DEFAULT 0,
+            cost_estimate REAL DEFAULT 0.0
+        )
+    ''')
     # Ensure datasets storage directory exists
     datasets_dir = os.path.join(os.path.dirname(DB_PATH), "datasets")
     os.makedirs(datasets_dir, exist_ok=True)
@@ -258,6 +274,14 @@ def init_db():
         pass
     try:
         cursor.execute("ALTER TABLE tasks ADD COLUMN context_snapshot TEXT")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN total_tokens INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN total_cost REAL DEFAULT 0.0")
     except Exception:
         pass
     try:
@@ -664,7 +688,8 @@ def load_config() -> dict:
         "email_password": "",
         "email_imap_server": "",
         "email_smtp_server": "",
-        "owner_email": ""
+        "owner_email": "",
+        "mcp_servers": {}
     }
 
 class ConfigUpdate(BaseModel):
@@ -685,6 +710,7 @@ class ConfigUpdate(BaseModel):
     email_imap_server: str
     email_smtp_server: str
     owner_email: str
+    mcp_servers: Optional[Dict[str, Any]] = None
     session_id: Optional[int] = None  # Target session for email config
 
 @app.get("/api/settings")
@@ -796,6 +822,8 @@ async def update_settings(config_update: ConfigUpdate):
         config["email_imap_server"] = config_update.email_imap_server
         config["email_smtp_server"] = config_update.email_smtp_server
         config["owner_email"] = config_update.owner_email
+        if config_update.mcp_servers is not None:
+            config["mcp_servers"] = config_update.mcp_servers
 
         # Save per-session email config when session_id is provided
         if config_update.session_id is not None:
@@ -892,9 +920,18 @@ async def get_provider_models(provider: str):
         models = defaults.get(provider, [])
         
     models.sort()
+    models.sort()
     return {"models": models}
 
-class PullRequest(BaseModel):
+@app.get("/api/stats/token_usage")
+async def get_token_usage_stats(provider: str, days: int = 30):
+    """Get historical token usage stats for a specific provider."""
+    from core.stats_manager import get_stats_manager
+    manager = get_stats_manager(DB_PATH)
+    history = manager.get_usage_history(provider, days)
+    return {"status": "success", "data": history}
+
+class PullRequest(BaseModel) :
     model_name: str
     tool: str = "huggingface" # "huggingface" or "modelscope"
 
@@ -2245,7 +2282,7 @@ async def websocket_endpoint(websocket: WebSocket):
             import concurrent.futures
             agent_future = loop.run_in_executor(
                 None, 
-                lambda: agent.run_turn(query, False, progress_callback, images=images)
+                lambda: agent.run_turn(query, False, progress_callback, images=images, task_id=ws_task_id)
             )
             
             # Handle agent progress and check for interruption
@@ -2268,6 +2305,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             interrupt_shell()
                             if ws_task_id:
                                 update_task_status(ws_task_id, "interrupted", interruption_reason="user")
+                        elif user_msg.get("type") == "tool_reply":
+                            agent.user_input_queue.put(user_msg.get("answer"))
                         receive_task = None
                     except WebSocketDisconnect:
                         ws_alive = False
@@ -2325,6 +2364,17 @@ async def websocket_endpoint(websocket: WebSocket):
                         pass
                 else:
                     update_task_status(ws_task_id, "completed", summary)
+                
+                # Update total tokens in tasks table from stats
+                try:
+                    stats = get_stats_manager().get_task_usage(ws_task_id)
+                    if stats:
+                        conn_tmp = sqlite3.connect(DB_PATH)
+                        conn_tmp.execute("UPDATE tasks SET total_tokens = ?, total_cost = ? WHERE id = ?", (stats["total"], stats.get("cost", 0.0), ws_task_id))
+                        conn_tmp.commit()
+                        conn_tmp.close()
+                except Exception:
+                    pass
             
             return response
         except Exception as e:

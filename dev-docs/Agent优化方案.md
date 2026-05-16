@@ -940,3 +940,65 @@ def _get_adaptive_config(self, user_input: str) -> Dict:
 - 对频繁失败的工具自动限制使用或提示用户
 - 对长期未使用的工具自动降级（从 tool_schemas 移除或后置排序）
 
+---
+
+## 十五、工具架构进阶优化（参考 Claude Code 源码）
+
+**背景**：目前 Open-AGC 的调用方式是 `self.llm.chat(messages=self.messages, tools=self.tool_schemas)`，即将所有工具的完整 JSON Schema（名称、描述、所有参数说明）在每一次请求中**全部打包发送给大模型**。随着内置工具增多、尤其是 `auto_tool` 动态生成的专属工具不断积累，这种“一次性全量暴露”的机制会导致严重的 Token 浪费、上下文超限，且工具过多时大模型的“注意力分散”极易导致调用幻觉。
+
+通过对开源框架（如 Claude Code）源码的深度调研，我们制定了以下四个高优先级的架构级优化方案。
+
+### 15.1 渐进式工具发现机制 (Progressive Disclosure) ✅ [已实施]
+
+借鉴 Claude Code 中的 `ToolSearchTool` 机制，彻底改造目前的工具加载策略。
+
+*   **当前痛点**：全量加载导致单次请求的 `tools` 参数体积极大。
+*   **优化方案**：
+    1.  **工具分级**：将工具划分为 **Core Tools（核心基础工具）** 和 **Deferred Tools（延迟加载工具）**。
+        *   核心工具（默认加载）：`execute_shell`, `read_file`, `edit_file`, `computer_control`, `search_available_tools`。
+        *   延迟工具（按需加载）：各种自动生成的动态脚本、特定业务的 API 工具、爬虫工具等。
+    2.  **引入 `search_available_tools` 工具**：
+        *   大模型在处理复杂任务时，如果发现核心工具不够用，可以调用此工具并传入 `query`（如 "search database", "parse pdf"）。
+        *   后端根据 Query 进行向量或关键词匹配，返回匹配的工具 Schema（即 `tool_reference`）。
+    3.  **动态挂载**：Agent 捕获到模型检索了新工具后，在接下来的对话上下文中，动态将这些新工具的 Schema 追加到 API 请求中。
+
+### 15.2 原生集成 MCP (Model Context Protocol) 协议 ✅ [已实施]
+
+Claude Code 内置了强大的 `MCPTool`, `ListMcpResourcesTool` 等原生支持，使其能无缝连接外部数据。
+
+*   **当前痛点**：每次想让大模型具备新能力（例如连 MySQL、查 Notion 进度、读 Github Issue），都需要手写一个专门的 Python Tool 注册到 Agent 中，极其繁琐。
+*   **优化方案**：
+    1.  在 Open-AGC 的 `tools` 模块中实现标准的 MCP Client。
+    2.  前端提供配置页面，允许用户填入 MCP Server 的启动命令（例如 `npx @modelcontextprotocol/server-postgres`）。
+    3.  系统启动时，MCP Client 自动挂载外部 Server 提供的方法。
+    4.  配合上述的 **渐进式工具发现机制**，MCP 暴露出的成百上千个工具不会撑爆 Token，而是静默作为 Deferred Tools 等待模型检索调用。
+
+### 15.3 Git Worktree 沙箱保护模式 (Safe Sandbox) ✅ [已实施]
+
+*   **当前痛点**：大模型直接使用 `edit_file` 和 `write_file` 修改物理文件。一旦大模型陷入死循环、理解错误或改错关键配置，破坏性极强，用户恢复成本高。
+*   **优化方案**：
+    1.  开发 `EnterWorktreeTool` 和 `ExitWorktreeTool`。
+    2.  触发时机：当 Agent 判断当前任务属于“大规模重构”或涉及“关键核心文件”时，自动调用 `EnterWorktreeTool`。
+    3.  内部逻辑：系统后台执行 `git worktree add ../.open_agc_sandbox/<task_id>`，将当前工作区无缝切换到隔离分支。
+    4.  大模型在沙箱内尽情试错，并可以执行单元测试。
+    5.  测试通过后，调用 `ExitWorktreeTool` 自动将修改合回主分支；如果彻底改乱，可以直接丢弃沙箱，主代码库毫发无损。
+
+### 15.4 强中断/提问专属交互机制 (AskUserQuestionTool) ✅ [已实施]
+
+*   **当前痛点**：目前大模型如果遇到不确定的问题，通常会直接在普通的自然语言回复中输出一个问句。系统无法准确判断 Agent 是“任务结束了”还是“卡住了在等用户”，导致执行状态机混乱。
+*   **优化方案**：
+    1.  开发明确的 `ask_user_question` 工具，参数包含 `question_text` 和 `options`（可选）。
+    2.  大模型遇到决策点或缺信息时，**必须调用此工具**而不是直接用纯文本回复。
+    3.  前端收到此 Tool Call 后，触发特殊事件，弹出全局醒目的模态框阻断用户其他操作，强提示“Agent 正在等待您的确认”。
+    4.  Agent 进程挂起等待，用户在前端提交答案后，直接作为 Tool Response 返回给 Agent 继续执行。
+
+### 15.5 全局 Token 消耗监控与可视化 (Token Usage Tracking & Analytics) ✅ [已实施]
+
+*   **当前痛点**：用户目前无法直观看到 Agent 执行任务时的 Token 开销，也无法统计和追踪各家大模型厂商的 API 消耗成本，容易造成无意识的超额调用和计费黑盒。
+*   **优化方案**：
+    1.  **即时监控（执行面板）**：在 Agent 执行任务的聊天或进度流中，增加实时的 Token 消耗计数器（例如实时显示 `Prompt: 1.2k | Completion: 400`），让执行过程的成本透明化。
+    2.  **任务级统计（任务管理）**：在“任务管理”界面的每个任务详情中，持久化存储并展示该任务从规划到完成全生命周期的总 Token 消耗及预估费用（可根据模型内置费率字典计算）。
+    3.  **全局数据看板（系统设置）**：
+        *   在后端引入轻量级数据统计表（如 `token_usage_stats`），按照 `(日期, 厂商名称, 模型名称, Tokens数量)` 维度进行记录。
+        *   在“系统配置 -> API 密钥”界面，每家厂商设置旁边新增一个“📊 消耗统计”按钮。
+        *   集成可视化库（如 ECharts/Chart.js），点击统计按钮后弹出折线图模态框，支持按时间范围（近7天、近30天等）查看每天消耗的 Token 趋势和预估成本曲线。

@@ -49,7 +49,11 @@ class ReadFileTool(BaseTool):
                     config = json.load(f)
                 
                 if config.get("sandbox_mode", True):
-                    sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+                    agent_ctx = kwargs.get("_agent_context")
+                    if agent_ctx and getattr(agent_ctx, "sandbox_dir", None):
+                        sandbox_dir = agent_ctx.sandbox_dir
+                    else:
+                        sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
                     os.makedirs(sandbox_dir, exist_ok=True)
                     abs_path = os.path.abspath(path)
                     
@@ -127,7 +131,11 @@ class WriteFileTool(BaseTool):
                     config = json.load(f)
                 
                 if config.get("sandbox_mode", True):
-                    sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+                    agent_ctx = kwargs.get("_agent_context")
+                    if agent_ctx and getattr(agent_ctx, "sandbox_dir", None):
+                        sandbox_dir = agent_ctx.sandbox_dir
+                    else:
+                        sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
                     os.makedirs(sandbox_dir, exist_ok=True)
                     abs_path = os.path.abspath(path)
                     
@@ -201,7 +209,11 @@ class EditFileTool(BaseTool):
                     config = json.load(f)
                 
                 if config.get("sandbox_mode", True):
-                    sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+                    agent_ctx = kwargs.get("_agent_context")
+                    if agent_ctx and getattr(agent_ctx, "sandbox_dir", None):
+                        sandbox_dir = agent_ctx.sandbox_dir
+                    else:
+                        sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
                     abs_path = os.path.abspath(path)
                     
                     if os.path.commonpath([sandbox_dir, abs_path]) != sandbox_dir:

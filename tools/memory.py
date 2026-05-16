@@ -3,13 +3,23 @@ from core.memory_store import MemoryStore, migrate_from_markdown
 from core.paths import get_data_path
 
 
-class MemoryTool:
+from tools.base import BaseTool
+
+class MemoryTool(BaseTool):
     """
     智能记忆管理工具。使用 FTS5 全文搜索来存储和检索相关记忆。
     支持记忆层次：core（核心事实）、working（工作记忆）、episode（事件记录）。
     """
+    model_config = {"extra": "allow", "arbitrary_types_allowed": True}
+    
+    name: str = "manage_memory"
+    description: str = (
+        "管理你的长期记忆系统。可以使用 'search' 通过语义相似度搜索相关记忆，"
+        "使用 'add' 保存重要事实或学到的知识，支持 core/working/episode 多层级存储。"
+    )
 
-    def __init__(self, db_path: str = None, session_id=None):
+    def __init__(self, db_path: str = None, session_id=None, **kwargs):
+        super().__init__(**kwargs)
         if db_path is None:
             db_path = get_data_path("memory.db")
         self.session_id = session_id
