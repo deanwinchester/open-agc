@@ -12,16 +12,13 @@ class BrowserAutomationTool:
     基于 Playwright 的隔离沙盒浏览器控制工具。
     允许大模型在前台或后台打开网页，通过 CSS Selector 精准操作 DOM。
     使用独立后台线程运行 Playwright 以避免与 FastAPI/Asyncio 发生冲突。
-
-    修复要点：
-    - 启动前自动清理浏览器 profile 锁文件，防止上次异常退出导致启动失败
-    - 初始化增加超时保护，防止永久阻塞
-    - Singleton 崩溃后可自动恢复
-    - 持久模式失败时自动降级为非持久模式
-    - 自动检测无显示器环境（WSL/服务器）并切换 headless 模式
-    - 使用独立的 init_queue 避免初始化信号与命令响应混淆
     """
     _instance = None
+    name: str = "browser_automation"
+    description: str = (
+        "虚拟沙盒浏览器工具。使用 playwright 进行隔离环境下的网页控制与数据抓取。"
+        "支持导航(goto)、读取DOM(read_dom)、点击(click)、填写表单(fill)和上传文件(upload)。"
+    )
 
     def __new__(cls, *args, **kwargs):
         if not cls._instance:

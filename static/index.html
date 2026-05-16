@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="/static/dist/open-agc.css">
     <link rel="stylesheet"
         href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 
 <body>
@@ -176,7 +177,10 @@
                             <option value="default">默认智能体</option>
                         </select>
                     </div>
-                    <div class="model-badge" id="current-model-badge">加载中...</div>
+                    <div style="display: flex; align-items: center; gap: 12px;">
+                        <div id="token-usage-display" style="font-size: 11px; color: var(--text-secondary); opacity: 0.8; font-family: monospace;"></div>
+                        <div class="model-badge" id="current-model-badge">加载中...</div>
+                    </div>
                 </header>
 
                 <div class="chat-body" id="chat-body">
@@ -936,6 +940,23 @@
             </div>
         </div>
     </div>
+
+    <!-- Stats Modal -->
+    <div class="modal-overlay" id="stats-modal">
+        <div class="modal-box" style="max-width: 800px; width: 95%;">
+            <div class="modal-header">
+                <h3 id="stats-modal-title">📈 消耗统计</h3>
+                <button class="modal-close" id="stats-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <canvas id="token-usage-chart" style="max-height: 400px;"></canvas>
+                <div id="stats-summary" style="margin-top: 1rem; padding: 1rem; background: var(--bg-secondary); border-radius: 8px;">
+                    <!-- Stats summary text -->
+                </div>
+            </div>
+        </div>
+    </div>
+
 </body>
 
 </html>

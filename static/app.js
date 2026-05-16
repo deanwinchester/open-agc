@@ -433,6 +433,63 @@ function initApp() {
       return;
     }
 
+    if (event === 'ask_user') {
+      hideThinkingStatus();
+      const stepEl = document.createElement('div');
+      stepEl.className = 'progress-step ask-user';
+      stepEl.style.border = '1px solid var(--primary)';
+      stepEl.style.padding = '12px';
+      stepEl.style.borderRadius = '8px';
+      stepEl.style.backgroundColor = 'rgba(74, 144, 226, 0.05)';
+      stepEl.innerHTML = `
+        <span class="step-icon">❓</span>
+        <div class="step-body" style="width: 100%;">
+          <span class="step-label" style="color: var(--primary); font-weight: bold;">Agent 提问 / 确认</span>
+          <span class="step-detail" style="margin-bottom: 12px; font-size: 1rem;">${escapeHtml(data.question)}</span>
+          <div class="ask-user-form" style="display: flex; gap: 8px; flex-direction: column;">
+             ${data.options && data.options.length ? 
+                data.options.map(o => `<button class="btn-secondary ask-option-btn" data-val="${escapeHtml(o)}">${escapeHtml(o)}</button>`).join('') :
+                `<input type="text" class="input-styled ask-user-input" placeholder="请输入您的回答..." />
+                 <button class="btn-primary ask-user-submit" style="align-self: flex-start;">提交回答</button>`
+             }
+          </div>
+        </div>`;
+      stepsEl.appendChild(stepEl);
+      scrollToBottom();
+      
+      const submitAnswer = (ans) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          ws.send(JSON.stringify({ type: 'tool_reply', answer: ans }));
+          stepEl.querySelector('.ask-user-form').innerHTML = `<span style="color: var(--success, #2ecc71); font-size: 0.9rem;">✓ 您的回答：<strong>${escapeHtml(ans)}</strong></span>`;
+      };
+
+      if (data.options && data.options.length) {
+          stepEl.querySelectorAll('.ask-option-btn').forEach(btn => {
+              btn.addEventListener('click', () => submitAnswer(btn.dataset.val));
+          });
+      } else {
+          const input = stepEl.querySelector('.ask-user-input');
+          const btn = stepEl.querySelector('.ask-user-submit');
+          input.focus();
+          input.addEventListener('keypress', (e) => { if (e.key === 'Enter') btn.click(); });
+          btn.addEventListener('click', () => {
+              const val = input.value.trim();
+              if (val) submitAnswer(val);
+          });
+      }
+      return;
+    }
+
+    if (event === 'usage') {
+        const usageEl = document.getElementById('token-usage-display');
+        if (usageEl) {
+            usageEl.textContent = `Tokens: ${data.total_tokens} (P:${data.prompt_tokens} / C:${data.completion_tokens})`;
+            usageEl.classList.add('updated');
+            setTimeout(() => usageEl.classList.remove('updated'), 500);
+        }
+        return;
+    }
+
     if (event === 'tool_start') {
       progressStepCount++;
       const stepEl = document.createElement('div');
@@ -919,14 +976,43 @@ function initApp() {
     recognition.continuous = false;
     recognition.interimResults = false;
 
-    recognition.onstart = () => { isListening = true; micBtn.classList.add('listening'); messageInput.placeholder = "请说话..."; };
-    recognition.onresult = (event) => {
-      messageInput.value = event.results[0][0].transcript;
-      state.wasVoiceQuery = true;
-      handleSend();
+    recognition.onstart = () => { 
+      isListening = true; 
+      micBtn.classList.add('listening'); 
+      messageInput.placeholder = "正在聆听中..."; 
     };
-    recognition.onerror = () => { if (isListening) { isListening = false; micBtn.classList.remove('listening'); } };
-    recognition.onend = () => { if (isListening) { isListening = false; micBtn.classList.remove('listening'); } };
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      if (transcript) {
+        const start = messageInput.selectionStart;
+        const end = messageInput.selectionEnd;
+        const text = messageInput.value;
+        const before = text.substring(0, start);
+        const after  = text.substring(end);
+        messageInput.value = before + transcript + after;
+        messageInput.selectionStart = messageInput.selectionEnd = start + transcript.length;
+        
+        // Trigger resize and state update
+        messageInput.dispatchEvent(new Event('input'));
+        messageInput.focus();
+      }
+    };
+    recognition.onerror = (event) => { 
+      console.error("Speech recognition error", event.error);
+      if (isListening) { 
+        isListening = false; 
+        micBtn.classList.remove('listening'); 
+        messageInput.placeholder = "告诉我熊猫，你想在电脑上做什么..."; 
+      } 
+    };
+    recognition.onend = () => { 
+      if (isListening) { 
+        isListening = false; 
+        micBtn.classList.remove('listening'); 
+        messageInput.placeholder = "告诉我熊猫，你想在电脑上做什么..."; 
+        messageInput.focus();
+      } 
+    };
   } else {
     if (micBtn) micBtn.style.display = 'none';
   }

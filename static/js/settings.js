@@ -43,6 +43,9 @@ export async function loadSettingsConfig() {
     document.getElementById('email-password-input').placeholder = data.email_password ? '***' : '密码或授权码';
     document.getElementById('email-imap-input').value = data.email_imap_server || '';
     document.getElementById('email-smtp-input').value = data.email_smtp_server || '';
+    if (document.getElementById('mcp-config-input')) {
+        document.getElementById('mcp-config-input').value = data.mcp_servers && Object.keys(data.mcp_servers).length > 0 ? JSON.stringify(data.mcp_servers, null, 2) : '';
+    }
 
     state.settingsLoaded = true;
   } catch (err) {
@@ -82,6 +85,7 @@ function buildApiKeysGrid(maskedKeys) {
         </button>
       </div>
       <span class="key-status ${hasSaved ? 'saved' : ''}">${hasSaved ? '✓ 已保存' : '未配置'}</span>
+      <button type="button" class="btn-icon view-stats-btn" data-provider="${p.key}" title="查看消耗统计" style="margin-left: 10px; font-size: 14px;">📊</button>
     `;
     grid.appendChild(wrapper);
   });
@@ -91,6 +95,89 @@ function buildApiKeysGrid(maskedKeys) {
       input.type = input.type === 'password' ? 'text' : 'password';
     });
   });
+  grid.querySelectorAll('.view-stats-btn').forEach(btn => {
+    btn.addEventListener('click', () => showProviderStats(btn.dataset.provider));
+  });
+}
+
+let usageChart = null;
+async function showProviderStats(provider) {
+  const modal = document.getElementById('stats-modal');
+  const title = document.getElementById('stats-modal-title');
+  const summary = document.getElementById('stats-summary');
+  const canvas = document.getElementById('token-usage-chart');
+  
+  if (!modal || !canvas) return;
+  modal.classList.add('active');
+  title.textContent = `📈 ${provider.toUpperCase()} 消耗统计 (近30天)`;
+  summary.textContent = '正在加载统计数据...';
+  
+  try {
+    const res = await fetch(`/api/stats/token_usage?provider=${provider}`);
+    const result = await res.json();
+    const data = result.data || [];
+    
+    if (data.length === 0) {
+      summary.textContent = '暂无消耗数据。';
+      if (usageChart) usageChart.destroy();
+      return;
+    }
+    
+    const labels = data.map(d => d.day);
+    const totals = data.map(d => d.total);
+    const prompts = data.map(d => d.prompt);
+    const completions = data.map(d => d.completion);
+    
+    const totalTokens = totals.reduce((a, b) => a + b, 0);
+    const totalCost = data.reduce((a, b) => a + b.cost, 0).toFixed(4);
+    summary.innerHTML = `总消耗：<strong>${totalTokens.toLocaleString()}</strong> Tokens | 预估成本：<strong>$${totalCost}</strong>`;
+    
+    if (usageChart) usageChart.destroy();
+    
+    usageChart = new Chart(canvas, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [
+          {
+            label: '总 Tokens',
+            data: totals,
+            borderColor: '#4a90e2',
+            backgroundColor: 'rgba(74, 144, 226, 0.1)',
+            fill: true,
+            tension: 0.3
+          },
+          {
+            label: 'Prompt',
+            data: prompts,
+            borderColor: '#2ecc71',
+            borderDash: [5, 5],
+            fill: false
+          },
+          {
+            label: 'Completion',
+            data: completions,
+            borderColor: '#e67e22',
+            borderDash: [2, 2],
+            fill: false
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { position: 'top' }
+        },
+        scales: {
+          y: { beginAtZero: true }
+        }
+      }
+    });
+    
+  } catch (e) {
+    summary.textContent = '获取统计数据失败。';
+    console.error(e);
+  }
 }
 
 export async function buildModelSelection(data) {
@@ -207,9 +294,17 @@ async function saveSettings() {
     email_imap_server: document.getElementById('email-imap-input')?.value?.trim() || '',
     email_smtp_server: document.getElementById('email-smtp-input')?.value?.trim() || '',
     owner_email: document.getElementById('owner-email-input')?.value?.trim() || '',
-    session_id: state.currentSessionId || 1,
-    mcp_servers: document.getElementById('mcp-config-input')?.value?.trim() || '{}'
+    session_id: state.currentSessionId || 1
   };
+  
+  try {
+    const mcpStr = document.getElementById('mcp-config-input')?.value?.trim();
+    payload.mcp_servers = mcpStr ? JSON.parse(mcpStr) : {};
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = '✗ MCP JSON 格式错误'; statusEl.className = 'save-status error'; }
+    if (saveBtn) saveBtn.disabled = false;
+    return;
+  }
 
   providers.forEach(p => {
     const el = document.getElementById(`key-${p.key}`);
@@ -774,3 +869,7 @@ window.loadSkillsConfig = loadSkillsConfig;
 window.loadAgents = loadAgents;
 window.openAIDesignModal = openAIDesignModal;
 window.closeAIDesignModal = closeAIDesignModal;
+
+document.getElementById('stats-modal-close')?.addEventListener('click', () => {
+  document.getElementById('stats-modal').classList.remove('active');
+});

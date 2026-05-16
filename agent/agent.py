@@ -5,6 +5,7 @@ import threading
 import hashlib
 from typing import List, Dict, Any, Optional, Callable
 import os
+import queue
 
 from core.paths import get_data_path, get_skills_dir
 
@@ -15,6 +16,7 @@ from core.skill_store import SkillStore
 from core.token_budget import TokenBudget, estimate_messages_tokens
 from core.reflection import ReflectionEngine
 from core.knowledge_graph import KnowledgeGraph
+from core.stats_manager import get_stats_manager
 from tools.shell import ShellTool
 from tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool
 from tools.search import GrepSearchTool, GlobTool
@@ -31,6 +33,10 @@ from tools.auto_tool import (DynamicTool, load_all_dynamic_tools,
                               generate_tool_code, validate_tool_code,
                               save_tool_code, init_auto_tools)
 from agent.sub_agent import SubAgent, TOOL_SETS
+from tools.discovery import ToolDiscoveryTool
+from tools.mcp_tool import get_mcp_manager
+from tools.interaction import AskUserQuestionTool
+from tools.sandbox import EnterWorktreeTool, ExitWorktreeTool
 
 class OpenAGCAgent:
     """
@@ -133,12 +139,15 @@ class OpenAGCAgent:
             }
         ]
         
+        self.user_input_queue = queue.Queue()
+        self.progress_callback = None
+        
         # Instantiate tools (MemoryTool shares the same store)
         memory_tool = MemoryTool(
             db_path=get_data_path("memory.db"),
             session_id=self.session_id
         )
-        self.available_tools = {
+        self.full_available_tools = {
             "execute_shell": ShellTool(),
             "read_file": ReadFileTool(),
             "write_file": WriteFileTool(),
@@ -154,7 +163,10 @@ class OpenAGCAgent:
             "browser_automation": BrowserAutomationTool(headless=self.browser_headless),
             "search_emails": SearchEmailTool(),
             "send_email": SendEmailTool(),
-            "queue_download": DownloadTool()
+            "queue_download": DownloadTool(),
+            "ask_user_question": AskUserQuestionTool(),
+            "enter_sandbox_mode": EnterWorktreeTool(),
+            "exit_sandbox_mode": ExitWorktreeTool()
         }
 
         # Tool display names (Chinese-friendly)
@@ -174,7 +186,11 @@ class OpenAGCAgent:
             "browser_automation": "虚拟浏览器控制",
             "search_emails": "搜索邮件",
             "send_email": "发送邮件",
-            "queue_download": "下载文件"
+            "queue_download": "下载文件",
+            "search_available_tools": "检索扩展工具",
+            "ask_user_question": "向用户提问",
+            "enter_sandbox_mode": "进入沙箱模式",
+            "exit_sandbox_mode": "退出沙箱模式"
         }
 
         # Load auto-generated tools (persisted from previous sessions)
@@ -186,9 +202,45 @@ class OpenAGCAgent:
         init_auto_tools(user_gen_dir)
         loaded = load_all_dynamic_tools(user_gen_dir)
         for tool_name, tool_instance in loaded.items():
-            if tool_name not in self.available_tools:
-                self.available_tools[tool_name] = tool_instance
+            if tool_name not in self.full_available_tools:
+                self.full_available_tools[tool_name] = tool_instance
                 self.tool_display_names[tool_name] = tool_instance.description[:20]
+
+        # Load MCP tools
+        try:
+            with open(get_data_path("config.json"), "r") as f:
+                config_data = json.load(f)
+                mcp_config = config_data.get("mcp_servers", {})
+                if mcp_config:
+                    mcp_manager = get_mcp_manager()
+                    mcp_tools = mcp_manager.load_servers(mcp_config)
+                    for name, tool_instance in mcp_tools.items():
+                        if name not in self.full_available_tools:
+                            self.full_available_tools[name] = tool_instance
+                            self.tool_display_names[name] = f"[MCP] {name}"
+        except Exception as e:
+            print(f"[Agent] Failed to load MCP tools: {e}")
+
+        # Progressive Disclosure Setup
+        CORE_TOOL_NAMES = {"execute_shell", "read_file", "write_file", "edit_file", "search_file_content", "find_files", "search_available_tools", "ask_user_question"}
+        self.active_tool_names = set(CORE_TOOL_NAMES)
+        
+        def _enable_tools_callback(tool_names: List[str]):
+            added = False
+            for name in tool_names:
+                if name in self.full_available_tools and name not in self.active_tool_names:
+                    self.active_tool_names.add(name)
+                    self.available_tools[name] = self.full_available_tools[name]
+                    added = True
+            if added:
+                self.tool_schemas = [tool.get_openai_schema() for tool in self.available_tools.values()]
+                
+        self.full_available_tools["search_available_tools"] = ToolDiscoveryTool(
+            full_tools=self.full_available_tools, 
+            enable_callback=_enable_tools_callback
+        )
+        
+        self.available_tools = {name: self.full_available_tools[name] for name in self.active_tool_names if name in self.full_available_tools}
 
         # Prepare OpenAI format tool schema
         self.tool_schemas = [tool.get_openai_schema() for tool in self.available_tools.values()]
@@ -663,22 +715,22 @@ class OpenAGCAgent:
 
     def run_turn(self, user_input: str, verbose: bool = False,
                  progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-                 images: Optional[List[str]] = None) -> str:
+                 images: Optional[List[str]] = None,
+                 task_id: Optional[int] = None) -> str:
         """
-        Run a single conversational turn. Will loop until the LLM returns a final text message.
-
-        Args:
-            user_input: The user's message.
-            verbose: If true, print debug info.
-            progress_callback: Optional callback for real-time progress updates.
-            images: Optional list of image file paths or data URLs to include as vision input.
+        Execute a single turn of reasoning and action.
         """
         self.is_interrupted = False
-        self.messages.append(build_user_message(user_input, images))
+        self.task_id = task_id
+        self.progress_callback = progress_callback
+        
+        # Only append user message if it's not None (None means we are resuming from ask_user_question)
+        if user_input is not None:
+            self.messages.append(build_user_message(user_input, images))
+            if self.logger:
+                self.logger.log_user_query(user_input)
+                
         _task_start = _time.time()
-
-        if self.logger:
-            self.logger.log_user_query(user_input)
 
         # Auto-retrieve relevant memories for this query
         def _msg_text(m):
@@ -756,7 +808,7 @@ class OpenAGCAgent:
                         sub = SubAgent(
                             task=plan["task"],
                             tools=plan.get("tools", ["execute_shell"]),
-                            parent_tools=self.available_tools,
+                            parent_tools=self.full_available_tools,
                             max_iterations=plan.get("max_iterations", 10),
                             progress_callback=progress_callback,
                             llm_client=self.llm,
@@ -813,6 +865,42 @@ class OpenAGCAgent:
             
             response, actual_model = self.llm.chat(messages=self.messages, tools=self.tool_schemas)
             message = response.choices[0].message
+            
+            # Record Token Usage
+            usage = getattr(response, 'usage', None)
+            if usage:
+                prompt_tokens = getattr(usage, 'prompt_tokens', 0)
+                completion_tokens = getattr(usage, 'completion_tokens', 0)
+                
+                # Smart Provider Detection
+                provider = 'unknown'
+                if '/' in actual_model:
+                    provider = actual_model.split('/')[0]
+                else:
+                    # Known mappings
+                    model_lower = actual_model.lower()
+                    if 'deepseek' in model_lower: provider = 'deepseek'
+                    elif 'gpt' in model_lower or 'openai' in model_lower: provider = 'openai'
+                    elif 'claude' in model_lower: provider = 'anthropic'
+                    elif 'gemini' in model_lower: provider = 'gemini'
+                    elif 'kimi' in model_lower or 'moonshot' in model_lower: provider = 'kimi'
+                    elif 'glm' in model_lower or 'zai' in model_lower: provider = 'glm'
+                
+                get_stats_manager().record_usage(
+                    provider=provider,
+                    model=actual_model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    session_id=self.session_id,
+                    task_id=self.task_id
+                )
+                if progress_callback:
+                    progress_callback({
+                        "event": "usage",
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens
+                    })
             
             # Detect empty response (no content and no tool calls)
             # This can happen with some models like Ollama's Qwen when they malfunction or refuse to answer.
@@ -947,6 +1035,7 @@ class OpenAGCAgent:
                                 if 'interrupt_check' in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
                                     result = tool_instance.execute(
                                         interrupt_check=lambda: self.is_interrupted,
+                                        _agent_context=self,
                                         **function_args
                                     )
                                 else:
@@ -1072,3 +1161,22 @@ class OpenAGCAgent:
         self._record_skill_feedback(success=False, task_input=user_input,
                                     duration=_time.time() - _task_start)
         return "[MAX_ITERATIONS_REACHED] Agent stopped: Reached maximum iterations without a final answer. The task may be incomplete."
+        
+    def wait_for_user_input(self, question: str, options: Optional[List[str]] = None) -> str:
+        """
+        Block the agent thread and wait for user input from the frontend.
+        """
+        if self.progress_callback:
+            self.progress_callback({
+                "event": "ask_user",
+                "question": question,
+                "options": options
+            })
+        
+        # Clear queue of any stale responses
+        while not self.user_input_queue.empty():
+            self.user_input_queue.get_nowait()
+            
+        # Block until the websocket sends a response
+        answer = self.user_input_queue.get(block=True)
+        return answer
