@@ -47,9 +47,27 @@ class BrowserAutomationTool:
     @staticmethod
     def _has_display():
         """Check if a graphical display is available."""
-        if sys.platform == "win32":
+        if sys.platform in ["win32", "darwin"]:
             return True
         return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+    def _install_playwright_browsers(self):
+        """尝试自动安装 Playwright 浏览器二进制文件"""
+        print("[Browser] 正在尝试自动安装 Chromium 浏览器...")
+        import subprocess
+        try:
+            # Use sys.executable to ensure we use the same environment
+            cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+            process = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if process.returncode == 0:
+                print("[Browser] Chromium 安装成功！")
+                return True
+            else:
+                print(f"[Browser] Chromium 安装失败: {process.stderr}")
+                return False
+        except Exception as e:
+            print(f"[Browser] 执行安装命令时出错: {e}")
+            return False
 
     @staticmethod
     def _find_chromium():
@@ -65,10 +83,12 @@ class BrowserAutomationTool:
         elif sys.platform == "darwin":
             candidates = [
                 os.path.join(home, "Library", "Caches", "ms-playwright", "chromium-*"),
+                "/Library/Caches/ms-playwright/chromium-*",
             ]
         else:
             candidates = [
                 os.path.join(home, ".cache", "ms-playwright", "chromium-*"),
+                "/usr/local/share/ms-playwright/chromium-*",
             ]
         for pattern in candidates:
             matches = glob.glob(pattern)
@@ -83,18 +103,6 @@ class BrowserAutomationTool:
                     exe = os.path.join(m, "chrome-linux", "chrome")
                 if os.path.isfile(exe):
                     return exe
-        # Fallback: check if playwright CLI is available and chromium is installed
-        if shutil.which("playwright"):
-            import subprocess
-            try:
-                result = subprocess.run(
-                    [sys.executable, "-m", "playwright", "install", "--dry-run", "chromium"],
-                    capture_output=True, text=True, timeout=10
-                )
-                if result.returncode == 0:
-                    return True  # playwright says it's installed
-            except Exception:
-                pass
         return None
 
     def _clean_lock_files(self, user_data_dir: str):
@@ -126,17 +134,9 @@ class BrowserAutomationTool:
                     except queue.Empty:
                         break
 
-            # Pre-flight: check Chromium is installed
-            if not self._find_chromium():
-                msg = (
-                    "Playwright Chromium 浏览器未安装。请运行以下命令安装：\n"
-                    "  playwright install chromium\n"
-                    "如果 playwright 命令不可用，请运行：\n"
-                    f"  {sys.executable} -m playwright install chromium"
-                )
-                # Don't put into res_queue — return the error directly via raise
-                raise RuntimeError(msg)
-
+            # Let the thread start. We will handle missing browser inside the thread
+            # so that we can attempt auto-installation without blocking the main thread 
+            # if it takes a long time.
             self.thread = threading.Thread(target=self._browser_loop, daemon=True)
             self.thread.start()
 
@@ -174,31 +174,51 @@ class BrowserAutomationTool:
                 use_persistent = True
 
                 # 尝试持久模式，失败则降级
-                try:
-                    context = p.chromium.launch_persistent_context(
-                        user_data_dir=user_data_dir,
-                        headless=self.headless,
-                        viewport={'width': 1280, 'height': 800},
-                        user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        no_viewport=False,
-                        timeout=15000
-                    )
-                    page = context.pages[0] if len(context.pages) > 0 else context.new_page()
-                except Exception as e:
-                    print(f"[Browser] 持久模式启动失败 ({e})，降级为非持久模式...")
-                    use_persistent = False
+                def try_launch():
                     try:
+                        ctx = p.chromium.launch_persistent_context(
+                            user_data_dir=user_data_dir,
+                            headless=self.headless,
+                            viewport={'width': 1280, 'height': 800},
+                            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                            no_viewport=False,
+                            timeout=15000
+                        )
+                        pg = ctx.pages[0] if len(ctx.pages) > 0 else ctx.new_page()
+                        return ctx, pg, True
+                    except Exception as e:
+                        msg = str(e)
+                        if "executable" in msg.lower() or "not found" in msg.lower() or "doesn't exist" in msg.lower():
+                            raise  # Re-raise to trigger auto-install
+                        
+                        print(f"[Browser] 持久模式启动失败 ({e})，降级为非持久模式...")
                         browser = p.chromium.launch(
                             headless=self.headless,
                             timeout=15000
                         )
-                        context = browser.new_context(
+                        ctx = browser.new_context(
                             viewport={'width': 1280, 'height': 800},
                             user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                         )
-                        page = context.new_page()
-                    except Exception as e2:
-                        self._init_queue.put({"status": "error", "message": f"浏览器启动完全失败: {str(e2)}"})
+                        pg = ctx.new_page()
+                        return ctx, pg, False
+
+                try:
+                    context, page, use_persistent = try_launch()
+                except Exception as e:
+                    msg = str(e)
+                    if "executable" in msg.lower() or "not found" in msg.lower() or "doesn't exist" in msg.lower():
+                        if self._install_playwright_browsers():
+                            try:
+                                context, page, use_persistent = try_launch()
+                            except Exception as e2:
+                                self._init_queue.put({"status": "error", "message": f"安装后启动依然失败: {str(e2)}"})
+                                return
+                        else:
+                            self._init_queue.put({"status": "error", "message": f"浏览器未安装且自动安装失败。请手动运行: python3 -m playwright install chromium"})
+                            return
+                    else:
+                        self._init_queue.put({"status": "error", "message": f"浏览器启动完全失败: {str(e)}"})
                         return
                 
                 # Signal successful init via the dedicated init queue
@@ -328,14 +348,23 @@ class BrowserAutomationTool:
             return "浏览器已关闭"
 
         # Phase 1: Ensure browser thread is running
+        self._start_browser_thread()
+        
+        # Phase 2: Wait for initialization result (only if we are not already initialized)
+        # In a singleton, the thread might be starting. We check _init_queue for status.
+        # But wait, _start_browser_thread is safe to call. 
+        # We need a way to know if we need to wait for a FRESH init.
+        # Let's use a timeout on the first command if the thread was just started.
         try:
-            self._start_browser_thread()
-        except RuntimeError as e:
-            # Directly return the detailed error from _start_browser_thread
-            # instead of hiding it behind "内部通讯错误"
-            return f"Error: {str(e)}"
+            # Check the init queue for success/error
+            # If the thread was already running, this queue might be empty, which is fine.
+            init_res = self._init_queue.get(timeout=0.1)
+            if init_res.get("status") == "error":
+                return f"Error: {init_res.get('message')}"
+        except queue.Empty:
+            pass
 
-        # Phase 2: Send command and wait for response
+        # Phase 3: Send command and wait for response
         try:
             self.cmd_queue.put({
                 "action": action, 
@@ -347,10 +376,12 @@ class BrowserAutomationTool:
                 "wait_time": wait_time
             })
             
-            res = self.res_queue.get(timeout=30)
+            # Use a longer timeout (60s) in case the browser is still initializing/installing
+            res = self.res_queue.get(timeout=60)
             if res.get("status") == "error":
                 return f"Error: {res.get('message')}"
             return res.get("message", "")
+
         except queue.Empty:
             # Check if the thread died while we were waiting
             if self.thread is None or not self.thread.is_alive():

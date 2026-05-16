@@ -64,9 +64,9 @@
         "要求",
         "或进"
       ],
-      "usage_count": 0,
-      "success_rate": 1.0,
-      "last_used": null
+      "usage_count": 2,
+      "success_rate": 0.81,
+      "last_used": "2026-05-16T12:30:25.298991"
     },
     {
       "filename": "data_analyst.md",
@@ -96,9 +96,9 @@
         "能当",
         "需要"
       ],
-      "usage_count": 1,
-      "success_rate": 1.0,
-      "last_used": "2026-05-14T13:23:40.421130"
+      "usage_count": 3,
+      "success_rate": 0.81,
+      "last_used": "2026-05-16T12:30:25.298769"
     },
     {
       "filename": "doc_writer.md",
@@ -177,9 +177,9 @@
         "需要",
         "搜索"
       ],
-      "usage_count": 18,
-      "success_rate": 0.8260689923994206,
-      "last_used": "2026-05-16T01:36:20.903802"
+      "usage_count": 31,
+      "success_rate": 0.7393645065193255,
+      "last_used": "2026-05-16T14:58:27.198250"
     },
     {
       "filename": "file_organizer.md",
@@ -286,9 +286,9 @@
         "能当",
         "能指"
       ],
-      "usage_count": 2,
-      "success_rate": 0.91,
-      "last_used": "2026-05-16T01:22:15.840833"
+      "usage_count": 7,
+      "success_rate": 0.8568559000000001,
+      "last_used": "2026-05-16T13:38:59.965845"
     },
     {
       "filename": "web_scraper.md",
@@ -385,9 +385,9 @@
         "自动",
         "布技"
       ],
-      "usage_count": 3,
-      "success_rate": 0.8290000000000001,
-      "last_used": "2026-05-16T01:22:15.840631"
+      "usage_count": 10,
+      "success_rate": 0.7553112301,
+      "last_used": "2026-05-16T14:51:34.639083"
     },
     {
       "filename": "xiaohongshu_publish.md",
@@ -444,9 +444,9 @@
         "自动",
         "布技"
       ],
-      "usage_count": 0,
-      "success_rate": 1.0,
-      "last_used": null
+      "usage_count": 2,
+      "success_rate": 0.91,
+      "last_used": "2026-05-16T14:51:34.640015"
     }
   ]
 }

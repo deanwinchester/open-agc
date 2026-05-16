@@ -817,49 +817,74 @@ body {
     100% { transform: rotate(0deg) scale(1); }
 }
 
-/* Inline collapsible progress card */
+/* Production-Grade Inline Progress Card */
 .progress-inline {
-    margin: 0.4rem 0 0.8rem 3rem;
-    border: 1px solid var(--border-color);
-    border-radius: 10px;
-    background: var(--bg-inner);
-    overflow: hidden;
-    transition: border-color 0.3s;
+    margin: 1rem 0 1.5rem 3rem;
+    border: 1px solid rgba(0,0,0,0.06);
+    border-radius: 12px;
+    background: #ffffff;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.03);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    flex-shrink: 0;
+    min-width: 300px;
+    position: relative;
+    overflow: visible;
 }
+
+[data-theme="dark"] .progress-inline {
+    background: #1e1e2d;
+    border-color: rgba(255,255,255,0.08);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+}
+
 .progress-inline.completed {
-    border-color: var(--success, #10b981);
+    border-color: rgba(16, 185, 129, 0.2);
 }
+
 .progress-inline-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.7rem 1rem;
-    min-height: 38px;
+    padding: 0.8rem 1.25rem;
+    min-height: 48px;
     cursor: pointer;
     user-select: none;
-    transition: background 0.15s;
-    background: var(--bg-inner);
+    border-bottom: 1px solid rgba(0,0,0,0.04);
+    border-radius: 12px 12px 0 0;
 }
+
+[data-theme="dark"] .progress-inline-header {
+    border-bottom-color: rgba(255,255,255,0.04);
+}
+
 .progress-inline-header:hover {
-    background: var(--hover-bg, rgba(0,0,0,0.03));
+    background: rgba(0,0,0,0.01);
 }
+
 .progress-inline-left {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex: 1;
+}
+
+.progress-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--text-primary);
     display: flex;
     align-items: center;
     gap: 0.5rem;
 }
-.progress-title {
-    font-size: 0.82rem;
-    font-weight: 600;
-    color: var(--text-primary);
-}
-.progress-toggle-icon {
-    font-size: 0.7rem;
+
+.progress-current-step {
+    font-weight: 400;
     color: var(--text-secondary);
-    transition: transform 0.2s;
-}
-.progress-toggle-icon.expanded {
-    transform: rotate(0deg);
+    font-size: 0.8rem;
+    max-width: 200px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .progress-toggle-icon.collapsed {
     transform: rotate(0deg);
@@ -909,11 +934,45 @@ body {
 .progress-inline-steps {
     max-height: 0;
     overflow: hidden;
-    transition: max-height 0.3s ease;
-    border-top: 1px solid var(--border-color);
+    transition: max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    background: rgba(0,0,0,0.005);
+    display: flex;
+    flex-direction: column;
 }
 
-/* Input Area */
+[data-theme="dark"] .progress-inline-steps {
+    background: rgba(0,0,0,0.1);
+}
+.progress-inline-footer {
+    padding: 0.5rem;
+    text-align: center;
+    border-top: 1px solid rgba(0,0,0,0.03);
+    background: rgba(0,0,0,0.01);
+    border-radius: 0 0 12px 12px;
+}
+
+[data-theme="dark"] .progress-inline-footer {
+    background: rgba(255,255,255,0.02);
+    border-top-color: rgba(255,255,255,0.03);
+}
+
+.btn-collapse-steps {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0.35rem 1rem;
+    border-radius: 20px;
+    transition: all 0.2s;
+}
+
+.btn-collapse-steps:hover {
+    color: var(--theme-color);
+    background: rgba(74, 222, 128, 0.08);
+}
+
 .input-container {
     padding: 1.25rem 2rem;
     background: linear-gradient(to top, var(--bg-base) 60%, transparent);
@@ -1067,36 +1126,73 @@ textarea {
 .progress-step {
     display: flex;
     align-items: flex-start;
-    gap: 0.5rem;
-    padding: 0.45rem 0.6rem;
-    border-radius: var(--radius-sm);
-    background: var(--bg-inner);
+    gap: 0.75rem;
+    padding: 0.75rem 1.25rem;
     border-left: 3px solid transparent;
-    animation: fadeSlideIn 0.25s ease;
-    transition: all var(--trans-fast);
-    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+}
+
+.progress-step::before {
+    content: "";
+    position: absolute;
+    left: -1.5px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: rgba(0,0,0,0.05);
+    display: none; /* We use border-left instead */
 }
 
 .progress-step:hover {
-    background: var(--bg-hover);
-    box-shadow: 0 0 0 1px var(--border-color);
+    background: rgba(0,0,0,0.02);
 }
 
-.progress-step.running { border-left-color: var(--theme-color); background: rgba(74, 222, 128, 0.04); }
-.progress-step.done { border-left-color: var(--success); }
-.progress-step.failed { border-left-color: var(--error); }
-.progress-step.model-switch { border-left-color: var(--warning); background: rgba(245, 158, 11, 0.06); }
-.progress-step.thinking-process { border-left-color: var(--theme-color); background: rgba(74, 222, 128, 0.02); font-style: italic; }
-.progress-step.thinking-process .step-detail { color: var(--text-secondary); font-size: 0.82rem; }
+.progress-step.running {
+    border-left-color: var(--theme-color);
+    background: rgba(74, 222, 128, 0.02);
+}
+
+.progress-step.done {
+    border-left-color: #10b981;
+}
+
+.progress-step.failed {
+    border-left-color: #ef4444;
+    background: rgba(239, 68, 68, 0.02);
+}
+
+.progress-step.thinking-process {
+    background: rgba(99, 102, 241, 0.02);
+    border-left-color: #6366f1;
+    font-style: normal;
+    border-bottom: 1px dashed rgba(0,0,0,0.03);
+}
+
+[data-theme="dark"] .progress-step.thinking-process {
+    background: rgba(99, 102, 241, 0.05);
+    border-bottom-color: rgba(255,255,255,0.05);
+}
+
+.progress-step.thinking-process .step-label {
+    color: #6366f1;
+    font-weight: 700;
+}
+
+.progress-step.thinking-process .step-detail {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    line-height: 1.5;
+}
 
 .step-icon {
     flex-shrink: 0;
-    width: 20px;
-    height: 20px;
+    width: 24px;
+    height: 24px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 0.85rem;
+    font-size: 1rem;
 }
 
 .step-spinner {

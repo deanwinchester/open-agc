@@ -306,34 +306,56 @@ function initApp() {
       progressInline = document.createElement('div');
       progressInline.className = 'progress-inline';
       progressInline.innerHTML = `
-        <div class="progress-inline-header" id="progress-inline-header" style="min-height: 40px;">
+        <div class="progress-inline-header" id="progress-inline-header">
           <div class="progress-inline-left">
             <div class="progress-spinner"></div>
             <span class="progress-title">${t('working')}</span>
-            <span class="progress-current-step" style="margin-left: 8px; color: var(--text-secondary); opacity: 0.8; font-size: 0.8rem;"></span>
+            <span class="progress-current-step"></span>
           </div>
           <span class="progress-toggle-icon collapsed">▸</span>
         </div>
-        <div class="progress-inline-steps" id="progress-inline-steps" style="max-height: none;"></div>`;
+        <div class="progress-inline-steps" id="progress-inline-steps" style="max-height: 0px;"></div>
+        <div class="progress-inline-footer" style="display:none">
+          <button class="btn-collapse-steps">收起日志 ▴</button>
+        </div>`;
       progressStepsEl = progressInline.querySelector('.progress-inline-steps');
 
       // Toggle collapse/expand on header click
       const header = progressInline.querySelector('.progress-inline-header');
-      header.addEventListener('click', function() {
+      const footer = progressInline.querySelector('.progress-inline-footer');
+      const collapseBtn = footer.querySelector('.btn-collapse-steps');
+      
+      const toggleCollapse = function(forceCollapse = false) {
         const steps = progressInline.querySelector('.progress-inline-steps');
         const icon = progressInline.querySelector('.progress-toggle-icon');
-        const isCollapsed = steps.style.maxHeight === '0px' || !steps.style.maxHeight;
-        if (isCollapsed) {
-          steps.style.maxHeight = steps.scrollHeight + 'px';
-          icon.classList.remove('collapsed');
-          icon.classList.add('expanded');
-          icon.textContent = '▾';
-        } else {
+        const isCurrentlyCollapsed = steps.style.maxHeight === '0px' || !steps.style.maxHeight;
+        
+        if (!isCurrentlyCollapsed || forceCollapse) {
+          // Collapse
+          if (steps.style.maxHeight === 'none') steps.style.maxHeight = steps.scrollHeight + 'px';
+          steps.offsetHeight; // force reflow
           steps.style.maxHeight = '0px';
           icon.classList.remove('expanded');
           icon.classList.add('collapsed');
           icon.textContent = '▸';
+          footer.style.display = 'none';
+          // If we are at the bottom, scroll header into view
+          progressInline.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } else {
+          // Expand
+          steps.style.maxHeight = steps.scrollHeight + 'px';
+          icon.classList.remove('collapsed');
+          icon.classList.add('expanded');
+          icon.textContent = '▾';
+          footer.style.display = 'block';
+          setTimeout(() => { if(steps.style.maxHeight !== '0px') steps.style.maxHeight = 'none'; }, 350);
         }
+      };
+
+      header.addEventListener('click', () => toggleCollapse());
+      collapseBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleCollapse(true);
       });
 
       // Insert after last user message
@@ -351,28 +373,20 @@ function initApp() {
 
   function finishProgressContainer() {
     if (!progressInline) return;
+    const title = progressInline.querySelector('.progress-title');
+    const spinner = progressInline.querySelector('.progress-spinner');
+    const header = progressInline.querySelector('.progress-inline-header');
+    const currentStepEl = progressInline.querySelector('.progress-current-step');
+    
+    if (title) title.innerHTML = `✨ ${t('done')} · ${progressStepCount} 步`;
+    if (spinner) spinner.style.display = 'none';
+    if (currentStepEl) currentStepEl.style.display = 'none';
     progressInline.classList.add('completed');
-    const titleEl = progressInline.querySelector('.progress-title');
-    const count = progressStepCount;
-    if (titleEl) titleEl.textContent = `✨ 执行完成 · ${count} 步`;
-    const spinnerEl = progressInline.querySelector('.progress-spinner');
-    if (spinnerEl) spinnerEl.style.display = 'none';
-
-    // Don't auto-collapse anymore — let the user see the result!
-    // const steps = progressInline.querySelector('.progress-inline-steps');
-    // if (steps) steps.style.maxHeight = '0px';
-
-
-    // Update step count badge in header
-    const headerText = progressInline.querySelector('.progress-title');
-    if (headerText) headerText.textContent = `✨ 执行完成 · ${count} 步`;
-
-    // Reset for next turn
+    
     progressInline = null;
     progressStepsEl = null;
     progressSteps = {};
     progressStepCount = 0;
-    // Keep progressStepData for detail panel
   }
 
   window.handleProgressEvent = handleProgressEvent;
@@ -439,14 +453,9 @@ function initApp() {
       if (headerTitle) headerTitle.textContent = `⚡ 执行中 · ${progressStepCount} 步`;
       if (currentStepEl) currentStepEl.textContent = ` : ${data.tool_label || data.tool}`;
       
-      // Auto-expand on new step
-      const steps = progressInline.querySelector('.progress-inline-steps');
-      const icon = progressInline.querySelector('.progress-toggle-icon');
-      if (steps && (steps.style.maxHeight === '0px' || !steps.style.maxHeight || steps.style.maxHeight === 'none')) {
-          steps.style.maxHeight = 'none'; // Ensure visible
-          if (icon) { icon.classList.remove('collapsed'); icon.classList.add('expanded'); icon.textContent = '▾'; }
-      }
-
+      // Auto-expand removed to keep progress collapsed by default
+      
+      scrollToBottom();
       progressStepData[data.step] = {
         type: 'tool', step: data.step, tool: data.tool,
         tool_label: data.tool_label || data.tool,
@@ -562,14 +571,34 @@ function initApp() {
     }
     steps.forEach((s, i) => {
       const stepEl = document.createElement('div');
-      stepEl.className = `progress-step ${s.success ? 'done' : 'failed'}`;
+      const isFailed = s.success === false;
+      stepEl.className = `progress-step ${isFailed ? 'failed' : 'done'}`;
       stepEl.innerHTML = `
-        <span class="step-icon">${s.success ? '✅' : '❌'}</span>
+        <span class="step-icon">${isFailed ? '❌' : '✅'}</span>
         <div class="step-body">
           <span class="step-label">${s.step_number}. ${s.tool_label || s.tool_name}</span>
           ${s.args_preview ? `<span class="step-detail">${escapeHtml(s.args_preview)}</span>` : ''}
           ${s.result_preview ? `<span class="step-detail">${escapeHtml(s.result_preview)}</span>` : ''}
         </div>`;
+      
+      // Register step data for detail view
+      const stepKey = `hist-${data.task_id}-${s.step_number}`;
+      progressStepData[stepKey] = {
+        type: 'tool',
+        step: s.step_number,
+        tool: s.tool_name,
+        tool_label: s.tool_label || s.tool_name,
+        full_args: s.full_args || s.args_preview,
+        full_result: s.full_result || s.result_preview,
+        success: s.success,
+        status: 'completed'
+      };
+      
+      stepEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showStepDetail(stepKey);
+      });
+      
       stepsEl.appendChild(stepEl);
     });
 
