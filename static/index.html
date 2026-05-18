@@ -502,6 +502,26 @@
                         </div>
                     </section>
 
+                    <!-- Sandbox Authorization -->
+                    <section class="card" id="sandbox-auth-card">
+                        <div class="card-header">
+                            <h2>🔐 沙箱授权管理</h2>
+                            <p class="card-desc">管理 Agent 可访问的外部路径（独立于沙箱目录）。Agent 访问未授权路径时将弹出授权请求。</p>
+                        </div>
+                        <div class="field">
+                            <label>已授权路径 (allowed_paths)</label>
+                            <div id="allowed-paths-list" style="display:flex;flex-wrap:wrap;gap:0.35rem;margin-top:0.3rem;">
+                                <span style="color:var(--text-secondary);font-size:0.82rem;">加载中...</span>
+                            </div>
+                        </div>
+                        <div class="field" style="margin-top:0.8rem;">
+                            <label>已拒绝路径 (denied_paths)</label>
+                            <div id="denied-paths-list" style="display:flex;flex-wrap:wrap;gap:0.35rem;margin-top:0.3rem;">
+                                <span style="color:var(--text-secondary);font-size:0.82rem;">加载中...</span>
+                            </div>
+                        </div>
+                    </section>
+
                     <!-- Email -->
                     <section class="card">
                         <div class="card-header">

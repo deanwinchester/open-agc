@@ -55,8 +55,9 @@ import litellm
 # Fix for PyInstaller bundling issue with tiktoken
 litellm.num_tokens_logging = False 
 litellm.supports_token_counter = False
-litellm._turn_on_debug()
-litellm.set_verbose = True  # Double down on verbosity for terminal logs
+# LiteLLM debug logging — uncomment to debug model/pricing issues
+# litellm._turn_on_debug()
+# litellm.set_verbose = True
 
 # Ensure local connections bypass proxy
 for var in ["no_proxy", "NO_PROXY"]:
@@ -77,7 +78,8 @@ _main_event_loop: asyncio.AbstractEventLoop = None
 @app.on_event("startup")
 async def _capture_event_loop():
     global _main_event_loop
-    _main_event_loop = asyncio.get_event_loop()
+    _main_event_loop = asyncio.get_running_loop()
+    print(f"[Server] Event loop captured: {_main_event_loop}")
 
 # Initialize Database
 DB_PATH = get_data_path("chat_history.db")
@@ -430,6 +432,10 @@ def reconcile_tasks():
 
 reconcile_tasks()
 
+# Initialize StatsManager singleton with correct database
+from core.stats_manager import get_stats_manager
+get_stats_manager(DB_PATH)
+
 # Task helper functions
 def create_task(title: str, user_query: str, task_type: str = 'oneshot',
                 schedule_cron: str = None, schedule_enabled: bool = False) -> int:
@@ -602,6 +608,8 @@ def delete_download_record(download_id: int):
 # ==========================================
 connected_websockets: list = []  # List of active WebSocket connections
 
+_sandbox_waits: dict = {}  # {session_id: {"event": threading.Event, "result": dict}} — sandbox auth waits
+
 def _broadcast_to_websockets(data: dict):
     """Send data to all connected WebSocket clients."""
     import asyncio
@@ -762,7 +770,9 @@ async def get_settings(session_id: int = None):
         "email_password": sess_email.get("email_password", ("***" if config.get("email_password") else "")),
         "email_imap_server": sess_email.get("email_imap_server", config.get("email_imap_server", "")),
         "email_smtp_server": sess_email.get("email_smtp_server", config.get("email_smtp_server", "")),
-        "owner_email": sess_email.get("owner_email", config.get("owner_email", ""))
+        "owner_email": sess_email.get("owner_email", config.get("owner_email", "")),
+        "allowed_paths": config.get("allowed_paths", []),
+        "denied_paths": config.get("denied_paths", [])
     }
 
 @app.post("/api/settings")
@@ -930,6 +940,69 @@ async def get_token_usage_stats(provider: str, days: int = 30):
     manager = get_stats_manager(DB_PATH)
     history = manager.get_usage_history(provider, days)
     return {"status": "success", "data": history}
+
+@app.post("/api/sandbox/approve")
+async def approve_sandbox_request(body: dict):
+    """Approve a pending sandbox path access request — adds path to allowed_paths."""
+    path = (body.get("path") or "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+
+    config = load_config()
+    allowed = config.get("allowed_paths", [])
+    if isinstance(allowed, str):
+        try:
+            import json as _j
+            allowed = _j.loads(allowed)
+        except Exception:
+            allowed = []
+
+    abs_p = os.path.abspath(os.path.expandvars(path))
+    if abs_p not in allowed:
+        allowed.append(abs_p)
+
+    config["allowed_paths"] = allowed
+    config["pending_path_requests"] = [
+        r for r in config.get("pending_path_requests", [])
+        if os.path.abspath(os.path.expandvars(r.get("path", ""))) != abs_p
+    ]
+
+    import json as _j
+    config_path = get_data_path("config.json")
+    with open(config_path, "w", encoding="utf-8") as f:
+        _j.dump(config, f, ensure_ascii=False, indent=2)
+
+    return {"ok": True, "allowed_paths": allowed}
+
+@app.post("/api/sandbox/remove-path")
+async def remove_sandbox_path(body: dict):
+    """Remove a path from allowed_paths or denied_paths."""
+    path = (body.get("path") or "").strip()
+    list_type = body.get("type", "allowed")  # "allowed" or "denied"
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+
+    config = load_config()
+    key = "allowed_paths" if list_type == "allowed" else "denied_paths"
+    paths = config.get(key, [])
+    if isinstance(paths, str):
+        try:
+            import json as _j
+            paths = _j.loads(paths)
+        except Exception:
+            paths = []
+
+    abs_p = os.path.abspath(os.path.expandvars(path))
+    # Remove by matching absolute path
+    paths = [p for p in paths if os.path.abspath(os.path.expandvars(p)) != abs_p]
+    config[key] = paths
+
+    import json as _j
+    config_path = get_data_path("config.json")
+    with open(config_path, "w", encoding="utf-8") as f:
+        _j.dump(config, f, ensure_ascii=False, indent=2)
+
+    return {"ok": True, key: paths}
 
 class PullRequest(BaseModel) :
     model_name: str
@@ -2151,19 +2224,36 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"[WS] Task replay error: {e}")
     
-    async def run_agent_with_progress(query: str, model: str = None, agent_profile_name: str = None, is_heartbeat: bool = False, images: list = None):
-        """Run agent in a thread and push progress to WebSocket via a Queue."""
+    async def run_agent_with_progress(query: str, model: str = None, agent_profile_name: str = None, is_heartbeat: bool = False, images: list = None, resume_task_id: int = None):
+        """Run agent in a thread and push progress to WebSocket via a Queue.
+
+        If resume_task_id is set, steps are appended to the existing task instead of creating a new one.
+        """
         nonlocal session_history, last_query, agent_is_running, receive_task, ws_alive, ws_session_id
         if not is_heartbeat:
             last_query = query
-            
+
         if agent_is_running:
             return "BUSY"
-            
+
         agent_is_running = True
-        ws_task_id = None  # Track task_id for this run
-        task_has_tools = False  # Only create task if tools are called
-        
+        ws_task_id = resume_task_id  # Reuse existing task on resume
+        step_offset = 0
+        task_has_tools = resume_task_id is not None  # Skip creation on resume
+
+        # Compute step offset for resume
+        if resume_task_id:
+            try:
+                db_conn = sqlite3.connect(DB_PATH)
+                max_step = db_conn.execute(
+                    "SELECT COALESCE(MAX(step_number), -1) FROM task_steps WHERE task_id=?",
+                    (resume_task_id,)).fetchone()[0]
+                db_conn.close()
+                step_offset = max_step + 1
+                update_task_status(resume_task_id, "running")
+            except Exception as e:
+                print(f"[Task] Resume offset error: {e}")
+
         try:
             import queue as thread_queue
             progress_queue = thread_queue.Queue()
@@ -2187,12 +2277,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception as e:
                         print(f"[Task] Failed to create task: {e}")
 
-                # Record task steps
+                # Record task steps (offset on resume to continue numbering)
+                adjusted_step = event.get("step", 0) + step_offset
+
                 if ws_task_id and event.get("event") == "tool_start":
                     try:
                         add_task_step(
                             task_id=ws_task_id,
-                            step_number=event.get("step", 0),
+                            step_number=adjusted_step,
                             tool_name=event.get("tool", ""),
                             tool_label=event.get("tool_label", ""),
                             args_preview=event.get("args_preview", ""),
@@ -2209,7 +2301,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         cursor.execute(
                             "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=?",
                             (event.get("result_preview", ""), event.get("result_preview", ""),
-                             1 if event.get("success") else 0, ws_task_id, event.get("step", 0))
+                             1 if event.get("success") else 0, ws_task_id, adjusted_step)
                         )
                         conn.commit()
                         conn.close()
@@ -2219,6 +2311,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Attach task_id to the event so frontend can track it
                 if ws_task_id:
                     event["task_id"] = ws_task_id
+                # Adjust step number for resumed tasks
+                if step_offset:
+                    event["step"] = event.get("step", 0) + step_offset
 
                 progress_queue.put(event)
             
@@ -2307,6 +2402,15 @@ async def websocket_endpoint(websocket: WebSocket):
                                 update_task_status(ws_task_id, "interrupted", interruption_reason="user")
                         elif user_msg.get("type") == "tool_reply":
                             agent.user_input_queue.put(user_msg.get("answer"))
+                        elif user_msg.get("type") == "sandbox_response":
+                            sid = user_msg.get("session_id", ws_session_id)
+                            action = user_msg.get("action", "deny_once")
+                            wait = _sandbox_waits.get(sid)
+                            if wait:
+                                wait["result"]["action"] = action
+                                wait["result"]["path"] = user_msg.get("path", "")
+                                wait["event"].set()
+                                print(f"[WS] Sandbox response: {action} for {sid}")
                         receive_task = None
                     except WebSocketDisconnect:
                         ws_alive = False
@@ -2411,32 +2515,58 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 user_msg = json.loads(data)
                 msg_type = user_msg.get("type", "query")
+                resume_id_for_run = None
+
+                if msg_type == "sandbox_response":
+                    # Resolve a pending sandbox auth wait
+                    sid = user_msg.get("session_id", ws_session_id)
+                    action = user_msg.get("action", "deny_once")
+                    wait = _sandbox_waits.get(sid)
+                    if wait:
+                        wait["result"]["action"] = action
+                        wait["result"]["path"] = user_msg.get("path", "")
+                        wait["event"].set()
+                        print(f"[WS] Sandbox response: {action} for session {sid}")
+                    continue
 
                 if msg_type == "resume":
                     # Resume an interrupted task
                     task_id = user_msg.get("task_id")
                     if task_id and not agent_is_running:
+                        resume_id_for_run = task_id
                         try:
                             ctx = get_task_context(task_id)
+                            # Always load steps for replay and context
+                            conn2 = sqlite3.connect(DB_PATH)
+                            conn2.row_factory = sqlite3.Row
+                            steps = conn2.execute(
+                                "SELECT step_number, tool_name, tool_label, args_preview, "
+                                "result_preview, success FROM task_steps "
+                                "WHERE task_id=? ORDER BY step_number", (task_id,)).fetchall()
+                            conn2.close()
+                            await _safe_send({
+                                "type": "history_steps",
+                                "task_id": task_id,
+                                "task_status": "resuming",
+                                "steps": [dict(s) for s in steps]
+                            })
                             if ctx:
-                                # Replay steps so the chat shows them
-                                conn2 = sqlite3.connect(DB_PATH)
-                                conn2.row_factory = sqlite3.Row
-                                steps = conn2.execute(
-                                    "SELECT step_number, tool_name, tool_label, args_preview, "
-                                    "result_preview, success FROM task_steps "
-                                    "WHERE task_id=? ORDER BY step_number", (task_id,)).fetchall()
-                                conn2.close()
-                                await _safe_send({
-                                    "type": "history_steps",
-                                    "task_id": task_id,
-                                    "task_status": "resuming",
-                                    "steps": [dict(s) for s in steps]
-                                })
                                 session_history = ctx
-                                query = "继续执行未完成的任务。请检查上面的执行记录，从上次中断的地方继续。"
-                            else:
-                                query = "继续执行未完成的任务。"
+                            # Build step summary so agent knows what was already done
+                            step_summary = "\n".join(
+                                f"步骤{s['step_number']}: {s['tool_label'] or s['tool_name']} "
+                                f"({'✓' if s['success'] else '✗'}) "
+                                f"{s.get('result_preview', '')[:100]}"
+                                for s in steps[-20:]
+                            ) if steps else ""
+                            query = (
+                                "继续执行未完成的任务。以下是之前已完成的执行步骤摘要：\n"
+                                "--- 已完成步骤 ---\n"
+                                f"{step_summary}\n"
+                                "---\n"
+                                "请根据以上已完成步骤的上下文，从上次中断的地方继续执行。"
+                                "不要重复读取已经成功获得的文件内容，直接使用已有的结果继续下一步。"
+                            )
                         except Exception as e:
                             print(f"[WS] Resume error: {e}")
                             query = "继续执行未完成的任务。"
@@ -2483,7 +2613,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
             
             try:
-                response = await run_agent_with_progress(query, retry_model, agent_profile_name, is_heartbeat=is_heartbeat, images=ws_images)
+                response = await run_agent_with_progress(query, retry_model, agent_profile_name, is_heartbeat=is_heartbeat, images=ws_images, resume_task_id=resume_id_for_run)
                 
                 if response == "BUSY":
                     continue

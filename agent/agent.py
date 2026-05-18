@@ -49,6 +49,7 @@ class OpenAGCAgent:
         self.session_id = session_id
         self.logger = logger
         self.llm = LLMClient(default_model=model)
+        self._session_sandbox_whitelist: set = set()  # One-time approved paths
         # Load config to check disabled skills
         disabled_skills = []
         config_path = get_data_path("config.json")
@@ -119,6 +120,8 @@ class OpenAGCAgent:
             f"3. 如果你想在调用工具前表达思考过程，请将其放在 JSON 之前的独立段落中（不带 JSON 结构）。\n"
             f"\n【文件生成与显示规范（极其重要）】："
             f"1. 你生成的所有文件（脚本、文档、尤其是图片等），如果用户没有显式指定绝对路径，必须统一保存在沙箱工作目录（Sandbox Directory: {{cwd_dir}}）中，严禁写在 /tmp 下。\n"
+            f"   ⚠️ 如果你需要访问沙箱外的路径（如读取用户指定目录中的文件），直接操作即可。"
+            f"系统会自动弹出授权请求让用户批准。\n"
             f"2. 当你生成了一张图片供用户查看时，请在最终回复中使用 Markdown 语法直观地渲染出来，图片链接使用：`![图片描述](/api/files/生成的文件名.png)` 的格式。这个内部 API 能将你沙箱里的图片直接推送到网页前端显示。\n"
             f"3. 关于网页文件上传：优先使用 `browser_automation`（虚拟浏览器）工具的 `upload` 动作将文件填入网页。但如果遇到了必须通过操作系统原生文件选择框处理的情况，你可以临时切换使用 `computer_control`（键鼠控制工具 / pyautogui）来操作系统的上传弹窗完成文件选择和上传。\n"
             f"\n记忆系统：你拥有智能记忆系统。每次对话开始时，系统会自动检索并展示过去交互中的"
@@ -357,6 +360,123 @@ class OpenAGCAgent:
             )
         except Exception as e:
             print(f"[Agent] Auto-save memories error: {e}")
+
+    def _handle_sandbox_blocked(self, sb, tool_name, tool_args, progress_callback):
+        """Pause agent loop and wait for user to approve/deny sandbox path access."""
+        import threading
+        import json as _json
+        from core.paths import get_data_path
+
+        # Build request
+        pending = {
+            "path": sb.path,
+            "reason": f"Tool '{tool_name}' needs access to {sb.path}",
+            "tool_name": tool_name,
+        }
+        if progress_callback:
+            progress_callback({
+                "event": "sandbox_blocked",
+                "path": sb.path,
+                "tool_name": tool_name,
+                "session_id": self.session_id,
+            })
+
+        # Wait for user response
+        wait_event = threading.Event()
+        result_holder = {"action": "timeout"}
+        try:
+            from api.server import _sandbox_waits
+        except Exception as e:
+            print(f"[Agent] Failed to import _sandbox_waits: {e}")
+            return f"Sandbox authorization failed (internal error): {sb.path}"
+        _sandbox_waits[self.session_id] = {"event": wait_event, "result": result_holder}
+        print(f"[Agent] Sandbox blocked: {sb.path} — waiting for user response...")
+        responded = wait_event.wait(timeout=120)
+
+        if not responded:
+            print(f"[Agent] Sandbox wait timeout for {sb.path}")
+            _sandbox_waits.pop(self.session_id, None)
+            return f"Sandbox authorization timeout for path: {sb.path}"
+
+        action = result_holder.get("action", "deny_once")
+        try:
+            _sandbox_waits.pop(self.session_id, None)
+        except Exception:
+            pass
+
+        if action == "approve_dir":
+            dirpath = os.path.dirname(os.path.abspath(sb.path))
+            self._session_sandbox_whitelist.add(dirpath)
+            # Persist the directory to config
+            try:
+                config_path = get_data_path("config.json")
+                config = {}
+                if os.path.exists(config_path):
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config = _json.load(f)
+                allowed = config.get("allowed_paths", [])
+                if isinstance(allowed, str):
+                    allowed = _json.loads(allowed)
+                if dirpath not in allowed:
+                    allowed.append(dirpath)
+                config["allowed_paths"] = allowed
+                with open(config_path, "w", encoding="utf-8") as f:
+                    _json.dump(config, f, ensure_ascii=False, indent=2)
+                print(f"[Agent] Sandbox approved (dir): {dirpath}")
+            except Exception as e:
+                print(f"[Agent] Failed to persist allowed_path: {e}")
+            return None  # Signal to retry
+        elif action == "approve_once":
+            # Add parent directory to whitelist so other files in same dir work too
+            dirpath = os.path.dirname(os.path.abspath(sb.path))
+            self._session_sandbox_whitelist.add(dirpath)
+            self._session_sandbox_whitelist.add(sb.path)
+            print(f"[Agent] Sandbox approved (once): {sb.path} (dir: {dirpath})")
+            return None  # Signal to retry
+        elif action == "approve_always":
+            # Store the directory for permanent multi-file access
+            dirpath = os.path.dirname(os.path.abspath(sb.path))
+            self._session_sandbox_whitelist.add(dirpath)
+            # Persist directory to config for future sessions
+            try:
+                config_path = get_data_path("config.json")
+                config = {}
+                if os.path.exists(config_path):
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config = _json.load(f)
+                allowed = config.get("allowed_paths", [])
+                if isinstance(allowed, str):
+                    allowed = _json.loads(allowed)
+                if dirpath not in allowed:
+                    allowed.append(dirpath)
+                config["allowed_paths"] = allowed
+                with open(config_path, "w", encoding="utf-8") as f:
+                    _json.dump(config, f, ensure_ascii=False, indent=2)
+                print(f"[Agent] Sandbox approved (always): {sb.path}")
+            except Exception as e:
+                print(f"[Agent] Failed to persist allowed_path: {e}")
+            return None  # Signal to retry
+        elif action == "deny_always":
+            # Add to denied_paths
+            try:
+                config_path = get_data_path("config.json")
+                config = {}
+                if os.path.exists(config_path):
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config = _json.load(f)
+                denied = config.get("denied_paths", [])
+                if isinstance(denied, str):
+                    denied = _json.loads(denied)
+                if sb.path not in denied:
+                    denied.append(sb.path)
+                config["denied_paths"] = denied
+                with open(config_path, "w", encoding="utf-8") as f:
+                    _json.dump(config, f, ensure_ascii=False, indent=2)
+                print(f"[Agent] Sandbox denied (always): {sb.path}")
+            except Exception as e:
+                print(f"[Agent] Failed to persist denied_path: {e}")
+        # deny_once or deny_always or timeout → return error
+        return f"Sandbox access denied by user: {sb.path}"
 
     def _record_skill_feedback(self, success: bool, task_input: str = "",
                                 duration: float = 0):
@@ -1034,21 +1154,42 @@ class OpenAGCAgent:
                             print(f"[Tool Loop Detected] Blocked {function_name}")
                     else:
                         if tool_instance:
-                            try:
-                                import inspect
-                                sig = inspect.signature(tool_instance.execute)
-                                if 'interrupt_check' in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-                                    result = tool_instance.execute(
-                                        interrupt_check=lambda: self.is_interrupted,
-                                        _agent_context=self,
-                                        **function_args
-                                    )
-                                else:
-                                    result = tool_instance.execute(**function_args)
-                                tool_success = True
-                            except Exception as e:
-                                result = f"Error executing tool: {str(e)}"
-                                tool_success = False
+                            from tools.base import SandboxBlocked
+                            tool_success = True
+                            attempt = 0
+                            while True:
+                                attempt += 1
+                                try:
+                                    import inspect
+                                    sig = inspect.signature(tool_instance.execute)
+                                    extra_kwargs = {"_session_whitelist": self._session_sandbox_whitelist}
+                                    if 'interrupt_check' in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                                        result = tool_instance.execute(
+                                            interrupt_check=lambda: self.is_interrupted,
+                                            _agent_context=self,
+                                            **extra_kwargs,
+                                            **function_args
+                                        )
+                                    else:
+                                        result = tool_instance.execute(**function_args, **extra_kwargs)
+                                    break  # Success — exit retry loop
+                                except SandboxBlocked as sb:
+                                    if attempt > 2:
+                                        result = f"Sandbox blocked: {sb.path} (max retries exceeded)"
+                                        tool_success = False
+                                        break
+                                    result = self._handle_sandbox_blocked(
+                                        sb, function_name, function_args, progress_callback)
+                                    if result is not None:
+                                        # User denied or timeout — return error
+                                        tool_success = False
+                                        break
+                                    # User approved — retry the tool call
+                                    continue
+                                except Exception as e:
+                                    result = f"Error executing tool: {str(e)}"
+                                    tool_success = False
+                                    break
                         else:
                             result = f"Error: Tool {function_name} not found."
                             tool_success = False

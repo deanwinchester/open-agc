@@ -44,24 +44,15 @@ class ReadFileTool(BaseTool):
         # Sandbox Mode Enforcement
         config_path = get_data_path("config.json")
         if os.path.exists(config_path):
+            config = {}
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
-                
-                if config.get("sandbox_mode", True):
-                    agent_ctx = kwargs.get("_agent_context")
-                    if agent_ctx and getattr(agent_ctx, "sandbox_dir", None):
-                        sandbox_dir = agent_ctx.sandbox_dir
-                    else:
-                        sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
-                    os.makedirs(sandbox_dir, exist_ok=True)
-                    abs_path = os.path.abspath(path)
-                    
-                    # Ensure path is within sandbox_dir
-                    if os.path.commonpath([sandbox_dir, abs_path]) != sandbox_dir:
-                        return f"Sandbox Security Error: Access to path '{path}' is denied. It is outside the permitted sandbox directory ({sandbox_dir})."
-            except Exception as e:
-                print(f"[ReadFileTool] Warning checking sandbox config: {e}")
+            except Exception:
+                pass
+            if config.get("sandbox_mode", True):
+                whitelist = kwargs.get("_session_whitelist", None)
+                self.check_sandbox(path, config=config, session_whitelist=whitelist)
                 
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -79,7 +70,8 @@ class ReadFileTool(BaseTool):
             # Format with line numbers (cat -n style)
             formatted_lines = []
             for i, line in enumerate(subset, start=start_idx + 1):
-                formatted_lines.append(f"{i:4d} | {line.rstrip('\\n')}")
+                clean_line = line.rstrip('\n')
+                formatted_lines.append(f"{i:4d} | {clean_line}")
                 
             content = "\n".join(formatted_lines)
             header = f"--- Content of {path} (Lines {start_idx + 1} to {end_idx} of {len(lines)}) ---"

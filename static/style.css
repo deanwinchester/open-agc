@@ -817,6 +817,29 @@ body {
     100% { transform: rotate(0deg) scale(1); }
 }
 
+/* Scroll-to-bottom hint */
+.scroll-hint {
+    position: absolute;
+    bottom: 5rem;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    background: var(--theme-color, #10b981);
+    color: #fff;
+    padding: 0.35rem 0.9rem;
+    border-radius: 16px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.12);
+    animation: pulseHint 1.5s ease-in-out infinite;
+    white-space: nowrap;
+}
+@keyframes pulseHint {
+    0%, 100% { transform: translateX(-50%) translateY(0); }
+    50% { transform: translateX(-50%) translateY(-3px); }
+}
+
 /* Production-Grade Inline Progress Card */
 .progress-inline {
     margin: 1rem 0 1.5rem 3rem;
@@ -1639,6 +1662,60 @@ textarea {
 }
 .key-help-link:hover {
     opacity: 1;
+}
+
+/* Sandbox Path Chips */
+.path-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.25rem 0.55rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 0.78rem;
+    font-family: monospace;
+    max-width: 100%;
+}
+.path-chip-del {
+    border: none;
+    background: none;
+    color: var(--error, #ef4444);
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0 2px;
+    opacity: 0.6;
+    transition: opacity 0.15s;
+}
+.path-chip-del:hover {
+    opacity: 1;
+}
+
+/* Sandbox Blocked Modal Buttons */
+.btn-sandbox {
+    padding: 0.5rem 0.8rem;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.btn-sandbox:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+.btn-sandbox.primary {
+    background: var(--theme-color, #10b981);
+    color: #fff;
+    border-color: var(--theme-color, #10b981);
+}
+.btn-sandbox.deny {
+    border-color: var(--error, #ef4444);
+    color: var(--error, #ef4444);
 }
 
 .key-input-wrapper {
