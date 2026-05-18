@@ -540,8 +540,8 @@ function initApp() {
       scrollToBottom();
       
       const submitAnswer = (ans) => {
-          if (!ws || ws.readyState !== WebSocket.OPEN) return;
-          ws.send(JSON.stringify({ type: 'tool_reply', answer: ans }));
+          if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+          state.ws.send(JSON.stringify({ type: 'tool_reply', answer: ans }));
           stepEl.querySelector('.ask-user-form').innerHTML = `<span style="color: var(--success, #2ecc71); font-size: 0.9rem;">✓ 您的回答：<strong>${escapeHtml(ans)}</strong></span>`;
       };
 
