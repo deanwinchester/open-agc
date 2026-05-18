@@ -118,6 +118,10 @@ class OpenAGCAgent:
             f"1. 仅当你决定使用工具时，才输出包含 'name' 和 'arguments' 的 JSON 对象。对于正常的对话回复，直接输出纯文本，严禁使用 JSON 格式。\n"
             f"2. 工具调用格式：`{{\"name\": \"execute_shell\", \"arguments\": {{\"command\": \"ls -l\"}}}}`，不要带多余的前缀或后缀。\n"
             f"3. 如果你想在调用工具前表达思考过程，请将其放在 JSON 之前的独立段落中（不带 JSON 结构）。\n"
+            f"\n【大文件下载规范（极其重要）】："
+            f"如果需要下载超过 100MB 的大文件（如模型文件 .gguf/.safetensors/.bin），"
+            f"必须使用 queue_download 工具而非 execute_shell。它支持断点续传，"
+            f"不会因为超时而失败。下载进度可在下载管理面板查看。\n"
             f"\n【文件生成与显示规范（极其重要）】："
             f"1. 你生成的所有文件（脚本、文档、尤其是图片等），如果用户没有显式指定绝对路径，必须统一保存在沙箱工作目录（Sandbox Directory: {{cwd_dir}}）中，严禁写在 /tmp 下。\n"
             f"   ⚠️ 如果你需要访问沙箱外的路径（如读取用户指定目录中的文件），直接操作即可。"
@@ -211,7 +215,7 @@ class OpenAGCAgent:
 
         # Load MCP tools
         try:
-            with open(get_data_path("config.json"), "r") as f:
+            with open(get_data_path("config.json"), "r", encoding="utf-8") as f:
                 config_data = json.load(f)
                 mcp_config = config_data.get("mcp_servers", {})
                 if mcp_config:
@@ -1162,7 +1166,10 @@ class OpenAGCAgent:
                                 try:
                                     import inspect
                                     sig = inspect.signature(tool_instance.execute)
-                                    extra_kwargs = {"_session_whitelist": self._session_sandbox_whitelist}
+                                    extra_kwargs = {
+                                        "_session_whitelist": self._session_sandbox_whitelist,
+                                        "_progress_cb": progress_callback,
+                                    }
                                     if 'interrupt_check' in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
                                         result = tool_instance.execute(
                                             interrupt_check=lambda: self.is_interrupted,
@@ -1205,16 +1212,23 @@ class OpenAGCAgent:
 
                     # Notify: tool done
                     if progress_callback:
-                        # Truncate result for preview
-                        preview = result_str[:120] + "..." if len(result_str) > 120 else result_str
-                        progress_callback({
+                        # Longer preview for shell output so it survives page refresh
+                        preview_limit = 500 if function_name == "execute_shell" else 120
+                        preview = result_str[:preview_limit]
+                        if len(result_str) > preview_limit:
+                            preview += "..."
+                        evt = {
                             "event": "tool_done",
                             "step": step_counter,
                             "tool": function_name,
                             "tool_label": tool_label,
                             "result_preview": preview,
-                            "success": not result_str.startswith("Error") and not result_str.startswith("System Guard")
-                        })
+                            "success": not result_str.startswith("Error") and not result_str.startswith("System Guard"),
+                        }
+                        # Send full result for shell commands (persisted to task_steps)
+                        if function_name == "execute_shell":
+                            evt["full_result"] = result_str[:5000]
+                        progress_callback(evt)
                     
                     if verbose:
                         print(f"[Tool Result]\n{result_str}\n")

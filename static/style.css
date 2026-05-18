@@ -1694,6 +1694,25 @@ textarea {
     opacity: 1;
 }
 
+/* Shell streaming output */
+.shell-output-box {
+    margin: 0.5rem 1rem;
+    max-height: 260px;
+    overflow-y: auto;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    padding: 0.5rem;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.06);
+}
+.shell-output-line {
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
 /* Sandbox Blocked Modal Buttons */
 .btn-sandbox {
     padding: 0.5rem 0.8rem;

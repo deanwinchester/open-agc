@@ -430,6 +430,26 @@ def reconcile_tasks():
     except Exception as e:
         print(f"[Startup] Task reconciliation error: {e}")
 
+def _extract_task_title(response: str) -> str:
+    """Extract a meaningful task title from the agent's response.
+    Uses the first non-empty, non-markdown, non-tool-call line.
+    """
+    if not response:
+        return ""
+    lines = response.strip().split('\n')
+    for line in lines:
+        line = line.strip()
+        # Skip markdown headers, code blocks, tool calls, empty lines
+        if not line:
+            continue
+        if line.startswith('```') or line.startswith('#'):
+            continue
+        if line.startswith('{') or line.startswith('<!--'):
+            continue
+        if len(line) > 3 and not line.startswith('- '):
+            return line[:80]
+    return ""
+
 reconcile_tasks()
 
 # Initialize StatsManager singleton with correct database
@@ -2272,7 +2292,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 if event.get("event") == "tool_start" and not task_has_tools and not is_heartbeat:
                     task_has_tools = True
                     try:
-                        title = query[:60] + ('...' if len(query) > 60 else '')
+                        # Extract first sentence or meaningful start of query as title
+                        title = _extract_task_title(query) or query[:60]
+                        if len(title) >= 60:
+                            title = title[:57] + '...'
                         ws_task_id = create_task(title, query)
                     except Exception as e:
                         print(f"[Task] Failed to create task: {e}")
@@ -2300,7 +2323,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         cursor = conn.cursor()
                         cursor.execute(
                             "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=?",
-                            (event.get("result_preview", ""), event.get("result_preview", ""),
+                            (event.get("result_preview", ""),
+                             event.get("full_result", event.get("result_preview", "")),
                              1 if event.get("success") else 0, ws_task_id, adjusted_step)
                         )
                         conn.commit()
@@ -2451,6 +2475,17 @@ async def websocket_endpoint(websocket: WebSocket):
             
             if ws_task_id:
                 summary = response[:200] if response else ""
+                # Update task title from agent's first response line
+                if response and not response.startswith("[MAX_ITERATIONS_REACHED]"):
+                    title = _extract_task_title(response)
+                    if title:
+                        try:
+                            tconn = sqlite3.connect(DB_PATH)
+                            tconn.execute("UPDATE tasks SET title=? WHERE id=?", (title, ws_task_id))
+                            tconn.commit()
+                            tconn.close()
+                        except Exception:
+                            pass
                 if is_max_iter:
                     # Save context for potential resume
                     save_task_context(ws_task_id, agent.messages[1:])
@@ -2541,8 +2576,11 @@ async def websocket_endpoint(websocket: WebSocket):
                             conn2.row_factory = sqlite3.Row
                             steps = conn2.execute(
                                 "SELECT step_number, tool_name, tool_label, args_preview, "
-                                "result_preview, success FROM task_steps "
+                                "result_preview, full_result, success FROM task_steps "
                                 "WHERE task_id=? ORDER BY step_number", (task_id,)).fetchall()
+                            # Also fetch the original task goal
+                            task_row = conn2.execute(
+                                "SELECT user_query FROM tasks WHERE id=?", (task_id,)).fetchone()
                             conn2.close()
                             await _safe_send({
                                 "type": "history_steps",
@@ -2552,19 +2590,21 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
                             if ctx:
                                 session_history = ctx
+                            original_goal = (task_row["user_query"] if task_row else "")
                             # Build step summary so agent knows what was already done
                             step_summary = "\n".join(
                                 f"步骤{s['step_number']}: {s['tool_label'] or s['tool_name']} "
                                 f"({'✓' if s['success'] else '✗'}) "
-                                f"{s.get('result_preview', '')[:100]}"
+                                f"{(s['result_preview'] or '')[:100]}"
                                 for s in steps[-20:]
                             ) if steps else ""
                             query = (
-                                "继续执行未完成的任务。以下是之前已完成的执行步骤摘要：\n"
+                                f"【原始任务目标】{original_goal}\n\n"
+                                "你需要继续执行这个任务。以下是之前已完成的执行步骤摘要：\n"
                                 "--- 已完成步骤 ---\n"
                                 f"{step_summary}\n"
                                 "---\n"
-                                "请根据以上已完成步骤的上下文，从上次中断的地方继续执行。"
+                                "请根据以上原始目标和已完成步骤，从上次中断的地方继续执行。"
                                 "不要重复读取已经成功获得的文件内容，直接使用已有的结果继续下一步。"
                             )
                         except Exception as e:
@@ -2847,6 +2887,16 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         is_max_iter = response and response.startswith("[MAX_ITERATIONS_REACHED]")
         
         summary = response[:200] if response else ""
+        if response and not is_max_iter:
+            title = _extract_task_title(response)
+            if title:
+                try:
+                    tconn = sqlite3.connect(DB_PATH)
+                    tconn.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
+                    tconn.commit()
+                    tconn.close()
+                except Exception:
+                    pass
         if is_max_iter:
             save_task_context(task_id, agent.messages[1:])
             update_task_status(task_id, "interrupted", summary, interruption_reason="max_iterations")
