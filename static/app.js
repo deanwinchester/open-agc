@@ -697,9 +697,31 @@ function initApp() {
           <span class="progress-toggle-icon collapsed">▸</span>
         </div>
       </div>
-      <div class="progress-inline-steps" style="max-height: none;"></div>`;
+      <div class="progress-inline-steps" style="max-height: none;"></div>
+      <div class="progress-inline-footer">
+        <button class="btn-collapse-steps">收起步骤 ▴</button>
+      </div>`;
 
     const stepsEl = historyCard.querySelector('.progress-inline-steps');
+    // Wire footer collapse button
+    var histFooter = historyCard.querySelector('.progress-inline-footer');
+    var histBtn = histFooter?.querySelector('.btn-collapse-steps');
+    if (histBtn) {
+      histBtn.onclick = function(e) {
+        e.stopPropagation();
+        var s = historyCard.querySelector('.progress-inline-steps');
+        var b = this;
+        if (!s) return;
+        if (s.style.maxHeight === '0px') {
+          s.style.maxHeight = s.scrollHeight + 'px';
+          b.textContent = '收起步骤 ▴';
+          setTimeout(function() { if (s.style.maxHeight !== '0px') s.style.maxHeight = 'none'; }, 350);
+        } else {
+          s.style.maxHeight = '0px';
+          b.textContent = '展开步骤 ▾';
+        }
+      };
+    }
     const toggleIcon = historyCard.querySelector('.progress-toggle-icon');
     if (toggleIcon) {
       toggleIcon.classList.remove('collapsed');
