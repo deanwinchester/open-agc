@@ -501,6 +501,11 @@ function initApp() {
       return;
     }
 
+    if (event === 'shell_output') {
+      updateShellOutput(data);
+      return;
+    }
+
     if (event === 'model_switched') {
       const switchNote = document.createElement('div');
       switchNote.className = 'progress-step model-switch';
@@ -673,6 +678,26 @@ function initApp() {
     finishProgressContainer();
   }
 
+  function updateShellOutput(data) {
+    if (!progressInline) return;
+    var shellBox = progressInline.querySelector('.shell-output-box');
+    if (!shellBox) {
+      shellBox = document.createElement('div');
+      shellBox.className = 'shell-output-box';
+      var st = progressInline.querySelector('.progress-inline-steps');
+      if (st) st.insertAdjacentElement('afterend', shellBox);
+    }
+    var text = data.text || '';
+    var lineEl = document.createElement('div');
+    lineEl.className = 'shell-output-line';
+    lineEl.textContent = text;
+    shellBox.appendChild(lineEl);
+    shellBox.scrollTop = shellBox.scrollHeight;
+    var lines = shellBox.querySelectorAll('.shell-output-line');
+    while (lines.length > 200) lines[0].remove();
+    scrollToBottom();
+  }
+
   function renderHistorySteps(data) {
     // If already showing progress for this task, don't create a duplicate card
     if (progressInline && progressInline.dataset.taskId == data.task_id) return;
@@ -737,18 +762,20 @@ function initApp() {
         <div class="step-body">
           <span class="step-label">${s.step_number}. ${s.tool_label || s.tool_name}</span>
           ${s.args_preview ? `<span class="step-detail">${escapeHtml(s.args_preview)}</span>` : ''}
-          ${s.result_preview ? `<span class="step-detail">${escapeHtml(s.result_preview)}</span>` : ''}
+          ${s.result_preview ? `<span class="step-detail">${escapeHtml((s.full_result || s.result_preview).substring(0, 600))}</span>` : ''}
         </div>`;
       
       // Register step data for detail view
       const stepKey = `hist-${data.task_id}-${s.step_number}`;
+      // Use full_result from DB for shell commands
+      const stepResult = s.full_result || s.result_preview || '';
       progressStepData[stepKey] = {
         type: 'tool',
         step: s.step_number,
         tool: s.tool_name,
         tool_label: s.tool_label || s.tool_name,
         full_args: s.full_args || s.args_preview,
-        full_result: s.full_result || s.result_preview,
+        full_result: stepResult,
         success: s.success,
         status: 'completed'
       };
