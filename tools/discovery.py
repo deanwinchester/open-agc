@@ -38,7 +38,7 @@ class ToolDiscoveryTool(BaseTool):
             }
         }
 
-    def execute(self, query: str) -> str:
+    def execute(self, query: str, **kwargs) -> str:
         # Simple keyword matching algorithm
         # In a production system this could be replaced with TF-IDF or Vector Embeddings
         query_terms = set(query.lower().replace("_", " ").split())

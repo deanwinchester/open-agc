@@ -52,6 +52,36 @@ class ShellTool(BaseTool):
             }
         }
 
+    @staticmethod
+    def _check_dangerous(command: str) -> str:
+        """Block commands that would kill the Open-AGC server process itself."""
+        cmd_lower = command.lower().strip()
+        server_pid = os.getpid()
+
+        # Patterns that kill all python / the server process
+        suicidal_patterns = [
+            # Windows: taskkill targeting python.exe or the server PID
+            (r'taskkill\b.*(?:/im\s+python\b|/im\s+python3?\b)', "禁止终止 python.exe（会杀死 Open-AGC 自身）"),
+            (r'taskkill\b.*/pid\s+' + str(server_pid), "禁止终止 Open-AGC 进程自身"),
+            (r'tskill\s+python\b', "禁止终止 python 进程"),
+            (r'wmic\s+process\s+where.*delete', "禁止通过 WMI 终止进程"),
+            # Unix: kill/pkill/killall targeting python or the server PID
+            (r'(?:^|[|&;]\s*)(?:sudo\s+)?(?:kill\s+-9\s+' + str(server_pid) + r'|pkill\s+(?:-9\s+)?python|killall\s+(?:-9\s+)?python)', "禁止终止 python 进程（会杀死 Open-AGC 自身）"),
+            # Generic: stop/kill the uvicorn or server process
+            (r'(?:stop|kill|terminate)\s+(?:uvicorn|open-agc|server)', "禁止停止服务器进程"),
+        ]
+
+        for pattern, reason in suicidal_patterns:
+            if re.search(pattern, cmd_lower):
+                return (
+                    f"⛔ 该命令被阻止执行：{reason}\n\n"
+                    f"被阻止的命令: {command[:200]}\n"
+                    f"如果你需要终止某个特定程序，请使用更精确的进程名或 PID，"
+                    f"而非终止全部 python 进程。"
+                )
+
+        return ""
+
     def execute(self, **kwargs) -> str:
         import json
         from core.paths import get_data_path
@@ -62,6 +92,11 @@ class ShellTool(BaseTool):
 
         timeout = kwargs.get("timeout", 60)
         interrupt_check: Optional[Callable[[], bool]] = kwargs.get("interrupt_check")
+
+        # ── Self-preservation: block commands that would kill the server ──
+        blocked = self._check_dangerous(command)
+        if blocked:
+            return blocked
 
         # Sandbox Mode Enforcement
         cwd = None

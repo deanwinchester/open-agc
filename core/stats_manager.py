@@ -6,9 +6,31 @@ from typing import List, Dict, Any, Optional
 class StatsManager:
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self._init_db()
 
     def _get_conn(self):
         return sqlite3.connect(self.db_path)
+
+    def _init_db(self):
+        try:
+            with self._get_conn() as conn:
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS token_usage (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        session_id INTEGER,
+                        task_id INTEGER,
+                        provider TEXT,
+                        model TEXT,
+                        prompt_tokens INTEGER DEFAULT 0,
+                        completion_tokens INTEGER DEFAULT 0,
+                        total_tokens INTEGER DEFAULT 0,
+                        cost_estimate REAL DEFAULT 0.0
+                    )
+                ''')
+                conn.commit()
+        except Exception as e:
+            print(f"[StatsManager] Init error: {e}")
 
     def record_usage(self, provider: str, model: str, prompt_tokens: int, completion_tokens: int, 
                      session_id: Optional[int] = None, task_id: Optional[int] = None):

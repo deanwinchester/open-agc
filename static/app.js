@@ -289,6 +289,54 @@ function initApp() {
     }
   }
 
+  function showSandboxBlockedModal(data) {
+    var modal = document.getElementById('sandbox-blocked-modal');
+    if (!modal) {
+      // Create modal on demand
+      modal = document.createElement('div');
+      modal.id = 'sandbox-blocked-modal';
+      modal.className = 'modal-overlay';
+      modal.style.display = 'flex';
+      modal.innerHTML = `
+        <div class="modal-box" style="max-width:480px;width:90%;">
+          <div class="modal-header"><h3>🔐 沙箱路径授权</h3></div>
+          <div class="modal-body">
+            <p style="margin:0 0 0.5rem">Agent 工具 <b id="sb-tool"></b> 请求访问沙箱外路径：</p>
+            <div id="sb-path" style="background:var(--bg-secondary);padding:0.5rem 0.75rem;border-radius:6px;font-family:monospace;font-size:0.82rem;word-break:break-all;margin-bottom:1rem;"></div>
+            <div style="display:flex;flex-wrap:wrap;gap:0.5rem;">
+              <button id="sb-approve-dir" class="btn-sandbox primary" style="flex:1;min-width:45%;">📁 授权整个目录</button>
+              <button id="sb-approve-once" class="btn-sandbox" style="flex:1;min-width:45%;">✓ 单次授权</button>
+              <button id="sb-approve-always" class="btn-sandbox primary" style="flex:1;min-width:45%;">⭐ 永久授权</button>
+              <button id="sb-deny-once" class="btn-sandbox deny" style="flex:1;min-width:45%;">✗ 拒绝本次</button>
+              <button id="sb-deny-always" class="btn-sandbox deny" style="flex:1;min-width:45%;">🚫 永久拒绝</button>
+            </div>
+          </div>
+        </div>`;
+      document.body.appendChild(modal);
+    }
+
+    document.getElementById('sb-tool').textContent = data.tool_name || data.tool || '?';
+    document.getElementById('sb-path').textContent = data.path || '';
+
+    function respond(action) {
+      modal.style.display = 'none';
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({
+          type: 'sandbox_response',
+          action: action,
+          path: data.path,
+          session_id: state.currentSessionId
+        }));
+      }
+    }
+
+    document.getElementById('sb-approve-dir').onclick = function() { respond('approve_dir'); };
+    document.getElementById('sb-approve-once').onclick = function() { respond('approve_once'); };
+    document.getElementById('sb-approve-always').onclick = function() { respond('approve_always'); };
+    document.getElementById('sb-deny-once').onclick = function() { respond('deny_once'); };
+    document.getElementById('sb-deny-always').onclick = function() { respond('deny_always'); };
+  }
+
   // =============================================
   // Progress Tracking UI
   // =============================================
@@ -319,6 +367,7 @@ function initApp() {
           <button class="btn-collapse-steps">收起日志 ▴</button>
         </div>`;
       progressStepsEl = progressInline.querySelector('.progress-inline-steps');
+      if (state.currentTaskId) progressInline.dataset.taskId = state.currentTaskId;
 
       // Toggle collapse/expand on header click
       const header = progressInline.querySelector('.progress-inline-header');
@@ -373,16 +422,39 @@ function initApp() {
 
   function finishProgressContainer() {
     if (!progressInline) return;
-    const title = progressInline.querySelector('.progress-title');
-    const spinner = progressInline.querySelector('.progress-spinner');
-    const header = progressInline.querySelector('.progress-inline-header');
-    const currentStepEl = progressInline.querySelector('.progress-current-step');
-    
+    var card = progressInline;  // Capture before nulling
+    var title = card.querySelector('.progress-title');
+    var spinner = card.querySelector('.progress-spinner');
+    var currentStepEl = card.querySelector('.progress-current-step');
+
     if (title) title.innerHTML = `✨ ${t('done')} · ${progressStepCount} 步`;
     if (spinner) spinner.style.display = 'none';
     if (currentStepEl) currentStepEl.style.display = 'none';
-    progressInline.classList.add('completed');
-    
+    // Collapse steps and show the footer with expand button
+    var st = card.querySelector('.progress-inline-steps');
+    if (st) st.style.maxHeight = '0px';
+    var ft = card.querySelector('.progress-inline-footer');
+    if (ft) {
+      ft.style.display = 'block';
+      var btn = ft.querySelector('.btn-collapse-steps');
+      if (btn) btn.textContent = '展开步骤 ▾';
+      btn.onclick = function(e) {
+        e.stopPropagation();
+        var s = card.querySelector('.progress-inline-steps');
+        var b = this;
+        if (!s) return;
+        if (s.style.maxHeight === '0px') {
+          s.style.maxHeight = s.scrollHeight + 'px';
+          b.textContent = '收起步骤 ▴';
+          setTimeout(function() { if (s.style.maxHeight !== '0px') s.style.maxHeight = 'none'; }, 350);
+        } else {
+          s.style.maxHeight = '0px';
+          b.textContent = '展开步骤 ▾';
+        }
+      };
+    }
+    card.classList.add('completed');
+
     progressInline = null;
     progressStepsEl = null;
     progressSteps = {};
@@ -421,6 +493,11 @@ function initApp() {
       } else {
         showThinkingStatus(t('agent_thinking'));
       }
+      return;
+    }
+
+    if (event === 'sandbox_blocked') {
+      showSandboxBlockedModal(data);
       return;
     }
 
@@ -597,12 +674,15 @@ function initApp() {
   }
 
   function renderHistorySteps(data) {
-    // Render past execution steps as a completed progress-inline card
+    // If already showing progress for this task, don't create a duplicate card
+    if (progressInline && progressInline.dataset.taskId == data.task_id) return;
+
     const steps = data.steps || [];
     if (!steps.length) return;
 
     const historyCard = document.createElement('div');
     historyCard.className = 'progress-inline completed';
+    historyCard.dataset.taskId = data.task_id;
     const stepCount = steps.length;
     historyCard.innerHTML = `
       <div class="progress-inline-header" style="min-height: 38px; padding: 0.7rem 1rem;">
@@ -688,17 +768,37 @@ function initApp() {
       ic.textContent = isCurrentlyCollapsed ? '▾' : '▸';
     });
 
-    // Resume button handler
+    // Wire this card as the active progress card when resuming
+    if (data.task_status === 'resuming') {
+      historyCard.classList.remove('completed');
+      const titleEl = historyCard.querySelector('.progress-title');
+      if (titleEl) titleEl.textContent = `🐼 执行中 · ${stepCount} 步`;
+      progressInline = historyCard;
+      progressStepsEl = stepsEl;
+      progressStepCount = stepCount;
+      var rb = historyCard.querySelector('.btn-resume-task');
+      if (rb) rb.remove();
+    }
+
+    // Resume button handler (for interrupted tasks, not resuming)
     const resumeBtn = historyCard.querySelector('.btn-resume-task');
     if (resumeBtn) {
       resumeBtn.addEventListener('click', function(e) {
         e.stopPropagation();
         const taskId = resumeBtn.dataset.taskId;
         if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+          // Mark card as running immediately — don't remove it
+          historyCard.classList.remove('completed');
+          var t = historyCard.querySelector('.progress-title');
+          if (t) t.textContent = `🐼 执行中 · ${stepCount} 步`;
+          progressInline = historyCard;
+          progressStepsEl = stepsEl;
+          progressStepCount = stepCount;
+          resumeBtn.remove();
+          // Hide the steps (collapsed for resume)
+          var st = historyCard.querySelector('.progress-inline-steps');
+          if (st) st.style.maxHeight = 'none';
           state.ws.send(JSON.stringify({ type: 'resume', task_id: parseInt(taskId) }));
-          resumeBtn.textContent = '⏳ 恢复中...';
-          resumeBtn.disabled = true;
-          historyCard.remove();
         }
       });
     }
@@ -855,9 +955,37 @@ function initApp() {
     if (currentStatusBubble) { currentStatusBubble.remove(); currentStatusBubble = null; }
   }
 
-  function scrollToBottom() {
-    chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' });
+  function scrollToBottom(force) {
+    // Only auto-scroll if user is near the bottom (within 200px) or forced
+    const threshold = 200;
+    const atBottom = chatContainer.scrollTop + chatContainer.clientHeight >= chatContainer.scrollHeight - threshold;
+    if (force || atBottom || chatContainer.scrollHeight <= chatContainer.clientHeight) {
+      chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' });
+      hideScrollHint();
+    } else {
+      showScrollHint();
+    }
   }
+
+  let scrollHintEl = null;
+  function showScrollHint() {
+    if (scrollHintEl) return;
+    scrollHintEl = document.createElement('div');
+    scrollHintEl.className = 'scroll-hint';
+    scrollHintEl.innerHTML = '<span>↓ 新消息</span>';
+    scrollHintEl.addEventListener('click', () => scrollToBottom(true));
+    document.getElementById('chat-body')?.appendChild(scrollHintEl);
+  }
+  function hideScrollHint() {
+    if (scrollHintEl) { scrollHintEl.remove(); scrollHintEl = null; }
+  }
+  // Reset scroll hint when user manually scrolls
+  chatContainer.addEventListener('scroll', function() {
+    const threshold = 200;
+    if (chatContainer.scrollTop + chatContainer.clientHeight >= chatContainer.scrollHeight - threshold) {
+      hideScrollHint();
+    }
+  });
 
   function updateInputState() {
     if (state.isAgentThinking) {

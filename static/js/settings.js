@@ -47,6 +47,8 @@ export async function loadSettingsConfig() {
         document.getElementById('mcp-config-input').value = data.mcp_servers && Object.keys(data.mcp_servers).length > 0 ? JSON.stringify(data.mcp_servers, null, 2) : '';
     }
 
+    renderSandboxPaths(data.allowed_paths || [], data.denied_paths || []);
+
     state.settingsLoaded = true;
   } catch (err) {
     console.error("Failed to load settings config:", err);
@@ -864,6 +866,42 @@ function applyAIDesignToForm() {
 }
 
 // ===================== Expose to window for legacy navigation =====================
+function renderSandboxPaths(allowed, denied) {
+  renderPathChips('allowed-paths-list', allowed, 'allowed');
+  renderPathChips('denied-paths-list', denied, 'denied');
+}
+
+function renderPathChips(containerId, paths, listType) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = '';
+  if (!paths || paths.length === 0) {
+    container.innerHTML = '<span style="color:var(--text-secondary);font-size:0.82rem;">无</span>';
+    return;
+  }
+  paths.forEach(function(p) {
+    if (!p) return;
+    var chip = document.createElement('span');
+    chip.className = 'path-chip';
+    chip.title = p;
+    chip.innerHTML = `${p.substring(0, 50)}${p.length > 50 ? '...' : ''} <button class="path-chip-del" title="移除">×</button>`;
+    chip.querySelector('.path-chip-del').addEventListener('click', function(e) {
+      e.stopPropagation();
+      fetch('/api/sandbox/remove-path', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: p, type: listType })
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        if (d.ok) {
+          state.settingsLoaded = false;
+          loadSettingsConfig();
+        }
+      });
+    });
+    container.appendChild(chip);
+  });
+}
+
 window.loadSettingsConfig = loadSettingsConfig;
 window.loadSkillsConfig = loadSkillsConfig;
 window.loadAgents = loadAgents;
