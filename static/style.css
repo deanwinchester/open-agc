@@ -343,7 +343,8 @@ body {
     display: flex;
 }
 .session-rename-btn,
-.session-delete-btn {
+.session-delete-btn,
+.session-clear-btn {
     width: 18px;
     height: 18px;
     border: none;
@@ -360,6 +361,7 @@ body {
 }
 .session-rename-btn:hover { color: var(--theme-color); }
 .session-delete-btn:hover { color: #e74c3c; }
+.session-clear-btn:hover { color: var(--theme-color); }
 
 /* Agent cards */
 .agent-card {
