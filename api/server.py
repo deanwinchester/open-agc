@@ -2347,11 +2347,24 @@ async def websocket_endpoint(websocket: WebSocket):
                 if event.get("event") == "tool_start" and not task_has_tools and not is_heartbeat:
                     task_has_tools = True
                     try:
-                        # Extract first sentence or meaningful start of query as title
                         title = _extract_task_title(query) or query[:60]
                         if len(title) >= 60:
                             title = title[:57] + '...'
                         ws_task_id = create_task(title, query)
+                        # Link any session downloads that were queued before task creation
+                        import tools.download as _dl
+                        pending = getattr(_dl, '_pending_task_links', {})
+                        dl_ids = pending.pop(ws_session_id, [])
+                        if dl_ids:
+                            dl_conn = sqlite3.connect(DB_PATH)
+                            for dl_id in dl_ids:
+                                dl_conn.execute(
+                                    "UPDATE downloads SET task_id=? WHERE id=? AND task_id IS NULL",
+                                    (ws_task_id, dl_id))
+                            dl_conn.commit()
+                            dl_conn.close()
+                    except Exception:
+                        pass
                     except Exception as e:
                         print(f"[Task] Failed to create task: {e}")
 
@@ -3112,8 +3125,9 @@ def start_background_monitor():
                             save_task_context(tid, ctx)
                         continue
                     dl_fail = conn.execute(
-                        "SELECT id, error_message FROM downloads WHERE task_id=? AND status='failed' "
-                        "AND background_resumed=0 ORDER BY id DESC LIMIT 1",
+                        "SELECT id, error_message FROM downloads WHERE task_id=? "
+                        "AND status='failed' AND background_resumed=0 "
+                        "ORDER BY id DESC LIMIT 1",
                         (tid,)).fetchone()
                     if dl_fail:
                         conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?",
