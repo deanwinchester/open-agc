@@ -228,28 +228,50 @@ class SearchHistoryTool(BaseTool):
             if sess_id and os.path.exists(db_path):
                 db = sqlite3.connect(db_path)
                 db.row_factory = sqlite3.Row
-                like_pattern = f"%{q_lower}%" if q_lower else "%"
+
+                # Split query into words for word-level matching (same as in-memory search)
+                q_words = q_lower.split() if q_lower else []
+
+                # For multi-word queries, a single-word LIKE is too restrictive
+                # (Chinese keywords may not appear in args/result text).
+                # Fetch recent steps and filter in Python with word-level matching.
                 db_steps = db.execute(
                     "SELECT task_id, step_number, tool_name, tool_label, "
                     "args_preview, result_preview, full_result, success "
-                    "FROM task_steps WHERE session_id=? AND "
-                    "(full_result LIKE ? OR result_preview LIKE ? OR args_preview LIKE ?) "
-                    "ORDER BY task_id DESC, step_number DESC LIMIT 20",
-                    (sess_id, like_pattern, like_pattern, like_pattern)
+                    "FROM task_steps WHERE session_id=? "
+                    "ORDER BY task_id DESC, step_number DESC LIMIT 200",
+                    (sess_id,)
                 ).fetchall()
                 db.close()
                 for step in db_steps:
+                    ap = step["args_preview"] or ""
                     fr = step["full_result"] or ""
                     rp = step["result_preview"] or ""
-                    combined = (fr + " " + rp)[:3000]
+                    combined = (ap + " " + fr + " " + rp)[:3000]
+                    combined_lower = combined.lower()
+
+                    # Word-level matching: rank by how many query words match
+                    # (DB records lack conversational context, so partial match is needed)
+                    if q_words:
+                        match_count = sum(1 for w in q_words if w in combined_lower)
+                        if match_count == 0:
+                            continue
+                        word_score = match_count
+                    else:
+                        word_score = 1
+
+                    # Skip search_history's own calls — they just echo the query string back
+                    if step["tool_name"] == "search_history":
+                        continue
+
                     urls = re.findall(r'(?:https?|ftp)://[^\s\'"<>]{5,}', combined)
-                    preview = (rp or fr)[:300]
+                    preview = (rp or ap or fr)[:300]
                     label = step["tool_label"] or step["tool_name"]
                     s = f"[数据库步骤 #{step['task_id']}:{step['step_number']} {label}]"
                     if urls:
                         s += f" 链接={urls[0]}" + (f" (+{len(urls)-1})" if len(urls) > 1 else "")
                     s += f" | {preview[:200]}"
-                    scored.append((3 if urls else 2, step["task_id"] * 1000 + step["step_number"], s))
+                    scored.append((3 + word_score if urls else 1 + word_score, step["task_id"] * 1000 + step["step_number"], s))
         except Exception as e:
             print(f"[SearchHistory] DB search error: {e}")
 
