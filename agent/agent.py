@@ -35,7 +35,7 @@ from tools.auto_tool import (DynamicTool, load_all_dynamic_tools,
 from agent.sub_agent import SubAgent, TOOL_SETS
 from tools.discovery import ToolDiscoveryTool
 from tools.mcp_tool import get_mcp_manager
-from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused
+from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused, SearchHistoryTool, PauseAndWaitTool, TaskPaused
 from tools.sandbox import EnterWorktreeTool, ExitWorktreeTool
 
 class OpenAGCAgent:
@@ -45,10 +45,14 @@ class OpenAGCAgent:
     Features smart memory with TF-IDF semantic retrieval.
     """
     def __init__(self, model: str = "gpt-4o", session_id: Optional[int] = None,
-                 logger: Optional[SessionLogger] = None):
+                 logger: Optional[SessionLogger] = None,
+                 pre_enabled_tools: Optional[set] = None):
         self.session_id = session_id
         self.logger = logger
         self.llm = LLMClient(default_model=model)
+        self._pre_enabled_tools = pre_enabled_tools or set()
+        self._session_sandbox_whitelist: set = set()
+        self.pending_messages: list = []
         self._session_sandbox_whitelist: set = set()  # One-time approved paths
         # Load config to check disabled skills
         disabled_skills = []
@@ -127,6 +131,10 @@ class OpenAGCAgent:
             f"   ⚠️ 如果你需要访问沙箱外的路径（如读取用户指定目录中的文件），直接使用 read_file/write_file 等工具操作即可。"
             f"系统会自动弹出授权窗口让用户批准。"
             f"绝对不要使用 ask_user_question 来请求路径授权——沙箱机制会全自动处理。\n"
+            f"\n【上下文复用规范（极其重要）】："
+            f"当用户要求\"重试\"\"再下载一遍\"\"再试一次\"等操作时，你必须首先检查对话历史中的 tool_call 记录，"
+            f"复用已有的 URL、参数、文件路径等数据，直接重新调用对应工具。"
+            f"绝对不要重新浏览网页或重新搜索来获取已知信息。\n"
             f"\n【长时间任务后台化（极其重要）】："
             f"当你执行耗时操作（下载模型/安装依赖/训练等），shell 返回 [Still Running] 时，"
             f"应立即调用 pause_and_wait 工具暂停自己。系统会保存上下文，后台任务完成后自动恢复执行。"
@@ -178,6 +186,7 @@ class OpenAGCAgent:
             "send_email": SendEmailTool(),
             "queue_download": DownloadTool(),
             "ask_user_question": AskUserQuestionTool(),
+            "search_history": SearchHistoryTool(),
             "pause_and_wait": PauseAndWaitTool(),
             "enter_sandbox_mode": EnterWorktreeTool(),
             "exit_sandbox_mode": ExitWorktreeTool()
@@ -203,6 +212,7 @@ class OpenAGCAgent:
             "queue_download": "下载文件",
             "search_available_tools": "检索扩展工具",
             "ask_user_question": "向用户提问",
+            "search_history": "检索会话历史",
             "pause_and_wait": "暂停并等待后台完成",
             "enter_sandbox_mode": "进入沙箱模式",
             "exit_sandbox_mode": "退出沙箱模式"
@@ -237,8 +247,10 @@ class OpenAGCAgent:
             print(f"[Agent] Failed to load MCP tools: {e}")
 
         # Progressive Disclosure Setup
-        CORE_TOOL_NAMES = {"execute_shell", "read_file", "write_file", "edit_file", "search_file_content", "find_files", "search_available_tools", "ask_user_question"}
-        self.active_tool_names = set(CORE_TOOL_NAMES)
+        CORE_TOOL_NAMES = {"execute_shell", "read_file", "write_file", "edit_file",
+                           "search_file_content", "find_files", "search_available_tools",
+                           "ask_user_question", "search_history"}
+        self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
         
         def _enable_tools_callback(tool_names: List[str]):
             added = False

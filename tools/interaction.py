@@ -105,3 +105,96 @@ class PauseAndWaitTool(BaseTool):
                 }
             }
         }
+
+
+class SearchHistoryTool(BaseTool):
+    """Search the agent's conversation history for URLs, tool calls, and past results."""
+    name: str = "search_history"
+    description: str = (
+        "检索当前会话历史中的工具调用记录和结果。用于查找之前获取的 URL、文件路径、"
+        "下载链接等数据，避免重复浏览或搜索。当用户要求重试或再下载时，先用此工具检查历史。"
+    )
+
+    def execute(self, query: str = "", search_type: str = "all", **kwargs) -> str:
+        agent_ctx = kwargs.get("_agent_context")
+        if not agent_ctx:
+            return "Error: Cannot search history without agent context."
+
+        messages = getattr(agent_ctx, 'messages', [])
+        if not messages:
+            return "No conversation history available."
+
+        results = []
+        q_lower = query.lower() if query else ""
+
+        for i, msg in enumerate(messages):
+            # Search tool_call arguments
+            if search_type in ("all", "tool_calls") and msg.get("role") == "assistant":
+                tcs = msg.get("tool_calls", [])
+                for tc in tcs:
+                    if isinstance(tc, dict):
+                        fn = tc.get("function", {})
+                        name = fn.get("name", "")
+                        args_str = fn.get("arguments", "{}")
+                        if not q_lower or q_lower in args_str.lower() or q_lower in name.lower():
+                            try:
+                                import json
+                                args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                            except Exception:
+                                args = {}
+                            url = args.get("url", "")
+                            filename = args.get("filename", "")
+                            path = args.get("path", "")
+                            results.append(
+                                f"[{name}] url={url} filename={filename} path={path} "
+                                f"query={args.get('query','')[:80]}"
+                            )
+
+            # Search tool results
+            if search_type in ("all", "results") and msg.get("role") == "tool":
+                content = str(msg.get("content", ""))
+                name = msg.get("name", "")
+                if not q_lower or q_lower in content.lower() or q_lower in name.lower():
+                    # Extract URLs from content
+                    import re
+                    urls = re.findall(r'(?:https?|ftp)://[^\s\'"<>]+', content)
+                    preview = content[:300].replace('\n', ' ')
+                    results.append(
+                        f"[{name} result] urls={urls[:3]} preview={preview}"
+                    )
+
+            if len(results) >= 20:
+                break
+
+        if not results:
+            return f"No matching history found for '{query}'. Try a different search term."
+
+        return "Found in conversation history:\n" + "\n".join(results[-15:])
+
+    def get_openai_schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": "search_history",
+                "description": (
+                    "Search current conversation history for URLs, tool calls, file paths, "
+                    "download links, and past results. Use this BEFORE re-browsing or re-searching "
+                    "when the user asks you to retry or re-download. It finds data you've already obtained."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search term (e.g., movie name, URL keyword, filename)."
+                        },
+                        "search_type": {
+                            "type": "string",
+                            "enum": ["all", "tool_calls", "results"],
+                            "description": "What to search: 'all' (default), 'tool_calls' (arguments only), 'results' (output only)."
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }

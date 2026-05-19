@@ -1,3 +1,4 @@
+import os
 import threading
 from typing import Optional
 
@@ -39,34 +40,8 @@ class DownloadTool(BaseTool):
         if not filename:
             return "Error: Please provide a filename for the download."
 
-        # ── URL validation ──
-        if url:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            if parsed.scheme not in ('http', 'https'):
-                return (
-                    f"Error: Unsupported URL scheme '{parsed.scheme}'. "
-                    f"Only HTTP/HTTPS URLs are supported for downloads. "
-                    f"FTP and other protocols are not supported."
-                )
-            if source == 'direct' and not url:
-                return "Error: 'url' is required when source='direct'."
-
-        # ── File type validation ──
-        model_exts = ('.gguf', '.safetensors', '.bin', '.pt', '.pth', '.onnx')
-        other_allowed = ('.zip', '.tar.gz', '.tgz', '.tar', '.json', '.yaml',
-                        '.md', '.txt', '.py', '.whl', '.dmg', '.exe', '.msi')
-        fname_lower = filename.lower()
-        is_model = any(fname_lower.endswith(e) for e in model_exts)
-        is_allowed = is_model or any(fname_lower.endswith(e) for e in other_allowed)
-
-        if not is_allowed:
-            return (
-                f"Error: Unsupported file type '{filename}'. "
-                f"Download tool supports model files ({', '.join(model_exts)}) "
-                f"and common files ({', '.join(other_allowed)}). "
-                f"For other files (videos, images, etc.), use execute_shell with wget/curl."
-            )
+        if not filename:
+            return "Error: Please provide a filename for the download."
 
         # Check for existing download
         try:
@@ -94,6 +69,22 @@ class DownloadTool(BaseTool):
 
         mgr = get_llamacpp_manager()
 
+        # FTP not supported by requests library — suggest alternatives
+        if url and url.lower().startswith("ftp://"):
+            return (
+                f"FTP 协议暂不支持直接下载。建议:\n"
+                f"1. 使用浏览器找到该文件的 HTTP/HTTPS 镜像链接\n"
+                f"2. 或使用 execute_shell 执行: wget '{url}' -O '{filename}'\n"
+                f"3. 或在下载管理页面搜索同名文件的其他源"
+            )
+
+        # Determine download directory: models/ for GGUF, downloads/ for everything else
+        from core.paths import get_data_path as _gdp
+        is_gguf = filename.lower().endswith('.gguf')
+        dl_type = 'model' if is_gguf else 'file'
+        dl_dir = mgr.models_dir if is_gguf else _gdp("downloads")
+        os.makedirs(dl_dir, exist_ok=True)
+
         # Build download label
         if url and source == 'direct':
             label = f"{filename} (direct)"
@@ -112,14 +103,14 @@ class DownloadTool(BaseTool):
         try:
             task_id = kwargs.get("_task_id")
             record_id = create_download_record(
-                type_='model',
+                type_=dl_type,
                 label=label,
                 repo_id=repo_id,
                 filename=filename,
                 source=source,
                 url=download_url,
-                target_path=f"{mgr.models_dir}/{filename}",
-                partial_path=f"{mgr.models_dir}/{filename}.partial",
+                target_path=f"{dl_dir}/{filename}",
+                partial_path=f"{dl_dir}/{filename}.partial",
                 task_id=task_id
             )
         except Exception as e:
@@ -128,18 +119,16 @@ class DownloadTool(BaseTool):
         # Start background download
         def _download_thread():
             try:
-                # Register in download slots for multi-download tracking
-                slot_key = f"model_{record_id}"
+                slot_key = f"{dl_type}_{record_id}"
                 _llamacpp_download_state[slot_key] = {
-                    "active": True, "type": "model", "label": label, "id": record_id,
+                    "active": True, "type": dl_type, "label": label, "id": record_id,
                     "progress": 0.0, "stage": "downloading", "error": ""
                 }
-                # Also update legacy active flag for backward compat
                 _llamacpp_download_state["active"] = True
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "download_id": record_id,
-                    "task": "model", "label": label,
+                    "task": dl_type, "label": label,
                     "progress": 0.0, "stage": "downloading", "error": ""
                 })
 
@@ -150,16 +139,39 @@ class DownloadTool(BaseTool):
                     _broadcast_to_websockets({
                         "type": "llamacpp_download",
                         "download_id": record_id,
-                        "task": "model", "label": label,
+                        "task": dl_type, "label": label,
                         "progress": pct, "stage": "downloading", "error": ""
                     })
 
-                success = mgr.download_model(
-                    url=download_url,
-                    filename=filename,
-                    progress_callback=progress_cb,
-                    resume=True
-                )
+                if is_gguf:
+                    success = mgr.download_model(
+                        url=download_url,
+                        filename=filename,
+                        progress_callback=progress_cb,
+                        resume=True
+                    )
+                else:
+                    import requests
+                    target = f"{dl_dir}/{filename}"
+                    partial = target + ".partial"
+                    resume_offset = 0
+                    headers = {}
+                    if os.path.exists(partial):
+                        resume_offset = os.path.getsize(partial)
+                        headers["Range"] = f"bytes={resume_offset}-"
+                    resp = requests.get(download_url, stream=True, headers=headers, timeout=30)
+                    total = int(resp.headers.get("content-length", 0)) + (resume_offset if resp.status_code == 206 else 0)
+                    mode = "ab" if resp.status_code == 206 else "wb"
+                    downloaded = resume_offset if mode == "ab" else 0
+                    with open(partial, mode) as f:
+                        for chunk in resp.iter_content(8192):
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total > 0 and progress_cb:
+                                    progress_cb(downloaded / total)
+                    os.replace(partial, target)
+                    success = True
 
                 if success:
                     from api.server import update_download_progress
@@ -171,7 +183,7 @@ class DownloadTool(BaseTool):
                     _broadcast_to_websockets({
                         "type": "llamacpp_download",
                         "download_id": record_id,
-                        "task": "model", "label": label,
+                        "task": dl_type, "label": label,
                         "progress": 1.0, "stage": "complete", "error": ""
                     })
                 else:
@@ -187,7 +199,7 @@ class DownloadTool(BaseTool):
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "download_id": record_id,
-                    "task": "model", "label": label,
+                    "task": dl_type, "label": label,
                     "progress": _llamacpp_download_state[slot_key].get("progress", 0),
                     "stage": "error", "error": err_msg
                 })
