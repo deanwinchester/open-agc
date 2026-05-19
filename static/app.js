@@ -286,6 +286,10 @@ function initApp() {
         appendMessage(`**后台任务错误**: ${data.content}`, 'system');
       }
       updateTaskBadge();
+    } else if (data.type === 'task_backgrounded') {
+      appendMessage(`⏸️ **任务已进入后台**\n\n${data.message || '后台任务处理中...'}\n\n完成后将自动恢复执行。`, 'system');
+      hideProgressContainer();
+      updateTaskBadge();
     } else if (data.type === 'llamacpp_download') {
       handleLlamaDownloadProgress(data);
     }

@@ -323,6 +323,16 @@ def init_db():
     except Exception:
         pass
 
+    # Add task_id to downloads for background task linkage
+    try:
+        cursor.execute("ALTER TABLE downloads ADD COLUMN task_id INTEGER")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE downloads ADD COLUMN background_resumed INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -451,6 +461,39 @@ def _extract_task_title(response: str) -> str:
     return ""
 
 reconcile_tasks()
+
+def reconcile_backgrounded_after_restart():
+    """After server restart, check for completed downloads linked to backgrounded tasks."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        pairs = conn.execute(
+            "SELECT d.id as dl_id, d.task_id, t.status as task_status FROM downloads d "
+            "JOIN tasks t ON t.id = d.task_id "
+            "WHERE d.status = 'completed' AND d.background_resumed = 0 "
+            "AND t.status = 'backgrounded'"
+        ).fetchall()
+        for p in pairs:
+            tid = p["task_id"]
+            ctx = get_task_context(tid)
+            if ctx:
+                ctx.append({"role": "user", "content": (
+                    "【系统通知】服务器重启，后台下载任务已完成，文件已就绪。"
+                    "请继续执行之前未完成的任务。"
+                )})
+                increment_task_resume(tid)
+                update_task_status(tid, "interrupted",
+                    "服务器重启，后台任务已完成", interruption_reason="background_complete")
+                save_task_context(tid, ctx)
+                conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?",
+                             (p["dl_id"],))
+                conn.commit()
+                print(f"[Startup] Recovered backgrounded task {tid} from completed download {p['dl_id']}")
+        conn.close()
+    except Exception as e:
+        print(f"[Startup] Background recovery error: {e}")
+
+reconcile_backgrounded_after_restart()
 
 # Initialize StatsManager singleton with correct database
 from core.stats_manager import get_stats_manager
@@ -2491,11 +2534,28 @@ async def websocket_endpoint(websocket: WebSocket):
             
             # Detect max_iterations hit for longrun auto-resume
             is_max_iter = response and response.startswith("[MAX_ITERATIONS_REACHED]")
-            
+            is_backgrounded = response and response.startswith("[TASK_BACKGROUNDED]")
+
+            if ws_task_id and is_backgrounded:
+                # Agent voluntarily paused — save context, mark backgrounded
+                save_task_context(ws_task_id, agent.messages[1:])
+                update_task_status(ws_task_id, "backgrounded",
+                    response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台",
+                    interruption_reason="backgrounded")
+                # Send notification to frontend
+                await _safe_send({
+                    "type": "task_backgrounded",
+                    "task_id": ws_task_id,
+                    "message": "任务已进入后台，完成后自动恢复",
+                    "session_id": ws_session_id
+                })
+                agent_is_running = False
+                return response
+
             if ws_task_id:
                 summary = response[:200] if response else ""
                 # Update task title from agent's first response line
-                if response and not response.startswith("[MAX_ITERATIONS_REACHED]"):
+                if response and not response.startswith("[MAX_ITERATIONS_REACHED]") and not is_backgrounded:
                     title = _extract_task_title(response)
                     if title:
                         try:
@@ -3011,6 +3071,53 @@ def start_task_scheduler():
     
     threading.Thread(target=scheduler_loop, daemon=True).start()
 
+def start_background_monitor():
+    """Monitor backgrounded tasks — check download/process completion and auto-resume."""
+    def monitor_loop():
+        import time as _t
+        while True:
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                conn.row_factory = sqlite3.Row
+                bg_tasks = conn.execute(
+                    "SELECT id, user_query, resume_count, max_resume_count FROM tasks "
+                    "WHERE status='backgrounded' AND resume_count < max_resume_count"
+                ).fetchall()
+                for task in bg_tasks:
+                    tid = task["id"]
+                    dl = conn.execute(
+                        "SELECT id, status FROM downloads WHERE task_id=? AND status='completed' "
+                        "AND background_resumed=0 ORDER BY id DESC LIMIT 1",
+                        (tid,)).fetchone()
+                    if dl:
+                        print(f"[BgMonitor] Task {tid}: download {dl['id']} done — resuming")
+                        conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?",
+                                     (dl["id"],))
+                        conn.commit()
+                        ctx = get_task_context(tid)
+                        if ctx:
+                            ctx.append({"role": "user", "content": (
+                                "【系统通知】后台下载任务已完成，文件已就绪。"
+                                "请继续执行之前未完成的任务，不要重复下载已有文件。"
+                            )})
+                            increment_task_resume(tid)
+                            update_task_status(tid, "interrupted",
+                                "后台任务已完成", interruption_reason="background_complete")
+                            save_task_context(tid, ctx)
+                        continue
+                    dl_fail = conn.execute(
+                        "SELECT id FROM downloads WHERE task_id=? AND status='failed'",
+                        (tid,)).fetchone()
+                    if dl_fail:
+                        update_task_status(tid, "background_failed",
+                            "下载失败", interruption_reason="download_failed")
+                conn.close()
+            except Exception as e:
+                print(f"[BgMonitor] Error: {e}")
+            _t.sleep(10)
+    threading.Thread(target=monitor_loop, daemon=True).start()
+
 # Start background listeners
+start_background_monitor()
 start_email_listener()
 start_task_scheduler()
