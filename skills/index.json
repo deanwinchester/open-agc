@@ -129,9 +129,9 @@
         "能当",
         "需要"
       ],
-      "usage_count": 5,
-      "success_rate": 0.7633900000000001,
-      "last_used": "2026-05-19T11:19:55.819063"
+      "usage_count": 6,
+      "success_rate": 0.7870510000000001,
+      "last_used": "2026-05-19T13:48:46.422393"
     },
     {
       "filename": "example_skill.md",
@@ -177,9 +177,9 @@
         "需要",
         "搜索"
       ],
-      "usage_count": 49,
-      "success_rate": 0.3132047587136473,
-      "last_used": "2026-05-19T11:19:55.816039"
+      "usage_count": 53,
+      "success_rate": 0.5493936421920241,
+      "last_used": "2026-05-19T14:51:35.446337"
     },
     {
       "filename": "file_organizer.md",
@@ -211,9 +211,9 @@
         "或按",
         "归类"
       ],
-      "usage_count": 15,
-      "success_rate": 0.4874204890000001,
-      "last_used": "2026-05-19T11:19:55.813027"
+      "usage_count": 16,
+      "success_rate": 0.5386784401000001,
+      "last_used": "2026-05-19T13:48:46.416371"
     },
     {
       "filename": "git_workflow.md",
@@ -251,9 +251,9 @@
         "需要",
         "作流"
       ],
-      "usage_count": 9,
-      "success_rate": 0.701343279,
-      "last_used": "2026-05-19T10:50:26.738129"
+      "usage_count": 11,
+      "success_rate": 0.7580880559900001,
+      "last_used": "2026-05-19T17:39:42.088022"
     },
     {
       "filename": "system_monitor.md",

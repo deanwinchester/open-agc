@@ -290,6 +290,12 @@ function initApp() {
       appendMessage(`⏸️ **任务已进入后台**\n\n${data.message || '后台任务处理中...'}\n\n完成后将自动恢复执行。`, 'system');
       hideProgressContainer();
       updateTaskBadge();
+    } else if (data.type === 'download_failed') {
+      appendMessage(
+        '❌ **下载失败: ' + (data.label || '') + '**\n\n错误: ' + (data.error || '未知错误'),
+        'system'
+      );
+      showStatus('❌ 下载失败: ' + (data.error || '未知错误'), 'error');
     } else if (data.type === 'llamacpp_download') {
       handleLlamaDownloadProgress(data);
     }

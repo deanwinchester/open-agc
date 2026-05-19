@@ -138,7 +138,7 @@ class DownloadTool(BaseTool):
                 def progress_cb(pct):
                     from api.server import update_download_progress
                     _llamacpp_download_state[slot_key]["progress"] = pct
-                    update_download_progress(record_id, pct, 'downloading')
+                    update_download_progress(record_id, pct, status='downloading')
                     _broadcast_to_websockets({
                         "type": "llamacpp_download",
                         "download_id": record_id,
@@ -186,7 +186,7 @@ class DownloadTool(BaseTool):
 
                 if success:
                     from api.server import update_download_progress
-                    update_download_progress(record_id, 1.0, 'completed')
+                    update_download_progress(record_id, 1.0, status='completed')
                     _llamacpp_download_state[slot_key].update({
                         "active": False, "progress": 1.0,
                         "stage": "complete", "error": ""
@@ -201,9 +201,19 @@ class DownloadTool(BaseTool):
                     raise RuntimeError("Download failed")
 
             except Exception as e:
-                from api.server import update_download_progress
                 err_msg = str(e)
-                update_download_progress(record_id, None, 'failed', err_msg)
+                print(f"[Download] EXCEPTION in download thread #{record_id}: {err_msg}")
+                from api.server import update_download_progress
+                update_download_progress(record_id, None, status='failed', error_message=err_msg)
+                # Also notify session directly if pending task link exists
+                try:
+                    sid = kwargs.get("_session_id")
+                    if sid is not None:
+                        linked_ids = _pending_task_links.get(sid, [])
+                        if record_id in linked_ids:
+                            print(f"[Download] download #{record_id} failed, pending link to session {sid} task (will notify via tool_done)")
+                except Exception as notify_err:
+                    print(f"[Download] Failed to check pending links: {notify_err}")
                 _llamacpp_download_state[slot_key].update({
                     "active": False, "stage": "error", "error": err_msg
                 })

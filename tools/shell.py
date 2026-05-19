@@ -126,11 +126,17 @@ class ShellTool(BaseTool):
         if not allowed:
             return perm_msg
 
-        # Check network domain whitelist for commands with URLs
+        # Check network domain whitelist — raise SandboxBlocked for popup
+        network_whitelist = kwargs.get("_network_whitelist", set())
         for url in extract_urls_from_command(command):
+            from urllib.parse import urlparse
+            domain = urlparse(url).hostname or ""
+            if domain in network_whitelist:
+                continue  # Session-approved domain
             domain_ok, domain_msg = _check_domain_allowed(url, config)
             if not domain_ok:
-                return f"⛔ 网络访问受限: {domain_msg}\n命令: {command[:200]}"
+                from tools.base import SandboxBlocked
+                raise SandboxBlocked(url, sandbox_dir="network", tool_name="execute_shell")
 
         # Sandbox Mode Enforcement
         cwd = None

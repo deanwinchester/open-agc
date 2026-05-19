@@ -489,6 +489,26 @@ def reconcile_backgrounded_after_restart():
                              (p["dl_id"],))
                 conn.commit()
                 print(f"[Startup] Recovered backgrounded task {tid} from completed download {p['dl_id']}")
+        # Also reconcile failed downloads linked to any task — inject system message if not already done
+        failed_pairs = conn.execute(
+            "SELECT DISTINCT d.id as dl_id, d.task_id, d.label, d.filename, d.error_message, "
+            "(SELECT session_id FROM task_steps WHERE task_id = d.task_id AND session_id IS NOT NULL LIMIT 1) as session_id "
+            "FROM downloads d "
+            "JOIN tasks t ON t.id = d.task_id "
+            "WHERE d.status = 'failed' AND d.background_resumed = 0 "
+            "AND t.status IN ('completed', 'interrupted', 'background_failed')"
+        ).fetchall()
+        for p in failed_pairs:
+            label = p["label"] or p["filename"] or f"download #{p['dl_id']}"
+            err = p["error_message"] or "未知错误"
+            session_id = p["session_id"] or 1
+            save_message("system",
+                f"❌ 下载失败: {label}\n错误信息: {err}",
+                session_id)
+            conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?",
+                         (p["dl_id"],))
+            conn.commit()
+            print(f"[Startup] Recovered failed download #{p['dl_id']} (task {p['task_id']}) — message saved to session {session_id}")
         conn.close()
     except Exception as e:
         print(f"[Startup] Background recovery error: {e}")
@@ -630,6 +650,68 @@ def update_download_progress(download_id: int, progress: float,
     params.append(download_id)
     cursor.execute(f"UPDATE downloads SET {', '.join(fields)} WHERE id=?", params)
     conn.commit()
+
+    # If download failed and has a linked task, notify the session
+    if status == 'failed':
+        try:
+            cursor.execute("SELECT task_id, label, filename FROM downloads WHERE id=?", (download_id,))
+            dl_row = cursor.fetchone()
+            if dl_row:
+                task_id = dl_row[0]
+                label = dl_row[1] or dl_row[2] or f"download #{download_id}"
+                if task_id:
+                    cursor.execute(
+                        "SELECT session_id FROM task_steps WHERE task_id=? AND session_id IS NOT NULL LIMIT 1",
+                        (task_id,))
+                    sid_row = cursor.fetchone()
+                    session_id = sid_row[0] if sid_row else 1
+                    err = error_message or "未知错误"
+                    save_message("system",
+                        f"❌ 下载失败: {label}\n错误信息: {err}",
+                        session_id)
+                    # Also update the original task and add a failure step
+                    try:
+                        cursor.execute("SELECT MAX(step_number) FROM task_steps WHERE task_id=?", (task_id,))
+                        max_step = cursor.fetchone()[0] or 0
+                        add_task_step(task_id, max_step + 1, "queue_download",
+                            tool_label=f"❌ 下载失败: {label}",
+                            args_preview=f"filename={label}",
+                            result_preview=f"错误: {err}",
+                            full_result=f"下载失败: {label}\n错误信息: {err}",
+                            success=False, session_id=session_id)
+                        cursor.execute(
+                            "UPDATE tasks SET status='background_failed', result_summary=?, "
+                            "updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='completed'",
+                            (f"下载失败: {label}", task_id))
+                        conn.commit()
+                        cursor.execute("SELECT status FROM tasks WHERE id=?", (task_id,))
+                        task_status = cursor.fetchone()
+                        if task_status and task_status[0] == 'background_failed':
+                            ctx = get_task_context(task_id)
+                            ctx.append({"role": "user", "content": (
+                                f"【系统通知】之前的下载任务失败了。\n文件: {label}\n错误: {err}\n"
+                                "请尝试其他方式重新下载。"
+                            )})
+                            save_task_context(task_id, ctx)
+                            print(f"[Download] Task {task_id} marked background_failed due to download failure")
+                    except Exception as step_err:
+                        print(f"[Download] Failed to update task {task_id}: {step_err}")
+                    print(f"[Download] Notified session {session_id} about failed download #{download_id} (task {task_id}): {err}")
+                    _broadcast_to_websockets({
+                        "type": "download_failed",
+                        "download_id": download_id,
+                        "task_id": task_id,
+                        "session_id": session_id,
+                        "label": label,
+                        "error": err
+                    })
+                else:
+                    print(f"[Download] download #{download_id} failed, task_id=NULL (will check at tool_done)")
+            else:
+                print(f"[Download] download #{download_id} failed, but no DB row found!")
+        except Exception as notify_err:
+            print(f"[Download] NOTIFICATION ERROR for #{download_id}: {notify_err}")
+
     conn.close()
 
 
@@ -2383,10 +2465,29 @@ async def websocket_endpoint(websocket: WebSocket):
                                 dl_conn.execute(
                                     "UPDATE downloads SET task_id=? WHERE id=? AND task_id IS NULL",
                                     (ws_task_id, dl_id))
+                                # Check if this download already failed before linking
+                                already_failed = dl_conn.execute(
+                                    "SELECT status, label, filename, error_message FROM downloads WHERE id=? AND status='failed'",
+                                    (dl_id,)).fetchone()
+                                if already_failed:
+                                    err = already_failed[3] or "未知错误"
+                                    label = already_failed[1] or already_failed[2] or f"download #{dl_id}"
+                                    save_message("system",
+                                        f"❌ 下载失败: {label}\n错误信息: {err}",
+                                        ws_session_id)
+                                    _broadcast_to_websockets({
+                                        "type": "download_failed",
+                                        "download_id": dl_id,
+                                        "task_id": ws_task_id,
+                                        "session_id": ws_session_id,
+                                        "label": label,
+                                        "error": err
+                                    })
+                                    print(f"[Task] tool_done: download #{dl_id} already failed — notified session {ws_session_id}")
                             dl_conn.commit()
                             dl_conn.close()
-                    except Exception:
-                        pass
+                    except Exception as link_err:
+                        print(f"[Task] tool_done link error: {link_err}")
                     try:
                         # Update the step with result
                         conn = sqlite3.connect(DB_PATH)
