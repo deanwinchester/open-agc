@@ -595,14 +595,15 @@ def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: st
 def create_download_record(type_: str, label: str, repo_id: str = None,
                            filename: str = None, source: str = "huggingface",
                            url: str = None, target_path: str = "",
-                           partial_path: str = "", total_size: int = 0) -> int:
+                           partial_path: str = "", total_size: int = 0,
+                           task_id: int = None) -> int:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
         '''INSERT INTO downloads (type, label, repo_id, filename, source, url,
-           target_path, partial_path, total_size, downloaded_bytes, status, progress)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'downloading', 0.0)''',
-        (type_, label, repo_id, filename, source, url, target_path, partial_path, total_size)
+           target_path, partial_path, total_size, downloaded_bytes, status, progress, task_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'downloading', 0.0, ?)''',
+        (type_, label, repo_id, filename, source, url, target_path, partial_path, total_size, task_id)
     )
     download_id = cursor.lastrowid
     conn.commit()

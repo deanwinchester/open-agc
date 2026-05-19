@@ -110,9 +110,6 @@ class LlamaCppManager:
 
     def download_model(self, url: str, filename: str, progress_callback=None, resume: bool = True) -> bool:
         """Download a GGUF model from a URL. Supports HTTP Range resume when resume=True."""
-        if not filename.endswith(".gguf"):
-            filename += ".gguf"
-
         target_path = os.path.join(self.models_dir, filename)
         partial_path = target_path + ".partial"
 

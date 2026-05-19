@@ -39,6 +39,35 @@ class DownloadTool(BaseTool):
         if not filename:
             return "Error: Please provide a filename for the download."
 
+        # ── URL validation ──
+        if url:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            if parsed.scheme not in ('http', 'https'):
+                return (
+                    f"Error: Unsupported URL scheme '{parsed.scheme}'. "
+                    f"Only HTTP/HTTPS URLs are supported for downloads. "
+                    f"FTP and other protocols are not supported."
+                )
+            if source == 'direct' and not url:
+                return "Error: 'url' is required when source='direct'."
+
+        # ── File type validation ──
+        model_exts = ('.gguf', '.safetensors', '.bin', '.pt', '.pth', '.onnx')
+        other_allowed = ('.zip', '.tar.gz', '.tgz', '.tar', '.json', '.yaml',
+                        '.md', '.txt', '.py', '.whl', '.dmg', '.exe', '.msi')
+        fname_lower = filename.lower()
+        is_model = any(fname_lower.endswith(e) for e in model_exts)
+        is_allowed = is_model or any(fname_lower.endswith(e) for e in other_allowed)
+
+        if not is_allowed:
+            return (
+                f"Error: Unsupported file type '{filename}'. "
+                f"Download tool supports model files ({', '.join(model_exts)}) "
+                f"and common files ({', '.join(other_allowed)}). "
+                f"For other files (videos, images, etc.), use execute_shell with wget/curl."
+            )
+
         # Check for existing download
         try:
             import sqlite3
@@ -79,8 +108,9 @@ class DownloadTool(BaseTool):
         else:
             return "Error: Provide either 'url' (with source='direct') or 'repo_id' (with source='huggingface'/'modelscope')."
 
-        # Create DB record
+        # Create DB record (link to task if available)
         try:
+            task_id = kwargs.get("_task_id")
             record_id = create_download_record(
                 type_='model',
                 label=label,
@@ -89,7 +119,8 @@ class DownloadTool(BaseTool):
                 source=source,
                 url=download_url,
                 target_path=f"{mgr.models_dir}/{filename}",
-                partial_path=f"{mgr.models_dir}/{filename}.partial"
+                partial_path=f"{mgr.models_dir}/{filename}.partial",
+                task_id=task_id
             )
         except Exception as e:
             return f"Error creating download record: {e}"
