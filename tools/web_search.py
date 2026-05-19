@@ -58,25 +58,80 @@ def _search_baidu(query: str, max_results: int = 5) -> list:
 
     soup = BeautifulSoup(resp.text, "html.parser")
     results = []
+    seen_urls = set()
 
-    for item in soup.select("div.result, div.c-container"):
+    # Strategy 1: modern Baidu result items (div.result with h3 > a)
+    for item in soup.select("div.result"):
         title_el = item.select_one("h3 a")
+        if not title_el:
+            continue
+        title = title_el.get_text(strip=True)
+        href = title_el.get("href", "")
+        # Resolve Baidu redirect URL
+        if href.startswith("/"):
+            href = "https://www.baidu.com" + href
+        # Skip dupes
+        if href in seen_urls:
+            continue
+        seen_urls.add(href)
+
+        # Try multiple snippet selectors (modern Baidu variants)
         snippet_el = (
             item.select_one(".c-abstract")
+            or item.select_one(".c-span-last")
             or item.select_one(".content-right_2s-H4")
-            or item.select_one("span.content-right_2s-H4")
+            or item.select_one(".c-font-normal")
+            or item.select_one("span")
         )
-        if not snippet_el:
-            # Try generic paragraph
-            snippet_el = item.select_one("p") or item.select_one("span")
+        snippet = snippet_el.get_text(strip=True) if snippet_el else ""
 
-        if title_el:
+        results.append({"title": title, "url": href, "snippet": snippet})
+        if len(results) >= max_results:
+            break
+
+    # Strategy 2: fallback to c-container (older Baidu layout)
+    if not results:
+        for item in soup.select("div.c-container"):
+            title_el = item.select_one("h3 a")
+            if not title_el:
+                continue
             title = title_el.get_text(strip=True)
             href = title_el.get("href", "")
+            if href.startswith("/"):
+                href = "https://www.baidu.com" + href
+            if href in seen_urls:
+                continue
+            seen_urls.add(href)
+
+            snippet_el = (
+                item.select_one(".c-abstract")
+                or item.select_one(".c-span-last")
+                or item.select_one("span")
+            )
             snippet = snippet_el.get_text(strip=True) if snippet_el else ""
             results.append({"title": title, "url": href, "snippet": snippet})
             if len(results) >= max_results:
                 break
+
+    # Strategy 3: extract from script data (newest Baidu SPA-style pages)
+    if not results:
+        for script in soup.select("script"):
+            text = script.string or ""
+            if 'window._bd_results' in text or '"result"' in text:
+                import json
+                try:
+                    data = json.loads(re.search(r'({.*"result".*})', text).group(1))
+                    for item in data.get("result", {}).get("items", []):
+                        title = item.get("title", "")
+                        href = item.get("url", "")
+                        snippet = item.get("abstract", "")
+                        if title and href not in seen_urls:
+                            seen_urls.add(href)
+                            results.append({"title": title, "url": href, "snippet": snippet})
+                            if len(results) >= max_results:
+                                break
+                except (json.JSONDecodeError, AttributeError, KeyError):
+                    pass
 
     return results
 
@@ -183,6 +238,42 @@ class WebSearchTool(BaseTool):
             },
         }
 
+    @staticmethod
+    def _is_relevant(query: str, results: list, threshold: float = 0.3) -> tuple:
+        """Heuristic check: do result titles/URLs contain meaningful query terms?
+        Returns (is_relevant, score, explanation)."""
+        # Extract meaningful Chinese/English terms from query (skip stopwords)
+        stopwords = {"的", "了", "是", "在", "和", "就", "都", "而", "及", "与",
+                     "着", "或", "一个", "没有", "最", "什么", "怎么", "哪里",
+                     "a", "the", "an", "of", "in", "to", "for", "and", "or",
+                     "下载", "搜索", "最新", "热门"}
+        # For Chinese: extract individual characters and bigrams
+        import re as _re
+        tokens = set()
+        for seg in _re.split(r'[\s,;，；、]+', query):
+            if len(seg) > 1 and seg not in stopwords:
+                tokens.add(seg.lower())
+            # Also add individual CJK characters for partial matching
+            for ch in seg:
+                if '一' <= ch <= '鿿' and ch not in stopwords:
+                    tokens.add(ch)
+
+        if not tokens:
+            return True, 1.0, ""
+
+        match_count = 0
+        for r in results:
+            combined = (r["title"] + " " + r["url"] + " " + r["snippet"]).lower()
+            for t in tokens:
+                if t in combined:
+                    match_count += 1
+                    break  # one match per result is enough
+
+        score = match_count / max(len(results), 1)
+        if score < threshold:
+            return False, score, f"结果与查询\"{query[:30]}\"相关性低 (匹配率{score:.0%})"
+        return True, score, ""
+
     def execute(self, query: str, max_results: int = 5, **kwargs) -> str:
         errors = []
 
@@ -190,13 +281,17 @@ class WebSearchTool(BaseTool):
             try:
                 results = engine_fn(query, max_results)
                 if results:
+                    relevant, score, note = self._is_relevant(query, results)
                     formatted = []
                     for r in results:
                         formatted.append(
                             f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['snippet']}"
                         )
                     header = f"[Source: {engine_name}]\n"
-                    return header + "\n\n".join(formatted)
+                    body = header + "\n\n".join(formatted)
+                    if not relevant:
+                        body += f"\n\n⚠️ {note}。建议使用 browser_automation 直接访问目标网站。"
+                    return body
                 else:
                     errors.append(f"{engine_name}: No results returned")
             except Exception as e:

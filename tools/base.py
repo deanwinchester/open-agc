@@ -6,10 +6,17 @@ import os
 
 class SandboxBlocked(Exception):
     """Raised when a tool tries to access a path outside the sandbox and not yet authorized."""
-    def __init__(self, path: str, sandbox_dir: str = "", tool_name: str = ""):
-        self.path = os.path.abspath(path)
+    def __init__(self, path: str, sandbox_dir: str = "", tool_name: str = "",
+                 category: str = "", description: str = ""):
+        # Only apply abspath to filesystem paths, not URLs
+        if sandbox_dir in ("network", "permission") or path.startswith(("http://", "https://", "ftp://")):
+            self.path = path
+        else:
+            self.path = os.path.abspath(path)
         self.sandbox_dir = sandbox_dir
         self.tool_name = tool_name
+        self.category = category
+        self.description = description
         super().__init__(f"Sandbox blocked: {path}")
 
 

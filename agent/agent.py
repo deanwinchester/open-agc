@@ -48,12 +48,15 @@ class OpenAGCAgent:
                  logger: Optional[SessionLogger] = None,
                  pre_enabled_tools: Optional[set] = None):
         self.session_id = session_id
+        self._consecutive_failures = 0
         self.logger = logger
         self.llm = LLMClient(default_model=model)
         self._pre_enabled_tools = pre_enabled_tools or set()
         self._session_sandbox_whitelist: set = set()
         self.pending_messages: list = []
         self._session_sandbox_whitelist: set = set()  # One-time approved paths
+        self._session_permission_whitelist: set = set()  # Session-approved command categories
+        self._session_network_whitelist: set = set()  # Session-approved network domains
         # Load config to check disabled skills
         disabled_skills = []
         config_path = get_data_path("config.json")
@@ -385,21 +388,45 @@ class OpenAGCAgent:
         except Exception as e:
             print(f"[Agent] Auto-save memories error: {e}")
 
+    @staticmethod
+    def _text_keywords(text: str) -> set:
+        """Extract meaningful keywords from text for Chinese/English overlap check."""
+        import re
+        text = text.lower()
+        words = set()
+        # English words
+        for w in text.split():
+            w = w.strip('.,;:!?，。；：！？""''、')
+            if w and not all(c in ' \t\n\r' for c in w):
+                words.add(w)
+        # Chinese bigrams (相邻两个字的组合)
+        chars = re.findall(r'[一-鿿]', text)
+        for i in range(len(chars) - 1):
+            words.add(chars[i] + chars[i + 1])
+        # Also add single Chinese characters (excluding stopwords)
+        stop_chars = set('的了是在有和不就都而及与或个这那他也她它我对')
+        for ch in chars:
+            if ch not in stop_chars:
+                words.add(ch)
+        return words
+
     def _check_pending_messages(self, current_query: str = "") -> str:
         """Poll pending message queue. Returns injected message or empty string."""
         if not self.pending_messages:
             return ""
         msg = self.pending_messages.pop(0)
-        # Simple relatedness check: keyword overlap > 30%
         if current_query:
-            cur_words = set(current_query.lower().split())
-            new_words = set(msg.lower().split())
+            cur_words = self._text_keywords(current_query)
+            new_words = self._text_keywords(msg)
             if cur_words and new_words:
                 overlap = len(cur_words & new_words) / max(len(cur_words), len(new_words))
-                if overlap > 0.3:
+                # Chinese text with bigram matching typically gets 0.05-0.2 overlap
+                # Even 5% overlap suggests they're related topics
+                if overlap > 0.05:
                     return f"[用户追加指令] {msg}"
-        self.pending_messages.insert(0, msg)  # Put back if not related
-        return ""
+        # If no current_query to compare against, always accept
+        # If word overlap was too low, still accept (don't drop user messages)
+        return f"[用户追加指令] {msg}"
 
     def queue_message(self, text: str):
         """Add a message to the pending queue (non-blocking input)."""
@@ -413,19 +440,24 @@ class OpenAGCAgent:
 
         # Build request
         is_network = (sb.sandbox_dir == "network")
-        pending = {
-            "path": sb.path,
-            "reason": f"Tool '{tool_name}' needs access to {sb.path}",
-            "tool_name": tool_name,
-            "block_type": "network" if is_network else "path",
-        }
+        is_permission = (sb.sandbox_dir == "permission")
+        if is_permission:
+            block_type = "permission"
+            desc_text = sb.description or "敏感操作"
+            category_text = sb.category or "unknown"
+        else:
+            block_type = "network" if is_network else "path"
+            desc_text = ""
+            category_text = ""
         if progress_callback:
             progress_callback({
                 "event": "sandbox_blocked",
                 "path": sb.path,
                 "tool_name": tool_name,
                 "session_id": self.session_id,
-                "block_type": "network" if is_network else "path",
+                "block_type": block_type,
+                "description": desc_text,
+                "category": category_text,
             })
 
         # Wait for user response
@@ -498,6 +530,58 @@ class OpenAGCAgent:
                 except Exception:
                     pass
             return f"Network access denied by user: {sb.path}"
+
+        # ── Permission (sensitive command) authorization ──
+        is_permission = (sb.sandbox_dir == "permission")
+        if is_permission:
+            category = sb.category or "unknown"
+            desc = sb.description or "敏感操作"
+            if action == "deny_always":
+                try:
+                    config_path = get_data_path("config.json")
+                    config = {}
+                    if os.path.exists(config_path):
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            config = _json.load(f)
+                    perms = config.get("tool_permissions", {})
+                    if isinstance(perms, str):
+                        perms = _json.loads(perms)
+                    if category not in perms:
+                        perms[category] = {}
+                    perms[category]["permanent_deny"] = "deny"
+                    config["tool_permissions"] = perms
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        _json.dump(config, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+                return f"Operation denied by user: {desc} (permanent)"
+            elif action == "deny_once":
+                return f"Operation denied by user: {desc}"
+            elif action in ("approve_once", "approve_session"):
+                self._session_permission_whitelist.add(category)
+                print(f"[Agent] Permission approved (session): {category}")
+                return None  # Retry
+            elif action == "approve_always":
+                try:
+                    config_path = get_data_path("config.json")
+                    config = {}
+                    if os.path.exists(config_path):
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            config = _json.load(f)
+                    perms = config.get("tool_permissions", {})
+                    if isinstance(perms, str):
+                        perms = _json.loads(perms)
+                    if category not in perms:
+                        perms[category] = {}
+                    perms[category]["allow"] = "allow"
+                    config["tool_permissions"] = perms
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        _json.dump(config, f, ensure_ascii=False, indent=2)
+                    print(f"[Agent] Permission approved (always): {category}")
+                except Exception as e:
+                    print(f"[Agent] Permission persist error: {e}")
+                return None  # Retry
+            return f"Operation denied by user: {desc}"
 
         if action == "approve_dir":
             dirpath = os.path.dirname(os.path.abspath(sb.path))
@@ -1024,6 +1108,7 @@ class OpenAGCAgent:
         """
         self.is_interrupted = False
         self.task_id = task_id
+        self._consecutive_failures = 0
         self.progress_callback = progress_callback
         
         # Only append user message if it's not None (None means we are resuming from ask_user_question)
@@ -1373,7 +1458,8 @@ class OpenAGCAgent:
                                         "_session_whitelist": self._session_sandbox_whitelist,
                                         "_progress_cb": progress_callback,
                                         "_task_id": self.task_id,
-                                        "_network_whitelist": getattr(self, '_session_network_whitelist', set()),
+                                        "_network_whitelist": self._session_network_whitelist,
+                                        "_permission_whitelist": self._session_permission_whitelist,
                                         "_session_id": self.session_id,
                                     }
                                     if 'interrupt_check' in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
@@ -1385,6 +1471,18 @@ class OpenAGCAgent:
                                         )
                                     else:
                                         result = tool_instance.execute(**function_args, **extra_kwargs)
+                                    # Auto-background: shell returning [Still Running] means process
+                                    # is still running after timeout — system takes over automatically
+                                    # instead of relying on the LLM to call pause_and_wait
+                                    if (function_name == "execute_shell"
+                                            and isinstance(result, str)
+                                            and result.startswith("[Still Running]")):
+                                        if progress_callback:
+                                            progress_callback({
+                                                "event": "task_backgrounded",
+                                                "reason": "命令超时仍在运行，自动进入后台",
+                                            })
+                                        return f"[TASK_BACKGROUNDED] 命令仍在后台运行，自动转入后台。进程继续执行，完成后将自动恢复。"
                                     break  # Success — exit retry loop
                                 except TaskPaused as tp:
                                     # Agent voluntarily paused for background task
@@ -1472,6 +1570,24 @@ class OpenAGCAgent:
                         "name": function_name,
                         "content": result_str
                     })
+
+                    # Context preservation: detect consecutive failures and remind model of original task
+                    is_failure = not tool_success or result_str.startswith("Error") or result_str.startswith("System Guard") or result_str.startswith("Sandbox")
+                    if is_failure:
+                        self._consecutive_failures += 1
+                    else:
+                        self._consecutive_failures = 0
+
+                    if self._consecutive_failures == 3 and current_iter < max_iterations:
+                        reminder = (
+                            f"[系统提醒] 你已连续 {self._consecutive_failures} 次工具调用失败。"
+                            f"请暂停当前操作，回顾原始用户需求：「{user_input}」。"
+                            f"如果当前方法不可行，请尝试完全不同的策略，或向用户报告当前进展并询问下一步指令。"
+                            f"不要无意义地重复搜索或浏览——如果目标网站无法访问，直接告知用户。"
+                        )
+                        self.messages.append({"role": "user", "content": reminder})
+                        if verbose:
+                            print(f"[Agent] ⚠️ Context preservation: injected reminder after {self._consecutive_failures} consecutive failures")
 
                     # Collect screenshot data for vision injection
                     url = extract_screenshot_data(result_str)

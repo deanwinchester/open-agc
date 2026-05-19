@@ -38,36 +38,42 @@ DESTRUCTIVE_PATTERNS = [
 
 
 def check_command_permission(command: str, config: dict = None,
-                              session_id: int = None) -> Tuple[bool, str]:
+                              session_id: int = None,
+                              session_whitelist: set = None) -> Tuple[bool, str, str, str]:
     """Check if a shell command needs user authorization.
 
     Returns:
-        (allowed, message) — (True, "") if OK, (False, reason) if blocked.
+        (allowed, message, category, description) — (True, "", "", "") if OK,
+        (False, reason, category, description) if blocked.
     """
     cmd_lower = command.lower().strip()
 
     for pattern, description, category in DESTRUCTIVE_PATTERNS:
         if re.search(pattern, cmd_lower, re.IGNORECASE):
             # Check if already authorized
-            if _is_authorized(category, config, session_id):
-                return (True, "")
+            if _is_authorized(category, config, session_id, session_whitelist):
+                return (True, "", category, description)
 
             return (False,
                 f"⛔ 敏感操作: {description}\n\n"
                 f"命令: {command[:200]}\n"
                 f"类别: {category}\n\n"
-                f"该操作可能造成不可逆的破坏。如需执行，请:\n"
-                f"1. 在 Settings > 沙箱授权管理中确认\n"
-                f"2. 或者在 config.json 的 tool_permissions.{category} 中添加 'session_allow'\n"
-                f"3. 或者使用 ask_user_question 工具请求用户明确批准"
+                f"该操作可能造成不可逆的破坏。如需执行，请授权。",
+                category,
+                description
             )
 
-    return (True, "")
+    return (True, "", "", "")
 
 
 def _is_authorized(category: str, config: dict = None,
-                   session_id: int = None) -> bool:
+                   session_id: int = None,
+                   session_whitelist: set = None) -> bool:
     """Check if a command category is already authorized."""
+    # Check session-level whitelist first
+    if session_whitelist and category in session_whitelist:
+        return True
+
     if not config:
         return False
 

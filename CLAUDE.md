@@ -139,3 +139,7 @@ Single-page app: `index.html` + `app.js` + `style.css`. Panda theme with glass-m
   "browser_headless": false
 }
 ```
+
+### Dev docs (dev_docs/)
+
+- 重要优化文档：Agent优化方案.md，关于Agent的优化，随时更新到该文档，执行时也要注意本文档已经优化好的功能，不要受到影响。

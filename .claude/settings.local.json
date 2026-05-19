@@ -63,7 +63,8 @@
       "PowerShell(python -c \"import py_compile; py_compile.compile\\('core/memory_store.py', doraise=True\\); print\\('memory_store OK'\\)\")",
       "PowerShell(python -c \"import py_compile; py_compile.compile\\('tools/memory.py', doraise=True\\); print\\('OK'\\)\")",
       "Bash(dir \"D:\\\\GitHub\\\\cloud-code\\\\claude-code-source\\\\src\")",
-      "Bash(powershell.exe *)"
+      "Bash(powershell.exe *)",
+      "Bash(/Users/lhh/workspace/open-agc/venv/bin/python *)"
     ]
   }
 }

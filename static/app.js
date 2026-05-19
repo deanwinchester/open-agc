@@ -265,7 +265,7 @@ function initApp() {
       if (!isBackground && isForCurrentSession) showThinkingStatus(t('agent_thinking'));
     } else if (data.type === 'progress') {
       if (data.task_id && !isBackground && isForCurrentSession) state.currentTaskId = data.task_id;
-      if (!isBackground && isForCurrentSession) handleProgressEvent(data);
+      if (isForCurrentSession) handleProgressEvent(data);
       if (isBackground) updateTaskBadge();
     } else if (data.type === 'message') {
       if (!isBackground && isForCurrentSession) { hideThinkingStatus(); hideProgressContainer(); }
@@ -303,29 +303,65 @@ function initApp() {
 
   function showSandboxBlockedModal(data) {
     var modal = document.getElementById('sandbox-blocked-modal');
+    var isNetwork = data.block_type === 'network';
+    var isPermission = data.block_type === 'permission';
     if (!modal) {
-      // Create modal on demand
       modal = document.createElement('div');
       modal.id = 'sandbox-blocked-modal';
       modal.className = 'modal-overlay';
       modal.style.display = 'flex';
-      modal.innerHTML = `
-        <div class="modal-box" style="max-width:480px;width:90%;">
-          <div class="modal-header"><h3>🔐 沙箱路径授权</h3></div>
-          <div class="modal-body">
-            <p style="margin:0 0 0.5rem">Agent 工具 <b id="sb-tool"></b> 请求访问沙箱外路径：</p>
-            <div id="sb-path" style="background:var(--bg-secondary);padding:0.5rem 0.75rem;border-radius:6px;font-family:monospace;font-size:0.82rem;word-break:break-all;margin-bottom:1rem;"></div>
-            <div style="display:flex;flex-wrap:wrap;gap:0.5rem;">
-              <button id="sb-approve-dir" class="btn-sandbox primary" style="flex:1;min-width:45%;">📁 授权整个目录</button>
-              <button id="sb-approve-once" class="btn-sandbox" style="flex:1;min-width:45%;">✓ 单次授权</button>
-              <button id="sb-approve-always" class="btn-sandbox primary" style="flex:1;min-width:45%;">⭐ 永久授权</button>
-              <button id="sb-deny-once" class="btn-sandbox deny" style="flex:1;min-width:45%;">✗ 拒绝本次</button>
-              <button id="sb-deny-always" class="btn-sandbox deny" style="flex:1;min-width:45%;">🚫 永久拒绝</button>
-            </div>
-          </div>
-        </div>`;
       document.body.appendChild(modal);
     }
+    // Determine UI based on block type
+    var headerIcon, headerTitle, descText, buttonsHtml;
+    if (isPermission) {
+      headerIcon = '⚡';
+      headerTitle = '敏感操作授权';
+      descText = '请求执行敏感操作：';
+      buttonsHtml =
+        `<button id="sb-approve-once" class="btn-sandbox" style="flex:1;min-width:45%;">✓ 授权本次</button>
+         <button id="sb-approve-session" class="btn-sandbox" style="flex:1;min-width:45%;">🔄 本次会话全部同类</button>
+         <button id="sb-approve-always" class="btn-sandbox primary" style="flex:1;min-width:45%;">⭐ 永久授权</button>
+         <button id="sb-deny-once" class="btn-sandbox deny" style="flex:1;min-width:45%;">✗ 拒绝本次</button>
+         <button id="sb-deny-always" class="btn-sandbox deny" style="flex:1;min-width:45%;">🚫 永久拒绝</button>`;
+    } else if (isNetwork) {
+      headerIcon = '🌐';
+      headerTitle = '网络访问授权';
+      descText = '请求访问外部网址：';
+      buttonsHtml =
+        `<button id="sb-approve-once" class="btn-sandbox" style="flex:1;min-width:45%;">✓ 单次授权</button>
+         <button id="sb-approve-always" class="btn-sandbox primary" style="flex:1;min-width:45%;">⭐ 永久授权</button>
+         <button id="sb-deny-once" class="btn-sandbox deny" style="flex:1;min-width:45%;">✗ 拒绝本次</button>
+         <button id="sb-deny-always" class="btn-sandbox deny" style="flex:1;min-width:45%;">🚫 永久拒绝</button>`;
+    } else {
+      headerIcon = '🔐';
+      headerTitle = '沙箱路径授权';
+      descText = '请求访问沙箱外路径：';
+      buttonsHtml =
+        `<button id="sb-approve-dir" class="btn-sandbox primary" style="flex:1;min-width:45%;">📁 授权整个目录</button>
+         <button id="sb-approve-once" class="btn-sandbox" style="flex:1;min-width:45%;">✓ 单次授权</button>
+         <button id="sb-approve-always" class="btn-sandbox primary" style="flex:1;min-width:45%;">⭐ 永久授权</button>
+         <button id="sb-deny-once" class="btn-sandbox deny" style="flex:1;min-width:45%;">✗ 拒绝本次</button>
+         <button id="sb-deny-always" class="btn-sandbox deny" style="flex:1;min-width:45%;">🚫 永久拒绝</button>`;
+    }
+
+    // Show description line for permission (e.g. "rm -rf / (删除根目录)")
+    var descLine = '';
+    if (isPermission && data.description) {
+      descLine = `<div style="color:var(--warning,#e67e22);font-size:0.85rem;margin-bottom:0.5rem;">⚠️ ${data.description}</div>`;
+    }
+
+    modal.innerHTML = `
+      <div class="modal-box" style="max-width:480px;width:90%;">
+        <div class="modal-header"><h3>${headerIcon} ${headerTitle}</h3></div>
+        <div class="modal-body">
+          <p style="margin:0 0 0.5rem">Agent 工具 <b id="sb-tool"></b> ${descText}</p>
+          ${descLine}
+          <div id="sb-path" style="background:var(--bg-secondary);padding:0.5rem 0.75rem;border-radius:6px;font-family:monospace;font-size:0.82rem;word-break:break-all;margin-bottom:1rem;"></div>
+          <div style="display:flex;flex-wrap:wrap;gap:0.5rem;">${buttonsHtml}</div>
+        </div>
+      </div>`;
+    modal.style.display = 'flex';
 
     document.getElementById('sb-tool').textContent = data.tool_name || data.tool || '?';
     document.getElementById('sb-path').textContent = data.path || '';
@@ -342,11 +378,14 @@ function initApp() {
       }
     }
 
-    document.getElementById('sb-approve-dir').onclick = function() { respond('approve_dir'); };
     document.getElementById('sb-approve-once').onclick = function() { respond('approve_once'); };
     document.getElementById('sb-approve-always').onclick = function() { respond('approve_always'); };
     document.getElementById('sb-deny-once').onclick = function() { respond('deny_once'); };
     document.getElementById('sb-deny-always').onclick = function() { respond('deny_always'); };
+    var sessionBtn = document.getElementById('sb-approve-session');
+    if (sessionBtn) sessionBtn.onclick = function() { respond('approve_session'); };
+    var dirBtn = document.getElementById('sb-approve-dir');
+    if (dirBtn) dirBtn.onclick = function() { respond('approve_dir'); };
   }
 
   // =============================================
@@ -476,6 +515,13 @@ function initApp() {
   window.handleProgressEvent = handleProgressEvent;
   function handleProgressEvent(data) {
     const event = data.event;
+
+    // sandbox_blocked must be handled regardless of progress container state
+    if (event === 'sandbox_blocked') {
+      showSandboxBlockedModal(data);
+      return;
+    }
+
     const stepsEl = ensureProgressContainer() ? progressStepsEl : null;
     if (!stepsEl) return;
 
@@ -505,11 +551,6 @@ function initApp() {
       } else {
         showThinkingStatus(t('agent_thinking'));
       }
-      return;
-    }
-
-    if (event === 'sandbox_blocked') {
-      showSandboxBlockedModal(data);
       return;
     }
 
@@ -1052,11 +1093,9 @@ function initApp() {
     messageInput.disabled = false;
     if (state.isAgentThinking) {
       sendBtn.style.display = 'flex';
-      sendBtn.textContent = '追加';
-      sendBtn.title = '追加任务到当前执行中';
+      sendBtn.title = '发送';
       if (stopBtn) { stopBtn.style.display = 'flex'; stopBtn.disabled = false; stopBtn.opacity = '1'; }
     } else {
-      sendBtn.textContent = '发送';
       sendBtn.title = '';
       sendBtn.style.display = 'flex';
       if (stopBtn) stopBtn.style.display = 'none';
@@ -1129,12 +1168,7 @@ function initApp() {
 
   function handleSend() {
     const text = messageInput.value.trim();
-    if ((!text && state.pendingImages.length === 0) || !state.isConnected || state.isAgentThinking) return;
-    // Reset progress state for new turn
-    progressInline = null;
-    progressStepsEl = null;
-    progressSteps = {};
-    progressStepCount = 0;
+    if ((!text && state.pendingImages.length === 0) || !state.isConnected) return;
     const msgImages = [...state.pendingImages];
     appendMessage(text || '[图片]', 'user', msgImages);
     const agentSelector = document.getElementById('agent-selector');
@@ -1151,6 +1185,13 @@ function initApp() {
     state.ws.send(JSON.stringify(msg));
     messageInput.value = '';
     messageInput.style.height = 'auto';
+    // If agent is already running, queue as pending message without resetting state
+    if (state.isAgentThinking) return;
+    // Reset progress state for new turn
+    progressInline = null;
+    progressStepsEl = null;
+    progressSteps = {};
+    progressStepCount = 0;
     state.isAgentThinking = true;
     updateInputState();
   }

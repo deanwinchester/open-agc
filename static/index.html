@@ -522,6 +522,26 @@
                         </div>
                     </section>
 
+                    <!-- Tool Permissions -->
+                    <section class="card" id="tool-permissions-card">
+                        <div class="card-header">
+                            <h2>⚡ 工具权限管理</h2>
+                            <p class="card-desc">管理 Agent 各类操作的授权状态。Agent 执行未授权的敏感操作时将弹出授权请求。</p>
+                        </div>
+                        <div class="field">
+                            <label>网络域名 (<code>tool_permissions.network</code>)</label>
+                            <div id="network-domain-list" style="display:flex;flex-wrap:wrap;gap:0.35rem;margin-top:0.3rem;">
+                                <span style="color:var(--text-secondary);font-size:0.82rem;">加载中...</span>
+                            </div>
+                        </div>
+                        <div class="field" style="margin-top:0.8rem;">
+                            <label>敏感命令类别 (<code>fs_destroy / git_destructive / pkg_uninstall / db_destroy / docker_destroy / network_unsafe</code>)</label>
+                            <div id="cmd-permission-list" style="display:flex;flex-wrap:wrap;gap:0.35rem;margin-top:0.3rem;">
+                                <span style="color:var(--text-secondary);font-size:0.82rem;">加载中...</span>
+                            </div>
+                        </div>
+                    </section>
+
                     <!-- Email -->
                     <section class="card">
                         <div class="card-header">
