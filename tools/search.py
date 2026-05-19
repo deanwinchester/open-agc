@@ -2,7 +2,7 @@ import os
 import glob
 import subprocess
 from typing import Any, Dict
-from tools.base import BaseTool
+from tools.base import BaseTool, SandboxBlocked
 
 class GlobTool(BaseTool):
     name: str = "find_files"
@@ -43,16 +43,15 @@ class GlobTool(BaseTool):
             
         # Sandbox Mode Enforcement
         config_path = get_data_path("config.json")
-        sandbox_dir = base_path
         if os.path.exists(config_path):
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
                 if config.get("sandbox_mode", True):
-                    sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
-                    abs_path = os.path.abspath(base_path)
-                    if os.path.commonpath([sandbox_dir, abs_path]) != sandbox_dir:
-                        return f"Sandbox Security Error: Search access to path '{base_path}' is denied. It is outside the permitted sandbox directory ({sandbox_dir})."
+                    whitelist = kwargs.get("_session_whitelist", None)
+                    self.check_sandbox(base_path, config=config, session_whitelist=whitelist)
+            except SandboxBlocked:
+                raise
             except Exception:
                 pass
 
@@ -133,10 +132,10 @@ class GrepSearchTool(BaseTool):
                 with open(config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
                 if config.get("sandbox_mode", True):
-                    sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
-                    abs_path = os.path.abspath(target_path)
-                    if os.path.commonpath([sandbox_dir, abs_path]) != sandbox_dir:
-                        return f"Sandbox Security Error: Search access to path '{target_path}' is denied."
+                    whitelist = kwargs.get("_session_whitelist", None)
+                    self.check_sandbox(target_path, config=config, session_whitelist=whitelist)
+            except SandboxBlocked:
+                raise
             except Exception:
                 pass
                 

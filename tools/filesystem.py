@@ -1,6 +1,6 @@
 import os
 from typing import Any, Dict
-from tools.base import BaseTool
+from tools.base import BaseTool, SandboxBlocked
 
 class ReadFileTool(BaseTool):
     name: str = "read_file"
@@ -123,19 +123,12 @@ class WriteFileTool(BaseTool):
                     config = json.load(f)
                 
                 if config.get("sandbox_mode", True):
-                    agent_ctx = kwargs.get("_agent_context")
-                    if agent_ctx and getattr(agent_ctx, "sandbox_dir", None):
-                        sandbox_dir = agent_ctx.sandbox_dir
-                    else:
-                        sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
-                    os.makedirs(sandbox_dir, exist_ok=True)
-                    abs_path = os.path.abspath(path)
-                    
-                    # Ensure path is within sandbox_dir
-                    if os.path.commonpath([sandbox_dir, abs_path]) != sandbox_dir:
-                        return f"Sandbox Security Error: Write access to path '{path}' is denied. It is outside the permitted sandbox directory ({sandbox_dir})."
-            except Exception as e:
-                print(f"[WriteFileTool] Warning checking sandbox config: {e}")
+                    whitelist = kwargs.get("_session_whitelist", None)
+                    self.check_sandbox(path, config=config, session_whitelist=whitelist)
+            except SandboxBlocked:
+                raise
+            except Exception:
+                pass
                 
         try:
             # Ensure directory exists
@@ -199,20 +192,14 @@ class EditFileTool(BaseTool):
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
-                
+
                 if config.get("sandbox_mode", True):
-                    agent_ctx = kwargs.get("_agent_context")
-                    if agent_ctx and getattr(agent_ctx, "sandbox_dir", None):
-                        sandbox_dir = agent_ctx.sandbox_dir
-                    else:
-                        sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
-                    abs_path = os.path.abspath(path)
-                    
-                    if os.path.commonpath([sandbox_dir, abs_path]) != sandbox_dir:
-                        return f"Sandbox Security Error: Edit access to path '{path}' is denied. It is outside the permitted sandbox directory ({sandbox_dir})."
-            except Exception as e:
+                    whitelist = kwargs.get("_session_whitelist", None)
+                    self.check_sandbox(path, config=config, session_whitelist=whitelist)
+            except SandboxBlocked:
+                raise
+            except Exception:
                 pass
-                
         if not os.path.exists(path):
             return f"Error: File '{path}' does not exist."
             
