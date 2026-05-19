@@ -2356,6 +2356,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         pending = getattr(_dl, '_pending_task_links', {})
                         dl_ids = pending.pop(ws_session_id, [])
                         if dl_ids:
+                            print(f"[Task] Linking {len(dl_ids)} pending download(s) to task {ws_task_id}")
                             dl_conn = sqlite3.connect(DB_PATH)
                             for dl_id in dl_ids:
                                 dl_conn.execute(
@@ -3102,6 +3103,8 @@ def start_background_monitor():
                     "SELECT id, user_query, resume_count, max_resume_count FROM tasks "
                     "WHERE status='backgrounded' AND resume_count < max_resume_count"
                 ).fetchall()
+                if bg_tasks:
+                    print(f"[BgMonitor] Found {len(bg_tasks)} backgrounded task(s) to check")
                 for task in bg_tasks:
                     tid = task["id"]
                     dl = conn.execute(
