@@ -249,7 +249,7 @@ class OpenAGCAgent:
         # Progressive Disclosure Setup
         CORE_TOOL_NAMES = {"execute_shell", "read_file", "write_file", "edit_file",
                            "search_file_content", "find_files", "search_available_tools",
-                           "ask_user_question", "search_history"}
+                           "ask_user_question", "search_history", "queue_download", "pause_and_wait"}
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
         
         def _enable_tools_callback(tool_names: List[str]):
