@@ -121,10 +121,16 @@ class ShellTool(BaseTool):
                     config = json.load(f)
             except Exception:
                 pass
-        from tools.permissions import check_command_permission
+        from tools.permissions import check_command_permission, extract_urls_from_command, _check_domain_allowed
         allowed, perm_msg = check_command_permission(command, config)
         if not allowed:
             return perm_msg
+
+        # Check network domain whitelist for commands with URLs
+        for url in extract_urls_from_command(command):
+            domain_ok, domain_msg = _check_domain_allowed(url, config)
+            if not domain_ok:
+                return f"⛔ 网络访问受限: {domain_msg}\n命令: {command[:200]}"
 
         # Sandbox Mode Enforcement
         cwd = None

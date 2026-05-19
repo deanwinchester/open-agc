@@ -686,14 +686,43 @@ class OpenAGCAgent:
 
     def _synthesize_results(self, user_input: str,
                             sub_results: List[Dict]) -> str:
-        """Combine sub-agent results into a coherent final answer."""
-        parts = [f"## 任务完成报告\n\n原始任务：{user_input}\n"]
+        """Combine sub-agent results into a coherent structured report."""
+        total_tasks = len(sub_results)
+        success_count = sum(1 for r in sub_results if r.get("success"))
+        fail_count = total_tasks - success_count
+        total_duration = sum(r.get("duration", 0) for r in sub_results)
+        total_tool_calls = sum(r.get("tool_calls", 0) for r in sub_results)
+
+        status_emoji = "✅" if fail_count == 0 else "⚠️" if success_count > 0 else "❌"
+        parts = [
+            f"## {status_emoji} 子代理任务执行报告\n",
+            f"**原始任务**：{user_input}\n",
+            f"**执行摘要**：{total_tasks} 个子任务 "
+            f"({success_count} 成功, {fail_count} 失败) · "
+            f"总耗时 {total_duration:.1f}s · "
+            f"工具调用 {total_tool_calls} 次\n",
+            "---\n",
+        ]
 
         for i, result in enumerate(sub_results, 1):
-            status = "✅ 成功" if result.get("success") else "❌ 失败"
-            summary = result.get("summary", "无摘要")[:500]
+            status = "✅" if result.get("success") else "❌"
+            summary = result.get("summary", "无输出")[:800]
             duration = result.get("duration", 0)
-            parts.append(f"### 子任务 {i} {status}（{duration:.1f}s）\n{summary}\n")
+            tc = result.get("tool_calls", 0)
+            files = result.get("output_files", [])
+            parts.append(
+                f"### 子任务 {i} [{status}] （{duration:.1f}s, {tc} 步）\n"
+                f"{summary}\n"
+            )
+            if files:
+                parts.append(f"📄 产出文件: {', '.join(files)}\n")
+
+        if fail_count > 0:
+            parts.append("---\n### ⚠️ 失败分析\n")
+            for i, r in enumerate(sub_results, 1):
+                if not r.get("success"):
+                    parts.append(f"- **子任务 {i}**：{r.get('summary', '未知错误')[:300]}\n")
+            parts.append("\n建议：检查失败子任务的输入数据或增加 max_iterations 后重试。\n")
 
         return "\n".join(parts)
 
@@ -952,25 +981,38 @@ class OpenAGCAgent:
                     batch = [p for p in remaining if all(d in completed for d in p.get("depends_on", []))]
                     if not batch:
                         break  # Circular dependency or unresolvable
+                    # Remove from remaining
                     for plan in batch:
                         remaining.remove(plan)
-                        sub = SubAgent(
-                            task=plan["task"],
-                            tools=plan.get("tools", ["execute_shell"]),
-                            parent_tools=self.full_available_tools,
-                            max_iterations=plan.get("max_iterations", 10),
-                            progress_callback=progress_callback,
-                            llm_client=self.llm,
-                        )
-                        result = sub.run()
-                        sub_results.append(result)
-                        if result.get("success"):
-                            completed.add(plan["id"])
-                        else:
-                            # Abort on failure if dependencies chain
-                            dep_ids = {plan["id"]}
-                            remaining = [p for p in remaining if not (dep_ids & set(p.get("depends_on", [])))]
-                            break
+
+                    # Run independent sub-agents in parallel
+                    import concurrent.futures
+                    batch_futures = {}
+                    with concurrent.futures.ThreadPoolExecutor(
+                            max_workers=min(len(batch), 4)) as executor:
+                        for plan in batch:
+                            sub = SubAgent(
+                                task=plan["task"],
+                                tools=plan.get("tools", ["execute_shell"]),
+                                parent_tools=self.full_available_tools,
+                                max_iterations=plan.get("max_iterations", 10),
+                                progress_callback=progress_callback,
+                                llm_client=self.llm,
+                            )
+                            batch_futures[executor.submit(sub.run)] = plan
+                        for future in concurrent.futures.as_completed(batch_futures):
+                            plan = batch_futures[future]
+                            try:
+                                result = future.result()
+                            except Exception as e:
+                                result = {"success": False, "summary": str(e)}
+                            sub_results.append(result)
+                            if result.get("success"):
+                                completed.add(plan["id"])
+                            else:
+                                dep_ids = {plan["id"]}
+                                remaining = [p for p in remaining
+                                    if not (dep_ids & set(p.get("depends_on", [])))]
                 result_text = self._synthesize_results(user_input, sub_results)
                 self.messages.append({"role": "assistant", "content": result_text})
                 return result_text

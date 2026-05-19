@@ -1376,6 +1376,13 @@ async def resume_download(download_id: int):
                 success = manager.download_model_from_ms(
                     record["repo_id"], record["filename"], progress_callback=progress_cb
                 )
+            elif record["url"] and not record["repo_id"]:
+                # Direct URL download (use url from record)
+                from urllib.parse import urlparse
+                fname = record["filename"] or os.path.basename(urlparse(record["url"]).path) or "download"
+                success = manager.download_model(
+                    record["url"], fname, progress_callback=progress_cb, resume=True
+                )
             else:
                 success = manager.download_model_from_hf(
                     record["repo_id"], record["filename"], progress_callback=progress_cb
