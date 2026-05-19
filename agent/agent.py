@@ -35,7 +35,7 @@ from tools.auto_tool import (DynamicTool, load_all_dynamic_tools,
 from agent.sub_agent import SubAgent, TOOL_SETS
 from tools.discovery import ToolDiscoveryTool
 from tools.mcp_tool import get_mcp_manager
-from tools.interaction import AskUserQuestionTool
+from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused
 from tools.sandbox import EnterWorktreeTool, ExitWorktreeTool
 
 class OpenAGCAgent:
@@ -127,6 +127,10 @@ class OpenAGCAgent:
             f"   ⚠️ 如果你需要访问沙箱外的路径（如读取用户指定目录中的文件），直接使用 read_file/write_file 等工具操作即可。"
             f"系统会自动弹出授权窗口让用户批准。"
             f"绝对不要使用 ask_user_question 来请求路径授权——沙箱机制会全自动处理。\n"
+            f"\n【长时间任务后台化（极其重要）】："
+            f"当你执行耗时操作（下载模型/安装依赖/训练等），shell 返回 [Still Running] 时，"
+            f"应立即调用 pause_and_wait 工具暂停自己。系统会保存上下文，后台任务完成后自动恢复执行。"
+            f"不要让用户干等着，也不要反复重试。\n"
             f"2. 当你生成了一张图片供用户查看时，请在最终回复中使用 Markdown 语法直观地渲染出来，图片链接使用：`![图片描述](/api/files/生成的文件名.png)` 的格式。这个内部 API 能将你沙箱里的图片直接推送到网页前端显示。\n"
             f"3. 关于网页文件上传：优先使用 `browser_automation`（虚拟浏览器）工具的 `upload` 动作将文件填入网页。但如果遇到了必须通过操作系统原生文件选择框处理的情况，你可以临时切换使用 `computer_control`（键鼠控制工具 / pyautogui）来操作系统的上传弹窗完成文件选择和上传。\n"
             f"\n记忆系统：你拥有智能记忆系统。每次对话开始时，系统会自动检索并展示过去交互中的"
@@ -174,6 +178,7 @@ class OpenAGCAgent:
             "send_email": SendEmailTool(),
             "queue_download": DownloadTool(),
             "ask_user_question": AskUserQuestionTool(),
+            "pause_and_wait": PauseAndWaitTool(),
             "enter_sandbox_mode": EnterWorktreeTool(),
             "exit_sandbox_mode": ExitWorktreeTool()
         }
@@ -198,6 +203,7 @@ class OpenAGCAgent:
             "queue_download": "下载文件",
             "search_available_tools": "检索扩展工具",
             "ask_user_question": "向用户提问",
+            "pause_and_wait": "暂停并等待后台完成",
             "enter_sandbox_mode": "进入沙箱模式",
             "exit_sandbox_mode": "退出沙箱模式"
         }
@@ -1314,6 +1320,16 @@ class OpenAGCAgent:
                                     else:
                                         result = tool_instance.execute(**function_args, **extra_kwargs)
                                     break  # Success — exit retry loop
+                                except TaskPaused as tp:
+                                    # Agent voluntarily paused for background task
+                                    if progress_callback:
+                                        progress_callback({
+                                            "event": "task_backgrounded",
+                                            "reason": str(tp),
+                                            "pid": tp.pid,
+                                            "output_file": tp.output_file,
+                                        })
+                                    return f"[TASK_BACKGROUNDED] {tp}"
                                 except SandboxBlocked as sb:
                                     if attempt > 2:
                                         result = f"Sandbox blocked: {sb.path} (max retries exceeded)"

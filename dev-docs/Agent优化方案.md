@@ -56,15 +56,46 @@
 | 子代理结果深度合成 | P1 | `agent/agent.py` (`_synthesize_results`) | ✓ 完成 |
 | HF 断点续传修复 | P2 | `api/server.py` (resume 增加 direct URL 回退) | ✓ 完成 |
 | 网络访问域名白名单 | P2 | `tools/permissions.py`, `tools/shell.py` | ✓ 完成 |
+| 自动工具毕业机制 | P3 | `tools/auto_tool.py` (`_trust.json` + `graduate_tool`) | ✓ 完成 |
+| 长期运行统计调优 | P3 | `agent/agent.py` (`task_stats.json` + 自适应) | ✓ 完成 |
 
 ### 未完成 / 待优化
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
 | 桌面助手功能 | 动态熊猫图标 + 系统托盘 + 快捷消息 | 中 |
-| 自动工具安全提升机制 | 自动工具连续 3 次成功后才升为永久工具 | 低 |
-| 长期运行统计调优 | 定期分析 task_stats 自动调整参数 | 低 |
 | 动态情绪主题 | 根据 Agent 回复内容情感微调 UI 色调 | 低 |
+
+---
+
+---
+
+## 十七、长时间任务自动后台化
+
+> ✅ 已规划，待实施
+
+### 目标
+Agent 执行长时间任务（下载、训练、生成图片/视频）时，主动结束 loop 交由系统接管，后台完成后携带上下文自动恢复。
+
+### 核心流程
+```
+Agent 执行长命令 → Shell 超时返回 [Still Running]
+  → Agent 调用 pause_and_wait 工具暂停自己
+  → 系统保存上下文 → 任务标记 "backgrounded"
+  → 前端显示友好卡片 + 下载管理可见进度
+  → 后台监控线程每 5s 检查进程/下载状态
+  → 完成 → 自动加载上下文 → 追加通知 → 恢复 agent loop
+```
+
+### 防护
+- 检查 `exit_code == 0` 才恢复；失败则标记通知用户
+- `max_resume_count=3`，防止死循环
+- 6h 超时 kill
+- 恢复前验证任务仍为 `backgrounded`
+- 重启后 `reconcile_downloads()` 扫描已完成下载 → 触发恢复
+
+### 涉及文件
+`tools/interaction.py`, `tools/download.py`, `agent/agent.py`, `api/server.py`, `static/app.js`
 
 ---
 
