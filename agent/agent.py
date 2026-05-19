@@ -1309,6 +1309,7 @@ class OpenAGCAgent:
                                     extra_kwargs = {
                                         "_session_whitelist": self._session_sandbox_whitelist,
                                         "_progress_cb": progress_callback,
+                                        "_task_id": self.task_id,
                                     }
                                     if 'interrupt_check' in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
                                         result = tool_instance.execute(
