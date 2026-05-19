@@ -108,68 +108,101 @@ class PauseAndWaitTool(BaseTool):
 
 
 class SearchHistoryTool(BaseTool):
-    """Search the agent's conversation history for URLs, tool calls, and past results."""
+    """Search the agent's own conversation memory — recall past queries, results, decisions."""
     name: str = "search_history"
     description: str = (
-        "检索当前会话历史中的工具调用记录和结果。用于查找之前获取的 URL、文件路径、"
-        "下载链接等数据，避免重复浏览或搜索。当用户要求重试或再下载时，先用此工具检查历史。"
+        "检索当前会话的完整记忆。当上下文模糊、需要回忆之前讨论过什么、"
+        "查找之前获取的数据（URL/文件/命令结果）、或需要确认任务进度时使用。"
+        "这是你的\"记忆回溯\"入口——不记得时就搜索。"
     )
 
-    def execute(self, query: str = "", search_type: str = "all", **kwargs) -> str:
+    def execute(self, query: str = "", search_type: str = "all",
+                max_results: int = 8, **kwargs) -> str:
         agent_ctx = kwargs.get("_agent_context")
         if not agent_ctx:
             return "Error: Cannot search history without agent context."
 
         messages = getattr(agent_ctx, 'messages', [])
         if not messages:
-            return "No conversation history available."
+            return "当前会话还没有对话历史。"
 
         results = []
         q_lower = query.lower() if query else ""
+        q_words = set(q_lower.split()) if q_lower else set()
+        scored = []  # (score, index, text)
 
         for i, msg in enumerate(messages):
-            # Search tool_call arguments
-            if search_type in ("all", "tool_calls") and msg.get("role") == "assistant":
+            role = msg.get("role", "")
+            content = str(msg.get("content", ""))
+            score = 0
+
+            if search_type in ("all", "user_query") and role == "user":
+                if q_lower:
+                    score = sum(1 for w in q_words if w in content.lower())
+                    score += 3 if q_lower in content.lower() else 0
+                else:
+                    score = 1
+                if score > 0:
+                    scored.append((score + 2, i,
+                        f"[用户查询] {content[:300]}"))
+
+            if search_type in ("all", "tool_calls") and role == "assistant":
                 tcs = msg.get("tool_calls", [])
-                for tc in tcs:
+                for tc in (tcs or []):
                     if isinstance(tc, dict):
                         fn = tc.get("function", {})
                         name = fn.get("name", "")
                         args_str = fn.get("arguments", "{}")
-                        if not q_lower or q_lower in args_str.lower() or q_lower in name.lower():
-                            try:
-                                import json
-                                args = json.loads(args_str) if isinstance(args_str, str) else args_str
-                            except Exception:
-                                args = {}
+                        import json
+                        try:
+                            args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                        except Exception:
+                            args = {}
+                        match = q_lower in args_str.lower() or q_lower in name.lower()
+                        if match or not q_lower:
                             url = args.get("url", "")
-                            filename = args.get("filename", "")
-                            path = args.get("path", "")
-                            results.append(
-                                f"[{name}] url={url} filename={filename} path={path} "
-                                f"query={args.get('query','')[:80]}"
-                            )
+                            fname = args.get("filename", "")
+                            fpath = args.get("path", "")
+                            cmd = args.get("command", "")[:100]
+                            s = f"[工具调用: {name}]"
+                            if url: s += f" url={url}"
+                            if fname: s += f" filename={fname}"
+                            if fpath: s += f" path={fpath}"
+                            if cmd: s += f" cmd={cmd}"
+                            scored.append((5 if match else 1, i, s))
 
-            # Search tool results
-            if search_type in ("all", "results") and msg.get("role") == "tool":
-                content = str(msg.get("content", ""))
+            if search_type in ("all", "results") and role == "tool":
                 name = msg.get("name", "")
-                if not q_lower or q_lower in content.lower() or q_lower in name.lower():
-                    # Extract URLs from content
+                c = content[:500].replace('\n', ' ').replace('\r', '')
+                match = q_lower and (q_lower in c.lower() or q_lower in name.lower())
+                if match or not q_lower:
                     import re
-                    urls = re.findall(r'(?:https?|ftp)://[^\s\'"<>]+', content)
-                    preview = content[:300].replace('\n', ' ')
-                    results.append(
-                        f"[{name} result] urls={urls[:3]} preview={preview}"
-                    )
+                    urls = re.findall(r'(?:https?|ftp)://[^\s\'"<>]{5,}', c)
+                    preview = c[:400]
+                    s = f"[{name} 结果]"
+                    if urls: s += f" 链接={urls[0]}" + (f" (+{len(urls)-1})" if len(urls)>1 else "")
+                    s += f" | {preview}"
+                    scored.append((4 if match else 0, i, s))
 
-            if len(results) >= 20:
-                break
+            if search_type in ("all", "agent_response") and role == "assistant" and not msg.get("tool_calls"):
+                if q_lower and q_lower in content.lower():
+                    scored.append((3, i, f"[Agent 回复] {content[:400]}"))
 
-        if not results:
-            return f"No matching history found for '{query}'. Try a different search term."
+        # Sort by score descending, take top N
+        scored.sort(key=lambda x: -x[0])
+        top = scored[:max_results]
 
-        return "Found in conversation history:\n" + "\n".join(results[-15:])
+        if not top:
+            return (
+                f"会话记忆中未找到与 '{query}' 相关的内容。\n"
+                f"建议：尝试更短的关键词，或先用 search_available_tools 查看可用工具。"
+            )
+
+        lines = [f"会话记忆检索结果 ({len(top)} 条，关键词: '{query or '全部'}'):"]
+        for _, idx, text in sorted(top, key=lambda x: x[1]):  # Sort by message order
+            lines.append(f"  {text}")
+
+        return "\n".join(lines)
 
     def get_openai_schema(self) -> dict:
         return {
@@ -177,21 +210,26 @@ class SearchHistoryTool(BaseTool):
             "function": {
                 "name": "search_history",
                 "description": (
-                    "Search current conversation history for URLs, tool calls, file paths, "
-                    "download links, and past results. Use this BEFORE re-browsing or re-searching "
-                    "when the user asks you to retry or re-download. It finds data you've already obtained."
+                    "Search your own conversation memory. Use this whenever you feel context is fuzzy — "
+                    "to recall what the user asked, what files you read, what commands you ran, "
+                    "what errors occurred, what URLs you found, or what decisions were made earlier. "
+                    "This is your memory recall tool. If you don't remember, search."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Search term (e.g., movie name, URL keyword, filename)."
+                            "description": "What to search for: a keyword, filename, URL fragment, task description, error message, or leave empty to see recent activity."
                         },
                         "search_type": {
                             "type": "string",
-                            "enum": ["all", "tool_calls", "results"],
-                            "description": "What to search: 'all' (default), 'tool_calls' (arguments only), 'results' (output only)."
+                            "enum": ["all", "user_query", "tool_calls", "results", "agent_response"],
+                            "description": "Scope: 'all' (default), 'user_query' (user messages), 'tool_calls' (tool invocations), 'results' (tool outputs), 'agent_response' (your own replies)."
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Max results to return (default 8)."
                         }
                     },
                     "required": ["query"]
