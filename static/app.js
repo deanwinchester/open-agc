@@ -87,19 +87,21 @@ function initApp() {
   function handleLlamaDownloadProgress(data) {
     const ratio = data.progress || 0;
     const pctText = Math.round(ratio * 100) + '%';
+    const dlId = data.download_id;
+    // Update specific download item by ID
     const historyContainer = document.getElementById('download-history-container') || document.getElementById('downloads-view-container');
-    if (historyContainer) {
-      const downloadingItems = historyContainer.querySelectorAll('.download-item');
-      downloadingItems.forEach(item => {
-        const statusBadge = item.querySelector('.download-status-badge');
-        const isDownloading = statusBadge && statusBadge.classList.contains('downloading');
-        if (isDownloading) {
-          const bar = item.querySelector('.download-item-progress-bar');
-          if (bar) bar.style.width = Math.max(ratio * 100, 0) + '%';
-          const metaSpans = item.querySelectorAll('.download-item-meta span');
-          if (metaSpans.length >= 2) metaSpans[1].textContent = pctText;
+    if (historyContainer && dlId) {
+      const item = historyContainer.querySelector(`.download-item[data-dl-id="${dlId}"]`);
+      if (item) {
+        const bar = item.querySelector('.download-item-progress-bar');
+        if (bar) bar.style.width = Math.max(ratio * 100, 0) + '%';
+        const metaSpans = item.querySelectorAll('.download-item-meta span');
+        if (metaSpans.length >= 2) metaSpans[1].textContent = pctText;
+        if (data.stage === 'complete') {
+          var badge = item.querySelector('.download-status-badge');
+          if (badge) { badge.textContent = 'completed'; badge.className = 'download-status-badge completed'; }
         }
-      });
+      }
     }
 
     const banner = document.getElementById('global-download-banner');
@@ -1037,12 +1039,15 @@ function initApp() {
   });
 
   function updateInputState() {
+    messageInput.disabled = false;
     if (state.isAgentThinking) {
-      messageInput.disabled = true;
-      sendBtn.style.display = 'none';
-      if (stopBtn) { stopBtn.style.display = 'flex'; stopBtn.disabled = false; stopBtn.style.opacity = '1'; }
+      sendBtn.style.display = 'flex';
+      sendBtn.textContent = '追加';
+      sendBtn.title = '追加任务到当前执行中';
+      if (stopBtn) { stopBtn.style.display = 'flex'; stopBtn.disabled = false; stopBtn.opacity = '1'; }
     } else {
-      messageInput.disabled = false;
+      sendBtn.textContent = '发送';
+      sendBtn.title = '';
       sendBtn.style.display = 'flex';
       if (stopBtn) stopBtn.style.display = 'none';
       if (state.isConnected) messageInput.focus();

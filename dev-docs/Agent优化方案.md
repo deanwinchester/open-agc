@@ -30,16 +30,35 @@
 | 自动工具创造 | 进阶 | `tools/auto_tool.py`, `agent/agent.py` | ✓ 完成 |
 | 子代理委派 | 进阶 | `agent/sub_agent.py`, `agent/agent.py` | ✓ 完成 |
 
+### 已完成（第二阶段 — 安全与会话体验）
+
+| 项目 | 优先级 | 涉及文件 | 状态 |
+|------|--------|---------|------|
+| 会话严格隔离 | P0 | `core/memory_store.py`, `agent/agent.py`, `api/server.py` | ✓ 完成 |
+| 沙箱阻断式授权弹窗 | P0 | `tools/base.py`, `agent/agent.py`, `static/app.js` | ✓ 完成 |
+| Shell 自杀保护 | P0 | `tools/shell.py` | ✓ 完成 |
+| 流式 Shell 输出 | P0 | `tools/shell.py`, `static/app.js` | ✓ 完成 |
+| 下载多槽位 + toast 关闭 | P0 | `tools/download.py`, `static/` | ✓ 完成 |
+| 工具权限管理（敏感命令） | P0 | `tools/permissions.py`, `tools/shell.py` | ✓ 完成 |
+| 任务恢复（注入原始目标 + 步骤摘要） | P1 | `api/server.py`, `static/app.js` | ✓ 完成 |
+| 非阻塞任务输入（消息队列） | P1 | `agent/agent.py`, `api/server.py`, `static/app.js` | ✓ 完成 |
+| 向量语义记忆（ChromaDB） | P1 | `core/memory_store.py`, `agent/agent.py` | ✓ 完成 |
+| 自动滚动优化 | P2 | `static/app.js`, `static/style.css` | ✓ 完成 |
+| UI 熊猫图标 + 思考动效 | P2 | `static/index.html`, `static/app.js`, `static/style.css` | ✓ 完成 |
+| 毛玻璃 + 微动效 | P2 | `static/style.css` | ✓ 完成 |
+| 会话邮箱绑定 | P2 | `api/server.py`, `static/` | ✓ 完成 |
+
 ### 未完成 / 待优化
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| Task stats 统计表持久化 | 配置自适应缺乏执行反馈数据持久化 → agent.db task_stats 表 | 低 |
-| 自动工具安全提升机制 | 自动工具连续 3 次成功后才升为永久工具的逻辑未实现 | 低 |
 | 子代理并行执行 | 当前串行执行，可改为 ThreadPoolExecutor 并行 | 中 |
-| 向量检索增强记忆 | 可用 embedding 替代关键词检索 | 中 |
 | 子代理结果深度合成 | 当前仅摘要拼接，可让主 Agent 用 LLM 二次加工 | 低 |
+| 自动工具安全提升机制 | 自动工具连续 3 次成功后才升为永久工具的逻辑未实现 | 低 |
 | 长期运行统计调优 | 定期分析 task_stats 自动调整 TASK_CATEGORIES 参数 | 低 |
+| 桌面助手功能 | 动态熊猫图标 + 系统托盘 + 快捷消息 | 中 |
+| HF 断点续传修复 | resume 接口查询原始 url 再重试 | 低 |
+| 网络访问域名白名单 | 权限管理扩展到网络层 | 中 |
 
 ---
 
@@ -897,13 +916,13 @@ def _get_adaptive_config(self, user_input: str) -> Dict:
 
 ---
 
-## 十五、工具架构进阶优化（参考 Claude Code 源码）
+## 十四、工具架构进阶优化（参考 Claude Code 源码）
 
 **背景**：目前 Open-AGC 的调用方式是 `self.llm.chat(messages=self.messages, tools=self.tool_schemas)`，即将所有工具的完整 JSON Schema（名称、描述、所有参数说明）在每一次请求中**全部打包发送给大模型**。随着内置工具增多、尤其是 `auto_tool` 动态生成的专属工具不断积累，这种“一次性全量暴露”的机制会导致严重的 Token 浪费、上下文超限，且工具过多时大模型的“注意力分散”极易导致调用幻觉。
 
 通过对开源框架（如 Claude Code）源码的深度调研，我们制定了以下四个高优先级的架构级优化方案。
 
-### 15.1 渐进式工具发现机制 (Progressive Disclosure) ✅ [已实施]
+### 14.1 渐进式工具发现机制 (Progressive Disclosure) ✅ [已实施]
 
 借鉴 Claude Code 中的 `ToolSearchTool` 机制，彻底改造目前的工具加载策略。
 
@@ -917,7 +936,7 @@ def _get_adaptive_config(self, user_input: str) -> Dict:
         *   后端根据 Query 进行向量或关键词匹配，返回匹配的工具 Schema（即 `tool_reference`）。
     3.  **动态挂载**：Agent 捕获到模型检索了新工具后，在接下来的对话上下文中，动态将这些新工具的 Schema 追加到 API 请求中。
 
-### 15.2 原生集成 MCP (Model Context Protocol) 协议 ✅ [已实施]
+### 14.2 原生集成 MCP (Model Context Protocol) 协议 ✅ [已实施]
 
 Claude Code 内置了强大的 `MCPTool`, `ListMcpResourcesTool` 等原生支持，使其能无缝连接外部数据。
 
@@ -928,7 +947,7 @@ Claude Code 内置了强大的 `MCPTool`, `ListMcpResourcesTool` 等原生支持
     3.  系统启动时，MCP Client 自动挂载外部 Server 提供的方法。
     4.  配合上述的 **渐进式工具发现机制**，MCP 暴露出的成百上千个工具不会撑爆 Token，而是静默作为 Deferred Tools 等待模型检索调用。
 
-### 15.3 Git Worktree 沙箱保护模式 (Safe Sandbox) ✅ [已实施]
+### 14.3 Git Worktree 沙箱保护模式 (Safe Sandbox) ✅ [已实施]
 
 *   **当前痛点**：大模型直接使用 `edit_file` 和 `write_file` 修改物理文件。一旦大模型陷入死循环、理解错误或改错关键配置，破坏性极强，用户恢复成本高。
 *   **优化方案**：
@@ -938,7 +957,7 @@ Claude Code 内置了强大的 `MCPTool`, `ListMcpResourcesTool` 等原生支持
     4.  大模型在沙箱内尽情试错，并可以执行单元测试。
     5.  测试通过后，调用 `ExitWorktreeTool` 自动将修改合回主分支；如果彻底改乱，可以直接丢弃沙箱，主代码库毫发无损。
 
-### 15.4 强中断/提问专属交互机制 (AskUserQuestionTool) ✅ [已实施]
+### 14.4 强中断/提问专属交互机制 (AskUserQuestionTool) ✅ [已实施]
 
 *   **当前痛点**：目前大模型如果遇到不确定的问题，通常会直接在普通的自然语言回复中输出一个问句。系统无法准确判断 Agent 是“任务结束了”还是“卡住了在等用户”，导致执行状态机混乱。
 *   **优化方案**：
@@ -947,7 +966,7 @@ Claude Code 内置了强大的 `MCPTool`, `ListMcpResourcesTool` 等原生支持
     3.  前端收到此 Tool Call 后，触发特殊事件，弹出全局醒目的模态框阻断用户其他操作，强提示“Agent 正在等待您的确认”。
     4.  Agent 进程挂起等待，用户在前端提交答案后，直接作为 Tool Response 返回给 Agent 继续执行。
 
-### 15.5 全局 Token 消耗监控与可视化 (Token Usage Tracking & Analytics) ✅ [已实施]
+### 14.5 全局 Token 消耗监控与可视化 (Token Usage Tracking & Analytics) ✅ [已实施]
 
 *   **当前痛点**：用户目前无法直观看到 Agent 执行任务时的 Token 开销，也无法统计和追踪各家大模型厂商的 API 消耗成本，容易造成无意识的超额调用和计费黑盒。
 *   **优化方案**：
@@ -960,33 +979,83 @@ Claude Code 内置了强大的 `MCPTool`, `ListMcpResourcesTool` 等原生支持
 
 ---
 
-## 十六、后续路线图与极致体验优化
+## 十五、后续路线图与极致体验优化
 
-在完成 Task 15 的安全与统计大项后，Open-AGC 已具备生产级代理的雏形。接下来的优化将聚焦于“性能、智能深度与视觉巅峰”。
+在完成 Task 14 的安全与统计大项后，Open-AGC 已具备生产级代理的雏形。接下来的优化将聚焦于”性能、智能深度与视觉巅峰”。
 
-### 16.1 语义级向量记忆插件 (Vector Memory Expansion)
+> 📊 实施进度：以下标注 ✅ 已完成、🔧 部分实现、⏳ 待实施。
+
+### 15.1 语义级向量记忆插件 (Vector Memory Expansion) ⏳
 当前基于 FTS5 的搜索仅能处理关键词重合。
 *   **改进方案**：引入 `Chromadb` 或 `FAISS` 本地向量库，使用 `nomic-embed-text` 或 `bge-small-zh` 模型实现语义搜索。
-*   **价值**：使 Agent 能够理解“如何配置数据库”与“帮我连上 MySQL”之间的语义相关性，即便关键词不完全一致。
+*   **价值**：使 Agent 能够理解”如何配置数据库”与”帮我连上 MySQL”之间的语义相关性，即便关键词不完全一致。
+*   **详细设计**：使用 `chromadb` + `sentence-transformers/all-MiniLM-L6-v2`，在 `MemoryStore` 中新增 `add_memory_vector()` 和 `search_semantic()`。渐进式双路搜索（FTS5 + 向量），结果合并去重。依赖可选安装（`pip install chromadb sentence-transformers`）。
 
-### 16.2 异步子任务并行流水线 (Async Sub-task Pipeline)
+### 15.2 异步子任务并行流水线 (Async Sub-task Pipeline) ⏳
 *   **改进方案**：改造 `SubAgent` 调度逻辑，使用 `ThreadPoolExecutor` 并发执行无依赖关系的子任务。
 *   **注意**：需为每个并发子任务分配独立的临时沙箱路径或浏览器实例，避免 IO 冲突。
 
-### 16.3 自动工具的“毕业”与进化机制 (Tool Graduation)
-*   **改进方案**：建立 `tool_trust_score` 模型。新生成的动态工具初始为“临时”状态，在连续 3 次执行成功且用户无负面反馈后，自动“毕业”提升为系统永久技能 (`skills/permanent/`)。
+### 15.3 自动工具的”毕业”与进化机制 (Tool Graduation) ⏳
+*   **改进方案**：建立 `tool_trust_score` 模型。新生成的动态工具初始为”临时”状态，在连续 3 次执行成功且用户无负面反馈后，自动”毕业”提升为系统永久技能 (`skills/permanent/`)。
 
-### 16.4 自适应任务动态参数调优 (Adaptive Hyper-tuning)
-*   **改进方案**：记录 `task_id` 关联的成功率与消耗。如果某类任务（如“环境部署”）平均需要 20 轮，则自动将该类任务的 `max_iterations` 默认值从 50 调优至 30 以节省开销。
+### 15.4 自适应任务动态参数调优 (Adaptive Hyper-tuning) ⏳
+*   **改进方案**：记录 `task_id` 关联的成功率与消耗。如果某类任务（如”环境部署”）平均需要 20 轮，则自动将该类任务的 `max_iterations` 默认值从 50 调优至 30 以节省开销。
 
-### 16.5 结构化多源结果深度合成引擎 (Deep Synthesis)
-*   **改进方案**：不再只是简单的拼接子代理输出。引入专门的“合成 Prompt”，让主 Agent 以专业技术文档的格式汇总所有子任务的产出、修改的文件差异、以及后续操作建议。
+### 15.5 结构化多源结果深度合成引擎 (Deep Synthesis) ⏳
+*   **改进方案**：不再只是简单的拼接子代理输出。引入专门的”合成 Prompt”，让主 Agent 以专业技术文档的格式汇总所有子任务的产出、修改的文件差异、以及后续操作建议。
 
-### 16.6 全链路进度透明化 (Full-stack Progress Tracking)
-*   **改进方案**：将 `progress_callback` 渗透到子代理的每一次工具调用、自动工具的每一行代码生成过程。用户能在前端实时看到“正在生成测试代码...”、“子代理 A 正在检索文档...”等微观动态。
+### 15.6 全链路进度透明化 (Full-stack Progress Tracking) 🔧
+*   **改进方案**：将 `progress_callback` 渗透到子代理的每一次工具调用、自动工具的每一行代码生成过程。用户能在前端实时看到”正在生成测试代码...”、”子代理 A 正在检索文档...”等微观动态。
+*   ✅ 已实现：流式 shell 输出（文件模式 + 轮询线程，前端暗色终端渲染）、内联折叠进度卡片、右侧详情面板、工具调用实时步骤。
 
-### 16.7 极致视觉与动效体验 (Premium UX & Aesthetics) 🚀
-作为 Antigravity 系统，视觉上的“惊艳”与功能同等重要。
-*   **毛玻璃效果 (Glassmorphism)**：全面升级 UI 层次感，增加背景虚化与多层阴影。
-*   **微动效 (Micro-animations)**：为工具调用添加流畅的过渡动画，状态切换增加呼吸灯效果。
-*   **动态主题**：根据当前 Agent 的负载或心情（分析回复情感）动态微调界面配色。
+### 15.7 极致视觉与动效体验 (Premium UX & Aesthetics) 🚀 🔧
+*   ✅ 已完成：熊猫几何化图标（sidebar logo + 对话框 avatar + 思考动画图标）、思考动效（pandaEat 点头 / pandaRoll 翻跟头）、随机萌系文案（8条）、终端暗色输出窗口、流式 shell 进度
+*   ⏳ 待做：毛玻璃效果 (`backdrop-filter: blur(12px)`)、微动效（slideDown 入场动画、呼吸灯）、动态情绪主题
+
+## 十六、待思考方案
+
+> 📊 实施进度：以下标注 ✅ 已完成、🔧 部分实现、⏳ 待实施。
+
+### 16.1 非阻塞任务输入 ⏳
+当前任务执行时阻塞，导致其他任务无法执行，应可以继续输入，自动判断是否为追加任务条件，插入当前任务loop，如果不适合插入当前任务，则排队等待当前任务结束，并可设置优先级。
+
+*   **详细设计**：
+    - `agent/agent.py`：`run_turn()` 增加 `_check_pending_messages()` 轮询
+    - `api/server.py`：WS handler 接收消息入队（非阻塞），不设 `agent_is_running` 阻塞标记
+    - `static/app.js`：输入框始终可用，发送后显示"已加入队列"或"已插入当前任务"
+    - 关键词重叠度 > 50% → 插入当前 loop；否则排队
+    - 任务优先级：`POST /api/tasks/{id}/priority`
+
+### 16.2 工具权限管理 🔧
+不应当局限于路径，类似Claude code的工具权限管理，执行敏感操作需要授权，也可以批量授权、单次授权，授权信息持久化，有过期时间，或授权本会话。
+
+*   ✅ 已实现：三层权限模型
+    - **路径访问** — `check_sandbox()` 阻断式弹窗，四按钮（单次/永久/目录/拒绝），`allowed_paths`/`denied_paths` 配置持久化，设置页面可视化管理
+    - **Shell 自杀保护** — 拦截 `taskkill /f /im python.exe` 等杀服务器命令
+*   ⏳ 待实施：网络访问域名白名单、敏感操作确认（`rm -rf`、`git push --force`、`format C:`）
+*   **详细设计**：
+    - 新增 `tools/permissions.py` 权限管理器，`check_command_permission(command)` 检测敏感操作
+    - 弹窗 "批量授权" 选项："本次会话全部放行此类操作"
+    - 配置持久化：`tool_permissions: {network: {"*.hf.co": "allow"}, shell_destructive: {"rm": "session_allow"}}`
+    - 过期时间：`session`、`1h`、`24h`、`permanent`
+
+### 16.3 桌面助手功能 ⏳
+动态熊猫图标，显示当前任务信息、进度，可交互，支持快捷发送消息，不打开网页。
+
+### 16.4 任务下载大文件处理 🔧
+*   ✅ 已修复：
+    - Shell 工具文件模式 + 流式输出（写 temp 文件，轮询线程 emit `shell_output` 事件，前端暗色终端渲染）
+    - 超时不杀进程（返回 `[Still Running]` + 文件路径，进程继续后台运行）
+    - 下载/安装命令智能检测（`_looks_like_download`），自动延长超时至 600s
+    - Agent 提示词新增"大文件下载规范"，引导使用 `queue_download` 工具
+    - 多槽位下载进度追踪（`_llamacpp_download_state[slot_key]`），前端按 `download_id` 更新特定条目
+    - 下载 toast × 关闭按钮
+*   ⏳ 待修复：
+    - HF 断点续传 resume 接口（需查询 downloads 表获取原始 url 和 partial_path 再重试）
+    - 下载完成后自动回调 agent 继续执行（目前需手动检查）
+
+## 十七、当前问题
+
+### 17.1 max iteration机制不友好，claude code是什么机制？
+
+### 17.2 中断后的自动恢复机制也有问题，我点继续时，系统同时自动恢复，变成两个任务了

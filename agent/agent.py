@@ -148,6 +148,7 @@ class OpenAGCAgent:
         ]
         
         self.user_input_queue = queue.Queue()
+        self.pending_messages: list = []  # Non-blocking input queue during execution
         self.progress_callback = None
         
         # Instantiate tools (MemoryTool shares the same store)
@@ -349,7 +350,7 @@ class OpenAGCAgent:
                                 if content not in similar['content'] else similar['content']
                             self.memory_store.update_memory(similar["id"], merged)
                         else:
-                            self.memory_store.add_memory(
+                            self.memory_store.add_memory_vector(
                                 content=content,
                                 category=category,
                                 importance=importance,
@@ -365,6 +366,26 @@ class OpenAGCAgent:
             )
         except Exception as e:
             print(f"[Agent] Auto-save memories error: {e}")
+
+    def _check_pending_messages(self, current_query: str = "") -> str:
+        """Poll pending message queue. Returns injected message or empty string."""
+        if not self.pending_messages:
+            return ""
+        msg = self.pending_messages.pop(0)
+        # Simple relatedness check: keyword overlap > 30%
+        if current_query:
+            cur_words = set(current_query.lower().split())
+            new_words = set(msg.lower().split())
+            if cur_words and new_words:
+                overlap = len(cur_words & new_words) / max(len(cur_words), len(new_words))
+                if overlap > 0.3:
+                    return f"[用户追加指令] {msg}"
+        self.pending_messages.insert(0, msg)  # Put back if not related
+        return ""
+
+    def queue_message(self, text: str):
+        """Add a message to the pending queue (non-blocking input)."""
+        self.pending_messages.append(text)
 
     def _handle_sandbox_blocked(self, sb, tool_name, tool_args, progress_callback):
         """Pause agent loop and wait for user to approve/deny sandbox path access."""
@@ -867,7 +888,10 @@ class OpenAGCAgent:
         recent_context = "\n".join([_msg_text(m) for m in self.messages[-3:] if m["role"] == "user"])
         memory_context = ""
         try:
-            results = self.memory_store.search_memories(recent_context, top_k=3)
+            # Dual search: semantic (ChromaDB) → FTS5 fallback
+            results = self.memory_store.search_semantic(recent_context, top_k=3)
+            if not results:
+                results = self.memory_store.search_memories(recent_context, top_k=3)
             if results:
                 memory_context = "\n".join([f"- {r['content']} (Type: {r['memory_type']})" for r in results])
         except Exception as e:
@@ -979,6 +1003,13 @@ class OpenAGCAgent:
                 self._record_skill_feedback(success=False, task_input=user_input,
                                             duration=_time.time() - _task_start)
                 return "Task interrupted by user."
+
+            # Check for pending messages from non-blocking input
+            injected = self._check_pending_messages(user_input)
+            if injected:
+                self.messages.append({"role": "user", "content": injected})
+                if verbose:
+                    print(f"[Agent] Injected pending message: {injected[:80]}")
 
             current_iter += 1
             if verbose:
