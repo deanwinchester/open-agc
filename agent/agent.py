@@ -412,10 +412,12 @@ class OpenAGCAgent:
         from core.paths import get_data_path
 
         # Build request
+        is_network = (sb.sandbox_dir == "network")
         pending = {
             "path": sb.path,
             "reason": f"Tool '{tool_name}' needs access to {sb.path}",
             "tool_name": tool_name,
+            "block_type": "network" if is_network else "path",
         }
         if progress_callback:
             progress_callback({
@@ -423,6 +425,7 @@ class OpenAGCAgent:
                 "path": sb.path,
                 "tool_name": tool_name,
                 "session_id": self.session_id,
+                "block_type": "network" if is_network else "path",
             })
 
         # Wait for user response
@@ -447,6 +450,54 @@ class OpenAGCAgent:
             _sandbox_waits.pop(self.session_id, None)
         except Exception:
             pass
+
+        if is_network:
+            # Network domain authorization
+            from urllib.parse import urlparse
+            domain = urlparse(sb.path).hostname or sb.path
+            if action in ("approve_dir", "approve_always"):
+                try:
+                    config_path = get_data_path("config.json")
+                    config = {}
+                    if os.path.exists(config_path):
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            config = _json.load(f)
+                    perms = config.get("tool_permissions", {})
+                    if isinstance(perms, str):
+                        perms = _json.loads(perms)
+                    net = perms.get("network", {})
+                    net[domain] = "allow"
+                    perms["network"] = net
+                    config["tool_permissions"] = perms
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        _json.dump(config, f, ensure_ascii=False, indent=2)
+                    print(f"[Agent] Network approved (always): {domain}")
+                except Exception as e:
+                    print(f"[Agent] Network persist error: {e}")
+                return None  # Retry
+            elif action == "approve_once":
+                if not hasattr(self, '_session_network_whitelist'):
+                    self._session_network_whitelist = set()
+                self._session_network_whitelist.add(domain)
+                print(f"[Agent] Network approved (once): {domain}")
+                return None  # Retry
+            elif action == "deny_always":
+                try:
+                    config_path = get_data_path("config.json")
+                    config = {}
+                    if os.path.exists(config_path):
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            config = _json.load(f)
+                    perms = config.get("tool_permissions", {})
+                    net = perms.get("network", {})
+                    net[domain] = "permanent_deny"
+                    perms["network"] = net
+                    config["tool_permissions"] = perms
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        _json.dump(config, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+            return f"Network access denied by user: {sb.path}"
 
         if action == "approve_dir":
             dirpath = os.path.dirname(os.path.abspath(sb.path))
@@ -1322,6 +1373,8 @@ class OpenAGCAgent:
                                         "_session_whitelist": self._session_sandbox_whitelist,
                                         "_progress_cb": progress_callback,
                                         "_task_id": self.task_id,
+                                        "_network_whitelist": getattr(self, '_session_network_whitelist', set()),
+                                        "_session_id": self.session_id,
                                     }
                                     if 'interrupt_check' in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
                                         result = tool_instance.execute(

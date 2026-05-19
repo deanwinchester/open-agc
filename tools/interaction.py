@@ -152,24 +152,46 @@ class SearchHistoryTool(BaseTool):
                     if isinstance(tc, dict):
                         fn = tc.get("function", {})
                         name = fn.get("name", "")
-                        args_str = fn.get("arguments", "{}")
-                        import json
-                        try:
-                            args = json.loads(args_str) if isinstance(args_str, str) else args_str
-                        except Exception:
+                        raw_args = fn.get("arguments", "{}")
+                        # Normalize: args might be a JSON string OR already-parsed dict
+                        if isinstance(raw_args, str):
+                            args_str = raw_args
+                            try:
+                                import json
+                                args = json.loads(raw_args)
+                            except Exception:
+                                args = {}
+                        elif isinstance(raw_args, dict):
+                            import json
+                            args = raw_args
+                            args_str = json.dumps(raw_args, ensure_ascii=False)
+                        else:
                             args = {}
-                        match = q_lower in args_str.lower() or q_lower in name.lower()
-                        if match or not q_lower:
-                            url = args.get("url", "")
-                            fname = args.get("filename", "")
-                            fpath = args.get("path", "")
-                            cmd = args.get("command", "")[:100]
+                            args_str = "{}"
+                        url = args.get("url", "")
+                        fname = args.get("filename", "")
+                        fpath = args.get("path", "")
+                        cmd = args.get("command", "")[:100]
+                        qtext = args.get("query", "") or args.get("question_text", "") or args.get("reason", "")
+                        # Build searchable text from all arg values
+                        search_text = f"{name} {url} {fname} {fpath} {cmd} {qtext}".lower()
+                        match = q_lower and q_lower in search_text
+                        has_data = bool(url or fname or fpath)
+                        data_score = 3 if has_data else 0
+                        if match:
                             s = f"[工具调用: {name}]"
                             if url: s += f" url={url}"
                             if fname: s += f" filename={fname}"
                             if fpath: s += f" path={fpath}"
                             if cmd: s += f" cmd={cmd}"
-                            scored.append((5 if match else 1, i, s))
+                            if qtext: s += f" query={qtext[:80]}"
+                            scored.append((8 + data_score, i, s))
+                        elif not q_lower and has_data:
+                            s = f"[工具调用: {name}]"
+                            if url: s += f" url={url}"
+                            if fname: s += f" filename={fname}"
+                            if fpath: s += f" path={fpath}"
+                            scored.append((1 + data_score, i, s))
 
             if search_type in ("all", "results") and role == "tool":
                 name = msg.get("name", "")

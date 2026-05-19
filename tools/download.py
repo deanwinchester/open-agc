@@ -4,6 +4,9 @@ from typing import Optional
 
 from tools.base import BaseTool
 
+# Session-scoped pending download IDs, linked to tasks when created
+_pending_task_links: dict = {}  # {session_id: [download_id, ...]}
+
 class DownloadTool(BaseTool):
     """Queue a download in the background. Returns immediately, does NOT block."""
     model_config = {"extra": "allow", "arbitrary_types_allowed": True}
@@ -69,14 +72,8 @@ class DownloadTool(BaseTool):
 
         mgr = get_llamacpp_manager()
 
-        # FTP not supported by requests library — suggest alternatives
-        if url and url.lower().startswith("ftp://"):
-            return (
-                f"FTP 协议暂不支持直接下载。建议:\n"
-                f"1. 使用浏览器找到该文件的 HTTP/HTTPS 镜像链接\n"
-                f"2. 或使用 execute_shell 执行: wget '{url}' -O '{filename}'\n"
-                f"3. 或在下载管理页面搜索同名文件的其他源"
-            )
+        # FTP: use dedicated FTP download handler
+        is_ftp = url and url.lower().startswith("ftp://") if url else False
 
         # Determine download directory: models/ for GGUF, downloads/ for everything else
         from core.paths import get_data_path as _gdp
@@ -116,6 +113,11 @@ class DownloadTool(BaseTool):
         except Exception as e:
             return f"Error creating download record: {e}"
 
+        # Register for session→task linking (server will assign task_id later)
+        sid = kwargs.get("_session_id")
+        if sid is not None and record_id:
+            _pending_task_links.setdefault(sid, []).append(record_id)
+
         # Start background download
         def _download_thread():
             try:
@@ -143,7 +145,13 @@ class DownloadTool(BaseTool):
                         "progress": pct, "stage": "downloading", "error": ""
                     })
 
-                if is_gguf:
+                if is_ftp:
+                    success = _download_ftp(
+                        url=download_url,
+                        target=f"{dl_dir}/{filename}",
+                        progress_callback=progress_cb
+                    )
+                elif is_gguf:
                     success = mgr.download_model(
                         url=download_url,
                         filename=filename,
@@ -251,3 +259,50 @@ class DownloadTool(BaseTool):
                 }
             }
         }
+
+
+def _download_ftp(url: str, target: str, progress_callback=None) -> bool:
+    """Download a file via FTP with progress and resume support."""
+    from urllib.parse import urlparse, unquote
+    import ftplib
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    port = parsed.port or 21
+    path = unquote(parsed.path).lstrip("/")
+    user = parsed.username or "anonymous"
+    pwd = parsed.password or "guest"
+    try:
+        ftp = ftplib.FTP()
+        ftp.connect(host, port, timeout=30)
+        ftp.login(user, pwd)
+        ftp.voidcmd("TYPE I")
+        total = ftp.size(path) or 0
+        partial = target + ".partial"
+        resume_offset = 0
+        mode = "wb"
+        if os.path.exists(partial):
+            resume_offset = os.path.getsize(partial)
+            if total > 0 and resume_offset >= total:
+                os.replace(partial, target)
+                ftp.quit()
+                return True
+            if resume_offset > 0:
+                ftp.voidcmd(f"REST {resume_offset}")
+                mode = "ab"
+        downloaded = resume_offset
+        with open(partial, mode) as fout:
+            def cb(data):
+                nonlocal downloaded
+                fout.write(data)
+                downloaded += len(data)
+                if total > 0 and progress_callback:
+                    progress_callback(downloaded / total)
+            ftp.retrbinary(f"RETR {path}", cb, blocksize=8192)
+        ftp.quit()
+        if total == 0 or downloaded >= total * 0.99:
+            os.replace(partial, target)
+            return True
+        return False
+    except Exception as e:
+        print(f"[Download] FTP error: {e}")
+        return False
