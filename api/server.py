@@ -1347,8 +1347,9 @@ class ModelDownloadRequest(BaseModel):
 @app.post("/api/llamacpp/download-model")
 async def download_llamacpp_model(req: ModelDownloadRequest):
     """Download a GGUF model."""
+    loop = asyncio.get_event_loop()
     manager = get_llamacpp_manager()
-    success = manager.download_model(req.url, req.filename)
+    success = await loop.run_in_executor(None, manager.download_model, req.url, req.filename)
     if success:
         return {"status": "success", "message": f"Model {req.filename} downloaded successfully"}
     else:
@@ -1361,11 +1362,12 @@ class ModelSearchRequest(BaseModel):
 @app.post("/api/llamacpp/search-models")
 async def search_llamacpp_models(req: ModelSearchRequest):
     """Search for GGUF models by name from HuggingFace or ModelScope."""
+    loop = asyncio.get_event_loop()
     manager = get_llamacpp_manager()
     if req.source == "modelscope":
-        results = manager.search_ms_models(req.query)
+        results = await loop.run_in_executor(None, manager.search_ms_models, req.query)
     else:
-        results = manager.search_hf_models(req.query)
+        results = await loop.run_in_executor(None, manager.search_hf_models, req.query)
     return {"status": "success", "models": results}
 
 class ModelFilesRequest(BaseModel):
@@ -1375,11 +1377,12 @@ class ModelFilesRequest(BaseModel):
 @app.post("/api/llamacpp/model-files")
 async def get_llamacpp_model_files(req: ModelFilesRequest):
     """List GGUF files in a model repository (HF or ModelScope)."""
+    loop = asyncio.get_event_loop()
     manager = get_llamacpp_manager()
     if req.source == "modelscope":
-        files = manager.get_ms_model_files(req.repo_id)
+        files = await loop.run_in_executor(None, manager.get_ms_model_files, req.repo_id)
     else:
-        files = manager.get_hf_model_files(req.repo_id)
+        files = await loop.run_in_executor(None, manager.get_hf_model_files, req.repo_id)
     return {"status": "success", "files": files}
 
 class ModelDownloadHFRequest(BaseModel):

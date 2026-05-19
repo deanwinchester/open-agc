@@ -746,7 +746,7 @@ function initApp() {
     lineEl.textContent = text;
     shellBox.appendChild(lineEl);
     shellBox.scrollTop = shellBox.scrollHeight;
-    var lines = shellBox.querySelectorAll('.shell-output-line');
+    var lines = shellBox.getElementsByClassName('shell-output-line');
     while (lines.length > 200) lines[0].remove();
     scrollToBottom();
   }

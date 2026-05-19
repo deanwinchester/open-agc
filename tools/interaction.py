@@ -233,9 +233,9 @@ class SearchHistoryTool(BaseTool):
                     "SELECT task_id, step_number, tool_name, tool_label, "
                     "args_preview, result_preview, full_result, success "
                     "FROM task_steps WHERE session_id=? AND "
-                    "(full_result LIKE ? OR result_preview LIKE ?) "
+                    "(full_result LIKE ? OR result_preview LIKE ? OR args_preview LIKE ?) "
                     "ORDER BY task_id DESC, step_number DESC LIMIT 20",
-                    (sess_id, like_pattern, like_pattern)
+                    (sess_id, like_pattern, like_pattern, like_pattern)
                 ).fetchall()
                 db.close()
                 for step in db_steps:
