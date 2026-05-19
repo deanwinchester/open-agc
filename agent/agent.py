@@ -560,12 +560,70 @@ class OpenAGCAgent:
     }
 
     def _classify_task(self, user_input: str) -> dict:
-        """Classify user input into a task category and return adaptive config."""
+        """Classify user input into a task category and return adaptive config
+        with runtime stats tuning."""
         text = user_input.lower()
+        matched_category = None
         for category, rules in self.TASK_CATEGORIES.items():
             if any(kw in text for kw in rules["keywords"]):
-                return rules["config"]
-        return {"max_iterations": 30, "temperature": 0.3}
+                matched_category = category
+                break
+
+        base_config = (self.TASK_CATEGORIES[matched_category]["config"]
+                       if matched_category
+                       else {"max_iterations": 30, "temperature": 0.3})
+
+        # Apply runtime stats tuning if available
+        if matched_category:
+            stats = self._load_task_stats().get(matched_category, {})
+            sample_count = stats.get("count", 0)
+            if sample_count >= 5:
+                avg_iters = stats.get("avg_iterations", base_config["max_iterations"])
+                success_rate = stats.get("success_rate", 1.0)
+                # Use the higher of (average + 5) or minimum 8
+                tuned = max(int(avg_iters * 1.3), 8)
+                # Don't increase beyond default; don't go below 5
+                tuned = min(tuned, base_config["max_iterations"])
+                tuned = max(tuned, 5)
+                base_config = {**base_config, "max_iterations": tuned}
+                if success_rate < 0.5 and sample_count >= 3:
+                    base_config["max_iterations"] = max(base_config["max_iterations"], 15)
+
+        return base_config
+
+    def _load_task_stats(self) -> dict:
+        try:
+            import json as _j
+            from core.paths import get_data_path
+            path = get_data_path("task_stats.json")
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    return _j.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _save_task_stats(self, category: str, iterations: int, success: bool):
+        try:
+            import json as _j
+            from core.paths import get_data_path
+            path = get_data_path("task_stats.json")
+            stats = self._load_task_stats()
+            entry = stats.get(category, {"count": 0, "total_iterations": 0,
+                                           "successes": 0, "avg_iterations": 0,
+                                           "success_rate": 1.0})
+            entry["count"] += 1
+            entry["total_iterations"] += iterations
+            entry["avg_iterations"] = entry["total_iterations"] / entry["count"]
+            if success:
+                entry["successes"] += 1
+            entry["success_rate"] = entry["successes"] / entry["count"]
+            stats[category] = entry
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                _j.dump(stats, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[Agent] Task stats save error: {e}")
 
     def _register_dynamic_tool(self, tool_name: str, tool_instance) -> bool:
         """Register a dynamically created tool so the LLM can call it."""
@@ -1044,6 +1102,8 @@ class OpenAGCAgent:
             if self.is_interrupted:
                 self._record_skill_feedback(success=False, task_input=user_input,
                                             duration=_time.time() - _task_start)
+                cat = self._classify_task_category(user_input)
+                self._save_task_stats(cat, current_iter, False)
                 return "Task interrupted by user."
 
             # Check for pending messages from non-blocking input
@@ -1279,6 +1339,22 @@ class OpenAGCAgent:
                         self.logger.log_tool_call(function_name, function_args)
                         self.logger.log_tool_result(function_name, str(result), tool_success)
 
+                    # Track auto-tool trust for graduation
+                    tool_obj = self.full_available_tools.get(function_name)
+                    if tool_obj and hasattr(tool_obj, 'fn'):  # DynamicTool has .fn
+                        try:
+                            from tools.auto_tool import record_tool_usage, check_graduation, graduate_tool
+                            from core.paths import get_data_path as _gdp
+                            tools_dir = _gdp(f"auto_tools/{self.session_id or '1'}")
+                            info = record_tool_usage(tools_dir, function_name, tool_success)
+                            if check_graduation(tools_dir, function_name):
+                                print(f"[Agent] Auto-tool {function_name} ready for graduation! ({info['consecutive']} consecutive successes)")
+                                if graduate_tool(tools_dir, function_name):
+                                    # Reload from permanent skills
+                                    self.skill_store.refresh()
+                        except Exception:
+                            pass
+
                     result_str = str(result)
 
                     # Context Compaction: compress long tool results to preserve context window
@@ -1376,6 +1452,9 @@ class OpenAGCAgent:
                     print(f"[Agent] KG extraction error: {e}")
                 self._record_skill_feedback(success=True, task_input=user_input,
                                             duration=_time.time() - _task_start)
+                # Save runtime stats for adaptive tuning
+                cat = self._classify_task_category(user_input)
+                self._save_task_stats(cat, current_iter, True)
                 # Auto-generate tool from successful complex trajectory
                 try:
                     tool_seq = self.reflection_engine._extract_tool_sequence(self.messages)
@@ -1394,7 +1473,17 @@ class OpenAGCAgent:
             print(f"[Agent] KG extraction error: {e}")
         self._record_skill_feedback(success=False, task_input=user_input,
                                     duration=_time.time() - _task_start)
+        cat = self._classify_task_category(user_input)
+        self._save_task_stats(cat, current_iter, False)
         return "[MAX_ITERATIONS_REACHED] Agent stopped: Reached maximum iterations without a final answer. The task may be incomplete."
+
+    def _classify_task_category(self, user_input: str) -> str:
+        """Return the category name for a user input (for stats tracking)."""
+        text = user_input.lower()
+        for category, rules in self.TASK_CATEGORIES.items():
+            if any(kw in text for kw in rules["keywords"]):
+                return category
+        return "general"
         
     def wait_for_user_input(self, question: str, options: Optional[List[str]] = None) -> str:
         """
