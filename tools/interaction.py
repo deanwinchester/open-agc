@@ -1,3 +1,7 @@
+import json
+import os
+import re
+import sqlite3
 from typing import Any, Dict, List, Optional
 from pydantic import Field
 from tools.base import BaseTool
@@ -123,8 +127,6 @@ class SearchHistoryTool(BaseTool):
             return "Error: Cannot search history without agent context."
 
         messages = getattr(agent_ctx, 'messages', [])
-        if not messages:
-            return "当前会话还没有对话历史。"
 
         results = []
         q_lower = query.lower() if query else ""
@@ -217,6 +219,39 @@ class SearchHistoryTool(BaseTool):
             if search_type in ("all", "agent_response") and role == "assistant" and not msg.get("tool_calls"):
                 if q_lower and q_lower in content.lower():
                     scored.append((3, i, f"[Agent 回复] {content[:400]}"))
+
+        # Also search persisted task_steps in database (survives across run_turns)
+        try:
+            from core.paths import get_data_path
+            db_path = get_data_path("chat_history.db")
+            sess_id = getattr(agent_ctx, 'session_id', None)
+            if sess_id and os.path.exists(db_path):
+                db = sqlite3.connect(db_path)
+                db.row_factory = sqlite3.Row
+                like_pattern = f"%{q_lower}%" if q_lower else "%"
+                db_steps = db.execute(
+                    "SELECT task_id, step_number, tool_name, tool_label, "
+                    "args_preview, result_preview, full_result, success "
+                    "FROM task_steps WHERE session_id=? AND "
+                    "(full_result LIKE ? OR result_preview LIKE ?) "
+                    "ORDER BY task_id DESC, step_number DESC LIMIT 20",
+                    (sess_id, like_pattern, like_pattern)
+                ).fetchall()
+                db.close()
+                for step in db_steps:
+                    fr = step["full_result"] or ""
+                    rp = step["result_preview"] or ""
+                    combined = (fr + " " + rp)[:3000]
+                    urls = re.findall(r'(?:https?|ftp)://[^\s\'"<>]{5,}', combined)
+                    preview = (rp or fr)[:300]
+                    label = step["tool_label"] or step["tool_name"]
+                    s = f"[数据库步骤 #{step['task_id']}:{step['step_number']} {label}]"
+                    if urls:
+                        s += f" 链接={urls[0]}" + (f" (+{len(urls)-1})" if len(urls) > 1 else "")
+                    s += f" | {preview[:200]}"
+                    scored.append((3 if urls else 2, step["task_id"] * 1000 + step["step_number"], s))
+        except Exception as e:
+            print(f"[SearchHistory] DB search error: {e}")
 
         # Sort by score descending, take top N
         scored.sort(key=lambda x: -x[0])
