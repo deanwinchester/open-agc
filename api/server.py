@@ -2351,21 +2351,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         if len(title) >= 60:
                             title = title[:57] + '...'
                         ws_task_id = create_task(title, query)
-                        # Link any session downloads that were queued before task creation
-                        import tools.download as _dl
-                        pending = getattr(_dl, '_pending_task_links', {})
-                        dl_ids = pending.pop(ws_session_id, [])
-                        if dl_ids:
-                            print(f"[Task] Linking {len(dl_ids)} pending download(s) to task {ws_task_id}")
-                            dl_conn = sqlite3.connect(DB_PATH)
-                            for dl_id in dl_ids:
-                                dl_conn.execute(
-                                    "UPDATE downloads SET task_id=? WHERE id=? AND task_id IS NULL",
-                                    (ws_task_id, dl_id))
-                            dl_conn.commit()
-                            dl_conn.close()
-                    except Exception:
-                        pass
                     except Exception as e:
                         print(f"[Task] Failed to create task: {e}")
 
@@ -2386,6 +2371,22 @@ async def websocket_endpoint(websocket: WebSocket):
                         print(f"[Task] Failed to add step: {e}")
 
                 if ws_task_id and event.get("event") == "tool_done":
+                    # Link any pending downloads to this task (downloads run AFTER tool execution)
+                    try:
+                        import tools.download as _dl
+                        pending = getattr(_dl, '_pending_task_links', {})
+                        dl_ids = pending.pop(ws_session_id, [])
+                        if dl_ids:
+                            print(f"[Task] tool_done: linking {len(dl_ids)} download(s) to task {ws_task_id}")
+                            dl_conn = sqlite3.connect(DB_PATH)
+                            for dl_id in dl_ids:
+                                dl_conn.execute(
+                                    "UPDATE downloads SET task_id=? WHERE id=? AND task_id IS NULL",
+                                    (ws_task_id, dl_id))
+                            dl_conn.commit()
+                            dl_conn.close()
+                    except Exception:
+                        pass
                     try:
                         # Update the step with result
                         conn = sqlite3.connect(DB_PATH)
