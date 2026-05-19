@@ -117,6 +117,7 @@ class DownloadTool(BaseTool):
         sid = kwargs.get("_session_id")
         if sid is not None and record_id:
             _pending_task_links.setdefault(sid, []).append(record_id)
+            print(f"[Download] Pending task link: session={sid} dl_id={record_id}")
 
         # Start background download
         def _download_thread():
@@ -146,11 +147,13 @@ class DownloadTool(BaseTool):
                     })
 
                 if is_ftp:
+                    print(f"[Download] FTP download starting: {download_url} -> {dl_dir}/{filename}")
                     success = _download_ftp(
                         url=download_url,
                         target=f"{dl_dir}/{filename}",
                         progress_callback=progress_cb
                     )
+                    print(f"[Download] FTP download result: {'success' if success else 'failed'}")
                 elif is_gguf:
                     success = mgr.download_model(
                         url=download_url,

@@ -139,7 +139,6 @@ class SearchHistoryTool(BaseTool):
             if search_type in ("all", "user_query") and role == "user":
                 if q_lower:
                     score = sum(1 for w in q_words if w in content.lower())
-                    score += 3 if q_lower in content.lower() else 0
                 else:
                     score = 1
                 if score > 0:
@@ -175,7 +174,12 @@ class SearchHistoryTool(BaseTool):
                         qtext = args.get("query", "") or args.get("question_text", "") or args.get("reason", "")
                         # Build searchable text from all arg values
                         search_text = f"{name} {url} {fname} {fpath} {cmd} {qtext}".lower()
-                        match = q_lower and q_lower in search_text
+                        # Word-level matching: ALL query words must appear somewhere
+                        if q_lower:
+                            q_words = q_lower.split()
+                            match = all(w in search_text for w in q_words)
+                        else:
+                            match = False
                         has_data = bool(url or fname or fpath)
                         data_score = 3 if has_data else 0
                         if match:
@@ -196,7 +200,11 @@ class SearchHistoryTool(BaseTool):
             if search_type in ("all", "results") and role == "tool":
                 name = msg.get("name", "")
                 c = content[:500].replace('\n', ' ').replace('\r', '')
-                match = q_lower and (q_lower in c.lower() or q_lower in name.lower())
+                if q_lower:
+                    q_ws = q_lower.split()
+                    match = all(w in c.lower() or w in name.lower() for w in q_ws)
+                else:
+                    match = False
                 if match or not q_lower:
                     import re
                     urls = re.findall(r'(?:https?|ftp)://[^\s\'"<>]{5,}', c)
