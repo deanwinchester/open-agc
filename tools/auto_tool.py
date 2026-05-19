@@ -199,3 +199,84 @@ def load_all_dynamic_tools(tools_dir: str) -> Dict[str, DynamicTool]:
             if tool:
                 tools[tool.name] = tool
     return tools
+
+
+# ── Tool Graduation: auto-tool trust scoring ──
+
+TRUST_FILE = "_trust.json"
+GRADUATE_THRESHOLD = 3  # consecutive successes to graduate
+
+
+def _get_trust_path(tools_dir: str) -> str:
+    return os.path.join(tools_dir, TRUST_FILE)
+
+
+def _load_trust(tools_dir: str) -> dict:
+    path = _get_trust_path(tools_dir)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_trust(tools_dir: str, trust: dict):
+    path = _get_trust_path(tools_dir)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(trust, f, ensure_ascii=False, indent=2)
+
+
+def record_tool_usage(tools_dir: str, tool_name: str, success: bool) -> dict:
+    """Record usage of an auto-generated tool. Returns the tool's trust info."""
+    trust = _load_trust(tools_dir)
+    entry = trust.get(tool_name, {"total": 0, "successes": 0, "consecutive": 0,
+                                   "failures": 0, "graduated": False})
+    entry["total"] += 1
+    if success:
+        entry["successes"] += 1
+        entry["consecutive"] += 1
+    else:
+        entry["failures"] += 1
+        entry["consecutive"] = 0  # Reset streak on failure
+    trust[tool_name] = entry
+    _save_trust(tools_dir, trust)
+    return entry
+
+
+def check_graduation(tools_dir: str, tool_name: str) -> bool:
+    """Check if a tool has earned enough trust to graduate to permanent."""
+    trust = _load_trust(tools_dir)
+    entry = trust.get(tool_name, {})
+    if entry.get("graduated"):
+        return False  # Already graduated
+    return entry.get("consecutive", 0) >= GRADUATE_THRESHOLD
+
+
+def graduate_tool(tools_dir: str, tool_name: str) -> bool:
+    """Move an auto-tool to skills/permanent/ after graduation."""
+    from core.paths import get_data_path
+    trust = _load_trust(tools_dir)
+    if tool_name not in trust:
+        return False
+
+    source = os.path.join(tools_dir, f"{tool_name}.py")
+    if not os.path.exists(source):
+        return False
+
+    from core.paths import get_skills_dir
+    permanent_dir = os.path.join(get_skills_dir(), "permanent")
+    os.makedirs(permanent_dir, exist_ok=True)
+    dest = os.path.join(permanent_dir, f"{tool_name}.py")
+
+    try:
+        import shutil
+        shutil.move(source, dest)
+        trust[tool_name]["graduated"] = True
+        _save_trust(tools_dir, trust)
+        print(f"[AutoTool] {tool_name} graduated to permanent skill!")
+        return True
+    except Exception as e:
+        print(f"[AutoTool] Graduation failed for {tool_name}: {e}")
+        return False
