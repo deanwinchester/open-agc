@@ -101,6 +101,9 @@ class ShellTool(BaseTool):
 
         timeout = kwargs.get("timeout", 120)
         timeout = min(max(timeout, 1), 600)  # Clamp 1-600s
+        # Auto-extend timeout for package managers (pip/uv/npm all download large files)
+        if not kwargs.get("timeout") and _looks_like_download(command, ""):
+            timeout = 600  # 10 min for package manager commands
         interrupt_check: Optional[Callable[[], bool]] = kwargs.get("interrupt_check")
         progress_cb: Optional[Callable] = kwargs.get("_progress_cb")
 
@@ -109,9 +112,22 @@ class ShellTool(BaseTool):
         if blocked:
             return blocked
 
+        # ── Permission check for destructive commands ──
+        config_path = get_data_path("config.json")
+        config = {}
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+            except Exception:
+                pass
+        from tools.permissions import check_command_permission
+        allowed, perm_msg = check_command_permission(command, config)
+        if not allowed:
+            return perm_msg
+
         # Sandbox Mode Enforcement
         cwd = None
-        config_path = get_data_path("config.json")
         if os.path.exists(config_path):
             try:
                 with open(config_path, "r", encoding="utf-8") as f:

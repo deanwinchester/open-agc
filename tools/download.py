@@ -97,22 +97,28 @@ class DownloadTool(BaseTool):
         # Start background download
         def _download_thread():
             try:
-                _llamacpp_download_state.update({
-                    "active": True, "type": "model", "label": label,
+                # Register in download slots for multi-download tracking
+                slot_key = f"model_{record_id}"
+                _llamacpp_download_state[slot_key] = {
+                    "active": True, "type": "model", "label": label, "id": record_id,
                     "progress": 0.0, "stage": "downloading", "error": ""
-                })
+                }
+                # Also update legacy active flag for backward compat
+                _llamacpp_download_state["active"] = True
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
+                    "download_id": record_id,
                     "task": "model", "label": label,
                     "progress": 0.0, "stage": "downloading", "error": ""
                 })
 
                 def progress_cb(pct):
                     from api.server import update_download_progress
-                    _llamacpp_download_state["progress"] = pct
+                    _llamacpp_download_state[slot_key]["progress"] = pct
                     update_download_progress(record_id, pct, 'downloading')
                     _broadcast_to_websockets({
                         "type": "llamacpp_download",
+                        "download_id": record_id,
                         "task": "model", "label": label,
                         "progress": pct, "stage": "downloading", "error": ""
                     })
@@ -127,12 +133,13 @@ class DownloadTool(BaseTool):
                 if success:
                     from api.server import update_download_progress
                     update_download_progress(record_id, 1.0, 'completed')
-                    _llamacpp_download_state.update({
+                    _llamacpp_download_state[slot_key].update({
                         "active": False, "progress": 1.0,
                         "stage": "complete", "error": ""
                     })
                     _broadcast_to_websockets({
                         "type": "llamacpp_download",
+                        "download_id": record_id,
                         "task": "model", "label": label,
                         "progress": 1.0, "stage": "complete", "error": ""
                     })
@@ -143,13 +150,14 @@ class DownloadTool(BaseTool):
                 from api.server import update_download_progress
                 err_msg = str(e)
                 update_download_progress(record_id, None, 'failed', err_msg)
-                _llamacpp_download_state.update({
+                _llamacpp_download_state[slot_key].update({
                     "active": False, "stage": "error", "error": err_msg
                 })
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
+                    "download_id": record_id,
                     "task": "model", "label": label,
-                    "progress": _llamacpp_download_state.get("progress", 0),
+                    "progress": _llamacpp_download_state[slot_key].get("progress", 0),
                     "stage": "error", "error": err_msg
                 })
 

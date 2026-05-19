@@ -630,6 +630,8 @@ connected_websockets: list = []  # List of active WebSocket connections
 
 _sandbox_waits: dict = {}  # {session_id: {"event": threading.Event, "result": dict}} — sandbox auth waits
 
+_active_agents: dict = {}  # {session_id: OpenAGCAgent} — for non-blocking message injection
+
 def _broadcast_to_websockets(data: dict):
     """Send data to all connected WebSocket clients."""
     import asyncio
@@ -2376,6 +2378,7 @@ async def websocket_endpoint(websocket: WebSocket):
             )
             agent = OpenAGCAgent(model=current_model, session_id=ws_session_id,
                                  logger=session_logger)
+            _active_agents[ws_session_id] = agent  # Register for message injection
             
             # Inject custom agent profile prompt if specified
             if agent_profile_name and agent_profile_name != "default":
@@ -2435,6 +2438,15 @@ async def websocket_endpoint(websocket: WebSocket):
                                 wait["result"]["path"] = user_msg.get("path", "")
                                 wait["event"].set()
                                 print(f"[WS] Sandbox response: {action} for {sid}")
+                        else:
+                            # Non-blocking input: queue message to agent
+                            q = user_msg.get("query", user_msg.get("text", ""))
+                            if q.strip():
+                                a = _active_agents.get(ws_session_id)
+                                if a:
+                                    a.queue_message(q)
+                                    save_message("user", q, ws_session_id)
+                                    print(f"[WS] Queued message to agent session {ws_session_id}")
                         receive_task = None
                     except WebSocketDisconnect:
                         ws_alive = False

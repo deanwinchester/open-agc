@@ -105,6 +105,7 @@ export async function loadDownloadHistory() {
       const item = document.createElement('div');
       item.className = 'download-item';
       item.id = `download-item-${dl.id}`;
+      item.dataset.dlId = dl.id;
       item.innerHTML = `
         <div class="download-item-icon">${isDataset ? (dl.status === 'completed' ? '📊' : icon) : icon}</div>
         <div class="download-item-body">

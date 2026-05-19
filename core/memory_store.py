@@ -91,6 +91,8 @@ class MemoryStore:
         self.db_path = db_path
         self.session_id = session_id  # None = global/unfiltered
         self._init_db()
+        self._vectordb = None  # Lazy-init ChromaDB
+        self._embed_fn = None
 
     def _get_conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
@@ -554,6 +556,108 @@ class MemoryStore:
             return f"记忆整理完成：移除了 {len(duplicates)} 条重复记忆。"
 
         return "没有发现重复记忆，记忆库状态良好。"
+
+    # ── Vector / Semantic Search (ChromaDB) ──
+
+    def _init_vector(self):
+        """Lazy-init ChromaDB collection for semantic search."""
+        if self._vectordb is not None:
+            return
+        try:
+            import chromadb
+            from chromadb.config import Settings
+            from core.paths import get_data_path
+            chroma_dir = get_data_path("chromadb")
+            os.makedirs(chroma_dir, exist_ok=True)
+            client = chromadb.PersistentClient(
+                path=chroma_dir,
+                settings=Settings(anonymized_telemetry=False)
+            )
+            self._vectordb = client.get_or_create_collection(
+                name=f"memories_{self.session_id or 'global'}",
+                metadata={"hnsw:space": "cosine"}
+            )
+        except ImportError:
+            print("[MemoryStore] ChromaDB not installed — falling back to FTS5 only")
+        except Exception as e:
+            print(f"[MemoryStore] Vector init failed: {e}")
+
+    @staticmethod
+    def _embed(text: str) -> list:
+        """Generate embedding for text using sentence-transformers."""
+        try:
+            from sentence_transformers import SentenceTransformer
+            if not hasattr(MemoryStore, '_embed_model'):
+                MemoryStore._embed_model = SentenceTransformer(
+                    'all-MiniLM-L6-v2', device='cpu')
+            return MemoryStore._embed_model.encode(
+                text[:2000], normalize_embeddings=True).tolist()
+        except ImportError:
+            return None
+        except Exception as e:
+            print(f"[MemoryStore] Embed error: {e}")
+            return None
+
+    def add_memory_vector(self, content: str, category: str = None,
+                          keywords: str = "", importance: int = 1,
+                          memory_type: str = "episode") -> int:
+        """Add memory with vector embedding for semantic search."""
+        mid = self.add_memory(content, category, keywords, importance, memory_type)
+        self._init_vector()
+        if self._vectordb:
+            emb = self._embed(content)
+            if emb:
+                try:
+                    self._vectordb.add(
+                        ids=[str(mid)],
+                        embeddings=[emb],
+                        metadatas=[{"category": category or "general",
+                                     "type": memory_type}]
+                    )
+                except Exception as e:
+                    print(f"[MemoryStore] Vector add error: {e}")
+        return mid
+
+    def search_semantic(self, query: str, top_k: int = 5,
+                        session_id: Optional[int] = None) -> List[Dict]:
+        """Semantic search using ChromaDB. Falls back to FTS5 if unavailable."""
+        self._init_vector()
+        if not self._vectordb:
+            return []  # Caller should fall back to search_memories
+
+        emb = self._embed(query)
+        if not emb:
+            return []
+
+        try:
+            results = self._vectordb.query(
+                query_embeddings=[emb],
+                n_results=top_k
+            )
+            ids = results.get("ids", [[]])[0]
+            if not ids:
+                return []
+
+            # Fetch full memory records from SQLite
+            mems = []
+            with self._get_conn() as conn:
+                for mid in ids:
+                    row = conn.execute(
+                        "SELECT id, category, memory_type, content, keywords, "
+                        "created_at, access_count, importance FROM memories "
+                        "WHERE id=?", (int(mid),)
+                    ).fetchone()
+                    if row:
+                        mems.append({
+                            "id": row[0], "category": row[1], "memory_type": row[2],
+                            "content": row[3], "keywords": row[4], "created_at": row[5],
+                            "access_count": row[6], "importance": row[7],
+                            "relevance": 0.85  # Approximate
+                        })
+            return mems
+        except Exception as e:
+            print(f"[MemoryStore] Semantic search error: {e}")
+            return []
 
 
 # Migrate from old memory.md format

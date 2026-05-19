@@ -72,3 +72,7 @@ print(f"图片已保存至: {output_path}")
 - `execute_python` — 使用 PIL 生成图片
 - `browser_automation` — 发布到小红书平台
 - `write_file` — 保存文案草稿
+
+
+---
+*⚠️ 该技能最近使用效果不佳，成功率低于30%，需要检查修正。Review date: 2026-05-19 11:03*
