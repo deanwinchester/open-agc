@@ -676,6 +676,8 @@ _sandbox_waits: dict = {}  # {session_id: {"event": threading.Event, "result": d
 
 _active_agents: dict = {}  # {session_id: OpenAGCAgent} — for non-blocking message injection
 
+_session_enabled_tools: dict = {}  # {session_id: set(tool_names)} — progressive tool persistence
+
 def _broadcast_to_websockets(data: dict):
     """Send data to all connected WebSocket clients."""
     import asyncio
@@ -2428,8 +2430,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 session_id=ws_session_id
             )
             agent = OpenAGCAgent(model=current_model, session_id=ws_session_id,
-                                 logger=session_logger)
-            _active_agents[ws_session_id] = agent  # Register for message injection
+                                 logger=session_logger,
+                                 pre_enabled_tools=_session_enabled_tools.get(ws_session_id))
+            _active_agents[ws_session_id] = agent
             
             # Inject custom agent profile prompt if specified
             if agent_profile_name and agent_profile_name != "default":
@@ -2532,7 +2535,9 @@ async def websocket_endpoint(websocket: WebSocket):
             
             response = await agent_future
             session_history = agent.messages[1:]
-            
+            # Persist enabled tools for next turn (avoid re-discovering)
+            _session_enabled_tools[ws_session_id] = getattr(agent, 'active_tool_names', set())
+
             # Detect max_iterations hit for longrun auto-resume
             is_max_iter = response and response.startswith("[MAX_ITERATIONS_REACHED]")
             is_backgrounded = response and response.startswith("[TASK_BACKGROUNDED]")
@@ -3107,11 +3112,24 @@ def start_background_monitor():
                             save_task_context(tid, ctx)
                         continue
                     dl_fail = conn.execute(
-                        "SELECT id FROM downloads WHERE task_id=? AND status='failed'",
+                        "SELECT id, error_message FROM downloads WHERE task_id=? AND status='failed' "
+                        "AND background_resumed=0 ORDER BY id DESC LIMIT 1",
                         (tid,)).fetchone()
                     if dl_fail:
+                        conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?",
+                                     (dl_fail["id"],))
+                        conn.commit()
+                        err = dl_fail["error_message"] or "未知错误"
                         update_task_status(tid, "background_failed",
-                            "下载失败", interruption_reason="download_failed")
+                            f"下载失败: {err}", interruption_reason="download_failed")
+                        ctx = get_task_context(tid)
+                        if ctx:
+                            ctx.append({"role": "user", "content": (
+                                f"【系统通知】后台下载任务失败了。错误信息: {err}\n"
+                                "请检查下载管理器中的详细错误，尝试修复后重新下载。"
+                            )})
+                            save_task_context(tid, ctx)
+                        print(f"[BgMonitor] Task {tid}: download failed — notifying agent")
                 conn.close()
             except Exception as e:
                 print(f"[BgMonitor] Error: {e}")
