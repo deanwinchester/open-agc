@@ -2904,18 +2904,49 @@ async def websocket_endpoint(websocket: WebSocket):
                                 session_history = ctx
                             original_goal = (task_row["user_query"] if task_row else "")
                             # Build step summary so agent knows what was already done
-                            step_summary = "\n".join(
-                                f"步骤{s['step_number']}: {s['tool_label'] or s['tool_name']} "
-                                f"({'✓' if s['success'] else '✗'}) "
-                                f"{(s['result_preview'] or '')[:100]}"
-                                for s in steps[-20:]
-                            ) if steps else ""
+                            step_summary_lines = []
+                            for s in steps[-30:]:
+                                label = s['tool_label'] or s['tool_name']
+                                preview = (s['result_preview'] or '')[:120]
+                                step_summary_lines.append(
+                                    f"步骤{s['step_number']}: {label} "
+                                    f"({'✓' if s['success'] else '✗'}) "
+                                    f"{preview}"
+                                )
+                            step_summary = "\n".join(step_summary_lines) if step_summary_lines else ""
+
+                            # Extract key findings from full_result for resume context
+                            key_findings = []
+                            seen_urls = set()
+                            for s in steps:
+                                fr = s['full_result'] or ''
+                                if not fr:
+                                    continue
+                                step_urls = re.findall(r'(?:https?|ftp)://[^\s\'"<>]{5,}', fr)
+                                for u in step_urls:
+                                    if u not in seen_urls:
+                                        seen_urls.add(u)
+                                        key_findings.append(f"📎 URL: {u}")
+                                # Detect extracted data patterns
+                                if s['tool_name'] == 'execute_shell' and s['success']:
+                                    if re.search(r'(?:m3u8|mp4|\.ts)', fr, re.IGNORECASE):
+                                        short = fr[:500].replace('\n', ' ').replace('\r', '')[:120]
+                                        key_findings.append(f"📄 命令产出: {short}")
+
+                            findings_block = ""
+                            if key_findings:
+                                findings_block = (
+                                    "\n--- 之前的关键发现 ---\n"
+                                    + "\n".join(key_findings[:15])
+                                    + "\n---\n"
+                                )
+
                             query = (
                                 f"【原始任务目标】{original_goal}\n\n"
                                 "你需要继续执行这个任务。以下是之前已完成的执行步骤摘要：\n"
                                 "--- 已完成步骤 ---\n"
                                 f"{step_summary}\n"
-                                "---\n"
+                                f"{findings_block}"
                                 "请根据以上原始目标和已完成步骤，从上次中断的地方继续执行。"
                                 "不要重复读取已经成功获得的文件内容，直接使用已有的结果继续下一步。"
                             )
