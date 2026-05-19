@@ -12,6 +12,9 @@ from tools.base import BaseTool
 # Module-level process tracking for interrupt support
 _current_process: Optional[subprocess.Popen] = None
 _current_process_lock = threading.Lock()
+# Track backgrounded shell processes for monitoring
+_background_process_info: dict = {}  # {task_id: {"pid": int, "output_file": str, "command": str, "started_at": float}}
+_background_process_lock = threading.Lock()
 
 # Output directory for streaming shell logs
 SHELL_OUTPUT_DIR = None
@@ -122,9 +125,12 @@ class ShellTool(BaseTool):
             except Exception:
                 pass
         from tools.permissions import check_command_permission, extract_urls_from_command, _check_domain_allowed
-        allowed, perm_msg = check_command_permission(command, config)
+        permission_whitelist = kwargs.get("_permission_whitelist", set())
+        allowed, perm_msg, perm_cat, perm_desc = check_command_permission(command, config, session_whitelist=permission_whitelist)
         if not allowed:
-            return perm_msg
+            from tools.base import SandboxBlocked
+            raise SandboxBlocked(command, sandbox_dir="permission", tool_name="execute_shell",
+                                 category=perm_cat, description=perm_desc)
 
         # Check network domain whitelist — raise SandboxBlocked for popup
         network_whitelist = kwargs.get("_network_whitelist", set())
@@ -238,6 +244,16 @@ class ShellTool(BaseTool):
                         poll_stop.set()
                         poll_thread.join(timeout=2)
                         out_file.close()
+                        # Register as background process for system monitoring
+                        task_id = kwargs.get("_task_id") or kwargs.get("task_id", 0)
+                        with _background_process_lock:
+                            _background_process_info[str(task_id)] = {
+                                "pid": proc.pid,
+                                "output_file": out_path,
+                                "command": command[:200],
+                                "started_at": _t0,
+                                "timeout": timeout,
+                            }
                         tail = _read_tail(out_path, 3000)
                         hint = ""
                         if _looks_like_download(command, tail):
@@ -284,15 +300,43 @@ class ShellTool(BaseTool):
             return f"Error executing shell command: {str(e)}"
 
 
+def get_background_processes() -> dict:
+    """Return dict of tracked background processes: {task_id: info}."""
+    with _background_process_lock:
+        return dict(_background_process_info)
+
+
+def cleanup_background_process(task_id: str):
+    """Remove a background process from tracking."""
+    with _background_process_lock:
+        _background_process_info.pop(str(task_id), None)
+
+
 def _looks_like_download(command: str, output: str) -> bool:
     """Detect if a shell command looks like it's downloading/installing large files."""
     dl_patterns = [
+        # Package managers
         r'\b(pip|pip3|uv pip|conda|mamba)\s+install',
-        r'\b(uv sync|uv run|poetry install|npm install|yarn install)\b',
-        r'\b(wget|curl)\s+.*(\.gguf|\.safetensors|\.bin|\.zip|\.tar)',
+        r'\b(uv sync|uv run|uv add|poetry install|poetry add|npm install|yarn install|pnpm install)\b',
+        r'\b(brew|apt-get|apt |choco|scoop)\s+install',
+        r'\b(rustup update|nvm install|sdk install|gvm install)\b',
+        # Downloads
+        r'\b(wget|curl)\s+.*(\.gguf|\.safetensors|\.bin|\.zip|\.tar|\.gz|\.xz|\.7z|\.dmg|\.pkg)',
         r'\bgit clone\b',
-        r'\bapt-get\s+install|brew\s+install|choco\s+install',
+        r'\bgit pull\b',
+        r'\b(rsync|scp)\s+-',
         r'Downloading|Downloaded|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏',  # pip/uv spinner
+        # Build systems (compilation can take minutes)
+        r'\b(make|cmake --build|ninja|cargo build|go build|dotnet build|mvn install|gradle build)\b',
+        r'\bnpx playwright install\b',
+        r'\bplaywright install\b',
+        # Container operations
+        r'\bdocker\s+(build|pull|push|compose)\b',
+        # AI/ML model downloads
+        r'\bhuggingface-cli download\b',
+        r'\bollama (pull|run)\b',
+        # Large file operations
+        r'\bffmpeg\s+-(?:i|ss)\b',
     ]
     for p in dl_patterns:
         if re.search(p, command, re.IGNORECASE) or re.search(p, output, re.IGNORECASE):

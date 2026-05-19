@@ -290,6 +290,10 @@ def init_db():
         cursor.execute("ALTER TABLE tasks ADD COLUMN interruption_reason TEXT")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN session_id INTEGER DEFAULT 1")
+    except Exception:
+        pass
 
     # Email columns for per-session email binding
     try:
@@ -521,7 +525,8 @@ get_stats_manager(DB_PATH)
 
 # Task helper functions
 def create_task(title: str, user_query: str, task_type: str = 'oneshot',
-                schedule_cron: str = None, schedule_enabled: bool = False) -> int:
+                schedule_cron: str = None, schedule_enabled: bool = False,
+                session_id: int = 1) -> int:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     next_run = None
@@ -532,8 +537,8 @@ def create_task(title: str, user_query: str, task_type: str = 'oneshot',
         except Exception:
             pass
     cursor.execute(
-        "INSERT INTO tasks (title, user_query, task_type, schedule_cron, schedule_enabled, next_run_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (title, user_query, task_type, schedule_cron, 1 if schedule_enabled else 0, next_run)
+        "INSERT INTO tasks (title, user_query, task_type, schedule_cron, schedule_enabled, next_run_at, session_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (title, user_query, task_type, schedule_cron, 1 if schedule_enabled else 0, next_run, session_id)
     )
     task_id = cursor.lastrowid
     conn.commit()
@@ -563,6 +568,41 @@ def update_task_type(task_id: int, task_type: str):
     cursor.execute("UPDATE tasks SET task_type=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (task_type, task_id))
     conn.commit()
     conn.close()
+
+
+_CONTINUATION_PREFIXES = frozenset({
+    # Chinese
+    '继续', '再', '还', '然后', '是的', '对的', '对', '好', '行', '嗯',
+    '这个', '那个', '他', '她', '它', '他们', '她们', '它们',
+    '重试', '重新', '再来', '下一步', '下一条', '上一个',
+    '是', '不', '不要', '算了', '换', '换一个', '换一批',
+    # English
+    'yes', 'no', 'ok', 'okay', 'sure', 'go on', 'continue',
+    'retry', 'again', 'next', 'previous', 'that', 'this', 'it',
+    'him', 'her', 'them', 'that one', 'this one',
+})
+
+
+def _is_continuation_query(query: str) -> bool:
+    """Heuristic: does this query look like a continuation of the previous task?"""
+    q = query.strip()
+    if not q:
+        return False
+    # Very short queries (<15 chars Chinese, <20 chars English) are likely continuations
+    if len(q) < 15:
+        return True
+    # Starts with continuation markers
+    q_lower = q.lower()
+    for prefix in _CONTINUATION_PREFIXES:
+        if q_lower.startswith(prefix):
+            return True
+    # Single entity name (no verb), 2-6 Chinese chars without action verbs
+    import re
+    has_verb = any(re.search(r'[下载搜索查找播放打开创建删除修改更新]', q))
+    if not has_verb and 2 <= len(re.findall(r'[一-鿿]', q)) <= 8:
+        return True
+    return False
+
 
 def save_task_context(task_id: int, messages: list):
     """Save agent conversation messages as a JSON snapshot for resume."""
@@ -870,6 +910,7 @@ class ConfigUpdate(BaseModel):
     owner_email: str
     mcp_servers: Optional[Dict[str, Any]] = None
     session_id: Optional[int] = None  # Target session for email config
+    tool_permissions: Optional[Dict[str, Any]] = None
 
 @app.get("/api/settings")
 async def get_settings(session_id: int = None):
@@ -922,7 +963,8 @@ async def get_settings(session_id: int = None):
         "email_smtp_server": sess_email.get("email_smtp_server", config.get("email_smtp_server", "")),
         "owner_email": sess_email.get("owner_email", config.get("owner_email", "")),
         "allowed_paths": config.get("allowed_paths", []),
-        "denied_paths": config.get("denied_paths", [])
+        "denied_paths": config.get("denied_paths", []),
+        "tool_permissions": config.get("tool_permissions", {})
     }
 
 @app.post("/api/settings")
@@ -984,6 +1026,8 @@ async def update_settings(config_update: ConfigUpdate):
         config["owner_email"] = config_update.owner_email
         if config_update.mcp_servers is not None:
             config["mcp_servers"] = config_update.mcp_servers
+        if config_update.tool_permissions is not None:
+            config["tool_permissions"] = config_update.tool_permissions
 
         # Save per-session email config when session_id is provided
         if config_update.session_id is not None:
@@ -1153,6 +1197,38 @@ async def remove_sandbox_path(body: dict):
         _j.dump(config, f, ensure_ascii=False, indent=2)
 
     return {"ok": True, key: paths}
+
+@app.post("/api/sandbox/remove-permission")
+async def remove_tool_permission(body: dict):
+    """Remove a tool permission entry."""
+    category = (body.get("category") or "").strip()
+    key_name = body.get("key", "")  # specific key in the category, or empty to remove whole category
+    if not category:
+        raise HTTPException(status_code=400, detail="category is required")
+
+    config = load_config()
+    perms = config.get("tool_permissions", {})
+    if isinstance(perms, str):
+        try:
+            import json as _j
+            perms = _j.loads(perms)
+        except Exception:
+            perms = {}
+
+    if key_name:
+        if category in perms and isinstance(perms[category], dict):
+            perms[category].pop(key_name, None)
+            if not perms[category]:
+                perms.pop(category, None)
+    else:
+        perms.pop(category, None)
+
+    config["tool_permissions"] = perms
+    import json as _j
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        _j.dump(config, f, ensure_ascii=False, indent=2)
+
+    return {"ok": True, "tool_permissions": perms}
 
 class PullRequest(BaseModel) :
     model_name: str
@@ -2073,16 +2149,16 @@ async def agent_design(body: dict = {}):
 # ==========================================
 
 @app.get("/api/tasks")
-async def get_tasks(status: str = None, q: str = None):
+async def get_tasks(status: str = None, q: str = None, session_id: int = None):
     """List tasks with optional status filter and search."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    
+
     query = "SELECT t.*, (SELECT COUNT(*) FROM task_steps WHERE task_id = t.id) as step_count FROM tasks t"
     conditions = []
     params = []
-    
+
     if status and status != 'all':
         if status == 'scheduled':
             conditions.append("t.task_type = 'scheduled'")
@@ -2092,7 +2168,10 @@ async def get_tasks(status: str = None, q: str = None):
     if q:
         conditions.append("(t.title LIKE ? OR t.user_query LIKE ?)")
         params.extend([f"%{q}%", f"%{q}%"])
-    
+    if session_id is not None:
+        conditions.append("t.session_id = ?")
+        params.append(session_id)
+
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY t.created_at DESC LIMIT 100"
@@ -2425,14 +2504,46 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not has_taken_action and event.get("event") in ["thinking", "model_switched"]:
                         return
 
-                # Auto-create task on first tool_start
+                # Auto-create task on first tool_start (with session-aware merging)
                 if event.get("event") == "tool_start" and not task_has_tools and not is_heartbeat:
                     task_has_tools = True
                     try:
-                        title = _extract_task_title(query) or query[:60]
-                        if len(title) >= 60:
-                            title = title[:57] + '...'
-                        ws_task_id = create_task(title, query)
+                        db_check = sqlite3.connect(DB_PATH)
+                        existing = db_check.execute(
+                            "SELECT id, status, created_at FROM tasks WHERE session_id=? ORDER BY id DESC LIMIT 1",
+                            (ws_session_id,)
+                        ).fetchone()
+                        db_check.close()
+
+                        reuse = False
+                        if existing:
+                            tid, status, created = existing
+                            if status == 'running':
+                                reuse = True
+                            elif status in ('completed', 'interrupted'):
+                                # Reuse if completed recently (<30min) and query looks like a continuation
+                                try:
+                                    from datetime import datetime, timezone, timedelta
+                                    created_dt = datetime.strptime(created, '%Y-%m-%d %H:%M:%S')
+                                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                                    now = datetime.now(timezone.utc)
+                                    is_recent = (now - created_dt) < timedelta(minutes=30)
+                                except Exception:
+                                    is_recent = False
+
+                                if is_recent and _is_continuation_query(query):
+                                    reuse = True
+                                    update_task_status(tid, "running")
+                                    print(f"[Task] Continuing task {tid} for session {ws_session_id} (continuation: {query[:50]})")
+
+                        if reuse and existing:
+                            ws_task_id = existing[0]
+                            print(f"[Task] Reusing task {ws_task_id} for session {ws_session_id}")
+                        else:
+                            title = _extract_task_title(query) or query[:60]
+                            if len(title) >= 60:
+                                title = title[:57] + '...'
+                            ws_task_id = create_task(title, query, session_id=ws_session_id)
                     except Exception as e:
                         print(f"[Task] Failed to create task: {e}")
 
@@ -3024,13 +3135,24 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                          is_resume: bool = False):
     """Execute a task in background (no WebSocket). Results saved to DB and pushed to clients."""
     from agent.agent import OpenAGCAgent
-    
+
     config = load_config()
     model = config.get("default_model", "moonshot/kimi-latest")
     agent = OpenAGCAgent(model=model)
-    
+
+    # Look up session_id so progress events are routed to the correct session
+    bg_session_id = 1
+    try:
+        bg_conn = sqlite3.connect(DB_PATH)
+        row = bg_conn.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row and row[0]:
+            bg_session_id = row[0]
+        bg_conn.close()
+    except Exception:
+        pass
+
     step_counter = 0
-    
+
     def progress_cb(event: dict):
         nonlocal step_counter
         if event.get("event") == "tool_start":
@@ -3041,7 +3163,8 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                     step_number=event.get("step", step_counter),
                     tool_name=event.get("tool", ""),
                     tool_label=event.get("tool_label", ""),
-                    args_preview=event.get("args_preview", "")
+                    args_preview=event.get("args_preview", ""),
+                    session_id=bg_session_id
                 )
             except Exception:
                 pass
@@ -3058,9 +3181,10 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                 conn.close()
             except Exception:
                 pass
-        
-        # Push progress to connected clients
+
+        # Push progress to connected clients with session_id for proper routing
         event["task_id"] = task_id
+        event["session_id"] = bg_session_id
         event["background"] = True
         _broadcast_to_websockets({"type": "progress", **event})
     
@@ -3080,15 +3204,36 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     _broadcast_to_websockets({
         "type": "message",
         "role": "system",
+        "session_id": bg_session_id,
         "content": f"{'🔄 自动恢复' if is_resume else '⏰ 定时执行'}任务: {user_query[:60]}..."
     })
     
     try:
-        response = agent.run_turn(query, False, progress_cb)
+        response = agent.run_turn(query, False, progress_cb, task_id=task_id)
         is_max_iter = response and response.startswith("[MAX_ITERATIONS_REACHED]")
-        
+        is_backgrounded = response and response.startswith("[TASK_BACKGROUNDED]")
+
         summary = response[:200] if response else ""
-        if response and not is_max_iter:
+        if is_backgrounded:
+            # Agent auto-backgrounded (shell timeout) — save context for resume
+            save_task_context(task_id, agent.messages[1:])
+            update_task_status(task_id, "backgrounded",
+                response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台",
+                interruption_reason="backgrounded")
+            _broadcast_to_websockets({
+                "type": "task_backgrounded",
+                "task_id": task_id,
+                "message": "后台命令执行中，完成后自动恢复",
+                "session_id": bg_session_id,
+            })
+            return response
+        elif is_max_iter:
+            save_task_context(task_id, agent.messages[1:])
+            update_task_status(task_id, "interrupted", summary, interruption_reason="max_iterations")
+        else:
+            update_task_status(task_id, "completed", summary)
+            save_task_context(task_id, [])  # Clear context on success
+        if response and not is_max_iter and not is_backgrounded:
             title = _extract_task_title(response)
             if title:
                 try:
@@ -3098,25 +3243,21 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                     tconn.close()
                 except Exception:
                     pass
-        if is_max_iter:
-            save_task_context(task_id, agent.messages[1:])
-            update_task_status(task_id, "interrupted", summary, interruption_reason="max_iterations")
-        else:
-            update_task_status(task_id, "completed", summary)
-            save_task_context(task_id, [])  # Clear context on success
         
         # Push final result to clients
         _broadcast_to_websockets({
             "type": "message",
             "role": "agent",
+            "session_id": bg_session_id,
             "content": f"**{'🔄 自动恢复' if is_resume else '⏰ 定时'}任务完成**: {user_query[:40]}...\n\n{response[:500]}"
         })
-        
+
         return response
     except Exception as e:
         update_task_status(task_id, "failed", str(e)[:200], interruption_reason="error")
         _broadcast_to_websockets({
             "type": "error",
+            "session_id": bg_session_id,
             "content": f"后台任务失败: {str(e)[:100]}"
         })
         return None
@@ -3162,29 +3303,28 @@ def start_task_scheduler():
                         args=(task_id, task["user_query"]),
                         daemon=True
                     ).start()
-                
-                # 2. Check long-running tasks that need auto-resume
+
+
+                # 2. Auto-resume longrun tasks interrupted by faults (exclude max_iterations)
                 cursor.execute(
-                    "SELECT * FROM tasks WHERE task_type='longrun' AND status='interrupted' AND interruption_reason='max_iterations' AND resume_count < max_resume_count"
+                    "SELECT * FROM tasks WHERE task_type='longrun' AND status='interrupted' "
+                    "AND interruption_reason != 'max_iterations' AND resume_count < max_resume_count"
                 )
                 resume_tasks = cursor.fetchall()
-                
+
                 for task in resume_tasks:
                     task_id = task["id"]
                     print(f"[TaskScheduler] Auto-resuming longrun task #{task_id}: {task['title']}")
-                    
-                    # Increment resume count
+
                     increment_task_resume(task_id)
-                    
-                    # Load saved context
                     ctx = get_task_context(task_id)
-                    
+
                     threading.Thread(
                         target=_run_background_task,
                         args=(task_id, task["user_query"], ctx, True),
                         daemon=True
                     ).start()
-                
+
                 conn.close()
             except Exception as e:
                 print(f"[TaskScheduler] Error: {e}")
@@ -3197,6 +3337,7 @@ def start_background_monitor():
     """Monitor backgrounded tasks — check download/process completion and auto-resume."""
     def monitor_loop():
         import time as _t
+        import os as _os
         while True:
             try:
                 conn = sqlite3.connect(DB_PATH)
@@ -3209,6 +3350,7 @@ def start_background_monitor():
                     print(f"[BgMonitor] Found {len(bg_tasks)} backgrounded task(s) to check")
                 for task in bg_tasks:
                     tid = task["id"]
+                    # 1. Check downloads linked to this task
                     dl = conn.execute(
                         "SELECT id, status FROM downloads WHERE task_id=? AND status='completed' "
                         "AND background_resumed=0 ORDER BY id DESC LIMIT 1",
@@ -3249,6 +3391,62 @@ def start_background_monitor():
                             )})
                             save_task_context(tid, ctx)
                         print(f"[BgMonitor] Task {tid}: download failed — notifying agent")
+                        continue
+
+                    # 2. Check shell background processes
+                    try:
+                        from tools.shell import get_background_processes, cleanup_background_process
+                        bg_procs = get_background_processes()
+                        pinfo = bg_procs.get(str(tid))
+                        if pinfo:
+                            pid = pinfo.get("pid")
+                            out_file = pinfo.get("output_file", "")
+                            command = pinfo.get("command", "")
+                            try:
+                                _os.kill(pid, 0)  # No signal, just check existence
+                                # Process still running — skip
+                            except OSError:
+                                # Process has terminated — directly resume task
+                                cleanup_background_process(str(tid))
+                                full_out = ""
+                                if out_file and _os.path.exists(out_file):
+                                    try:
+                                        with open(out_file, "r", encoding="utf-8", errors="replace") as rf:
+                                            full_out = rf.read()[-5000:]
+                                    except Exception:
+                                        pass
+                                    try:
+                                        _os.remove(out_file)
+                                    except Exception:
+                                        pass
+                                ctx = get_task_context(tid)
+                                if ctx:
+                                    ctx.append({"role": "user", "content": (
+                                        f"【系统通知】后台命令已执行完毕。\n"
+                                        f"命令: `{command[:100]}`\n"
+                                        f"输出:\n```\n{full_out[:2000]}\n```\n"
+                                        f"请根据输出结果继续执行之前未完成的任务。"
+                                    )})
+                                    save_task_context(tid, ctx)
+                                # Directly resume instead of waiting for scheduler
+                                increment_task_resume(tid)
+                                task_row = conn.execute(
+                                    "SELECT user_query FROM tasks WHERE id=?", (tid,)
+                                ).fetchone()
+                                user_query = task_row["user_query"] if task_row else ""
+                                print(f"[BgMonitor] Task {tid}: shell process {pid} done — resuming directly")
+                                # Update status inside the thread to avoid race with scheduler
+                                def _do_resume_with_status():
+                                    update_task_status(tid, "interrupted",
+                                        "后台命令完成", interruption_reason="background_complete")
+                                    _run_background_task(tid, user_query, ctx, True)
+                                threading.Thread(
+                                    target=_do_resume_with_status,
+                                    daemon=True
+                                ).start()
+                    except Exception as e:
+                        print(f"[BgMonitor] Shell process check error: {e}")
+
                 conn.close()
             except Exception as e:
                 print(f"[BgMonitor] Error: {e}")

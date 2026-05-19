@@ -48,6 +48,7 @@ export async function loadSettingsConfig() {
     }
 
     renderSandboxPaths(data.allowed_paths || [], data.denied_paths || []);
+    renderToolPermissions(data.tool_permissions || {});
 
     state.settingsLoaded = true;
   } catch (err) {
@@ -296,9 +297,15 @@ async function saveSettings() {
     email_imap_server: document.getElementById('email-imap-input')?.value?.trim() || '',
     email_smtp_server: document.getElementById('email-smtp-input')?.value?.trim() || '',
     owner_email: document.getElementById('owner-email-input')?.value?.trim() || '',
-    session_id: state.currentSessionId || 1
+    session_id: state.currentSessionId || 1,
+    tool_permissions: null
   };
-  
+
+  // Include current tool_permissions in save
+  if (Object.keys(_toolPermissions).length > 0) {
+    payload.tool_permissions = JSON.parse(JSON.stringify(_toolPermissions));
+  }
+
   try {
     const mcpStr = document.getElementById('mcp-config-input')?.value?.trim();
     payload.mcp_servers = mcpStr ? JSON.parse(mcpStr) : {};
@@ -866,6 +873,7 @@ function applyAIDesignToForm() {
 }
 
 // ===================== Expose to window for legacy navigation =====================
+let _toolPermissions = {};  // Cache for saveSettings()
 function renderSandboxPaths(allowed, denied) {
   renderPathChips('allowed-paths-list', allowed, 'allowed');
   renderPathChips('denied-paths-list', denied, 'denied');
@@ -899,6 +907,92 @@ function renderPathChips(containerId, paths, listType) {
       });
     });
     container.appendChild(chip);
+  });
+}
+
+function renderToolPermissions(perms) {
+  _toolPermissions = perms;
+  // Network domains
+  renderPermChips('network-domain-list', perms.network, 'network');
+  // Command categories (all except network)
+  var cmdPerms = {};
+  for (var cat in perms) {
+    if (cat !== 'network' && perms.hasOwnProperty(cat)) {
+      cmdPerms[cat] = perms[cat];
+    }
+  }
+  renderCommandPerms('cmd-permission-list', cmdPerms);
+}
+
+function renderPermChips(containerId, entries, category) {
+  var container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = '';
+  if (!entries || typeof entries !== 'object' || Object.keys(entries).length === 0) {
+    container.innerHTML = '<span style="color:var(--text-secondary);font-size:0.82rem;">无</span>';
+    return;
+  }
+  Object.keys(entries).forEach(function(key) {
+    var status = entries[key];
+    var statusIcon = status === 'allow' ? '✅' : status === 'session_allow' ? '🔄' : status === 'permanent_deny' || status === 'deny' ? '🚫' : '❓';
+    var chip = document.createElement('span');
+    chip.className = 'path-chip';
+    chip.title = key + ' → ' + status;
+    chip.innerHTML = statusIcon + ' ' + key.substring(0, 40) + ' <button class="path-chip-del" title="移除">×</button>';
+    chip.querySelector('.path-chip-del').addEventListener('click', function(e) {
+      e.stopPropagation();
+      fetch('/api/sandbox/remove-permission', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: category, key: key })
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        if (d.ok) {
+          state.settingsLoaded = false;
+          loadSettingsConfig();
+        }
+      });
+    });
+    container.appendChild(chip);
+  });
+}
+
+function renderCommandPerms(containerId, cmdPerms) {
+  var container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = '';
+  var categories = Object.keys(cmdPerms);
+  if (categories.length === 0) {
+    container.innerHTML = '<span style="color:var(--text-secondary);font-size:0.82rem;">无</span>';
+    return;
+  }
+  categories.forEach(function(cat) {
+    var entries = cmdPerms[cat];
+    if (typeof entries !== 'object') {
+      entries = { '_': entries };
+    }
+    Object.keys(entries).forEach(function(key) {
+      var status = entries[key];
+      var statusIcon = status === 'allow' ? '✅' : status === 'session_allow' ? '🔄' : status === 'permanent_deny' || status === 'deny' ? '🚫' : '❓';
+      var label = cat + (key !== '_' && key !== cat ? '/' + key : '');
+      var chip = document.createElement('span');
+      chip.className = 'path-chip';
+      chip.title = cat + ' → ' + status;
+      chip.innerHTML = statusIcon + ' ' + label.substring(0, 50) + ' <button class="path-chip-del" title="移除">×</button>';
+      chip.querySelector('.path-chip-del').addEventListener('click', function(e) {
+        e.stopPropagation();
+        fetch('/api/sandbox/remove-permission', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ category: cat, key: key })
+        }).then(function(r) { return r.json(); }).then(function(d) {
+          if (d.ok) {
+            state.settingsLoaded = false;
+            loadSettingsConfig();
+          }
+        });
+      });
+      container.appendChild(chip);
+    });
   });
 }
 
