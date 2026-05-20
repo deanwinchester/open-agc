@@ -10,31 +10,49 @@ export function initTaskFilters() {
       document.querySelectorAll('.filter-pill').forEach(p => p.classList.remove('active'));
       pill.classList.add('active');
       state.taskFilter = pill.dataset.filter;
-      loadTasks();
+      loadTasks(true);
     });
   });
   document.getElementById('task-search-input')?.addEventListener('input', (e) => {
     state.taskSearchQuery = e.target.value.trim();
     clearTimeout(state.taskRefreshInterval);
-    state.taskRefreshInterval = setTimeout(loadTasks, 300);
+    state.taskRefreshInterval = setTimeout(() => loadTasks(true), 300);
   });
   document.getElementById('task-detail-back')?.addEventListener('click', () => {
     switchView('tasks');
   });
 }
 
-export async function loadTasks() {
+export async function loadTasks(resetPage = false) {
   const container = document.getElementById('task-list-container');
   if (!container) return;
+  window._perf.loadTasksStart = performance.now();
 
   try {
+    if (resetPage) state.taskPage = 1;
+
     let url = '/api/tasks';
     const params = [];
     if (state.taskFilter !== 'all') params.push(`status=${state.taskFilter}`);
     if (state.taskSearchQuery) params.push(`q=${encodeURIComponent(state.taskSearchQuery)}`);
+    params.push(`page=${state.taskPage}`);
+    params.push(`page_size=50`);
     if (params.length > 0) url += '?' + params.join('&');
 
     const data = await cachedFetch(url);
+    const fetchDonePerf = performance.now();
+    if (data._dbg) {
+      const perfStart = window._perf.start;
+      const dateStart = window._perf.dateStart;
+      const clientSentMs = window._perf.loadTasksStart
+        ? (dateStart + (window._perf.loadTasksStart - perfStart))
+        : 0;
+      console.log('[DBG]', JSON.stringify(data._dbg),
+        '| client_sent_at:', Math.round(clientSentMs),
+        '| client_recv_at:', Math.round(fetchDonePerf + dateStart),
+        '| rtt:', Math.round(fetchDonePerf - (window._perf.loadTasksStart || 0)), 'ms');
+    }
+    state.totalTaskCount = data.total_count || 0;
 
     if (!data.tasks || data.tasks.length === 0) {
       container.innerHTML = `
@@ -136,6 +154,33 @@ export async function loadTasks() {
         }
       });
     });
+
+    // Pagination controls
+    const totalPages = Math.ceil(state.totalTaskCount / 50);
+    if (totalPages > 1) {
+      const pagination = document.createElement('div');
+      pagination.className = 'task-pagination';
+      pagination.innerHTML = `
+        <button class="pagination-btn" data-page="${state.taskPage - 1}" ${state.taskPage <= 1 ? 'disabled' : ''}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
+          上一页
+        </button>
+        <span class="pagination-info">${state.taskPage} / ${totalPages} (共 ${state.totalTaskCount} 条)</span>
+        <button class="pagination-btn" data-page="${state.taskPage + 1}" ${state.taskPage >= totalPages ? 'disabled' : ''}>
+          下一页
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+        </button>
+      `;
+      container.appendChild(pagination);
+
+      pagination.querySelectorAll('.pagination-btn:not([disabled])').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.taskPage = parseInt(btn.dataset.page);
+          loadTasks();
+          container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+      });
+    }
   } catch (e) {
     console.error('Failed to load tasks:', e);
   }

@@ -18,6 +18,8 @@ export const state = {
   skillsLoaded: false,
   taskFilter: 'all',
   taskSearchQuery: '',
+  taskPage: 1,
+  totalTaskCount: 0,
   taskRefreshInterval: null,
   editingAgentName: null,
   aiDesignResult: null,

@@ -292,17 +292,9 @@ class LlamaCppManager:
         return self.download_model(url, local_name, progress_callback, resume=resume)
 
     def is_running(self) -> bool:
-        """Check if llama-server is already responding."""
+        """Quick-check if llama-server is already responding (short timeout, single attempt)."""
         try:
-            # Try /health first (standard endpoint)
-            resp = requests.get(f"http://localhost:{self.port}/health", timeout=2)
-            if resp.status_code == 200:
-                return True
-        except Exception:
-            pass
-        try:
-            # Fallback: try /v1/models (OpenAI-compatible endpoint always available)
-            resp = requests.get(f"http://localhost:{self.port}/v1/models", timeout=2)
+            resp = requests.get(f"http://localhost:{self.port}/health", timeout=0.5)
             return resp.status_code == 200
         except Exception:
             return False

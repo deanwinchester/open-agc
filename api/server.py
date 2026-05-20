@@ -113,6 +113,8 @@ print(f"[Server] Loaded {len(_plugins)} plugin(s)")
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     cursor = conn.cursor()
 
     # Sessions table (new)
@@ -362,6 +364,33 @@ def init_db():
     conn.close()
 
 init_db()
+
+# ── Create indexes for query performance ──
+def create_indexes():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_task_steps_task_id ON task_steps(task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_task_steps_session_id ON task_steps(session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_task_type_status ON tasks(task_type, status)",
+        "CREATE INDEX IF NOT EXISTS idx_downloads_task_id ON downloads(task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status)",
+        "CREATE INDEX IF NOT EXISTS idx_downloads_filename ON downloads(filename)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at)",
+    ]
+    for idx in indexes:
+        try:
+            cursor.execute(idx)
+        except Exception as e:
+            print(f"[DB] Index error: {e}")
+    conn.commit()
+    conn.close()
+    print(f"[DB] Created {len(indexes)} indexes")
+
+create_indexes()
 
 def reconcile_downloads():
     """On startup, scan .partial files and reconcile DB records."""
@@ -2367,15 +2396,32 @@ async def agent_design(body: dict = {}):
 # ==========================================
 
 @app.get("/api/tasks")
-async def get_tasks(status: str = None, q: str = None, session_id: int = None):
-    """List tasks with optional status filter and search."""
-    conn = sqlite3.connect(DB_PATH)
+async def get_tasks(status: str = None, q: str = None, session_id: int = None,
+                    page: int = 1, page_size: int = 50):
+    """List tasks with optional status filter, search, and pagination."""
+    if page < 1:
+        page = 1
+    if page_size < 1 or page_size > 200:
+        page_size = 50
+    offset = (page - 1) * page_size
+
+    conn = sqlite3.connect(DB_PATH, timeout=2)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
+    # Explicitly set WAL mode on this connection
+    cur = conn.execute("PRAGMA journal_mode")
+    row = cur.fetchone()
+    jm = row[0] if row else '?'
+    if jm != 'wal':
+        print(f"[DB] get_tasks: journal_mode={jm}, attempting WAL...")
+        r2 = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+        print(f"[DB] get_tasks: after PRAGMA journal_mode=WAL -> {r2[0] if r2 else '?'}")
+    conn.execute("PRAGMA busy_timeout=2000")
 
-    query = ("SELECT t.*, sess.name as session_name, "
-             "(SELECT COUNT(*) FROM task_steps WHERE task_id = t.id) as step_count "
-             "FROM tasks t LEFT JOIN sessions sess ON sess.id = t.session_id")
+    columns = ("t.id, t.title, t.user_query, t.status, t.task_type, "
+               "t.created_at, t.updated_at, t.result_summary, "
+               "t.session_id, t.schedule_cron, t.schedule_enabled, "
+               "t.next_run_at, t.resume_count")
     conditions = []
     params = []
 
@@ -2392,14 +2438,28 @@ async def get_tasks(status: str = None, q: str = None, session_id: int = None):
         conditions.append("t.session_id = ?")
         params.append(session_id)
 
+    where_clause = ""
     if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY t.created_at DESC LIMIT 100"
-    
-    cursor.execute(query, params)
+        where_clause = " WHERE " + " AND ".join(conditions)
+
+    # Count total matching rows
+    t0 = _time.time()
+    count_query = "SELECT COUNT(*) FROM tasks t" + where_clause
+    cursor.execute(count_query, params)
+    total_count = cursor.fetchone()[0]
+    t1 = _time.time()
+
+    # Fetch page
+    query = ("SELECT " + columns + ", sess.name as session_name, "
+             "(SELECT COUNT(*) FROM task_steps WHERE task_id = t.id) as step_count "
+             "FROM tasks t LEFT JOIN sessions sess ON sess.id = t.session_id" +
+             where_clause +
+             " ORDER BY t.created_at DESC LIMIT ? OFFSET ?")
+    cursor.execute(query, params + [page_size, offset])
     rows = cursor.fetchall()
     conn.close()
-    
+    t2 = _time.time()
+
     tasks = []
     for row in rows:
         sid = row["session_id"] if "session_id" in row.keys() else None
@@ -2420,7 +2480,9 @@ async def get_tasks(status: str = None, q: str = None, session_id: int = None):
             "next_run_at": row["next_run_at"] if "next_run_at" in row.keys() else None,
             "resume_count": row["resume_count"] if "resume_count" in row.keys() else 0
         })
-    return {"tasks": tasks}
+    return {"tasks": tasks, "total_count": total_count, "page": page, "page_size": page_size,
+            "_dbg": {"jm": jm, "t_count": round(t1-t0, 3), "t_query": round(t2-t1, 3), "t_total": round(t2-t0, 3),
+                     "server_ts": _time.time()}}
 
 @app.get("/api/tasks/{task_id}")
 async def get_task_detail(task_id: int):

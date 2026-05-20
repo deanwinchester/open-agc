@@ -50,7 +50,29 @@ document.getElementById('global-download-close')?.addEventListener('click', () =
 // =============================================
 // Main App Init
 // =============================================
+function loadVendorScripts() {
+  var scripts = [
+    '/static/vendor/chart.min.js',
+    '/static/vendor/marked.min.js',
+    '/static/vendor/highlight.min.js'
+  ];
+  // Load vendor scripts one at a time with delay, so they don't hog connections
+  var i = 0;
+  function next() {
+    if (i >= scripts.length) return;
+    var s = document.createElement('script');
+    s.src = scripts[i++];
+    s.onload = next;
+    s.onerror = next;
+    document.head.appendChild(s);
+  }
+  // Start loading after a delay, giving priority to API calls
+  setTimeout(next, 2000);
+}
+
 function initApp() {
+  window._perf.initApp = performance.now();
+  loadVendorScripts();
   initI18n();
   initNavigation();
   loadPlugins();
@@ -1436,11 +1458,15 @@ function initApp() {
     } catch (e) {
       console.error("Failed to load initial data", e);
     }
+    console.log('[PERF] fetchInitialData done', (performance.now() - window._perf.start).toFixed(1), 'ms');
   }
 
   fetchInitialData().then(() => {
+    window._perf.connected = performance.now();
+    console.log('[PERF] connectWebSocket', (performance.now() - window._perf.start).toFixed(1), 'ms');
     connectWebSocket();
   });
+  console.log('[PERF] initApp done', (performance.now() - window._perf.start).toFixed(1), 'ms');
 }
 
 if (document.readyState === 'loading') {
