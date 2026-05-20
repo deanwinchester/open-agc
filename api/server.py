@@ -2557,11 +2557,25 @@ async def get_task_detail(task_id: int):
 
 @app.post("/api/tasks/{task_id}/interrupt")
 async def interrupt_task(task_id: int):
-    """Mark a task as interrupted by user and stop its background agent."""
-    # Stop background agent if running
+    """Mark a task as interrupted by user and stop its agent."""
+    # 1. Stop background agent if running
     bg_agent = _background_agents.get(task_id)
     if bg_agent:
         bg_agent.is_interrupted = True
+
+    # 2. Find foreground agent via task's session_id
+    try:
+        conn_i = sqlite3.connect(DB_PATH)
+        row_i = conn_i.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()
+        conn_i.close()
+        if row_i:
+            sid = row_i[0]
+            fg_agent = _active_agents.get(sid)
+            if fg_agent:
+                fg_agent.is_interrupted = True
+    except Exception:
+        pass
+
     interrupt_shell()
 
     # Cancel any active download associated with this task
@@ -3172,6 +3186,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             update_task_type(ws_task_id, 'longrun')
                     except Exception:
                         pass
+                elif response and ("interrupted by user" in response.lower() or "interrupted" in response.lower()):
+                    save_task_context(ws_task_id, agent.messages[1:])
+                    update_task_status(ws_task_id, "interrupted", summary, interruption_reason="user")
                 else:
                     update_task_status(ws_task_id, "completed", summary)
                 
@@ -3189,6 +3206,12 @@ async def websocket_endpoint(websocket: WebSocket):
             return response
         except Exception as e:
             if ws_task_id:
+                # Save context so failed tasks can also be resumed
+                if agent:
+                    try:
+                        save_task_context(ws_task_id, agent.messages[1:])
+                    except Exception:
+                        pass
                 update_task_status(ws_task_id, "failed", str(e)[:200], interruption_reason="error")
             raise
         finally:
