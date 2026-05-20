@@ -329,6 +329,7 @@ async def download_dataset(req: DatasetDownloadRequest):
     _download_slots[db_download_id] = slot_state
     # Update global state for banner
     _llamacpp_download_state.update(slot_state)
+    _llamacpp_download_state["cancelled"] = False
 
     def run_download():
         global _llamacpp_download_state
@@ -336,6 +337,8 @@ async def download_dataset(req: DatasetDownloadRequest):
         slot = _download_slots[dl_id]
         try:
             def progress_cb(ratio, label=None):
+                if _llamacpp_download_state.get("cancelled"):
+                    return
                 slot["progress"] = ratio
                 _update_download_progress(dl_id, ratio)
                 _broadcast({"type":"llamacpp_download","task":"dataset",
@@ -379,20 +382,31 @@ async def download_dataset(req: DatasetDownloadRequest):
             if count == 0 and os.path.exists(target_path):
                 count = sum(1 for _ in open(target_path,"r",encoding="utf-8") if _.strip())
 
+            if _llamacpp_download_state.get("cancelled"):
+                return
+
             conn2 = sqlite3.connect(_db_path); cur2 = conn2.cursor()
             cur2.execute("INSERT INTO datasets (name,source,source_path,storage_path,format,sample_count) VALUES (?,'huggingface',?,?,'jsonl',?)",
                          (ds_name, req.repo_id, target_path, count))
             conn2.commit(); conn2.close()
 
-            _llamacpp_download_state.update({"active":False,"stage":"complete","progress":1.0})
             slot.update({"active":False,"stage":"complete","progress":1.0})
             _update_download_progress(dl_id, 1.0, status="completed", downloaded_bytes=count)
+            # Only set top-level active=False when ALL slots are done
+            _llamacpp_download_state.update({"stage":"complete","progress":1.0})
+            if not any(s.get("active") for s in _download_slots.values()):
+                _llamacpp_download_state["active"] = False
             _broadcast({"type":"llamacpp_download","task":"dataset","download_id":dl_id,
                         "label":f"{ds_name} 下载完成 ({count} 条)","progress":1.0,"stage":"complete"})
             _download_slots.pop(dl_id, None)
         except Exception as e:
+            if _llamacpp_download_state.get("cancelled"):
+                return
             slot.update({"active":False,"stage":"error","error":str(e)})
-            _llamacpp_download_state.update({"active":False,"stage":"error","error":str(e)})
+            # Only set top-level active=False when ALL slots are done
+            _llamacpp_download_state.update({"stage":"error","error":str(e)})
+            if not any(s.get("active") for s in _download_slots.values()):
+                _llamacpp_download_state["active"] = False
             _update_download_progress(dl_id, 0.0, status="failed", error_message=str(e))
             _broadcast({"type":"llamacpp_download","task":"dataset","download_id":dl_id,
                         "label":f"下载失败: {e}","progress":0.0,"stage":"error","error":str(e)})

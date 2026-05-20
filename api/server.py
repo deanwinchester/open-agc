@@ -195,6 +195,17 @@ def init_db():
         )
     ''')
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS download_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            download_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            message TEXT DEFAULT '',
+            details TEXT DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (download_id) REFERENCES downloads(id) ON DELETE CASCADE
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS benchmark_results (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             model_id TEXT NOT NULL,
@@ -324,6 +335,16 @@ def init_db():
     # Add session_id to task_steps for session persistence
     try:
         cursor.execute("ALTER TABLE task_steps ADD COLUMN session_id INTEGER DEFAULT 1")
+    except Exception:
+        pass
+
+    # Add tool_call_id and full_args for perfect context reconstruction
+    try:
+        cursor.execute("ALTER TABLE task_steps ADD COLUMN tool_call_id TEXT")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE task_steps ADD COLUMN full_args TEXT")
     except Exception:
         pass
 
@@ -598,7 +619,7 @@ def _is_continuation_query(query: str) -> bool:
             return True
     # Single entity name (no verb), 2-6 Chinese chars without action verbs
     import re
-    has_verb = any(re.search(r'[下载搜索查找播放打开创建删除修改更新]', q))
+    has_verb = re.search(r'[下载搜索查找播放打开创建删除修改更新]', q) is not None
     if not has_verb and 2 <= len(re.findall(r'[一-鿿]', q)) <= 8:
         return True
     return False
@@ -616,18 +637,66 @@ def save_task_context(task_id: int, messages: list):
     conn.close()
 
 def get_task_context(task_id: int) -> list:
-    """Load saved conversation context for a task."""
+    """Load saved conversation context for a task, with fallback reconstruction."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT context_snapshot FROM tasks WHERE id=?", (task_id,))
+    cursor.execute("SELECT context_snapshot, user_query FROM tasks WHERE id=?", (task_id,))
     row = cursor.fetchone()
-    conn.close()
     if row and row[0]:
         try:
-            return json.loads(row[0])
+            ctx = json.loads(row[0])
+            conn.close()
+            if ctx:  # valid non-empty snapshot
+                return ctx
         except Exception:
             pass
-    return []
+
+    # Fallback: reconstruct context from user_query + task_steps
+    # Uses saved tool_call_id and full_args to build API-compatible tool_call/tool pairs
+    user_query = row[1] if row else ""
+    reconstructed = []
+    reconstructed.append({"role": "user", "content": user_query})
+
+    cursor.execute(
+        "SELECT tool_name, tool_label, args_preview, result_preview, full_result, success, "
+        "tool_call_id, full_args "
+        "FROM task_steps WHERE task_id=? ORDER BY step_number ASC", (task_id,))
+    steps = cursor.fetchall()
+    conn.close()
+
+    if steps:
+        for s in steps:
+            tool_name = s[0]
+            label = s[1] or tool_name
+            result = s[4] or s[3] or ""
+            tc_id = s[6]
+            if not tc_id:
+                args_for_id = s[2] or ""
+                tc_id = f"call_recon_{args_for_id[:8]}" if args_for_id else f"call_recon_{tool_name}"
+            full_args = s[7] or "{}"
+
+            reconstructed.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": tc_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": full_args
+                    }
+                }]
+            })
+            reconstructed.append({
+                "role": "tool",
+                "tool_call_id": tc_id,
+                "name": tool_name,
+                "content": result[:5000] if result else "(无输出)"
+            })
+
+        print(f"[Task] Reconstructed context for task {task_id} from {len(steps)} step(s)")
+
+    return reconstructed
 
 def increment_task_resume(task_id: int):
     conn = sqlite3.connect(DB_PATH)
@@ -638,12 +707,16 @@ def increment_task_resume(task_id: int):
 
 def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: str = None,
                   args_preview: str = None, result_preview: str = None, full_result: str = None,
-                  success: bool = True, thinking_content: str = None, session_id: int = None):
+                  success: bool = True, thinking_content: str = None, session_id: int = None,
+                  tool_call_id: str = None, full_args: str = None):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO task_steps (task_id, step_number, tool_name, tool_label, args_preview, result_preview, full_result, success, thinking_content, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (task_id, step_number, tool_name, tool_label, args_preview, result_preview, full_result, 1 if success else 0, thinking_content, session_id)
+        "INSERT INTO task_steps (task_id, step_number, tool_name, tool_label, args_preview, "
+        "result_preview, full_result, success, thinking_content, session_id, tool_call_id, full_args) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (task_id, step_number, tool_name, tool_label, args_preview, result_preview, full_result,
+         1 if success else 0, thinking_content, session_id, tool_call_id, full_args)
     )
     conn.commit()
     conn.close()
@@ -691,8 +764,14 @@ def update_download_progress(download_id: int, progress: float,
     cursor.execute(f"UPDATE downloads SET {', '.join(fields)} WHERE id=?", params)
     conn.commit()
 
-    # If download failed and has a linked task, notify the session
-    if status == 'failed':
+    # Log event for important status transitions
+    if status == 'completed':
+        log_download_event(download_id, "completed", "下载完成", "")
+    elif status == 'failed':
+        log_download_event(download_id, "failed", "下载失败", error_message or "未知错误")
+
+    # Notify the linked task (both success and failure)
+    if status in ('completed', 'failed'):
         try:
             cursor.execute("SELECT task_id, label, filename FROM downloads WHERE id=?", (download_id,))
             dl_row = cursor.fetchone()
@@ -705,54 +784,155 @@ def update_download_progress(download_id: int, progress: float,
                         (task_id,))
                     sid_row = cursor.fetchone()
                     session_id = sid_row[0] if sid_row else 1
-                    err = error_message or "未知错误"
-                    save_message("system",
-                        f"❌ 下载失败: {label}\n错误信息: {err}",
-                        session_id)
-                    # Also update the original task and add a failure step
-                    try:
-                        cursor.execute("SELECT MAX(step_number) FROM task_steps WHERE task_id=?", (task_id,))
-                        max_step = cursor.fetchone()[0] or 0
-                        add_task_step(task_id, max_step + 1, "queue_download",
-                            tool_label=f"❌ 下载失败: {label}",
-                            args_preview=f"filename={label}",
-                            result_preview=f"错误: {err}",
-                            full_result=f"下载失败: {label}\n错误信息: {err}",
-                            success=False, session_id=session_id)
-                        cursor.execute(
-                            "UPDATE tasks SET status='background_failed', result_summary=?, "
-                            "updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='completed'",
-                            (f"下载失败: {label}", task_id))
-                        conn.commit()
-                        cursor.execute("SELECT status FROM tasks WHERE id=?", (task_id,))
-                        task_status = cursor.fetchone()
-                        if task_status and task_status[0] == 'background_failed':
-                            ctx = get_task_context(task_id)
-                            ctx.append({"role": "user", "content": (
-                                f"【系统通知】之前的下载任务失败了。\n文件: {label}\n错误: {err}\n"
-                                "请尝试其他方式重新下载。"
-                            )})
-                            save_task_context(task_id, ctx)
-                            print(f"[Download] Task {task_id} marked background_failed due to download failure")
-                    except Exception as step_err:
-                        print(f"[Download] Failed to update task {task_id}: {step_err}")
-                    print(f"[Download] Notified session {session_id} about failed download #{download_id} (task {task_id}): {err}")
-                    _broadcast_to_websockets({
-                        "type": "download_failed",
-                        "download_id": download_id,
-                        "task_id": task_id,
-                        "session_id": session_id,
-                        "label": label,
-                        "error": err
-                    })
+
+                    if status == 'completed':
+                        save_message("system",
+                            f"✅ 下载完成: {label}", session_id)
+                        try:
+                            cursor.execute("SELECT MAX(step_number) FROM task_steps WHERE task_id=?", (task_id,))
+                            max_step = cursor.fetchone()[0] or 0
+                            add_task_step(task_id, max_step + 1, "queue_download",
+                                tool_label=f"✅ 下载完成: {label}",
+                                args_preview=f"filename={label}",
+                                result_preview="下载完成",
+                                full_result="",
+                                success=True, session_id=session_id)
+                        except Exception as step_err:
+                            print(f"[Download] Failed to add completed step for task {task_id}: {step_err}")
+
+                        # Inject "download done" context for background tasks
+                        try:
+                            cursor.execute(
+                                "SELECT status, user_query FROM tasks WHERE id=?",
+                                (task_id,))
+                            task_row = cursor.fetchone()
+                            if task_row and task_row[0] in ('backgrounded',):
+                                ctx = get_task_context(task_id)
+                                if ctx:
+                                    ctx.append({"role": "user", "content": (
+                                        "【系统通知】后台下载任务已完成，文件已就绪。"
+                                        "请继续执行之前未完成的任务，不要重复下载已有文件。"
+                                    )})
+                                    save_task_context(task_id, ctx)
+                                    # Direct resume — wake task immediately instead of waiting for poll
+                                    user_query = task_row[1] or ""
+                                    print(f"[Download] Download #{download_id} complete — directly resuming task {task_id}")
+                                    _direct_resume_background_task(task_id, user_query, ctx, download_id=download_id)
+                        except Exception as e:
+                            print(f"[Download] Failed to resume task {task_id} after download complete: {e}")
+
+                        _broadcast_to_websockets({
+                            "type": "download_success",
+                            "download_id": download_id,
+                            "task_id": task_id,
+                            "session_id": session_id,
+                            "label": label
+                        })
+                    else:  # failed
+                        err = error_message or "未知错误"
+                        save_message("system",
+                            f"❌ 下载失败: {label}\n错误信息: {err}",
+                            session_id)
+                        try:
+                            cursor.execute("SELECT MAX(step_number) FROM task_steps WHERE task_id=?", (task_id,))
+                            max_step = cursor.fetchone()[0] or 0
+                            add_task_step(task_id, max_step + 1, "queue_download",
+                                tool_label=f"❌ 下载失败: {label}",
+                                args_preview=f"filename={label}",
+                                result_preview=f"错误: {err}",
+                                full_result=f"下载失败: {label}\n错误信息: {err}",
+                                success=False, session_id=session_id)
+
+                            # Don't mark as background_failed — keep backgrounded for retry analysis
+                            cursor.execute(
+                                "SELECT status, user_query FROM tasks WHERE id=?",
+                                (task_id,))
+                            task_row = cursor.fetchone()
+                            if task_row and task_row[0] in ('backgrounded', 'completed'):
+                                ctx = get_task_context(task_id)
+                                if ctx:
+                                    ctx.append({"role": "user", "content": (
+                                        f"【系统通知】下载任务失败了。\n文件: {label}\n错误信息: {err}\n"
+                                        "请分析失败原因，尝试其他方式重新下载（如换源、换文件名），"
+                                        "如果确实无法下载则结束任务。"
+                                    )})
+                                    save_task_context(task_id, ctx)
+                                    # Wake the task so agent can analyze and retry
+                                    user_query = task_row[1] or ""
+                                    print(f"[Download] Download #{download_id} failed — directly resuming task {task_id} for retry analysis")
+                                    _direct_resume_background_task(task_id, user_query, ctx, download_id=download_id)
+                        except Exception as step_err:
+                            print(f"[Download] Failed to update task {task_id}: {step_err}")
+
+                        _broadcast_to_websockets({
+                            "type": "download_failed",
+                            "download_id": download_id,
+                            "task_id": task_id,
+                            "session_id": session_id,
+                            "label": label,
+                            "error": err
+                        })
                 else:
-                    print(f"[Download] download #{download_id} failed, task_id=NULL (will check at tool_done)")
+                    print(f"[Download] download #{download_id} {status}, task_id=NULL (will check at tool_done)")
             else:
-                print(f"[Download] download #{download_id} failed, but no DB row found!")
+                print(f"[Download] download #{download_id} {status}, but no DB row found!")
         except Exception as notify_err:
             print(f"[Download] NOTIFICATION ERROR for #{download_id}: {notify_err}")
 
     conn.close()
+
+
+def _direct_resume_background_task(task_id: int, user_query: str, context: list,
+                                     download_id: int = None):
+    """Directly resume a backgrounded task (thread-safe, non-blocking).
+    If download_id is provided, marks background_resumed=1 inside the thread
+    so BgMonitor doesn't double-resume."""
+    try:
+        def _do_resume():
+            # Mark as resumed FIRST so monitor won't also pick it up
+            if download_id is not None:
+                try:
+                    _conn = sqlite3.connect(DB_PATH)
+                    _conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?", (download_id,))
+                    _conn.commit()
+                    _conn.close()
+                except Exception:
+                    pass
+            update_task_status(task_id, "interrupted",
+                "后台下载触发恢复", interruption_reason="background_complete")
+            _run_background_task(task_id, user_query, context, True)
+        threading.Thread(target=_do_resume, daemon=True).start()
+    except Exception as e:
+        print(f"[Download] _direct_resume_background_task failed for task {task_id}: {e}")
+
+
+def log_download_event(download_id: int, event_type: str, message: str = "", details: str = ""):
+    """Write a structured event to the download_events log table."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT INTO download_events (download_id, event_type, message, details) VALUES (?, ?, ?, ?)",
+            (download_id, event_type, message, details)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[Download] Failed to log event #{download_id} {event_type}: {e}")
+
+
+def get_download_events(download_id: int) -> list:
+    """Return all events for a given download, ordered by creation time."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM download_events WHERE download_id=? ORDER BY id ASC", (download_id,)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[Download] Failed to get events for #{download_id}: {e}")
+        return []
 
 
 def get_download_record(download_id: int) -> Optional[Dict]:
@@ -797,6 +977,7 @@ connected_websockets: list = []  # List of active WebSocket connections
 _sandbox_waits: dict = {}  # {session_id: {"event": threading.Event, "result": dict}} — sandbox auth waits
 
 _active_agents: dict = {}  # {session_id: OpenAGCAgent} — for non-blocking message injection
+_background_agents: dict = {}  # {task_id: OpenAGCAgent} — background tasks for interrupt
 
 _session_enabled_tools: dict = {}  # {session_id: set(tool_names)} — progressive tool persistence
 
@@ -824,7 +1005,8 @@ _llamacpp_download_state = {
     "label": "",     # human-readable label
     "progress": 0.0, # 0.0 .. 1.0
     "stage": "",     # "downloading", "extracting", "complete", "error"
-    "error": ""      # error message if stage == "error"
+    "error": "",     # error message if stage == "error"
+    "cancelled": False # set to True to stop a running download
 }
 
 
@@ -1262,7 +1444,8 @@ async def setup_llamacpp():
         "label": "正在下载 llama.cpp 二进制文件...",
         "progress": 0.0,
         "stage": "downloading",
-        "error": ""
+        "error": "",
+        "cancelled": False
     }
 
     manager = get_llamacpp_manager()
@@ -1281,7 +1464,11 @@ async def setup_llamacpp():
         dl_id = db_download_id
         try:
             def progress_cb(ratio):
+                if _llamacpp_download_state.get("cancelled"):
+                    return
                 _llamacpp_download_state["progress"] = ratio
+                _llamacpp_download_state["label"] = "正在下载 llama.cpp 二进制文件..."
+                _llamacpp_download_state["stage"] = "downloading"
                 update_download_progress(dl_id, ratio)
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
@@ -1292,6 +1479,8 @@ async def setup_llamacpp():
                 })
 
             manager2 = get_llamacpp_manager()
+            if _llamacpp_download_state.get("cancelled"):
+                return
             _llamacpp_download_state["stage"] = "extracting"
             _llamacpp_download_state["label"] = "正在解压..."
             _broadcast_to_websockets({
@@ -1447,7 +1636,8 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
         "filename": req.filename,
         "source": req.source,
         "resume_offset": resume_offset,
-        "download_id": db_download_id
+        "download_id": db_download_id,
+        "cancelled": False
     }
 
     def run_download():
@@ -1455,7 +1645,11 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
         dl_id = db_download_id
         try:
             def progress_cb(ratio):
+                if _llamacpp_download_state.get("cancelled"):
+                    return
                 _llamacpp_download_state["progress"] = ratio
+                _llamacpp_download_state["label"] = f"正在下载 {short_name}..."
+                _llamacpp_download_state["stage"] = "downloading"
                 update_download_progress(dl_id, ratio)
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
@@ -1466,6 +1660,8 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
                 })
 
             manager2 = get_llamacpp_manager()
+            if _llamacpp_download_state.get("cancelled"):
+                return
             if req.source == "modelscope":
                 success = manager2.download_model_from_ms(req.repo_id, req.filename, progress_callback=progress_cb)
             else:
@@ -1519,6 +1715,16 @@ async def get_downloads(status: str = None):
     return {"downloads": records}
 
 
+@app.get("/api/downloads/{download_id}/events")
+async def get_download_events_endpoint(download_id: int):
+    """Get the event log for a specific download."""
+    record = get_download_record(download_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Download record not found")
+    events = get_download_events(download_id)
+    return {"download_id": download_id, "events": events}
+
+
 class ResumeDownloadResponse(BaseModel):
     status: str
     message: str
@@ -1554,7 +1760,8 @@ async def resume_download(download_id: int):
         "filename": record["filename"],
         "source": record["source"],
         "resume_offset": resume_offset,
-        "download_id": download_id
+        "download_id": download_id,
+        "cancelled": False
     }
 
     update_download_progress(download_id, record["progress"] or 0.0,
@@ -1565,8 +1772,14 @@ async def resume_download(download_id: int):
         global _llamacpp_download_state
         dl_id = download_id
         try:
+            log_download_event(dl_id, "resumed", f"续传: {short_name}",
+                               f"resume_offset={resume_offset}")
             def progress_cb(ratio):
+                if _llamacpp_download_state.get("cancelled"):
+                    return
                 _llamacpp_download_state["progress"] = ratio
+                _llamacpp_download_state["label"] = f"续传 {short_name}..."
+                _llamacpp_download_state["stage"] = "downloading"
                 update_download_progress(dl_id, ratio)
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
@@ -1577,6 +1790,8 @@ async def resume_download(download_id: int):
                 })
 
             manager = get_llamacpp_manager()
+            if _llamacpp_download_state.get("cancelled"):
+                return
             if record["type"] == "binary":
                 success = manager.download_binary(progress_callback=progress_cb)
             elif record["source"] == "modelscope":
@@ -2158,7 +2373,9 @@ async def get_tasks(status: str = None, q: str = None, session_id: int = None):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    query = "SELECT t.*, (SELECT COUNT(*) FROM task_steps WHERE task_id = t.id) as step_count FROM tasks t"
+    query = ("SELECT t.*, sess.name as session_name, "
+             "(SELECT COUNT(*) FROM task_steps WHERE task_id = t.id) as step_count "
+             "FROM tasks t LEFT JOIN sessions sess ON sess.id = t.session_id")
     conditions = []
     params = []
 
@@ -2185,6 +2402,7 @@ async def get_tasks(status: str = None, q: str = None, session_id: int = None):
     
     tasks = []
     for row in rows:
+        sid = row["session_id"] if "session_id" in row.keys() else None
         tasks.append({
             "id": row["id"],
             "title": row["title"],
@@ -2195,6 +2413,8 @@ async def get_tasks(status: str = None, q: str = None, session_id: int = None):
             "updated_at": row["updated_at"],
             "result_summary": row["result_summary"],
             "step_count": row["step_count"],
+            "session_id": sid,
+            "session_name": row["session_name"] if "session_name" in row.keys() else None,
             "schedule_cron": row["schedule_cron"] if "schedule_cron" in row.keys() else None,
             "schedule_enabled": bool(row["schedule_enabled"]) if "schedule_enabled" in row.keys() else False,
             "next_run_at": row["next_run_at"] if "next_run_at" in row.keys() else None,
@@ -2209,7 +2429,12 @@ async def get_task_detail(task_id: int):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+    cursor.execute("""
+        SELECT t.*, sess.name as session_name
+        FROM tasks t
+        LEFT JOIN sessions sess ON sess.id = t.session_id
+        WHERE t.id = ?
+    """, (task_id,))
     task_row = cursor.fetchone()
     if not task_row:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -2262,13 +2487,34 @@ async def get_task_detail(task_id: int):
             "run_count": task_row["run_count"] if "run_count" in task_row.keys() else 0,
             "resume_count": task_row["resume_count"] if "resume_count" in task_row.keys() else 0,
             "max_resume_count": task_row["max_resume_count"] if "max_resume_count" in task_row.keys() else 10,
-            "interruption_reason": task_row["interruption_reason"] if "interruption_reason" in task_row.keys() else None
+            "interruption_reason": task_row["interruption_reason"] if "interruption_reason" in task_row.keys() else None,
+            "session_id": task_row["session_id"] if "session_id" in task_row.keys() else None,
+            "session_name": task_row["session_name"] if "session_name" in task_row.keys() else None
         }
     }
 
 @app.post("/api/tasks/{task_id}/interrupt")
 async def interrupt_task(task_id: int):
-    """Mark a task as interrupted by user."""
+    """Mark a task as interrupted by user and stop its background agent."""
+    # Stop background agent if running
+    bg_agent = _background_agents.get(task_id)
+    if bg_agent:
+        bg_agent.is_interrupted = True
+    interrupt_shell()
+
+    # Cancel any active download associated with this task
+    if _llamacpp_download_state.get("active"):
+        _llamacpp_download_state["cancelled"] = True
+        _llamacpp_download_state["active"] = False
+        _broadcast_to_websockets({
+            "type": "llamacpp_download",
+            "task": _llamacpp_download_state.get("type", ""),
+            "label": "下载已取消",
+            "progress": 0.0,
+            "stage": "error",
+            "error": "用户中断"
+        })
+
     update_task_status(task_id, "interrupted", interruption_reason="user")
     return {"status": "success", "message": "Task marked as interrupted"}
 
@@ -2561,7 +2807,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             tool_name=event.get("tool", ""),
                             tool_label=event.get("tool_label", ""),
                             args_preview=event.get("args_preview", ""),
-                            session_id=ws_session_id
+                            session_id=ws_session_id,
+                            tool_call_id=event.get("tool_call_id"),
+                            full_args=event.get("tool_args")
                         )
                     except Exception as e:
                         print(f"[Task] Failed to add step: {e}")
@@ -2597,20 +2845,50 @@ async def websocket_endpoint(websocket: WebSocket):
                                         "label": label,
                                         "error": err
                                     })
+                                    # Inject failure info into the running agent so it can retry
+                                    try:
+                                        agent_ref = _active_agents.get(ws_session_id)
+                                        if agent_ref:
+                                            agent_ref.pending_messages.append(
+                                                f"【系统通知】下载失败了。\n文件: {label}\n错误: {err}\n"
+                                                f"download_id: {dl_id}\n"
+                                                f"请尝试其他方式重新下载（如换源），如果确实无法下载则结束任务。"
+                                            )
+                                            print(f"[Task] Injected download failure into agent for session {ws_session_id}")
+                                    except Exception as inject_err:
+                                        print(f"[Task] Failed to inject failure into agent: {inject_err}")
                                     print(f"[Task] tool_done: download #{dl_id} already failed — notified session {ws_session_id}")
+                                # Also check if download already completed before linking
+                                already_done = dl_conn.execute(
+                                    "SELECT status, label, filename FROM downloads WHERE id=? AND status='completed'",
+                                    (dl_id,)).fetchone()
+                                if already_done:
+                                    label = already_done[1] or already_done[2] or f"download #{dl_id}"
+                                    try:
+                                        agent_ref = _active_agents.get(ws_session_id)
+                                        if agent_ref:
+                                            agent_ref.pending_messages.append(
+                                                f"【系统通知】后台下载已完成。\n文件: {label}\n"
+                                                f"请继续执行之前的任务。"
+                                            )
+                                            print(f"[Task] Injected download completion into agent for session {ws_session_id}")
+                                    except Exception as inject_err:
+                                        print(f"[Task] Failed to inject download completion: {inject_err}")
                             dl_conn.commit()
                             dl_conn.close()
                     except Exception as link_err:
                         print(f"[Task] tool_done link error: {link_err}")
                     try:
-                        # Update the step with result
+                        # Update the step with result and tool_call_id
                         conn = sqlite3.connect(DB_PATH)
                         cursor = conn.cursor()
                         cursor.execute(
-                            "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=?",
+                            "UPDATE task_steps SET result_preview=?, full_result=?, success=?, tool_call_id=COALESCE(?, tool_call_id) WHERE task_id=? AND step_number=?",
                             (event.get("result_preview", ""),
                              event.get("full_result", event.get("result_preview", "")),
-                             1 if event.get("success") else 0, ws_task_id, adjusted_step)
+                             1 if event.get("success") else 0,
+                             event.get("tool_call_id"),
+                             ws_task_id, adjusted_step)
                         )
                         conn.commit()
                         conn.close()
@@ -2711,6 +2989,22 @@ async def websocket_endpoint(websocket: WebSocket):
                             interrupt_shell()
                             if ws_task_id:
                                 update_task_status(ws_task_id, "interrupted", interruption_reason="user")
+                            # Also interrupt any background agents for this session
+                            for tid, bg_agent in list(_background_agents.items()):
+                                bg_agent.is_interrupted = True
+                            interrupt_shell()
+                            # Cancel any active download
+                            if _llamacpp_download_state.get("active"):
+                                _llamacpp_download_state["cancelled"] = True
+                                _llamacpp_download_state["active"] = False
+                                _broadcast_to_websockets({
+                                    "type": "llamacpp_download",
+                                    "task": _llamacpp_download_state.get("type", ""),
+                                    "label": "下载已取消",
+                                    "progress": 0.0,
+                                    "stage": "error",
+                                    "error": "用户中断"
+                                })
                         elif user_msg.get("type") == "tool_reply":
                             agent.user_input_queue.put(user_msg.get("answer"))
                         elif user_msg.get("type") == "sandbox_response":
@@ -3144,6 +3438,45 @@ def _broadcast_to_websockets(message: dict):
             pass
 
 
+def _broadcast_task_history(task_id: int, session_id: int):
+    """Fetch task steps and broadcast as history_steps for UI rendering."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT step_number, tool_name, tool_label, args_preview, result_preview, full_result, success "
+            "FROM task_steps WHERE task_id=? ORDER BY step_number ASC", (task_id,)).fetchall()
+        conn.close()
+        if not rows:
+            return
+        steps = []
+        for r in rows:
+            steps.append({
+                "step_number": r["step_number"],
+                "tool_name": r["tool_name"],
+                "tool_label": r["tool_label"] or r["tool_name"],
+                "args_preview": r["args_preview"] or "",
+                "result_preview": r["result_preview"] or "",
+                "full_result": r["full_result"] or "",
+                "success": bool(r["success"]),
+            })
+        _broadcast_to_websockets({
+            "type": "history_steps",
+            "task_id": task_id,
+            "session_id": session_id,
+            "steps": steps,
+            "task_status": "interrupted",
+        })
+    except Exception as e:
+        print(f"[Task] Failed to broadcast task history: {e}")
+
+def _get_task_step_count(task_id: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cnt = conn.execute("SELECT COUNT(*) FROM task_steps WHERE task_id=?", (task_id,)).fetchone()[0]
+    conn.close()
+    return cnt
+
+
 # Wire route modules to shared state
 init_benchmark_routes(
     db_path=DB_PATH,
@@ -3198,7 +3531,9 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                     tool_name=event.get("tool", ""),
                     tool_label=event.get("tool_label", ""),
                     args_preview=event.get("args_preview", ""),
-                    session_id=bg_session_id
+                    session_id=bg_session_id,
+                    tool_call_id=event.get("tool_call_id"),
+                    full_args=event.get("tool_args")
                 )
             except Exception:
                 pass
@@ -3225,25 +3560,60 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     # Inject saved context if resuming
     if context_messages:
         agent.messages.extend(context_messages)
-    
+
     query = user_query
     if is_resume:
         query = (f"【系统指令 - 自动恢复】你之前因为执行步骤过多被系统自动中断了。"
                  f"请根据之前的上下文继续完成未完成的任务。"
                  f"原始任务: {user_query}")
-    
+
+        # Broadcast reconstructed history steps so they appear in the session
+        _broadcast_task_history(task_id, bg_session_id)
+
     update_task_status(task_id, "running")
-    
+
+    # Register so the WS/REST interrupt handler can stop this agent
+    _background_agents[task_id] = agent
+
     # Notify connected clients
+    step_count_str = ""
+    if is_resume:
+        try:
+            _sc = _get_task_step_count(task_id)
+            if _sc:
+                step_count_str = f"，共 {_sc} 个历史步骤"
+        except Exception:
+            pass
+
+    resume_msg = (
+        f"🔄 **任务自动恢复**\n\n"
+        f"任务 **#{task_id}** 已自动恢复执行{step_count_str}，正在继续之前未完成的工作。\n\n"
+        f"[📋 查看任务详情](task://{task_id}) · [🔗 任务中心](switch:view/tasks)"
+    ) if is_resume else (
+        f"⏰ **定时任务执行**\n\n"
+        f"任务 **#{task_id}**: {user_query[:80]}"
+    )
     _broadcast_to_websockets({
         "type": "message",
         "role": "system",
         "session_id": bg_session_id,
-        "content": f"{'🔄 自动恢复' if is_resume else '⏰ 定时执行'}任务: {user_query[:60]}..."
+        "content": resume_msg
     })
     
     try:
         response = agent.run_turn(query, False, progress_cb, task_id=task_id)
+
+        # If user already interrupted this task, don't overwrite the status
+        try:
+            chk_conn = sqlite3.connect(DB_PATH)
+            chk_row = chk_conn.execute("SELECT status, interruption_reason FROM tasks WHERE id=?", (task_id,)).fetchone()
+            chk_conn.close()
+            if chk_row and chk_row[0] == "interrupted" and chk_row[1] == "user":
+                print(f"[BgTask] Task #{task_id} was user-interrupted, skipping status update")
+                return response or ""
+        except Exception:
+            pass
+
         is_max_iter = response and response.startswith("[MAX_ITERATIONS_REACHED]")
         is_backgrounded = response and response.startswith("[TASK_BACKGROUNDED]")
 
@@ -3277,7 +3647,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                     tconn.close()
                 except Exception:
                     pass
-        
+
         # Push final result to clients
         _broadcast_to_websockets({
             "type": "message",
@@ -3295,6 +3665,8 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
             "content": f"后台任务失败: {str(e)[:100]}"
         })
         return None
+    finally:
+        _background_agents.pop(task_id, None)
 
 def start_task_scheduler():
     """Background thread that handles scheduled tasks and long-run auto-resume."""
@@ -3342,7 +3714,8 @@ def start_task_scheduler():
                 # 2. Auto-resume longrun tasks interrupted by faults (exclude max_iterations)
                 cursor.execute(
                     "SELECT * FROM tasks WHERE task_type='longrun' AND status='interrupted' "
-                    "AND interruption_reason != 'max_iterations' AND resume_count < max_resume_count"
+                    "AND interruption_reason != 'max_iterations' AND interruption_reason != 'user' "
+                    "AND resume_count < max_resume_count"
                 )
                 resume_tasks = cursor.fetchall()
 

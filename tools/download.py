@@ -34,7 +34,8 @@ class DownloadTool(BaseTool):
         try:
             from core.llamacpp_manager import get_llamacpp_manager
             from api.server import (
-                create_download_record, _llamacpp_download_state,
+                create_download_record, update_download_progress,
+                log_download_event, _llamacpp_download_state,
                 _broadcast_to_websockets, get_data_path
             )
         except ImportError as e:
@@ -122,12 +123,14 @@ class DownloadTool(BaseTool):
         # Start background download
         def _download_thread():
             try:
+                log_download_event(record_id, "started", f"开始下载: {label}", f"url={download_url}")
                 slot_key = f"{dl_type}_{record_id}"
                 _llamacpp_download_state[slot_key] = {
                     "active": True, "type": dl_type, "label": label, "id": record_id,
-                    "progress": 0.0, "stage": "downloading", "error": ""
+                    "progress": 0.0, "stage": "downloading", "error": "", "cancelled": False
                 }
                 _llamacpp_download_state["active"] = True
+                _llamacpp_download_state["cancelled"] = False
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "download_id": record_id,
@@ -136,6 +139,8 @@ class DownloadTool(BaseTool):
                 })
 
                 def progress_cb(pct):
+                    if _llamacpp_download_state.get("cancelled"):
+                        return
                     from api.server import update_download_progress
                     _llamacpp_download_state[slot_key]["progress"] = pct
                     update_download_progress(record_id, pct, status='downloading')
@@ -145,6 +150,9 @@ class DownloadTool(BaseTool):
                         "task": dl_type, "label": label,
                         "progress": pct, "stage": "downloading", "error": ""
                     })
+
+                if _llamacpp_download_state.get("cancelled"):
+                    return
 
                 if is_ftp:
                     print(f"[Download] FTP download starting: {download_url} -> {dl_dir}/{filename}")
@@ -184,6 +192,10 @@ class DownloadTool(BaseTool):
                     os.replace(partial, target)
                     success = True
 
+                # Check if cancelled before broadcasting complete/error
+                if _llamacpp_download_state.get("cancelled"):
+                    return
+
                 if success:
                     from api.server import update_download_progress
                     update_download_progress(record_id, 1.0, status='completed')
@@ -191,6 +203,9 @@ class DownloadTool(BaseTool):
                         "active": False, "progress": 1.0,
                         "stage": "complete", "error": ""
                     })
+                    # Only set top-level active=False when ALL slots are done
+                    if not any(isinstance(v, dict) and v.get("active") for k, v in _llamacpp_download_state.items() if k != slot_key):
+                        _llamacpp_download_state["active"] = False
                     _broadcast_to_websockets({
                         "type": "llamacpp_download",
                         "download_id": record_id,
@@ -201,6 +216,8 @@ class DownloadTool(BaseTool):
                     raise RuntimeError("Download failed")
 
             except Exception as e:
+                if _llamacpp_download_state.get("cancelled"):
+                    return
                 err_msg = str(e)
                 print(f"[Download] EXCEPTION in download thread #{record_id}: {err_msg}")
                 from api.server import update_download_progress
@@ -217,6 +234,9 @@ class DownloadTool(BaseTool):
                 _llamacpp_download_state[slot_key].update({
                     "active": False, "stage": "error", "error": err_msg
                 })
+                # Only set top-level active=False when ALL slots are done
+                if not any(isinstance(v, dict) and v.get("active") for k, v in _llamacpp_download_state.items() if k != slot_key):
+                    _llamacpp_download_state["active"] = False
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "download_id": record_id,

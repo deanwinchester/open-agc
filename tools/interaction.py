@@ -158,12 +158,10 @@ class SearchHistoryTool(BaseTool):
                         if isinstance(raw_args, str):
                             args_str = raw_args
                             try:
-                                import json
                                 args = json.loads(raw_args)
                             except Exception:
                                 args = {}
                         elif isinstance(raw_args, dict):
-                            import json
                             args = raw_args
                             args_str = json.dumps(raw_args, ensure_ascii=False)
                         else:
@@ -208,7 +206,6 @@ class SearchHistoryTool(BaseTool):
                 else:
                     match = False
                 if match or not q_lower:
-                    import re
                     urls = re.findall(r'(?:https?|ftp)://[^\s\'"<>]{5,}', c)
                     preview = c[:400]
                     s = f"[{name} 结果]"
