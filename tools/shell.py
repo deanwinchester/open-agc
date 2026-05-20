@@ -15,6 +15,11 @@ _current_process_lock = threading.Lock()
 # Track backgrounded shell processes for monitoring
 _background_process_info: dict = {}  # {task_id: {"pid": int, "output_file": str, "command": str, "started_at": float}}
 _background_process_lock = threading.Lock()
+# Orphan pool: processes backgrounded before a task_id was assigned
+# {orphan_id: {"pid": int, "output_file": str, "command": str, "started_at": float, "session_id": int}}
+_orphan_process_info: dict = {}
+_orphan_process_lock = threading.Lock()
+_orphan_counter = 0
 
 # Output directory for streaming shell logs
 SHELL_OUTPUT_DIR = None
@@ -106,7 +111,7 @@ class ShellTool(BaseTool):
         timeout = min(max(timeout, 1), 600)  # Clamp 1-600s
         # Auto-extend timeout for package managers (pip/uv/npm all download large files)
         if not kwargs.get("timeout") and _looks_like_download(command, ""):
-            timeout = 600  # 10 min for package manager commands
+            timeout = 180  # 10 min for package manager commands
         interrupt_check: Optional[Callable[[], bool]] = kwargs.get("interrupt_check")
         progress_cb: Optional[Callable] = kwargs.get("_progress_cb")
 
@@ -246,14 +251,30 @@ class ShellTool(BaseTool):
                         out_file.close()
                         # Register as background process for system monitoring
                         task_id = kwargs.get("_task_id") or kwargs.get("task_id", 0)
-                        with _background_process_lock:
-                            _background_process_info[str(task_id)] = {
-                                "pid": proc.pid,
-                                "output_file": out_path,
-                                "command": command[:200],
-                                "started_at": _t0,
-                                "timeout": timeout,
-                            }
+                        if not task_id or task_id == 0:
+                            # No valid task_id yet — put in orphan pool for late binding
+                            global _orphan_counter, _orphan_process_info, _orphan_process_lock
+                            session_id = kwargs.get("_session_id", 1) or 1
+                            with _orphan_process_lock:
+                                _orphan_counter += 1
+                                oid = f"orphan_{int(_t0)}_{_orphan_counter}"
+                                _orphan_process_info[oid] = {
+                                    "pid": proc.pid,
+                                    "output_file": out_path,
+                                    "command": command[:200],
+                                    "started_at": _t0,
+                                    "timeout": timeout,
+                                    "session_id": session_id,
+                                }
+                        else:
+                            with _background_process_lock:
+                                _background_process_info[str(task_id)] = {
+                                    "pid": proc.pid,
+                                    "output_file": out_path,
+                                    "command": command[:200],
+                                    "started_at": _t0,
+                                    "timeout": timeout,
+                                }
                         tail = _read_tail(out_path, 3000)
                         hint = ""
                         if _looks_like_download(command, tail):
@@ -310,6 +331,51 @@ def cleanup_background_process(task_id: str):
     """Remove a background process from tracking."""
     with _background_process_lock:
         _background_process_info.pop(str(task_id), None)
+
+
+def get_orphan_processes() -> dict:
+    """Return dict of orphan background processes: {orphan_id: info}."""
+    with _orphan_process_lock:
+        return dict(_orphan_process_info)
+
+
+def cleanup_orphan_process(orphan_id: str):
+    """Remove an orphan process from tracking."""
+    with _orphan_process_lock:
+        _orphan_process_info.pop(orphan_id, None)
+
+
+def adopt_orphan_processes(task_id: int, session_id: int = None) -> int:
+    """
+    Move orphan processes matching the given task_id/session_id from the
+    orphan pool into the main background_process_info dict.
+
+    Returns the number of processes adopted.
+    """
+    adopted = 0
+    now = time.time()
+    with _orphan_process_lock:
+        to_adopt = []
+        for oid, info in list(_orphan_process_info.items()):
+            # Match by session_id first (most reliable)
+            if session_id is not None and info.get("session_id") == session_id:
+                # Only adopt if the orphan is recent (< 10 min old)
+                if now - info.get("started_at", 0) < 600:
+                    to_adopt.append(oid)
+            # Also match any very recent orphans (< 2 min) regardless of session
+            elif now - info.get("started_at", 0) < 120:
+                to_adopt.append(oid)
+
+        for oid in to_adopt:
+            info = _orphan_process_info.pop(oid)
+            with _background_process_lock:
+                _background_process_info[str(task_id)] = info
+            adopted += 1
+
+    if adopted:
+        import sys
+        print(f"[Shell] Adopted {adopted} orphan process(es) → task #{task_id}", file=sys.stderr, flush=True)
+    return adopted
 
 
 def _looks_like_download(command: str, output: str) -> bool:
