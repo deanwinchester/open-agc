@@ -517,7 +517,8 @@ def _extract_task_title(response: str) -> str:
 reconcile_tasks()
 
 def reconcile_backgrounded_after_restart():
-    """After server restart, check for completed downloads linked to backgrounded tasks."""
+    """After server restart, check for completed downloads and lost shell processes
+    linked to backgrounded tasks."""
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -543,7 +544,7 @@ def reconcile_backgrounded_after_restart():
                              (p["dl_id"],))
                 conn.commit()
                 print(f"[Startup] Recovered backgrounded task {tid} from completed download {p['dl_id']}")
-        # Also reconcile failed downloads linked to any task — inject system message if not already done
+        # Also reconcile failed downloads linked to any task
         failed_pairs = conn.execute(
             "SELECT DISTINCT d.id as dl_id, d.task_id, d.label, d.filename, d.error_message, "
             "(SELECT session_id FROM task_steps WHERE task_id = d.task_id AND session_id IS NOT NULL LIMIT 1) as session_id "
@@ -563,6 +564,27 @@ def reconcile_backgrounded_after_restart():
                          (p["dl_id"],))
             conn.commit()
             print(f"[Startup] Recovered failed download #{p['dl_id']} (task {p['task_id']}) — message saved to session {session_id}")
+
+        # Reconcile backgrounded tasks whose shell process info was lost (in-memory dict)
+        lost_tasks = conn.execute(
+            "SELECT id FROM tasks WHERE status='backgrounded' "
+            "AND id NOT IN (SELECT DISTINCT task_id FROM downloads WHERE status='completed' AND background_resumed=0)"
+        ).fetchall()
+        if lost_tasks:
+            print(f"[Startup] Found {len(lost_tasks)} backgrounded task(s) with lost process info (server restart)")
+            for t in lost_tasks:
+                tid = t["id"]
+                ctx = get_task_context(tid)
+                if ctx:
+                    ctx.append({"role": "user", "content": (
+                        "【系统通知】服务器重启，后台命令的进程信息已丢失。"
+                        "请检查之前的工作状态，如有需要请重新执行。"
+                    )})
+                    save_task_context(tid, ctx)
+                update_task_status(tid, "background_failed",
+                    "服务器重启，后台进程信息丢失", interruption_reason="process_lost")
+                print(f"[Startup] Task {tid}: marked background_failed (process info lost on restart)")
+
         conn.close()
     except Exception as e:
         print(f"[Startup] Background recovery error: {e}")
@@ -652,6 +674,62 @@ def _is_continuation_query(query: str) -> bool:
     if not has_verb and 2 <= len(re.findall(r'[一-鿿]', q)) <= 8:
         return True
     return False
+
+
+def _resolve_task_for_query(session_id: int, query: str) -> int:
+    """
+    Determine the task_id for an incoming query BEFORE agent execution.
+
+    Reuses a recent task if this query looks like a continuation; otherwise
+    creates a new task. This ensures tool execution always has a valid task_id.
+    """
+    try:
+        db_check = sqlite3.connect(DB_PATH)
+        existing = db_check.execute(
+            "SELECT id, status, created_at FROM tasks WHERE session_id=? ORDER BY id DESC LIMIT 1",
+            (session_id,)
+        ).fetchone()
+        db_check.close()
+
+        if existing:
+            tid, status, created = existing
+            if status == 'running':
+                print(f"[Task] Reusing running task {tid} for session {session_id}")
+                return tid
+            elif status in ('completed', 'interrupted', 'backgrounded', 'background_failed'):
+                try:
+                    from datetime import datetime, timezone, timedelta
+                    created_dt = datetime.strptime(created, '%Y-%m-%d %H:%M:%S')
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    is_recent = (now - created_dt) < timedelta(minutes=30)
+                except Exception:
+                    is_recent = False
+
+                if is_recent and _is_continuation_query(query):
+                    print(f"[Task] Continuing task {tid} for session {session_id} (continuation: {query[:50]})")
+                    update_task_status(tid, "running")
+                    return tid
+    except Exception as e:
+        print(f"[Task] Error resolving task: {e}")
+
+    # Create a brand-new task
+    title = _extract_task_title(query) or query[:60]
+    if len(title) >= 60:
+        title = title[:57] + '...'
+    tid = create_task(title, query, session_id=session_id)
+    print(f"[Task] Created task {tid} for session {session_id}")
+
+    # Adopt any orphan shell processes that belong to this session
+    try:
+        from tools.shell import adopt_orphan_processes
+        adopted = adopt_orphan_processes(tid, session_id=session_id)
+        if adopted:
+            print(f"[Task] Adopted {adopted} orphan process(es) for task {tid}")
+    except Exception as e:
+        print(f"[Task] Orphan adoption error: {e}")
+
+    return tid
 
 
 def save_task_context(task_id: int, messages: list):
@@ -2798,9 +2876,15 @@ async def websocket_endpoint(websocket: WebSocket):
             return "BUSY"
 
         agent_is_running = True
-        ws_task_id = resume_task_id  # Reuse existing task on resume
+        # Pre-resolve task_id BEFORE agent execution so tools always get a valid _task_id.
+        # resume_task_id is used when explicitly resuming; otherwise detect new vs continuation.
+        if resume_task_id:
+            ws_task_id = resume_task_id
+        elif not is_heartbeat:
+            ws_task_id = _resolve_task_for_query(ws_session_id, query)
+        else:
+            ws_task_id = None
         step_offset = 0
-        task_has_tools = resume_task_id is not None  # Skip creation on resume
 
         # Compute step offset for resume
         if resume_task_id:
@@ -2821,56 +2905,13 @@ async def websocket_endpoint(websocket: WebSocket):
             has_taken_action = False
 
             def progress_callback(event: dict):
-                nonlocal has_taken_action, ws_task_id, task_has_tools
+                nonlocal has_taken_action, ws_task_id
                 """Thread-safe: push progress events from thread pool into queue."""
                 if is_heartbeat:
                     if event.get("event") == "tool_start":
                         has_taken_action = True
                     if not has_taken_action and event.get("event") in ["thinking", "model_switched"]:
                         return
-
-                # Auto-create task on first tool_start (with session-aware merging)
-                if event.get("event") == "tool_start" and not task_has_tools and not is_heartbeat:
-                    task_has_tools = True
-                    try:
-                        db_check = sqlite3.connect(DB_PATH)
-                        existing = db_check.execute(
-                            "SELECT id, status, created_at FROM tasks WHERE session_id=? ORDER BY id DESC LIMIT 1",
-                            (ws_session_id,)
-                        ).fetchone()
-                        db_check.close()
-
-                        reuse = False
-                        if existing:
-                            tid, status, created = existing
-                            if status == 'running':
-                                reuse = True
-                            elif status in ('completed', 'interrupted'):
-                                # Reuse if completed recently (<30min) and query looks like a continuation
-                                try:
-                                    from datetime import datetime, timezone, timedelta
-                                    created_dt = datetime.strptime(created, '%Y-%m-%d %H:%M:%S')
-                                    created_dt = created_dt.replace(tzinfo=timezone.utc)
-                                    now = datetime.now(timezone.utc)
-                                    is_recent = (now - created_dt) < timedelta(minutes=30)
-                                except Exception:
-                                    is_recent = False
-
-                                if is_recent and _is_continuation_query(query):
-                                    reuse = True
-                                    update_task_status(tid, "running")
-                                    print(f"[Task] Continuing task {tid} for session {ws_session_id} (continuation: {query[:50]})")
-
-                        if reuse and existing:
-                            ws_task_id = existing[0]
-                            print(f"[Task] Reusing task {ws_task_id} for session {ws_session_id}")
-                        else:
-                            title = _extract_task_title(query) or query[:60]
-                            if len(title) >= 60:
-                                title = title[:57] + '...'
-                            ws_task_id = create_task(title, query, session_id=ws_session_id)
-                    except Exception as e:
-                        print(f"[Task] Failed to create task: {e}")
 
                 # Record task steps (offset on resume to continue numbering)
                 adjusted_step = event.get("step", 0) + step_offset
@@ -3660,6 +3701,15 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     # Register so the WS/REST interrupt handler can stop this agent
     _background_agents[task_id] = agent
 
+    # Adopt any orphan shell processes waiting for this task
+    try:
+        from tools.shell import adopt_orphan_processes
+        adopted = adopt_orphan_processes(task_id, session_id=bg_session_id)
+        if adopted:
+            print(f"[BgTask] Task #{task_id}: adopted {adopted} orphan process(es)")
+    except Exception as e:
+        print(f"[BgTask] Orphan adoption error: {e}")
+
     # Notify connected clients
     step_count_str = ""
     if is_resume:
@@ -3835,7 +3885,7 @@ def start_background_monitor():
                 conn = sqlite3.connect(DB_PATH)
                 conn.row_factory = sqlite3.Row
                 bg_tasks = conn.execute(
-                    "SELECT id, user_query, resume_count, max_resume_count FROM tasks "
+                    "SELECT id, user_query, resume_count, max_resume_count, created_at FROM tasks "
                     "WHERE status='backgrounded' AND resume_count < max_resume_count"
                 ).fetchall()
                 if bg_tasks:
@@ -3887,9 +3937,55 @@ def start_background_monitor():
 
                     # 2. Check shell background processes
                     try:
-                        from tools.shell import get_background_processes, cleanup_background_process
+                        from tools.shell import (get_background_processes, cleanup_background_process,
+                                                  get_orphan_processes, cleanup_orphan_process,
+                                                  adopt_orphan_processes)
                         bg_procs = get_background_processes()
                         pinfo = bg_procs.get(str(tid))
+
+                        # Fallback 1: try orphan pool if main pool misses
+                        if not pinfo:
+                            orphan_procs = get_orphan_processes()
+                            if orphan_procs:
+                                # Try to adopt orphans matching this task's session/time
+                                task_row = conn.execute(
+                                    "SELECT session_id FROM tasks WHERE id=?", (tid,)
+                                ).fetchone()
+                                task_session = task_row["session_id"] if task_row else None
+                                adopted = adopt_orphan_processes(tid, session_id=task_session)
+                                if adopted:
+                                    # Re-read after adoption
+                                    bg_procs = get_background_processes()
+                                    pinfo = bg_procs.get(str(tid))
+                                    if pinfo:
+                                        print(f"[BgMonitor] Task {tid}: adopted orphan process")
+
+                        # Fallback 2: check for stale backgrounded tasks (> 30 min, no process track)
+                        if not pinfo:
+                            try:
+                                created_str = task["created_at"]
+                                if created_str:
+                                    from datetime import datetime, timezone, timedelta
+                                    created_dt = datetime.strptime(created_str, '%Y-%m-%d %H:%M:%S')
+                                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                                    now = datetime.now(timezone.utc)
+                                    age = now - created_dt
+                                    if age > timedelta(minutes=30):
+                                        print(f"[BgMonitor] Task {tid}: no process info for {age.total_seconds()/60:.0f}min — marking failed")
+                                        update_task_status(tid, "background_failed",
+                                            "后台进程信息丢失（可能因服务重启），无法恢复",
+                                            interruption_reason="process_lost")
+                                        ctx = get_task_context(tid)
+                                        if ctx:
+                                            ctx.append({"role": "user", "content": (
+                                                "【系统通知】后台命令的进程信息已丢失（可能因服务重启）。"
+                                                "请重新开始任务，或检查是否有残留进程需要手动处理。"
+                                            )})
+                                            save_task_context(tid, ctx)
+                                        continue
+                            except Exception as ts_err:
+                                print(f"[BgMonitor] Task {tid}: time-check error: {ts_err}")
+
                         if pinfo:
                             pid = pinfo.get("pid")
                             out_file = pinfo.get("output_file", "")
