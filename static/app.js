@@ -83,6 +83,8 @@ function initApp() {
   // Download Progress
   // =============================================
   let downloadResumeInfo = null;
+  let downloadBannerTimer = null;
+  let _lastDownloadBannerId = null;  // Track current download for "flash once" behavior
 
   function handleLlamaDownloadProgress(data) {
     const ratio = data.progress || 0;
@@ -111,6 +113,7 @@ function initApp() {
     const bannerIcon = document.getElementById('global-download-icon');
 
     if (data.stage === 'complete') {
+      clearTimeout(downloadBannerTimer);
       if (banner) {
         banner.style.display = 'block';
         bannerIcon.textContent = '✅';
@@ -121,10 +124,12 @@ function initApp() {
       }
       downloadResumeInfo = null;
       showStatus('✅ ' + (data.label || '下载完成'), 'success');
-      setTimeout(() => { if (banner) banner.style.display = 'none'; }, 4000);
+      downloadBannerTimer = setTimeout(() => { if (banner) banner.style.display = 'none'; }, 2000);
+      _lastDownloadBannerId = null;
       refreshLlamaStatus();
       loadDownloadHistory();
     } else if (data.stage === 'error') {
+      clearTimeout(downloadBannerTimer);
       if (banner) {
         banner.style.display = 'block';
         bannerIcon.textContent = '❌';
@@ -134,16 +139,23 @@ function initApp() {
         bannerBar.style.background = 'var(--error)';
       }
       showStatus('❌ ' + (data.error || '下载失败'), 'error');
-      setTimeout(() => { if (bannerBar) bannerBar.style.background = 'var(--theme-color)'; }, 8000);
+      downloadBannerTimer = setTimeout(() => { if (banner) banner.style.display = 'none'; }, 3000);
+      _lastDownloadBannerId = null;
       loadDownloadHistory();
     } else {
-      if (banner) {
-        banner.style.display = 'block';
-        bannerIcon.textContent = data.stage === 'extracting' ? '📦' : '📥';
-        bannerLabel.textContent = data.label || '下载中...';
+      // Flash banner briefly only on first event of a new download
+      if (dlId && dlId !== _lastDownloadBannerId) {
+        _lastDownloadBannerId = dlId;
+        if (banner) {
+          banner.style.display = 'block';
+          bannerIcon.textContent = data.stage === 'extracting' ? '📦' : '📥';
+          bannerLabel.textContent = data.label || '下载中...';
+        }
+        if (bannerPct) bannerPct.textContent = pctText;
+        if (bannerBar) { bannerBar.style.width = (ratio * 100) + '%'; bannerBar.style.background = 'var(--theme-color)'; }
+        downloadBannerTimer = setTimeout(() => { if (banner) banner.style.display = 'none'; }, 1500);
       }
-      if (bannerPct) bannerPct.textContent = pctText;
-      if (bannerBar) { bannerBar.style.width = (ratio * 100) + '%'; bannerBar.style.background = 'var(--theme-color)'; }
+      // Always update download manager item progress (handled above by historyContainer querySelector)
     }
   }
 
@@ -290,6 +302,12 @@ function initApp() {
       appendMessage(`⏸️ **任务已进入后台**\n\n${data.message || '后台任务处理中...'}\n\n完成后将自动恢复执行。`, 'system');
       hideProgressContainer();
       updateTaskBadge();
+    } else if (data.type === 'download_success') {
+      appendMessage(
+        '✅ **下载完成: ' + (data.label || '') + '**',
+        'system'
+      );
+      showStatus('✅ 下载完成: ' + (data.label || ''), 'success');
     } else if (data.type === 'download_failed') {
       appendMessage(
         '❌ **下载失败: ' + (data.label || '') + '**\n\n错误: ' + (data.error || '未知错误'),
@@ -401,6 +419,11 @@ function initApp() {
 
   function ensureProgressContainer() {
     if (!progressInline) {
+      // Remove any completed history card for this task before creating live progress
+      if (state.currentTaskId) {
+        const oldCard = chatContainer.querySelector(`.progress-inline.completed[data-task-id="${state.currentTaskId}"]`);
+        if (oldCard) oldCard.remove();
+      }
       hideThinkingStatus();
       progressInline = document.createElement('div');
       progressInline.className = 'progress-inline';
@@ -522,8 +545,18 @@ function initApp() {
       return;
     }
 
+    // Set task_id on state so ensureProgressContainer can clean up stale cards
+    if (data.task_id && !state.currentTaskId) {
+      state.currentTaskId = data.task_id;
+    }
+
     const stepsEl = ensureProgressContainer() ? progressStepsEl : null;
     if (!stepsEl) return;
+
+    // Attach task_id to the card so renderHistorySteps can detect duplicates
+    if (data.task_id && progressInline && !progressInline.dataset.taskId) {
+      progressInline.dataset.taskId = data.task_id;
+    }
 
     if (event === 'thinking') {
       if (data.content) {
@@ -754,6 +787,12 @@ function initApp() {
   function renderHistorySteps(data) {
     // If already showing progress for this task, don't create a duplicate card
     if (progressInline && progressInline.dataset.taskId == data.task_id) return;
+
+    // Remove any existing card for this task (both completed and live)
+    const existing = chatContainer.querySelector(
+      `.progress-inline.completed[data-task-id="${data.task_id}"],` +
+      `.progress-inline:not(.completed)[data-task-id="${data.task_id}"]`);
+    if (existing) existing.remove();
 
     const steps = data.steps || [];
     if (!steps.length) return;
@@ -1016,6 +1055,27 @@ function initApp() {
     messageDiv.querySelectorAll('pre code').forEach((block) => { hljs.highlightElement(block); });
     scrollToBottom();
   }
+
+  // Click delegation for task:// and switch:view/ links in chat messages
+  chatContainer.addEventListener('click', function(e) {
+    const link = e.target.closest('a[href^="task://"]');
+    if (link) {
+      e.preventDefault();
+      const taskId = link.getAttribute('href').replace('task://', '');
+      switchView('tasks');
+      setTimeout(function() {
+        const openFn = window.openTaskDetail;
+        if (typeof openFn === 'function') openFn(parseInt(taskId));
+      }, 300);
+      return;
+    }
+    const viewLink = e.target.closest('a[href^="switch:view/"]');
+    if (viewLink) {
+      e.preventDefault();
+      const viewId = viewLink.getAttribute('href').replace('switch:view/', '');
+      switchView(viewId);
+    }
+  });
 
   window.appendMessage = appendMessage;
 
@@ -1334,8 +1394,7 @@ function initApp() {
   document.getElementById('new-chat-btn').addEventListener('click', async () => {
     switchView('chat');
     await createSession();
-    state.ws.close();
-    connectWebSocket();
+    // createSession -> switchSession already reconnects the WebSocket
   });
 
   // =============================================

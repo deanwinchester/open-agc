@@ -269,6 +269,33 @@ class LLMClient:
 
         return cleaned
 
+    @staticmethod
+    def _remove_orphaned_tool_calls(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove assistant messages with tool_calls that lack tool responses.
+        Prevents API validation errors like 'insufficient tool messages following tool_calls'.
+        This is a general-purpose sanitizer safe for all providers."""
+        cleaned = []
+        in_tool_round = False  # True while accumulating tool results for an assistant(tc) message
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "")
+            if role == "assistant" and msg.get("tool_calls"):
+                # Keep only if the next message is a tool response (any tool_call_id)
+                if i + 1 < len(messages) and messages[i + 1].get("role") == "tool":
+                    cleaned.append(msg)
+                    in_tool_round = True
+                # else: drop orphaned tool_calls message, reset flag
+                else:
+                    in_tool_round = False
+            elif role == "tool":
+                # Keep tool result if we're inside an active tool round
+                if in_tool_round:
+                    cleaned.append(msg)
+                # else: drop orphaned tool result
+            else:
+                cleaned.append(msg)
+                in_tool_round = False  # non-tool message ends any tool round
+        return cleaned
+
     def chat(self, messages: List[Dict[str, Any]], model: Optional[str] = None,
              tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[Any, str]:
         """
@@ -306,6 +333,9 @@ class LLMClient:
                 truncated = self._truncate_for_context(messages, max_tokens=self.llamacpp_ctx_size)
                 kwargs["messages"] = self._sanitize_for_llamacpp(truncated)
                 kwargs["timeout"] = 600
+            else:
+                # General sanitization for API models — remove orphaned tool_calls
+                kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
 
             try:
                 response = litellm.completion(**kwargs)
@@ -345,6 +375,9 @@ class LLMClient:
                 kwargs["api_key"] = "sk-no-key-required"
             truncated = self._truncate_for_context(messages, max_tokens=self.llamacpp_ctx_size)
             kwargs["messages"] = self._sanitize_for_llamacpp(truncated)
+        else:
+            # General sanitization for API models — remove orphaned tool_calls
+            kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
             
         try:
             response = litellm.completion(**kwargs)

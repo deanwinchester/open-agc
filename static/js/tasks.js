@@ -79,6 +79,7 @@ export async function loadTasks() {
           <div class="task-item-meta">
             <span>${timeAgo}</span>
             <span>${task.step_count || 0} 步</span>
+            ${task.session_id ? `<span class="task-meta-chip" style="font-size:0.75rem">会话 #${task.session_id}${task.session_name ? ' · ' + escapeHtml(task.session_name) : ''}</span>` : ''}
             ${scheduleInfo}
           </div>
         </div>
@@ -191,9 +192,10 @@ async function openTaskDetail(taskId) {
         <span class="task-meta-chip task-type-badge ${task.task_type}">${typeBadge}</span>
         <span class="task-meta-chip">🕐 ${formatTime(task.created_at)}</span>
         <span class="task-meta-chip">📊 ${(task.steps || []).length} 步</span>
+        ${task.session_id ? `<span class="task-meta-chip">💬 会话 #${task.session_id}${task.session_name ? ' · ' + escapeHtml(task.session_name) : ''}</span>` : ''}
       </div>
       <div class="detail-section">
-        <div class="detail-section-title">用户指令</div>
+        <div class="detail-section-title">任务目标</div>
         <div class="detail-content-block">${escapeHtml(task.user_query)}</div>
       </div>
       ${scheduleSection}

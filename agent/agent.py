@@ -1350,6 +1350,7 @@ class OpenAGCAgent:
             # Append model's response to history
             message_dict = message.model_dump()
             self.messages.append(message_dict)
+            _tool_call_insertion_idx = len(self.messages) - 1  # track for cleanup on early return
             
             # 1. Check if model decided to use tools
             tool_calls = message.tool_calls
@@ -1417,7 +1418,9 @@ class OpenAGCAgent:
                             "step": step_counter,
                             "tool": function_name,
                             "tool_label": tool_label,
-                            "args_preview": args_preview
+                            "args_preview": args_preview,
+                            "tool_call_id": tool_call.id,
+                            "tool_args": json.dumps(function_args, ensure_ascii=False)
                         })
                     
                     if verbose:
@@ -1482,6 +1485,8 @@ class OpenAGCAgent:
                                                 "event": "task_backgrounded",
                                                 "reason": "命令超时仍在运行，自动进入后台",
                                             })
+                                        # Remove orphaned tool_calls message so API doesn't reject on next call
+                                        del self.messages[_tool_call_insertion_idx:]
                                         return f"[TASK_BACKGROUNDED] 命令仍在后台运行，自动转入后台。进程继续执行，完成后将自动恢复。"
                                     break  # Success — exit retry loop
                                 except TaskPaused as tp:
@@ -1493,6 +1498,8 @@ class OpenAGCAgent:
                                             "pid": tp.pid,
                                             "output_file": tp.output_file,
                                         })
+                                    # Remove orphaned tool_calls message so API doesn't reject on next call
+                                    del self.messages[_tool_call_insertion_idx:]
                                     return f"[TASK_BACKGROUNDED] {tp}"
                                 except SandboxBlocked as sb:
                                     if attempt > 2:
@@ -1552,6 +1559,7 @@ class OpenAGCAgent:
                             "step": step_counter,
                             "tool": function_name,
                             "tool_label": tool_label,
+                            "tool_call_id": tool_call.id,
                             "result_preview": preview,
                             "success": not result_str.startswith("Error") and not result_str.startswith("System Guard"),
                         }
