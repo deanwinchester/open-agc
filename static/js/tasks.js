@@ -244,10 +244,10 @@ async function openTaskDetail(taskId) {
         <div class="detail-content-block">${escapeHtml(task.user_query)}</div>
       </div>
       ${scheduleSection}
-      ${task.status === 'interrupted' ? `
+      ${task.status === 'interrupted' || task.status === 'failed' ? `
       <div class="detail-section" style="display:flex;align-items:center;gap:1rem">
         <button class="btn-resume-task-detail" data-task-id="${task.id}">▶ 继续执行</button>
-        <span style="font-size:0.8rem;color:var(--text-secondary)">中断原因: ${task.interruption_reason === 'server_restart' ? '🔌 服务器重启' : task.interruption_reason === 'user' ? '🛑 用户中断' : task.interruption_reason === 'max_iterations' ? '⚠️ 循环上限' : task.interruption_reason || '未知'}</span>
+        <span style="font-size:0.8rem;color:var(--text-secondary)">${task.status === 'failed' ? '❌ 错误: ' : '中断原因: '}${task.interruption_reason === 'server_restart' ? '🔌 服务器重启' : task.interruption_reason === 'user' ? '🛑 用户中断' : task.interruption_reason === 'max_iterations' ? '⚠️ 循环上限' : task.interruption_reason === 'error' ? '⚠️ 执行出错' : task.interruption_reason || '未知'}</span>
       </div>` : ''}
       ${task.result_summary ? `
       <div class="detail-section">
