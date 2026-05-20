@@ -1481,6 +1481,47 @@ textarea {
     color: var(--text-secondary);
 }
 
+.task-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    padding: 1.25rem 0 0.5rem;
+    border-top: var(--border-glass);
+    margin-top: 0.5rem;
+}
+
+.pagination-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.4rem 1rem;
+    background: var(--bg-inner);
+    border: var(--border-glass);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: var(--trans-fast);
+}
+
+.pagination-btn:hover:not([disabled]) {
+    background: var(--theme-color);
+    color: #fff;
+    border-color: var(--theme-color);
+}
+
+.pagination-btn[disabled] {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.pagination-info {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
 .task-detail-steps {
     display: flex;
     flex-direction: column;
