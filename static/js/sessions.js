@@ -72,7 +72,10 @@ export async function switchSession(sessionId) {
       const res = await fetch(`/api/history?session_id=${sessionId}`);
       const data = await res.json();
       if (data.history && data.history.length > 0) {
-        data.history.forEach(msg => window.appendMessage?.(msg.content, msg.role));
+        data.history.forEach(msg => {
+          try { window.appendMessage?.(msg.content, msg.role); }
+          catch (e) { console.error('[Session] Failed to render message:', e, msg); }
+        });
       } else {
         window.appendMessage?.('*控制台*', 'system');
       }

@@ -52,9 +52,7 @@ document.getElementById('global-download-close')?.addEventListener('click', () =
 // =============================================
 function loadVendorScripts() {
   var scripts = [
-    '/static/vendor/chart.min.js',
-    '/static/vendor/marked.min.js',
-    '/static/vendor/highlight.min.js'
+    '/static/vendor/chart.min.js'
   ];
   // Load vendor scripts one at a time with delay, so they don't hog connections
   var i = 0;
@@ -1028,7 +1026,7 @@ function initApp() {
   // =============================================
   // UI Helpers
   // =============================================
-  function appendMessage(content, role, images) {
+  function appendMessage(content, role, images, files) {
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${role}`;
 
@@ -1065,7 +1063,21 @@ function initApp() {
         ).join('') + '</div>';
     }
 
-    messageDiv.innerHTML = `<div class="avatar">${avatarSvg}</div><div class="content">${imagesHtml}${formattedContent}</div>`;
+    let filesHtml = '';
+    if (files && files.length > 0) {
+      filesHtml = '<div class="msg-attach-chips">' +
+        files.map(f => {
+          const sizeStr = f.size > 1024 * 1024
+            ? (f.size / (1024 * 1024)).toFixed(1) + ' MB'
+            : f.size > 1024 ? (f.size / 1024).toFixed(1) + ' KB' : f.size + ' B';
+          return `<a class="msg-attach-chip" href="/api/upload/${encodeURIComponent(f.name)}" download title="${escapeHtml(f.name)} (${sizeStr})">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            <span>${escapeHtml(f.name)}</span>
+          </a>`;
+        }).join('') + '</div>';
+    }
+
+    messageDiv.innerHTML = `<div class="avatar">${avatarSvg}</div><div class="content">${imagesHtml}${filesHtml}${formattedContent}</div>`;
     chatContainer.appendChild(messageDiv);
     // Cap chat messages at 100, remove oldest 50 beyond limit
     const msgs = chatContainer.querySelectorAll('.message');
@@ -1248,14 +1260,146 @@ function initApp() {
     });
   }
 
+  // =============================================
+  // File Upload (attachments for agent)
+  // =============================================
+  let attachedFiles = []; // {name, path, size} uploaded files for current message
+
+  const attachFileBar = document.getElementById('attach-file-bar');
+  const fileUploadInput = document.getElementById('file-upload-input');
+  const attachBtn = document.getElementById('attach-btn');
+
+  function renderAttachChips() {
+    if (!attachFileBar) return;
+    if (attachedFiles.length === 0) {
+      attachFileBar.style.display = 'none';
+      attachFileBar.innerHTML = '';
+      return;
+    }
+    attachFileBar.style.display = 'flex';
+    attachFileBar.innerHTML = attachedFiles.map((f, i) => {
+      const sizeStr = f.size > 1024 * 1024
+        ? (f.size / (1024 * 1024)).toFixed(1) + ' MB'
+        : f.size > 1024
+          ? (f.size / 1024).toFixed(1) + ' KB'
+          : f.size + ' B';
+      return `<div class="attach-chip">
+        <span class="attach-chip-name" title="${escapeHtml(f.name)} (${sizeStr})">${escapeHtml(f.name)}</span>
+        <a class="attach-chip-dl" href="/api/upload/${encodeURIComponent(f.name)}" title="下载" download>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </a>
+        <button class="attach-chip-rm" onclick="removeAttachedFile(${i})" title="移除">&times;</button>
+      </div>`;
+    }).join('');
+  }
+
+  window.removeAttachedFile = function(index) {
+    const f = attachedFiles[index];
+    if (f) {
+      fetch('/api/upload/' + encodeURIComponent(f.name), { method: 'DELETE' }).catch(() => {});
+    }
+    attachedFiles.splice(index, 1);
+    renderAttachChips();
+  };
+
+  function uploadFiles(files) {
+    const maxSize = 500 * 1024 * 1024;
+    for (const file of files) {
+      if (file.size > maxSize) {
+        showStatus(`❌ ${file.name} 超过 500MB 限制`, 'error');
+        continue;
+      }
+      const xhr = new XMLHttpRequest();
+      const formData = new FormData();
+      formData.append('file', file);
+
+      // Add a progress chip
+      const progId = 'upload-prog-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+      attachFileBar.style.display = 'flex';
+      const progEl = document.createElement('div');
+      progEl.id = progId;
+      progEl.className = 'attach-chip uploading';
+      progEl.innerHTML = `<span class="attach-chip-name">${escapeHtml(file.name)}</span>
+        <span class="attach-progress">
+          <span class="attach-progress-bar" style="width:0%"></span>
+        </span>`;
+      attachFileBar.appendChild(progEl);
+
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round((e.loaded / e.total) * 100);
+          const bar = progEl.querySelector('.attach-progress-bar');
+          if (bar) bar.style.width = pct + '%';
+        }
+      });
+
+      xhr.addEventListener('load', () => {
+        progEl.remove();
+        if (xhr.status === 200) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (data.status === 'success') {
+              attachedFiles.push({ name: data.filename, path: data.path, size: data.size });
+              showStatus(`✅ ${data.filename} 上传成功`, 'success');
+            }
+          } catch (_) {}
+        } else {
+          let detail = file.name + ' 上传失败';
+          try { const d = JSON.parse(xhr.responseText); if (d.detail) detail = d.detail; } catch (_) {}
+          showStatus('❌ ' + detail, 'error');
+        }
+        renderAttachChips();
+      });
+
+      xhr.addEventListener('error', () => {
+        progEl.remove();
+        showStatus(`❌ ${file.name} 网络错误`, 'error');
+        renderAttachChips();
+      });
+
+      xhr.open('POST', '/api/upload');
+      xhr.send(formData);
+    }
+  }
+
+  if (attachBtn) attachBtn.addEventListener('click', () => fileUploadInput && fileUploadInput.click());
+  if (fileUploadInput) {
+    fileUploadInput.addEventListener('change', () => {
+      if (fileUploadInput.files.length > 0) {
+        uploadFiles(fileUploadInput.files);
+        fileUploadInput.value = '';
+      }
+    });
+  }
+
+  // Drag-and-drop onto the chat area
+  const chatView = document.getElementById('view-chat');
+  if (chatView) {
+    chatView.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); });
+    chatView.addEventListener('drop', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (e.dataTransfer.files.length > 0) uploadFiles(e.dataTransfer.files);
+    });
+  }
+
   function handleSend() {
     const text = messageInput.value.trim();
-    if ((!text && state.pendingImages.length === 0) || !state.isConnected) return;
+    if ((!text && state.pendingImages.length === 0 && attachedFiles.length === 0) || !state.isConnected) return;
     const msgImages = [...state.pendingImages];
-    appendMessage(text || '[图片]', 'user', msgImages);
+    let queryText = text;
+    // Append attached file info to query so agent knows about them
+    if (attachedFiles.length > 0) {
+      const fileList = attachedFiles.map(f => 'uploads/' + f.name).join(', ');
+      if (queryText) {
+        queryText += '\n\n[已上传文件: ' + fileList + ']';
+      } else {
+        queryText = '请处理我上传的文件: ' + fileList;
+      }
+    }
+    appendMessage(text || (msgImages.length > 0 ? '[图片]' : '[文件]'), 'user', msgImages, attachedFiles.length > 0 ? [...attachedFiles] : null);
     const agentSelector = document.getElementById('agent-selector');
     const msg = {
-      query: text || '请分析这张图片',
+      query: queryText,
       session_id: state.currentSessionId,
       agent_name: agentSelector ? agentSelector.value : 'default'
     };
@@ -1263,6 +1407,10 @@ function initApp() {
       msg.images = msgImages;
       state.pendingImages = [];
       renderImagePreviews();
+    }
+    if (attachedFiles.length > 0) {
+      attachedFiles = [];
+      renderAttachChips();
     }
     state.ws.send(JSON.stringify(msg));
     messageInput.value = '';
@@ -1452,7 +1600,10 @@ function initApp() {
         const data = await historyRes.json();
         if (data.history && data.history.length > 0) {
           chatContainer.innerHTML = '';
-          data.history.forEach(msg => appendMessage(msg.content, msg.role));
+          data.history.forEach(msg => {
+            try { appendMessage(msg.content, msg.role); }
+            catch (e) { console.error('[History] Failed to render message:', e, msg); }
+          });
         }
       }
     } catch (e) {
