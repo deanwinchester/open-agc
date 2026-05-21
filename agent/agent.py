@@ -129,6 +129,10 @@ class OpenAGCAgent:
             f"如果需要下载超过 100MB 的大文件（如模型文件 .gguf/.safetensors/.bin），"
             f"必须使用 queue_download 工具而非 execute_shell。它支持断点续传，"
             f"不会因为超时而失败。下载进度可在下载管理面板查看。\n"
+            f"\n【Windows 系统特别说明】："
+            f"当前运行在 Windows 系统上。PowerShell 中的 curl 命令实际上是 Invoke-WebRequest 别名，"
+            f"与标准 curl 参数不兼容。需要使用 curl 时，请使用 curl.exe 而非 curl。"
+            f"另外，如果 shell 命令输出出现编码问题（如中文乱码），可以在命令前添加 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new() 来修正。\n"
             f"\n【文件生成与显示规范（极其重要）】："
             f"1. 你生成的所有文件（脚本、文档、尤其是图片等），如果用户没有显式指定绝对路径，必须统一保存在沙箱工作目录（Sandbox Directory: {{cwd_dir}}）中，严禁写在 /tmp 下。\n"
             f"   ⚠️ 如果你需要访问沙箱外的路径（如读取用户指定目录中的文件），直接使用 read_file/write_file 等工具操作即可。"
@@ -256,7 +260,8 @@ class OpenAGCAgent:
         # Progressive Disclosure Setup
         CORE_TOOL_NAMES = {"execute_shell", "read_file", "write_file", "edit_file",
                            "search_file_content", "find_files", "search_available_tools",
-                           "ask_user_question", "search_history", "queue_download", "pause_and_wait"}
+                           "ask_user_question", "search_history", "queue_download", "pause_and_wait",
+                           "execute_python"}
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
         
         def _enable_tools_callback(tool_names: List[str]):

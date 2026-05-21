@@ -3573,6 +3573,7 @@ def _broadcast_to_websockets(message: dict):
     loop = _main_event_loop
     if loop is None or loop.is_closed() or not loop.is_running():
         return
+    dead = []
     for ws in list(connected_websockets):
         try:
             asyncio.run_coroutine_threadsafe(_ws_send_safe(ws, message), loop)
@@ -3755,6 +3756,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     })
     
     try:
+        msg_count_before = len(agent.messages)
         response = agent.run_turn(query, False, progress_cb, task_id=task_id)
 
         # If user already interrupted this task, don't overwrite the status
@@ -3774,7 +3776,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         summary = response[:200] if response else ""
         if is_backgrounded:
             # Agent auto-backgrounded (shell timeout) — save context for resume
-            save_task_context(task_id, agent.messages[1:])
+            save_task_context(task_id, agent.messages[msg_count_before:])
             update_task_status(task_id, "backgrounded",
                 response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台",
                 interruption_reason="backgrounded")
@@ -3786,7 +3788,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
             })
             return response
         elif is_max_iter:
-            save_task_context(task_id, agent.messages[1:])
+            save_task_context(task_id, agent.messages[msg_count_before:])
             update_task_status(task_id, "interrupted", summary, interruption_reason="max_iterations")
         else:
             update_task_status(task_id, "completed", summary)
@@ -3899,6 +3901,7 @@ def start_background_monitor():
     def monitor_loop():
         import time as _t
         import os as _os
+        _output_staleness = {}  # {task_id: {"size": int, "count": int}} for output file growth tracking
         while True:
             try:
                 conn = sqlite3.connect(DB_PATH)
@@ -4009,48 +4012,70 @@ def start_background_monitor():
                             pid = pinfo.get("pid")
                             out_file = pinfo.get("output_file", "")
                             command = pinfo.get("command", "")
+                            should_resume = False
                             try:
                                 _os.kill(pid, 0)  # No signal, just check existence
-                                # Process still running — skip
-                            except OSError:
-                                # Process has terminated — directly resume task
-                                cleanup_background_process(str(tid))
-                                full_out = ""
+                                # Process still running — check if output file stopped growing
                                 if out_file and _os.path.exists(out_file):
-                                    try:
-                                        with open(out_file, "r", encoding="utf-8", errors="replace") as rf:
-                                            full_out = rf.read()[-5000:]
-                                    except Exception:
-                                        pass
-                                    try:
-                                        _os.remove(out_file)
-                                    except Exception:
-                                        pass
-                                ctx = get_task_context(tid)
-                                if ctx:
-                                    ctx.append({"role": "user", "content": (
-                                        f"【系统通知】后台命令已执行完毕。\n"
-                                        f"命令: `{command[:100]}`\n"
-                                        f"输出:\n```\n{full_out[:2000]}\n```\n"
-                                        f"请根据输出结果继续执行之前未完成的任务。"
-                                    )})
-                                    save_task_context(tid, ctx)
-                                # Directly resume instead of waiting for scheduler
-                                increment_task_resume(tid)
-                                task_row = conn.execute(
-                                    "SELECT user_query FROM tasks WHERE id=?", (tid,)
-                                ).fetchone()
-                                user_query = task_row["user_query"] if task_row else ""
-                                print(f"[BgMonitor] Task {tid}: shell process {pid} done — resuming directly")
-                                # Update status inside the thread to avoid race with scheduler
-                                def _do_resume_with_status():
-                                    update_task_status(tid, "interrupted",
-                                        "后台命令完成", interruption_reason="background_complete")
-                                    _run_background_task(tid, user_query, ctx, True)
-                                threading.Thread(
-                                    target=_do_resume_with_status,
-                                    daemon=True
-                                ).start()
+                                    cur_size = _os.path.getsize(out_file)
+                                    prev = _output_staleness.get(str(tid), {})
+                                    prev_size = prev.get("size", -1)
+                                    prev_count = prev.get("count", 0)
+                                    if cur_size == prev_size and cur_size > 0:
+                                        # File not growing — increment staleness counter
+                                        new_count = prev_count + 1
+                                        _output_staleness[str(tid)] = {"size": cur_size, "count": new_count}
+                                        if new_count >= 3:  # 30s of no change
+                                            should_resume = True
+                                            print(f"[BgMonitor] Task {tid}: output stale 30s — treating as done")
+                                    else:
+                                        # File still growing — reset staleness
+                                        _output_staleness[str(tid)] = {"size": cur_size, "count": 0}
+                            except OSError:
+                                # Process has terminated — resume task
+                                should_resume = True
+                                cleanup_background_process(str(tid))
+
+                            if not should_resume:
+                                continue  # Process still active, skip this check
+
+                            # ── Common resume path (process dead OR output stalled) ──
+                            _output_staleness.pop(str(tid), None)
+                            cleanup_background_process(str(tid))
+                            full_out = ""
+                            if out_file and _os.path.exists(out_file):
+                                try:
+                                    with open(out_file, "r", encoding="utf-8", errors="replace") as rf:
+                                        full_out = rf.read()[-5000:]
+                                except Exception:
+                                    pass
+                                try:
+                                    _os.remove(out_file)
+                                except Exception:
+                                    pass
+                            ctx = get_task_context(tid)
+                            if ctx:
+                                ctx.append({"role": "user", "content": (
+                                    f"【系统通知】后台命令已执行完毕。\n"
+                                    f"命令: `{command[:100]}`\n"
+                                    f"输出:\n```\n{full_out[:2000]}\n```\n"
+                                    f"请根据输出结果继续执行之前未完成的任务。"
+                                )})
+                                save_task_context(tid, ctx)
+                            increment_task_resume(tid)
+                            task_row = conn.execute(
+                                "SELECT user_query FROM tasks WHERE id=?", (tid,)
+                            ).fetchone()
+                            user_query = task_row["user_query"] if task_row else ""
+                            print(f"[BgMonitor] Task {tid}: shell process done — resuming")
+                            threading.Thread(
+                                target=lambda _tid=tid, _uq=user_query, _ctx=ctx: (
+                                    update_task_status(_tid, "interrupted",
+                                        "后台命令完成", interruption_reason="background_complete"),
+                                    _run_background_task(_tid, _uq, _ctx, True)
+                                ),
+                                daemon=True
+                            ).start()
                     except Exception as e:
                         print(f"[BgMonitor] Shell process check error: {e}")
 

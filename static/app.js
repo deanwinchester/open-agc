@@ -842,9 +842,9 @@ function initApp() {
           <span class="progress-toggle-icon collapsed">▸</span>
         </div>
       </div>
-      <div class="progress-inline-steps" style="max-height: none;"></div>
+      <div class="progress-inline-steps" style="max-height: 0px;"></div>
       <div class="progress-inline-footer">
-        <button class="btn-collapse-steps">收起步骤 ▴</button>
+        <button class="btn-collapse-steps">展开步骤 ▾</button>
       </div>`;
 
     const stepsEl = historyCard.querySelector('.progress-inline-steps');
@@ -869,9 +869,9 @@ function initApp() {
     }
     const toggleIcon = historyCard.querySelector('.progress-toggle-icon');
     if (toggleIcon) {
-      toggleIcon.classList.remove('collapsed');
-      toggleIcon.classList.add('expanded');
-      toggleIcon.textContent = '▾';
+      toggleIcon.classList.remove('expanded');
+      toggleIcon.classList.add('collapsed');
+      toggleIcon.textContent = '▸';
     }
     steps.forEach((s, i) => {
       const stepEl = document.createElement('div');
