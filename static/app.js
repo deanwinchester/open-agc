@@ -189,6 +189,10 @@ function initApp() {
   window._wsReconnectTimer = null;  // exposed so sessions.js can clear it
 
   function connectWebSocket() {
+    // Don't create a new connection if one is already open or connecting
+    if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws?session_id=${state.currentSessionId}`;
     state.ws = new WebSocket(wsUrl);
@@ -270,7 +274,9 @@ function initApp() {
       window._sessionChatCache = window._sessionChatCache || {};
       // Store raw events for the session — will be replayed on switch
       if (!window._sessionChatCache['_evt_' + evtSession]) window._sessionChatCache['_evt_' + evtSession] = [];
-      window._sessionChatCache['_evt_' + evtSession].push({type: data.type, data: data});
+      var evtArr = window._sessionChatCache['_evt_' + evtSession];
+      evtArr.push({type: data.type, data: data});
+      if (evtArr.length > 100) evtArr.splice(0, evtArr.length - 50);
       // Update task badge to show cross-session activity
       if (data.type === 'progress') updateTaskBadge();
       return;
@@ -553,6 +559,8 @@ function initApp() {
     progressStepsEl = null;
     progressSteps = {};
     progressStepCount = 0;
+    progressStepData = {};
+
   }
 
   window.handleProgressEvent = handleProgressEvent;
@@ -1295,11 +1303,13 @@ function initApp() {
 
   window.removeAttachedFile = function(index) {
     const f = attachedFiles[index];
-    if (f) {
-      fetch('/api/upload/' + encodeURIComponent(f.name), { method: 'DELETE' }).catch(() => {});
-    }
     attachedFiles.splice(index, 1);
     renderAttachChips();
+    if (f) {
+      fetch('/api/upload/' + encodeURIComponent(f.name), { method: 'DELETE' }).catch(() => {
+        showStatus(`⚠️ 文件 ${f.name} 已从输入区移除，但服务器端删除失败`, 'warning');
+      });
+    }
   };
 
   function uploadFiles(files) {
@@ -1421,6 +1431,7 @@ function initApp() {
     progressInline = null;
     progressStepsEl = null;
     progressSteps = {};
+    progressStepData = {};
     progressStepCount = 0;
     state.isAgentThinking = true;
     updateInputState();

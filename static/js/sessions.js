@@ -46,10 +46,21 @@ export async function switchSession(sessionId) {
   // Don't close WebSocket — the agent task keeps running regardless of which
   // session we're viewing. Messages arrive through the same connection.
   const chatContainer = document.getElementById('chat-container');
-  // Cache current chat DOM for the session we're leaving
+  // Cache current chat DOM for the session we're leaving (max 10 entries, LRU)
   if (!window._sessionChatCache) window._sessionChatCache = {};
+  if (!window._sessionChatOrder) window._sessionChatOrder = [];
   if (prevId !== sessionId && chatContainer) {
     window._sessionChatCache[prevId] = chatContainer.innerHTML;
+    // Track LRU order
+    var idx = window._sessionChatOrder.indexOf(prevId);
+    if (idx !== -1) window._sessionChatOrder.splice(idx, 1);
+    window._sessionChatOrder.push(prevId);
+    // Evict oldest entries beyond the cap
+    while (window._sessionChatOrder.length > 10) {
+      var oldId = window._sessionChatOrder.shift();
+      delete window._sessionChatCache[oldId];
+      delete window._sessionChatCache['_evt_' + oldId];
+    }
   }
   // Restore from cache or load from server
   if (window._sessionChatCache[sessionId]) {
@@ -87,7 +98,12 @@ export async function switchSession(sessionId) {
   // Reconnect WebSocket to the new session so history_steps are replayed
   if (prevId !== sessionId && window.connectWebSocket) {
     window._intentionalClose = true;
-    if (state.ws) state.ws.close();
+    if (state.ws) {
+      // Detach old handlers so they don't fire reconnect after we close
+      state.ws.onclose = null;
+      state.ws.onerror = null;
+      state.ws.close();
+    }
     // Clear any pending reconnect timer
     if (window._wsReconnectTimer) {
       clearTimeout(window._wsReconnectTimer);
@@ -121,6 +137,11 @@ export async function deleteSession(sessionId) {
       const err = await res.json();
       alert(err.detail || '删除失败');
       return;
+    }
+    // Clean cached DOM and events for the deleted session
+    if (window._sessionChatCache) {
+      delete window._sessionChatCache[sessionId];
+      delete window._sessionChatCache['_evt_' + sessionId];
     }
     if (state.currentSessionId === sessionId) {
       const next = state.sessions.find(s => s.id !== sessionId);
