@@ -1,5 +1,6 @@
 import subprocess
 import os
+import sys
 import time
 import re
 import threading
@@ -177,6 +178,8 @@ class ShellTool(BaseTool):
                     "stdout": subprocess.DEVNULL,
                     "stderr": subprocess.DEVNULL,
                 }
+                if sys.platform == "win32":
+                    popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 proc = subprocess.Popen(command, **popen_kwargs)
                 return f"[Background] Command started with PID {proc.pid}."
             else:
@@ -185,15 +188,16 @@ class ShellTool(BaseTool):
                 out_dir = _get_shell_output_dir()
                 out_name = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.log"
                 out_path = os.path.join(out_dir, out_name)
-                out_file = open(out_path, "w", encoding="utf-8", errors="replace")
+                out_file = open(out_path, "wb")  # binary mode: preserve raw output from child process
 
                 popen_kwargs: Dict = {
                     "shell": True,
                     "cwd": cwd,
                     "stdout": out_file,
                     "stderr": subprocess.STDOUT,
-                    "text": True,
                 }
+                if sys.platform == "win32":
+                    popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 _t0 = time.time()
                 proc = subprocess.Popen(command, **popen_kwargs)
 
@@ -205,6 +209,21 @@ class ShellTool(BaseTool):
                 poll_stop = threading.Event()
                 last_pos = 0
 
+                def _decode_shell_output(path: str, start: int, end: int) -> str:
+                    """Read shell output bytes and decode as UTF-8 with fallback to system encoding."""
+                    with open(path, "rb") as rf:
+                        rf.seek(start)
+                        raw = rf.read(end - start)
+                    try:
+                        return raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        # Fallback: system locale encoding (e.g. cp936 on Chinese Windows)
+                        import locale
+                        try:
+                            return raw.decode(locale.getpreferredencoding(), errors="replace")
+                        except Exception:
+                            return raw.decode("utf-8", errors="replace")
+
                 def _poll_output():
                     nonlocal last_pos
                     while not poll_stop.is_set():
@@ -212,21 +231,19 @@ class ShellTool(BaseTool):
                         try:
                             fsize = os.path.getsize(out_path)
                             if fsize > last_pos:
-                                with open(out_path, "r", encoding="utf-8", errors="replace") as rf:
-                                    rf.seek(last_pos)
-                                    new_text = rf.read(fsize - last_pos)
-                                    last_pos = fsize
-                                    if new_text and progress_cb:
-                                        elapsed = time.time() - _t0
-                                        # Truncate to last 2000 chars for progress
-                                        preview = (new_text[-2000:] if len(new_text) > 2000
-                                                   else new_text)
-                                        progress_cb({
-                                            "event": "shell_output",
-                                            "text": preview,
-                                            "elapsed": round(elapsed, 1),
-                                            "total_bytes": fsize,
-                                        })
+                                new_text = _decode_shell_output(out_path, last_pos, fsize)
+                                last_pos = fsize
+                                if new_text and progress_cb:
+                                    elapsed = time.time() - _t0
+                                    # Truncate to last 2000 chars for progress
+                                    preview = (new_text[-2000:] if len(new_text) > 2000
+                                               else new_text)
+                                    progress_cb({
+                                        "event": "shell_output",
+                                        "text": preview,
+                                        "elapsed": round(elapsed, 1),
+                                        "total_bytes": fsize,
+                                    })
                         except Exception:
                             pass
 
@@ -419,12 +436,20 @@ def _read_tail(path: str, max_chars: int) -> str:
         fsize = os.path.getsize(path)
         if fsize == 0:
             return "(no output)"
-        if fsize <= max_chars:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                return f.read()
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            f.seek(max(0, fsize - max_chars))
-            return "...(truncated)\n" + f.read()
+        with open(path, "rb") as f:
+            raw = f.read()
+        # Try UTF-8 first, then system locale
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            import locale
+            try:
+                text = raw.decode(locale.getpreferredencoding(), errors="replace")
+            except Exception:
+                text = raw.decode("utf-8", errors="replace")
+        if len(text) <= max_chars:
+            return text
+        return text[-max_chars:]
     except Exception as e:
         return f"(error reading output: {e})"
 

@@ -96,9 +96,9 @@
         "能当",
         "需要"
       ],
-      "usage_count": 11,
-      "success_rate": 0.7797012301,
-      "last_used": "2026-05-20T14:05:13.425714"
+      "usage_count": 13,
+      "success_rate": 0.821557996381,
+      "last_used": "2026-05-21T14:07:29.756888"
     },
     {
       "filename": "doc_writer.md",
@@ -129,9 +129,9 @@
         "能当",
         "需要"
       ],
-      "usage_count": 6,
-      "success_rate": 0.7870510000000001,
-      "last_used": "2026-05-19T13:48:46.422393"
+      "usage_count": 7,
+      "success_rate": 0.8083459000000001,
+      "last_used": "2026-05-21T13:56:42.864118"
     },
     {
       "filename": "example_skill.md",
@@ -177,9 +177,9 @@
         "需要",
         "搜索"
       ],
-      "usage_count": 63,
-      "success_rate": 0.4928604880603724,
-      "last_used": "2026-05-21T10:16:51.485441"
+      "usage_count": 65,
+      "success_rate": 0.5892169953289017,
+      "last_used": "2026-05-21T16:14:52.870210"
     },
     {
       "filename": "file_organizer.md",
@@ -211,9 +211,9 @@
         "或按",
         "归类"
       ],
-      "usage_count": 20,
-      "success_rate": 0.6244269245496101,
-      "last_used": "2026-05-20T14:05:13.428815"
+      "usage_count": 22,
+      "success_rate": 0.6957858088851842,
+      "last_used": "2026-05-21T14:07:29.757891"
     },
     {
       "filename": "git_workflow.md",
