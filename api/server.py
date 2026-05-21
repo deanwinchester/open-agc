@@ -2146,9 +2146,9 @@ async def get_history(session_id: int = None):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     if session_id:
-        cursor.execute("SELECT role, content FROM messages WHERE session_id=? ORDER BY id ASC", (session_id,))
+        cursor.execute("SELECT role, content FROM messages WHERE session_id=? ORDER BY id ASC LIMIT 500", (session_id,))
     else:
-        cursor.execute("SELECT role, content FROM messages ORDER BY id ASC")
+        cursor.execute("SELECT role, content FROM messages ORDER BY id ASC LIMIT 500")
     rows = cursor.fetchall()
     conn.close()
     return {"history": [{"role": row["role"], "content": row["content"]} for row in rows]}
@@ -2676,7 +2676,13 @@ async def interrupt_task(task_id: int):
 
 @app.delete("/api/tasks/{task_id}")
 async def delete_task(task_id: int):
-    """Delete a task and its steps."""
+    """Delete a task and its steps, cleaning up runtime state."""
+    # Interrupt running agent/process if active
+    bg_agent = _background_agents.pop(str(task_id), None)
+    if bg_agent:
+        try: bg_agent.set_interrupt_flag()
+        except Exception: pass
+    _background_process_info.pop(str(task_id), None)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM task_steps WHERE task_id = ?", (task_id,))
@@ -3147,6 +3153,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         receive_task = None
                     except WebSocketDisconnect:
                         ws_alive = False
+                        # Immediately remove from broadcast list
+                        if websocket in connected_websockets:
+                            connected_websockets.remove(websocket)
+                        _active_agents.pop(ws_session_id, None)
                         # Don't interrupt — let agent finish in background
                         # Reconnecting clients will replay completed steps
                         receive_task = None
@@ -3461,10 +3471,14 @@ async def websocket_endpoint(websocket: WebSocket):
         print("Client disconnected")
         if websocket in connected_websockets:
             connected_websockets.remove(websocket)
+        _active_agents.pop(ws_session_id, None)
+        _session_enabled_tools.pop(ws_session_id, None)
     except Exception as e:
         print(f"WebSocket error: {e}")
         if websocket in connected_websockets:
             connected_websockets.remove(websocket)
+        _active_agents.pop(ws_session_id, None)
+        _session_enabled_tools.pop(ws_session_id, None)
 
 def start_email_listener():
     def email_listener_loop():
@@ -3563,7 +3577,10 @@ def _broadcast_to_websockets(message: dict):
         try:
             asyncio.run_coroutine_threadsafe(_ws_send_safe(ws, message), loop)
         except Exception:
-            pass
+            dead.append(ws)
+    for ws in dead:
+        try: connected_websockets.remove(ws)
+        except ValueError: pass
 
 
 def _broadcast_task_history(task_id: int, session_id: int):
@@ -3671,7 +3688,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                 cursor = conn.cursor()
                 cursor.execute(
                     "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=?",
-                    (event.get("result_preview", ""), event.get("result_preview", ""),
+                    (event.get("result_preview", ""), event.get("full_result", event.get("result_preview", "")),
                      1 if event.get("success") else 0, task_id, event.get("step", step_counter))
                 )
                 conn.commit()
