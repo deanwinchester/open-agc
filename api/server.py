@@ -45,6 +45,7 @@ from core.plugin_manager import discover_plugins, list_plugins, list_all_plugins
 # ── Route modules ──
 from api.routes.benchmark import router as benchmark_router, init_benchmark_routes
 from api.routes.downloads import router as downloads_router, init_download_routes
+from api.routes.uploads import router as uploads_router
 
 # Load environment variables
 env_file = get_data_path(".env")
@@ -71,6 +72,7 @@ for var in ["no_proxy", "NO_PROXY"]:
 app = FastAPI(title="Open-AGC UI Server")
 app.include_router(benchmark_router)
 app.include_router(downloads_router)
+app.include_router(uploads_router)
 
 # Store the main event loop for cross-thread WebSocket broadcasts
 _main_event_loop: asyncio.AbstractEventLoop = None

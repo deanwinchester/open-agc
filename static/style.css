@@ -1076,6 +1076,133 @@ textarea {
 }
 
 /* ==========================================================================
+   File Upload Chips (chat input area)
+   ========================================================================== */
+#attach-file-bar {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    padding: 0.4rem 0.5rem;
+}
+
+.attach-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    background: var(--bg-inner);
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    padding: 0.25rem 0.4rem 0.25rem 0.6rem;
+    font-size: 0.78rem;
+    color: var(--text-primary);
+    transition: all var(--trans-fast);
+    max-width: 220px;
+}
+
+.attach-chip:hover {
+    border-color: var(--theme-color);
+    background: rgba(74, 222, 128, 0.06);
+}
+
+.attach-chip.uploading {
+    min-width: 160px;
+    padding: 0.25rem 0.6rem;
+    flex-direction: column;
+    gap: 0.2rem;
+    align-items: stretch;
+}
+
+.attach-chip-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+
+.attach-chip-dl {
+    display: flex;
+    align-items: center;
+    color: var(--text-secondary);
+    text-decoration: none;
+    padding: 2px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+
+.attach-chip-dl:hover {
+    color: var(--theme-color);
+}
+
+.attach-chip-rm {
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0 2px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+
+.attach-chip-rm:hover {
+    color: var(--error);
+    background: rgba(239, 68, 68, 0.1);
+}
+
+.attach-progress {
+    width: 100%;
+    height: 4px;
+    background: var(--border-color);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.attach-progress-bar {
+    display: block;
+    height: 100%;
+    background: var(--theme-color);
+    border-radius: 2px;
+    transition: width 0.15s ease;
+}
+
+/* Message bubble file chips */
+.msg-attach-chips {
+    display: flex;
+    gap: 0.3rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.4rem;
+}
+
+.msg-attach-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    background: var(--bg-base);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.25rem 0.55rem;
+    font-size: 0.76rem;
+    color: var(--theme-color);
+    text-decoration: none;
+    transition: all var(--trans-fast);
+}
+
+.msg-attach-chip:hover {
+    border-color: var(--theme-color);
+    background: rgba(74, 222, 128, 0.08);
+}
+
+.msg-attach-chip span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 180px;
+}
+
+/* ==========================================================================
    Retry Bar
    ========================================================================== */
 .retry-bar {
