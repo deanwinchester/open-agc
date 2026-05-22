@@ -1,6 +1,7 @@
-import traceback
+"""Web search tool with multiple backends and content fetching support."""
 import random
 import re
+import traceback
 import requests
 from bs4 import BeautifulSoup
 from .base import BaseTool
@@ -14,6 +15,9 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
 ]
 
+# Timeout per engine
+REQUEST_TIMEOUT = 12
+
 
 def _get_headers():
     return {
@@ -21,18 +25,33 @@ def _get_headers():
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Accept-Encoding": "gzip, deflate",
-        "Connection": "keep-alive",
     }
 
 
+def _text(el):
+    """Safely extract text from a BeautifulSoup element."""
+    return el.get_text(strip=True) if el else ""
+
+
+def _decode(resp):
+    """Decode response bytes to text with fallback."""
+    try:
+        return resp.content.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            return resp.content.decode(resp.apparent_encoding or "utf-8", errors="replace")
+        except Exception:
+            return resp.content.decode("utf-8", errors="replace")
+
+
 def _search_bing(query: str, max_results: int = 5) -> list:
-    """Search via Bing (international, usually accessible)."""
+    """Search via Bing."""
     url = "https://www.bing.com/search"
     params = {"q": query, "count": max_results}
-    resp = requests.get(url, params=params, headers=_get_headers(), timeout=10)
+    resp = requests.get(url, params=params, headers=_get_headers(), timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(resp.content, "html.parser")
     results = []
 
     for item in soup.select("li.b_algo"):
@@ -49,130 +68,121 @@ def _search_bing(query: str, max_results: int = 5) -> list:
     return results
 
 
-def _search_baidu(query: str, max_results: int = 5) -> list:
-    """Search via Baidu (reliable in China)."""
-    url = "https://www.baidu.com/s"
-    params = {"wd": query, "rn": max_results}
-    resp = requests.get(url, params=params, headers=_get_headers(), timeout=10)
+def _search_sogou(query: str, max_results: int = 5) -> list:
+    """Search via Sogou (reliable in China, good for Chinese queries)."""
+    url = "https://www.sogou.com/web"
+    params = {"query": query}
+    resp = requests.get(url, params=params, headers=_get_headers(), timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(resp.content, "html.parser")
     results = []
     seen_urls = set()
 
-    # Strategy 1: modern Baidu result items (div.result with h3 > a)
-    for item in soup.select("div.result"):
-        title_el = item.select_one("h3 a")
-        if not title_el:
+    # Sogou result selectors (multiple layouts)
+    for item in soup.select(".vr-title, .result-title, .rb"):
+        a = item if item.name == "a" else item.select_one("a")
+        if not a:
             continue
-        title = title_el.get_text(strip=True)
-        href = title_el.get("href", "")
-        # Resolve Baidu redirect URL
+        href = a.get("href", "")
         if href.startswith("/"):
-            href = "https://www.baidu.com" + href
-        # Skip dupes
+            href = "https://www.sogou.com" + href
         if href in seen_urls:
             continue
         seen_urls.add(href)
 
-        # Try multiple snippet selectors (modern Baidu variants)
-        snippet_el = (
-            item.select_one(".c-abstract")
-            or item.select_one(".c-span-last")
-            or item.select_one(".content-right_2s-H4")
-            or item.select_one(".c-font-normal")
-            or item.select_one("span")
-        )
+        title = a.get_text(strip=True)
+        # Find snippet: look for nearby text block
+        snippet_el = item.find_next_sibling(class_=lambda c: c and ("str-text" in c or "star-wiki" in c or "str-info" in c))
         snippet = snippet_el.get_text(strip=True) if snippet_el else ""
 
         results.append({"title": title, "url": href, "snippet": snippet})
         if len(results) >= max_results:
             break
 
-    # Strategy 2: fallback to c-container (older Baidu layout)
+    # Fallback: extract from general h3 > a pattern
     if not results:
-        for item in soup.select("div.c-container"):
-            title_el = item.select_one("h3 a")
-            if not title_el:
-                continue
-            title = title_el.get_text(strip=True)
-            href = title_el.get("href", "")
+        for a in soup.select("h3 a[href]"):
+            href = a.get("href", "")
             if href.startswith("/"):
-                href = "https://www.baidu.com" + href
+                href = "https://www.sogou.com" + href
             if href in seen_urls:
                 continue
             seen_urls.add(href)
-
-            snippet_el = (
-                item.select_one(".c-abstract")
-                or item.select_one(".c-span-last")
-                or item.select_one("span")
-            )
-            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-            results.append({"title": title, "url": href, "snippet": snippet})
+            title = a.get_text(strip=True)
+            results.append({"title": title, "url": href, "snippet": ""})
             if len(results) >= max_results:
                 break
-
-    # Strategy 3: extract from script data (newest Baidu SPA-style pages)
-    if not results:
-        for script in soup.select("script"):
-            text = script.string or ""
-            if 'window._bd_results' in text or '"result"' in text:
-                import json
-                try:
-                    data = json.loads(re.search(r'({.*"result".*})', text).group(1))
-                    for item in data.get("result", {}).get("items", []):
-                        title = item.get("title", "")
-                        href = item.get("url", "")
-                        snippet = item.get("abstract", "")
-                        if title and href not in seen_urls:
-                            seen_urls.add(href)
-                            results.append({"title": title, "url": href, "snippet": snippet})
-                            if len(results) >= max_results:
-                                break
-                except (json.JSONDecodeError, AttributeError, KeyError):
-                    pass
 
     return results
 
 
-def _search_google(query: str, max_results: int = 5) -> list:
-    """Search via Google (may be blocked in some regions)."""
-    url = "https://www.google.com/search"
-    params = {"q": query, "num": max_results, "hl": "zh-CN"}
-    resp = requests.get(url, params=params, headers=_get_headers(), timeout=10)
+def _search_baidu(query: str, max_results: int = 5) -> list:
+    """Search via Baidu. Uses multiple extraction strategies for the modern SPA layout."""
+    url = "https://www.baidu.com/s"
+    params = {"wd": query, "rn": max_results}
+    resp = requests.get(url, params=params, headers=_get_headers(), timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(resp.content, "html.parser")
     results = []
+    seen_urls = set()
 
-    for g in soup.select("div.g"):
-        title_el = g.select_one("h3")
-        link_el = g.select_one("a")
-        snippet_el = g.select_one("div.VwiC3b") or g.select_one("span.st")
-
-        if title_el and link_el:
-            title = title_el.get_text(strip=True)
-            href = link_el.get("href", "")
-            # Google wraps URLs, extract actual URL
-            if href.startswith("/url?q="):
-                href = href.split("/url?q=")[1].split("&")[0]
-            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-            results.append({"title": title, "url": href, "snippet": snippet})
+    # Strategy 1: h3 > a anywhere in the document
+    for a in soup.select("h3 a[href]"):
+        href = a.get("href", "")
+        if href.startswith("/"):
+            href = "https://www.baidu.com" + href
+        if href in seen_urls:
+            continue
+        seen_urls.add(href)
+        title = a.get_text(strip=True)
+        if title:
+            results.append({"title": title, "url": href, "snippet": ""})
             if len(results) >= max_results:
                 break
+
+    # Strategy 2: look for links containing titles (wider net)
+    if not results:
+        for a in soup.select("a[href*='baidu.com/link']"):
+            title = a.get("title", "") or a.get_text(strip=True)
+            href = a.get("href", "")
+            if title and href not in seen_urls and len(title) > 4:
+                seen_urls.add(href)
+                results.append({"title": title, "url": href, "snippet": ""})
+                if len(results) >= max_results:
+                    break
+
+    # Strategy 3: extract from JSON-LD / script data
+    if not results:
+        for script in soup.select("script[type='application/ld+json']"):
+            try:
+                import json
+                data = json.loads(script.string or "{}")
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    title = item.get("name", "") or item.get("headline", "")
+                    href = item.get("url", "")
+                    snippet = item.get("description", "")
+                    if title and href not in seen_urls:
+                        seen_urls.add(href)
+                        results.append({"title": title, "url": href, "snippet": snippet})
+                        if len(results) >= max_results:
+                            break
+            except Exception:
+                pass
 
     return results
 
 
 def _search_duckduckgo(query: str, max_results: int = 5) -> list:
-    """Fallback: DuckDuckGo HTML (no API key needed)."""
+    """Fallback: DuckDuckGo HTML (no API key needed, may be blocked in some regions)."""
     url = "https://html.duckduckgo.com/html/"
     data = {"q": query}
-    resp = requests.post(url, data=data, headers=_get_headers(), timeout=10)
+    resp = requests.post(url, data=data, headers=_get_headers(), timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(resp.content, "html.parser")
     results = []
 
     for item in soup.select("div.result"):
@@ -189,11 +199,50 @@ def _search_duckduckgo(query: str, max_results: int = 5) -> list:
     return results
 
 
+def fetch_page_content(url: str, max_chars: int = 5000) -> str:
+    """Fetch a URL and extract its readable text content.
+
+    Useful for getting full article/page content beyond search snippets.
+    """
+    try:
+        resp = requests.get(url, headers=_get_headers(), timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.content, "html.parser")
+
+        # Remove non-content elements
+        for tag in soup.select("script, style, nav, footer, header, aside, iframe, .sidebar, .ad, .menu, .comment"):
+            tag.decompose()
+
+        # Try common content selectors
+        content = None
+        for selector in ["article", "[role='main']", "main", ".content", ".post-content", ".article-content",
+                         "#content", ".entry-content", ".post"]:
+            el = soup.select_one(selector)
+            if el and len(el.get_text(strip=True)) > 200:
+                content = el
+                break
+
+        if not content:
+            content = soup.body or soup
+
+        text = content.get_text(separator="\n", strip=True)
+        # Clean up excessive whitespace
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r'[ \t]{2,}', ' ', text)
+
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + f"\n\n...(output truncated, full length: {len(text)} chars)"
+
+    except Exception as e:
+        return f"Error fetching page: {type(e).__name__}: {str(e)}"
+
+
 # Ordered list of search engines to try
 SEARCH_ENGINES = [
     ("Bing", _search_bing),
+    ("Sogou", _search_sogou),
     ("Baidu", _search_baidu),
-    ("Google", _search_google),
     ("DuckDuckGo", _search_duckduckgo),
 ]
 
@@ -201,8 +250,8 @@ SEARCH_ENGINES = [
 class WebSearchTool(BaseTool):
     """
     Search the web for information using multiple search engines.
-    Tries Bing → Baidu → Google → DuckDuckGo in order.
-    No paid API required — uses direct HTTP scraping.
+    Tries Bing → Sogou → Baidu → DuckDuckGo in order.
+    Also supports fetching full page content via fetch_content parameter.
     """
 
     def __init__(self):
@@ -210,7 +259,8 @@ class WebSearchTool(BaseTool):
             name="search_web",
             description=(
                 "Search the web for information, news, or current events. "
-                "Tries multiple search engines (Bing, Baidu, Google) automatically. "
+                "Tries multiple search engines (Bing, Sogou, Baidu) automatically. "
+                "Use fetch_content=True to get full page content from a result URL. "
                 "Use this tool for any question about recent events or real-time information."
             ),
         )
@@ -232,6 +282,14 @@ class WebSearchTool(BaseTool):
                             "type": "integer",
                             "description": "Maximum number of results to return (default 5).",
                         },
+                        "fetch_content": {
+                            "type": "boolean",
+                            "description": "If True, also fetch the full text content from the top result URL. Useful when snippets are insufficient. Default: False.",
+                        },
+                        "fetch_url": {
+                            "type": "string",
+                            "description": "Fetch full text content from a specific URL instead of searching. Use this when you already have a URL and want to read its content.",
+                        },
                     },
                     "required": ["query"],
                 },
@@ -239,65 +297,45 @@ class WebSearchTool(BaseTool):
         }
 
     @staticmethod
-    def _is_relevant(query: str, results: list, threshold: float = 0.3) -> tuple:
-        """Heuristic check: do result titles/URLs contain meaningful query terms?
-        Returns (is_relevant, score, explanation)."""
-        # Extract meaningful Chinese/English terms from query (skip stopwords)
-        stopwords = {"的", "了", "是", "在", "和", "就", "都", "而", "及", "与",
-                     "着", "或", "一个", "没有", "最", "什么", "怎么", "哪里",
-                     "a", "the", "an", "of", "in", "to", "for", "and", "or",
-                     "下载", "搜索", "最新", "热门"}
-        # For Chinese: extract individual characters and bigrams
-        import re as _re
-        tokens = set()
-        for seg in _re.split(r'[\s,;，；、]+', query):
-            if len(seg) > 1 and seg not in stopwords:
-                tokens.add(seg.lower())
-            # Also add individual CJK characters for partial matching
-            for ch in seg:
-                if '一' <= ch <= '鿿' and ch not in stopwords:
-                    tokens.add(ch)
+    def _format_results(engine_name: str, results: list) -> str:
+        formatted = []
+        for i, r in enumerate(results, 1):
+            formatted.append(
+                f"{i}. {r['title']}\n   URL: {r['url']}\n   {r['snippet']}"
+            )
+        header = f"[From {engine_name}]\n"
+        return header + "\n\n".join(formatted)
 
-        if not tokens:
-            return True, 1.0, ""
+    def execute(self, query: str = "", max_results: int = 5, fetch_content: bool = False,
+                fetch_url: str = "", **kwargs) -> str:
+        # ── Dedicated URL content fetch ──
+        if fetch_url:
+            content = fetch_page_content(fetch_url)
+            return f"[Fetched Content from {fetch_url}]\n\n{content}"
 
-        match_count = 0
-        for r in results:
-            combined = (r["title"] + " " + r["url"] + " " + r["snippet"]).lower()
-            for t in tokens:
-                if t in combined:
-                    match_count += 1
-                    break  # one match per result is enough
+        if not query:
+            return "Error: No query provided."
 
-        score = match_count / max(len(results), 1)
-        if score < threshold:
-            return False, score, f"结果与查询\"{query[:30]}\"相关性低 (匹配率{score:.0%})"
-        return True, score, ""
-
-    def execute(self, query: str, max_results: int = 5, **kwargs) -> str:
-        errors = []
+        # ── Search with multiple engines ──
+        all_errors = []
 
         for engine_name, engine_fn in SEARCH_ENGINES:
             try:
                 results = engine_fn(query, max_results)
                 if results:
-                    relevant, score, note = self._is_relevant(query, results)
-                    formatted = []
-                    for r in results:
-                        formatted.append(
-                            f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['snippet']}"
-                        )
-                    header = f"[Source: {engine_name}]\n"
-                    body = header + "\n\n".join(formatted)
-                    if not relevant:
-                        body += f"\n\n⚠️ {note}。建议使用 browser_automation 直接访问目标网站。"
+                    body = self._format_results(engine_name, results)
+
+                    # Optionally fetch top result content
+                    if fetch_content and results:
+                        top_url = results[0]["url"]
+                        content = fetch_page_content(top_url)
+                        body += f"\n\n[Full content from: {top_url}]\n{content}"
+
                     return body
                 else:
-                    errors.append(f"{engine_name}: No results returned")
+                    all_errors.append(f"{engine_name}: No results")
             except Exception as e:
-                errors.append(f"{engine_name}: {str(e)}")
+                all_errors.append(f"{engine_name}: {type(e).__name__}: {str(e)[:80]}")
                 continue
 
-        # All engines failed
-        error_details = "\n".join(errors)
-        return f"All search engines failed:\n{error_details}"
+        return f"All search engines failed:\n" + "\n".join(all_errors)
