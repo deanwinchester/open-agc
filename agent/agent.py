@@ -946,23 +946,78 @@ class OpenAGCAgent:
 
         return "\n".join(parts)
 
-    def _compress_tool_result(self, result: str, tool_name: str) -> str:
-        """Compress long tool results to preserve context window.
+    # ── Tool-specific compression strategies ──
 
-        Strategy (tiered):
-          1. < 3000 chars → keep as-is
-          2. 3000–15000 → extractive: keep head + key lines (error, traceback, etc.)
-          3. > 15000    → extractive compression (guaranteed < 8000 chars)
+    @staticmethod
+    def _compress_search_results(result: str) -> str:
+        """Compress search results: keep all entries, truncate snippets per-entry.
+
+        Search results are structured as:
+          [From Engine]
+          1. Title
+             URL: xxx
+             Snippet: yyy
+          2. Title
+             ...
         """
-        COMPRESS_THRESHOLD = 3000    # chars — below this, no compression needed
-        EXTRACTIVE_TARGET = 8000     # chars — target for extractive pass
+        MAX_ENTRY_CHARS = 400  # max chars per result entry (title+url+snippet)
+        MAX_TOTAL = 4000
+
+        lines = result.split("\n")
+        compressed = []
+        current_entry = []
+
+        for line in lines:
+            # Detect numbered entry start: "N. Title"
+            if re.match(r'^\d+\.\s', line):
+                # Flush previous entry
+                if current_entry:
+                    entry_text = "\n".join(current_entry)
+                    if len(entry_text) > MAX_ENTRY_CHARS:
+                        entry_text = entry_text[:MAX_ENTRY_CHARS] + "..."
+                    compressed.append(entry_text)
+                current_entry = [line]
+            else:
+                current_entry.append(line)
+
+        # Flush last entry
+        if current_entry:
+            entry_text = "\n".join(current_entry)
+            if len(entry_text) > MAX_ENTRY_CHARS:
+                entry_text = entry_text[:MAX_ENTRY_CHARS] + "..."
+            compressed.append(entry_text)
+
+        result_text = "\n".join(compressed)
+        if len(result_text) > MAX_TOTAL:
+            # Truncate from the end (lose lowest-ranked results)
+            result_text = result_text[:MAX_TOTAL] + "\n...(truncated)"
+
+        return result_text
+
+    @staticmethod
+    def _compress_file_content(result: str) -> str:
+        """Compress file content: keep head + tail with omitted-line annotation."""
+        HEAD_LINES = 30
+        TAIL_LINES = 20
+        lines = result.split("\n")
+        if len(lines) <= HEAD_LINES + TAIL_LINES + 5:
+            return result
+        head = lines[:HEAD_LINES]
+        tail = lines[-TAIL_LINES:]
+        omitted = len(lines) - HEAD_LINES - TAIL_LINES
+        return "\n".join(head + [f"─── {omitted} lines omitted ───"] + tail)
+
+    @staticmethod
+    def _compress_shell_output(result: str, tool_name: str) -> str:
+        """Compress shell/Python output: keep head + scored middle lines + tail."""
+        COMPRESS_THRESHOLD = 3000
+        EXTRACTIVE_TARGET = 8000
 
         if len(result) <= COMPRESS_THRESHOLD:
             return result
 
         lines = result.split("\n")
 
-        # Scoring function for important lines
         def _line_score(line: str) -> int:
             low = line.lower()
             score = 0
@@ -973,39 +1028,46 @@ class OpenAGCAgent:
             if any(kw in low for kw in ("file", "path", "dir", "found", "missing")):
                 score += 2
             if any(c.isdigit() for c in line):
-                score += 1  # lines with numbers tend to carry metrics
-            # Penalize very long lines (often raw data dumps)
+                score += 1
             if len(line) > 300:
                 score -= 2
             return score
 
-        # Always keep first 15 lines (command echo, header)
         head = lines[:15]
-        tail = lines[-5:]  # last 5 lines (exit code, summary)
-
-        # Score and pick important lines from the middle
+        tail = lines[-5:]
         middle = lines[15:-5] if len(lines) > 20 else []
+
+        if not middle:
+            compressed = "\n".join(head + tail)
+            return (f"[Compressed: {len(result)} chars → {len(compressed)} chars | "
+                    f"original tool: {tool_name}]\n{compressed}")
+
         scored_lines = [(i, _line_score(l), l) for i, l in enumerate(middle, start=15)]
         scored_lines.sort(key=lambda x: -x[1])
 
-        # Keep lines with score ≥ 3 (high importance), limit to avoid blowup
-        important = [(i, l) for i, s, l in scored_lines if s >= 3]
+        # Keep lines scoring >= 2 (lowered from 3), ensure at least 20% of middle
+        important = [(i, l) for i, s, l in scored_lines if s >= 2]
+        min_keep = max(1, len(middle) // 5)
+        if len(important) < min_keep:
+            extra = scored_lines[:min_keep - len(important)]
+            existing_ids = {idx for idx, _ in important}
+            for idx, s, l in extra:
+                if idx not in existing_ids:
+                    important.append((idx, l))
+                    existing_ids.add(idx)
 
-        # Also keep any line matching common output patterns (table borders, section headers)
+        # Section markers
         section_lines = []
+        existing_ids = {idx for idx, _ in important}
         for i, l in enumerate(middle):
-            if i + 15 not in {idx for idx, _ in important}:
-                if re.search(r'^[-|=+|]{5,}|^#{1,3}\s', l):
-                    section_lines.append((i + 15, l))
+            idx = i + 15
+            if idx not in existing_ids and re.search(r'^[-|=+|]{5,}|^#{1,3}\s', l):
+                section_lines.append((idx, l))
+                existing_ids.add(idx)
 
-        # Build compressed result
-        compressed_lines = []
+        # Build compressed
+        compressed_lines = list(head)
 
-        # Head section
-        original_head = len(head)
-        compressed_lines.extend(head)
-
-        # If there's important middle content, annotate
         if important or section_lines:
             compressed_lines.append(f"─── key output ({len(important)} important lines) ───")
             seen = set()
@@ -1013,33 +1075,32 @@ class OpenAGCAgent:
                 if l not in seen:
                     compressed_lines.append(l)
                     seen.add(l)
-
-            # Show count of omitted lines
-            omitted = len(lines) - original_head - len(tail) - len(seen)
+            omitted = len(lines) - len(head) - len(tail) - len(seen)
             if omitted > 0:
                 compressed_lines.append(f"─── {omitted} lines omitted ───")
 
-        # Tail section
         compressed_lines.extend(tail)
-
         compressed = "\n".join(compressed_lines)
 
-        # If still over target, do a second pass: just keep head + tail
         if len(compressed) > EXTRACTIVE_TARGET:
-            compressed = "\n".join(head + [f"─── {len(lines) - original_head - len(tail)} lines omitted ───"] + tail)
+            compressed = "\n".join(head + [f"─── {len(lines) - len(head) - len(tail)} lines omitted ───"] + tail)
 
-        # If still over COMPRESS_THRESHOLD after extraction (edge case), brute-force
         if len(compressed) > COMPRESS_THRESHOLD * 2:
             half = COMPRESS_THRESHOLD
             compressed = (compressed[:half] +
                           f"\n...[truncated {len(result)} chars to {half * 2}]...\n" +
                           compressed[-half:])
 
-        return (
-            f"[Compressed: {len(result)} chars → {len(compressed)} chars | "
-            f"original tool: {tool_name}]\n"
-            f"{compressed}"
-        )
+        return (f"[Compressed: {len(result)} chars → {len(compressed)} chars | "
+                f"original tool: {tool_name}]\n{compressed}")
+
+    def _compress_tool_result(self, result: str, tool_name: str) -> str:
+        """Dispatch to tool-specific compression strategy."""
+        if tool_name == "search_web":
+            return self._compress_search_results(result)
+        if tool_name in ("read_file", "write_file", "edit_file", "browser_automation"):
+            return self._compress_file_content(result)
+        return self._compress_shell_output(result, tool_name)
 
     def _fold_tool_calls(self, messages: List[Dict]) -> List[Dict]:
         """Fold consecutive tool-call rounds exceeding the threshold into a summary.
@@ -1572,9 +1633,18 @@ class OpenAGCAgent:
                             "result_preview": preview,
                             "success": not result_str.startswith("Error") and not result_str.startswith("System Guard"),
                         }
-                        # Send full result for shell commands (persisted to task_steps)
-                        if function_name == "execute_shell":
-                            evt["full_result"] = result_str[:5000]
+                        # Send full result for all tools (persisted to task_steps for resume)
+                        _full_cap = {
+                            "execute_shell": 5000,
+                            "execute_python": 5000,
+                            "search_web": 3000,
+                            "read_file": 3000,
+                            "write_file": 2000,
+                            "edit_file": 2000,
+                            "browser_automation": 2000,
+                        }.get(function_name, 1000)
+                        if len(result_str) > _full_cap:
+                            evt["full_result"] = result_str[:_full_cap]
                         progress_callback(evt)
                     
                     if verbose:
