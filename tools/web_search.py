@@ -1,4 +1,12 @@
-"""Web search tool with multiple backends and content fetching support."""
+"""Web search tool with multiple backends and content fetching support.
+
+Engine selection by query language:
+  - Chinese queries → Sogou → Baidu → Bing → DuckDuckGo
+    (Bing China / cn.bing.com fails on multi-word CJK queries for
+    less-known entities, returning character-dictionary results instead.
+    Sogou handles Chinese queries much more reliably.)
+  - English queries → Bing → DuckDuckGo → Sogou → Baidu
+"""
 import random
 import re
 import traceback
@@ -15,7 +23,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
 ]
 
-# Timeout per engine
 REQUEST_TIMEOUT = 12
 
 
@@ -26,22 +33,6 @@ def _get_headers():
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Accept-Encoding": "gzip, deflate",
     }
-
-
-def _text(el):
-    """Safely extract text from a BeautifulSoup element."""
-    return el.get_text(strip=True) if el else ""
-
-
-def _decode(resp):
-    """Decode response bytes to text with fallback."""
-    try:
-        return resp.content.decode("utf-8")
-    except UnicodeDecodeError:
-        try:
-            return resp.content.decode(resp.apparent_encoding or "utf-8", errors="replace")
-        except Exception:
-            return resp.content.decode("utf-8", errors="replace")
 
 
 def _search_bing(query: str, max_results: int = 5) -> list:
@@ -79,37 +70,15 @@ def _search_sogou(query: str, max_results: int = 5) -> list:
     results = []
     seen_urls = set()
 
-    # Sogou result selectors (multiple layouts)
-    for item in soup.select(".vr-title, .result-title, .rb"):
-        a = item if item.name == "a" else item.select_one("a")
-        if not a:
-            continue
+    for a in soup.select("h3 a[href]"):
         href = a.get("href", "")
         if href.startswith("/"):
             href = "https://www.sogou.com" + href
         if href in seen_urls:
             continue
         seen_urls.add(href)
-
         title = a.get_text(strip=True)
-        # Find snippet: look for nearby text block
-        snippet_el = item.find_next_sibling(class_=lambda c: c and ("str-text" in c or "star-wiki" in c or "str-info" in c))
-        snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-
-        results.append({"title": title, "url": href, "snippet": snippet})
-        if len(results) >= max_results:
-            break
-
-    # Fallback: extract from general h3 > a pattern
-    if not results:
-        for a in soup.select("h3 a[href]"):
-            href = a.get("href", "")
-            if href.startswith("/"):
-                href = "https://www.sogou.com" + href
-            if href in seen_urls:
-                continue
-            seen_urls.add(href)
-            title = a.get_text(strip=True)
+        if title:
             results.append({"title": title, "url": href, "snippet": ""})
             if len(results) >= max_results:
                 break
@@ -142,18 +111,7 @@ def _search_baidu(query: str, max_results: int = 5) -> list:
             if len(results) >= max_results:
                 break
 
-    # Strategy 2: look for links containing titles (wider net)
-    if not results:
-        for a in soup.select("a[href*='baidu.com/link']"):
-            title = a.get("title", "") or a.get_text(strip=True)
-            href = a.get("href", "")
-            if title and href not in seen_urls and len(title) > 4:
-                seen_urls.add(href)
-                results.append({"title": title, "url": href, "snippet": ""})
-                if len(results) >= max_results:
-                    break
-
-    # Strategy 3: extract from JSON-LD / script data
+    # Strategy 2: JSON-LD script data
     if not results:
         for script in soup.select("script[type='application/ld+json']"):
             try:
@@ -176,7 +134,7 @@ def _search_baidu(query: str, max_results: int = 5) -> list:
 
 
 def _search_duckduckgo(query: str, max_results: int = 5) -> list:
-    """Fallback: DuckDuckGo HTML (no API key needed, may be blocked in some regions)."""
+    """Fallback: DuckDuckGo HTML."""
     url = "https://html.duckduckgo.com/html/"
     data = {"q": query}
     resp = requests.post(url, data=data, headers=_get_headers(), timeout=REQUEST_TIMEOUT)
@@ -200,20 +158,15 @@ def _search_duckduckgo(query: str, max_results: int = 5) -> list:
 
 
 def fetch_page_content(url: str, max_chars: int = 5000) -> str:
-    """Fetch a URL and extract its readable text content.
-
-    Useful for getting full article/page content beyond search snippets.
-    """
+    """Fetch a URL and extract its readable text content."""
     try:
         resp = requests.get(url, headers=_get_headers(), timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.content, "html.parser")
 
-        # Remove non-content elements
         for tag in soup.select("script, style, nav, footer, header, aside, iframe, .sidebar, .ad, .menu, .comment"):
             tag.decompose()
 
-        # Try common content selectors
         content = None
         for selector in ["article", "[role='main']", "main", ".content", ".post-content", ".article-content",
                          "#content", ".entry-content", ".post"]:
@@ -226,7 +179,6 @@ def fetch_page_content(url: str, max_chars: int = 5000) -> str:
             content = soup.body or soup
 
         text = content.get_text(separator="\n", strip=True)
-        # Clean up excessive whitespace
         text = re.sub(r'\n{3,}', '\n\n', text)
         text = re.sub(r'[ \t]{2,}', ' ', text)
 
@@ -238,11 +190,17 @@ def fetch_page_content(url: str, max_chars: int = 5000) -> str:
         return f"Error fetching page: {type(e).__name__}: {str(e)}"
 
 
-# Ordered list of search engines to try
-SEARCH_ENGINES = [
+# Engine order varies by query language
+_ENGLISH_ENGINES = [
     ("Bing", _search_bing),
+    ("DuckDuckGo", _search_duckduckgo),
     ("Sogou", _search_sogou),
     ("Baidu", _search_baidu),
+]
+_CHINESE_ENGINES = [
+    ("Sogou", _search_sogou),
+    ("Baidu", _search_baidu),
+    ("Bing", _search_bing),
     ("DuckDuckGo", _search_duckduckgo),
 ]
 
@@ -250,7 +208,8 @@ SEARCH_ENGINES = [
 class WebSearchTool(BaseTool):
     """
     Search the web for information using multiple search engines.
-    Tries Bing → Sogou → Baidu → DuckDuckGo in order.
+    For Chinese queries: Sogou → Baidu → Bing → DuckDuckGo
+    For English queries: Bing → DuckDuckGo → Sogou → Baidu
     Also supports fetching full page content via fetch_content parameter.
     """
 
@@ -306,6 +265,44 @@ class WebSearchTool(BaseTool):
         header = f"[From {engine_name}]\n"
         return header + "\n\n".join(formatted)
 
+    @staticmethod
+    def _extract_key_terms(query: str) -> set:
+        """Extract meaningful key terms from query for relevance checking."""
+        terms = set()
+        cjk_blocks = re.findall(r'[一-鿿豈-﫿㐀-䶿]{2,}', query)
+        for block in cjk_blocks:
+            if len(block) >= 2:
+                terms.add(block)
+            for i in range(len(block) - 1):
+                terms.add(block[i:i+2])
+        for w in re.findall(r'[a-zA-Z]{3,}', query):
+            terms.add(w.lower())
+        return terms
+
+    @staticmethod
+    def _results_relevant(query: str, results: list, min_match_ratio: float = 0.3) -> bool:
+        """Lightweight relevance check for CJK queries."""
+        has_cjk = bool(re.search(r'[一-鿿]', query))
+        if not has_cjk or not results:
+            return True
+
+        key_terms = WebSearchTool._extract_key_terms(query)
+        if not key_terms:
+            return True
+
+        match_count = 0
+        for r in results:
+            combined = (r["title"] + " " + r["url"]).lower()
+            if any(t.lower() in combined for t in key_terms):
+                match_count += 1
+
+        return match_count / len(results) >= min_match_ratio
+
+    @staticmethod
+    def _is_cjk_query(query: str) -> bool:
+        """Check if query contains CJK characters."""
+        return bool(re.search(r'[一-鿿㐀-䶿]', query))
+
     def execute(self, query: str = "", max_results: int = 5, fetch_content: bool = False,
                 fetch_url: str = "", **kwargs) -> str:
         # ── Dedicated URL content fetch ──
@@ -316,26 +313,39 @@ class WebSearchTool(BaseTool):
         if not query:
             return "Error: No query provided."
 
-        # ── Search with multiple engines ──
-        all_errors = []
+        # ── Select engine order by query language ──
+        engines = _CHINESE_ENGINES if self._is_cjk_query(query) else _ENGLISH_ENGINES
 
-        for engine_name, engine_fn in SEARCH_ENGINES:
+        # ── Search with multiple engines, with relevance check ──
+        all_errors = []
+        all_results = []
+
+        for engine_name, engine_fn in engines:
             try:
                 results = engine_fn(query, max_results)
                 if results:
-                    body = self._format_results(engine_name, results)
-
-                    # Optionally fetch top result content
-                    if fetch_content and results:
-                        top_url = results[0]["url"]
-                        content = fetch_page_content(top_url)
-                        body += f"\n\n[Full content from: {top_url}]\n{content}"
-
-                    return body
+                    if self._results_relevant(query, results):
+                        body = self._format_results(engine_name, results)
+                        if fetch_content and results:
+                            top_url = results[0]["url"]
+                            content = fetch_page_content(top_url)
+                            body += f"\n\n[Full content from: {top_url}]\n{content}"
+                        return body
+                    else:
+                        all_results.append((engine_name, results))
+                        all_errors.append(f"{engine_name}: Results low relevance for query terms")
                 else:
                     all_errors.append(f"{engine_name}: No results")
             except Exception as e:
                 all_errors.append(f"{engine_name}: {type(e).__name__}: {str(e)[:80]}")
                 continue
+
+        # ── Fallback ──
+        if all_results:
+            best_name, best_results = all_results[0]
+            body = self._format_results(best_name, best_results)
+            body += ("\n\n⚠️ 搜索结果质量可能不佳，相关查询词未在结果标题中出现。"
+                     "建议使用 browser_automation 直接访问目标网站获取更准确信息。")
+            return body
 
         return f"All search engines failed:\n" + "\n".join(all_errors)
