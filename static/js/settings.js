@@ -13,7 +13,10 @@ const providers = [
   { key: "gemini", label: "Google Gemini" },
   { key: "glm", label: "GLM (智谱)" },
   { key: "minimax", label: "MiniMax" },
-  { key: "huggingface", label: "HuggingFace Token" }
+  { key: "huggingface", label: "HuggingFace Token" },
+  { key: "tavily", label: "Tavily Search" },
+  { key: "brave_search", label: "Brave Search" },
+  { key: "searxng", label: "SearXNG API Key" }
 ];
 
 export async function loadSettingsConfig() {
@@ -41,6 +44,8 @@ export async function loadSettingsConfig() {
     document.getElementById('owner-email-input').value = data.owner_email || '';
     document.getElementById('email-account-input').value = data.email_account || '';
     document.getElementById('email-password-input').placeholder = data.email_password ? '***' : '密码或授权码';
+    const searxngUrlInput = document.getElementById('searxng-url-input');
+    if (searxngUrlInput) searxngUrlInput.value = data.searxng_url || '';
     document.getElementById('email-imap-input').value = data.email_imap_server || '';
     document.getElementById('email-smtp-input').value = data.email_smtp_server || '';
     if (document.getElementById('mcp-config-input')) {
@@ -63,6 +68,8 @@ function buildApiKeysGrid(maskedKeys) {
   const helpLinks = {
     deepseek: 'https://platform.deepseek.com/api-docs',
     kimi: 'https://platform.moonshot.cn/docs',
+    tavily: 'https://tavily.com/',
+    brave_search: 'https://api.search.brave.com/',
   };
   providers.forEach(p => {
     const mask = maskedKeys[p.key] || '';
@@ -298,7 +305,9 @@ async function saveSettings() {
     email_smtp_server: document.getElementById('email-smtp-input')?.value?.trim() || '',
     owner_email: document.getElementById('owner-email-input')?.value?.trim() || '',
     session_id: state.currentSessionId || 1,
-    tool_permissions: null
+    tool_permissions: null,
+    searxng_url: document.getElementById('searxng-url-input')?.value?.trim() || '',
+    searxng_port: 8888
   };
 
   // Include current tool_permissions in save

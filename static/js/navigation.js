@@ -23,12 +23,15 @@ export function switchView(viewId) {
 
   // Load view-specific data — these are attached to window by app.js
   const w = window;
-  if (viewId === 'settings-models') { w.loadSettingsConfig?.(); w.loadDownloadHistory?.(); }
+  if (viewId === 'settings-models') { w.loadSettingsConfig?.(); w.loadDownloadHistory?.(); w.refreshSearXNGStatus?.(); }
   if (viewId === 'settings-skills') w.loadSkillsConfig?.();
   if (viewId === 'settings-mcp') w.loadAgents?.();
   if (viewId === 'settings-plugins') w.loadPluginManager?.();
   if (viewId === 'tasks') w.loadTasks?.();
   if (viewId === 'downloads') w.loadDownloadHistory?.();
+
+  // Persist active view so refresh stays on the same page
+  try { localStorage.setItem('lastViewId', viewId); } catch (e) {}
 }
 
 export function initNavigation() {

@@ -551,6 +551,38 @@
                         </div>
                     </section>
 
+                    <!-- SearXNG -->
+                    <section class="card">
+                        <div class="card-header">
+                            <h2>🔍 SearXNG 搜索服务</h2>
+                            <p class="card-desc">自托管搜索引擎聚合器。可通过 Docker 一键安装，或连接现有 SearXNG 实例。</p>
+                        </div>
+                        <div class="field">
+                            <div style="display:flex;gap:2rem;flex-wrap:wrap;">
+                                <div class="status-indicator" style="display:flex;align-items:center;gap:0.4rem;">
+                                    <span class="indicator-dot" id="searxng-docker-dot" style="width:10px;height:10px;border-radius:50%;background:var(--text-secondary);display:inline-block;"></span>
+                                    <span>Docker: <strong id="searxng-docker-text">检查中...</strong></span>
+                                </div>
+                                <div class="status-indicator" style="display:flex;align-items:center;gap:0.4rem;">
+                                    <span class="indicator-dot" id="searxng-run-status-dot" style="width:10px;height:10px;border-radius:50%;background:var(--text-secondary);display:inline-block;"></span>
+                                    <span>服务状态: <strong id="searxng-run-status-text">检查中...</strong></span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="field" style="margin-top:0.75rem;">
+                            <label>服务地址 (外部 SearXNG 实例 URL，如 http://192.168.1.100:8888)</label>
+                            <input type="text" id="searxng-url-input" class="input-styled" placeholder="留空则使用 Docker 本地部署">
+                        </div>
+                        <div class="field" style="margin-top:0.5rem;display:flex;gap:0.5rem;flex-wrap:wrap;">
+                            <button id="searxng-install-btn" class="btn-secondary">安装/更新 SearXNG</button>
+                            <button id="searxng-start-btn" class="btn-primary" disabled>启动服务</button>
+                            <button id="searxng-stop-btn" class="btn-secondary" style="color:var(--error-color);" disabled>停止服务</button>
+                        </div>
+                        <div class="field" style="margin-top:0.4rem;">
+                            <small class="field-hint" id="searxng-status-hint">需要安装 Docker 环境以使用一键安装功能。也可直接填入外部实例 URL 并使用。</small>
+                        </div>
+                    </section>
+
                     <!-- Email -->
                     <section class="card">
                         <div class="card-header">

@@ -1160,7 +1160,10 @@ def load_config() -> dict:
     return {
         "api_keys": {
             "llamacpp": "http://localhost:8080/v1",
-            "huggingface": ""
+            "huggingface": "",
+            "tavily": "",
+            "brave_search": "",
+            "searxng": ""
         },
         "default_model": "moonshot/kimi-latest",
         "fallback_models": ["deepseek/deepseek-chat"],
@@ -1202,6 +1205,8 @@ class ConfigUpdate(BaseModel):
     mcp_servers: Optional[Dict[str, Any]] = None
     session_id: Optional[int] = None  # Target session for email config
     tool_permissions: Optional[Dict[str, Any]] = None
+    searxng_url: str = ""
+    searxng_port: int = 8888
 
 @app.get("/api/settings")
 async def get_settings(session_id: int = None):
@@ -1255,7 +1260,9 @@ async def get_settings(session_id: int = None):
         "owner_email": sess_email.get("owner_email", config.get("owner_email", "")),
         "allowed_paths": config.get("allowed_paths", []),
         "denied_paths": config.get("denied_paths", []),
-        "tool_permissions": config.get("tool_permissions", {})
+        "tool_permissions": config.get("tool_permissions", {}),
+        "searxng_url": config.get("searxng_url", ""),
+        "searxng_port": config.get("searxng_port", 8888),
     }
 
 @app.post("/api/settings")
@@ -1276,7 +1283,10 @@ async def update_settings(config_update: ConfigUpdate):
         "glm": "ZAI_API_KEY",
         "minimax": "MINIMAX_API_KEY",
         "llamacpp": "LLAMACPP_API_BASE",
-        "huggingface": "HF_TOKEN"
+        "huggingface": "HF_TOKEN",
+        "tavily": "TAVILY_API_KEY",
+        "brave_search": "BRAVE_SEARCH_API_KEY",
+        "searxng": "SEARXNG_API_KEY"
     }
 
     try:
@@ -1319,6 +1329,10 @@ async def update_settings(config_update: ConfigUpdate):
             config["mcp_servers"] = config_update.mcp_servers
         if config_update.tool_permissions is not None:
             config["tool_permissions"] = config_update.tool_permissions
+        config["searxng_url"] = config_update.searxng_url
+        config["searxng_port"] = config_update.searxng_port
+        set_key(env_file, "SEARXNG_URL", config_update.searxng_url)
+        os.environ["SEARXNG_URL"] = config_update.searxng_url
 
         # Save per-session email config when session_id is provided
         if config_update.session_id is not None:
@@ -2774,6 +2788,60 @@ async def update_schedule(task_id: int, req: ScheduleTaskRequest):
     conn.close()
     return {"status": "success"}
 
+
+# ── SearXNG Management ──
+
+class SearXNGControlRequest(BaseModel):
+    action: str  # "install", "start", "stop"
+
+
+@app.get("/api/searxng/status")
+async def get_searxng_status():
+    """Return SearXNG Docker and runtime status."""
+    from core.searxng_manager import get_searxng_manager
+    config = load_config()
+    manager = get_searxng_manager()
+    manager.external_url = config.get("searxng_url", "")
+    manager.port = config.get("searxng_port", 8888)
+    status = manager.get_status()
+    if config.get("searxng_url"):
+        status["running"] = manager.is_running()
+        status["url"] = config["searxng_url"]
+    return status
+
+
+@app.post("/api/searxng/install")
+async def install_searxng():
+    """One-click install: generate configs and start SearXNG via Docker."""
+    from core.searxng_manager import get_searxng_manager
+    manager = get_searxng_manager()
+    if not manager.is_docker_available():
+        raise HTTPException(status_code=400, detail="Docker is not available on this system. Please install Docker Desktop first.")
+    if manager.is_running():
+        return {"status": "success", "message": "SearXNG is already running"}
+    success = manager.install()
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to install or start SearXNG. Check Docker logs for details.")
+    return {"status": "success", "message": "SearXNG installed and started successfully"}
+
+
+@app.post("/api/searxng/control")
+async def control_searxng(req: SearXNGControlRequest):
+    """Start or stop SearXNG container."""
+    from core.searxng_manager import get_searxng_manager
+    manager = get_searxng_manager()
+    if req.action == "start":
+        success = manager.start()
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to start SearXNG")
+        return {"status": "success", "message": "SearXNG started"}
+    elif req.action == "stop":
+        manager.stop()
+        return {"status": "success", "message": "SearXNG stopped"}
+    else:
+        raise HTTPException(status_code=400, detail="Invalid action")
+
+
 # Initialize a global agent instance
 # In a real multi-user system, this would be per-session
 # We'll instantiate per connection for simplicity and state isolation in this demo
@@ -3050,10 +3118,21 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
                             break
                     else:
-                        await _safe_send({
-                            "type": "status",
-                            "message": "llama-server 启动失败，请检查模型文件"
+                        _broadcast_to_websockets({
+                            "type": "llamacpp_download",
+                            "task": "binary",
+                            "label": "llama-server 启动失败",
+                            "progress": 0.0,
+                            "stage": "error",
+                            "error": "模型文件可能不兼容或损坏，请尝试下载其他 GGUF 模型"
                         })
+                        await _safe_send({
+                            "type": "system_message",
+                            "message": "❌ **llama-server 启动失败**\n\n模型文件可能不兼容或损坏，请尝试下载其他 GGUF 模型。\n可在「设置 → 模型管理」中更换模型。"
+                        })
+                        save_message("system",
+                            "❌ llama-server 启动失败，模型文件可能不兼容或损坏，请在设置中更换模型。",
+                            ws_session_id)
                         agent_is_running = False
                         return
 
