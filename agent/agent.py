@@ -263,7 +263,21 @@ class OpenAGCAgent:
                            "ask_user_question", "search_history", "queue_download", "pause_and_wait",
                            "execute_python", "search_web"}
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
-        
+
+        # Adaptive resident: auto-load frequently used non-core tools
+        try:
+            from tools.adaptive import get_adaptive_tools
+            from core.paths import get_data_path as _get_data_path
+            adapt_dir = os.path.dirname(_get_data_path("config.json"))
+            adapt_tools = get_adaptive_tools(adapt_dir,
+                                             set(self.full_available_tools.keys()),
+                                             CORE_TOOL_NAMES)
+            for name in adapt_tools:
+                if name in self.full_available_tools:
+                    self.active_tool_names.add(name)
+        except Exception as e:
+            print(f"[Agent] Adaptive resident init error: {e}")
+
         def _enable_tools_callback(tool_names: List[str]):
             added = False
             for name in tool_names:
@@ -1596,18 +1610,26 @@ class OpenAGCAgent:
                         self.logger.log_tool_call(function_name, function_args)
                         self.logger.log_tool_result(function_name, str(result), tool_success)
 
-                    # Track auto-tool trust for graduation
+                    # Track adaptive tool usage + auto-tool graduation
                     tool_obj = self.full_available_tools.get(function_name)
-                    if tool_obj and hasattr(tool_obj, 'fn'):  # DynamicTool has .fn
+                    is_dynamic = tool_obj and hasattr(tool_obj, 'fn')
+                    tool_type = "auto_tool" if is_dynamic else "builtin"
+                    try:
+                        from tools.adaptive import record_tool_call
+                        from core.paths import get_data_path as _gdp
+                        _adapt_dir = os.path.dirname(_gdp("config.json"))
+                        record_tool_call(_adapt_dir, function_name,
+                                         self.session_id or 0, tool_success,
+                                         tool_type=tool_type)
+                    except Exception:
+                        pass
+                    if is_dynamic:
                         try:
-                            from tools.auto_tool import record_tool_usage, check_graduation, graduate_tool
-                            from core.paths import get_data_path as _gdp
-                            tools_dir = _gdp(f"auto_tools/{self.session_id or '1'}")
-                            info = record_tool_usage(tools_dir, function_name, tool_success)
-                            if check_graduation(tools_dir, function_name):
-                                print(f"[Agent] Auto-tool {function_name} ready for graduation! ({info['consecutive']} consecutive successes)")
-                                if graduate_tool(tools_dir, function_name):
-                                    # Reload from permanent skills
+                            from tools.auto_tool import check_graduation, graduate_tool
+                            _tools_dir = _gdp(f"auto_tools/{self.session_id or '1'}")
+                            if check_graduation(_tools_dir, function_name):
+                                print(f"[Agent] Auto-tool {function_name} ready for graduation!")
+                                if graduate_tool(_tools_dir, function_name):
                                     self.skill_store.refresh()
                         except Exception:
                             pass

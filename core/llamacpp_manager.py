@@ -353,7 +353,9 @@ class LlamaCppManager:
             # Check if process died immediately
             time.sleep(0.5)
             if self.process.poll() is not None:
-                raise Exception(f"Process died with code {self.process.returncode}")
+                _stderr = self.process.stdout.read() if self.process.stdout else ""
+                _error_snippet = _stderr[-500:] if _stderr else "(no output)"
+                raise Exception(f"Process died with code {self.process.returncode}: {_error_snippet}")
 
             # Thread to log output (minimal)
             def log_output():

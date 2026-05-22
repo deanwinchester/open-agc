@@ -10,6 +10,7 @@ import { loadSessions, createSession, switchSession, deleteSession, renameSessio
 import { initSettingsListeners, loadSkillsConfig, loadAgents, openAIDesignModal, closeAIDesignModal, initAIDesignListeners } from './js/settings.js';
 import { initTaskFilters, initScheduleModal, loadTasks, updateTaskBadge } from './js/tasks.js';
 import { refreshLlamaStatus, loadDownloadHistory, initLlamaListeners, renderSearchResults } from './js/llama.js';
+import { refreshSearXNGStatus, initSearXNGListeners } from './js/searxng.js';
 
 // Expose to window for cross-module calls
 window.switchView = switchView;
@@ -22,6 +23,7 @@ window.openAIDesignModal = openAIDesignModal;
 window.closeAIDesignModal = closeAIDesignModal;
 window.refreshLlamaStatus = refreshLlamaStatus;
 window.loadDownloadHistory = loadDownloadHistory;
+window.refreshSearXNGStatus = refreshSearXNGStatus;
 window.renderSearchResults = renderSearchResults;
 
 // =============================================
@@ -73,12 +75,18 @@ function initApp() {
   loadVendorScripts();
   initI18n();
   initNavigation();
+  // Restore last active page on refresh (skip chat — it's the default)
+  try {
+    const lastView = localStorage.getItem('lastViewId');
+    if (lastView && lastView !== 'chat') switchView(lastView);
+  } catch (e) {}
   loadPlugins();
   initSettingsListeners();
   initAIDesignListeners();
   initTaskFilters();
   initScheduleModal();
   initLlamaListeners();
+  initSearXNGListeners();
 
   // =============================================
   // DOM References
@@ -163,19 +171,16 @@ function initApp() {
       _lastDownloadBannerId = null;
       loadDownloadHistory();
     } else {
-      // Flash banner briefly only on first event of a new download
-      if (dlId && dlId !== _lastDownloadBannerId) {
-        _lastDownloadBannerId = dlId;
-        if (banner) {
-          banner.style.display = 'block';
-          bannerIcon.textContent = data.stage === 'extracting' ? '📦' : '📥';
-          bannerLabel.textContent = data.label || '下载中...';
-        }
-        if (bannerPct) bannerPct.textContent = pctText;
-        if (bannerBar) { bannerBar.style.width = (ratio * 100) + '%'; bannerBar.style.background = 'var(--theme-color)'; }
-        downloadBannerTimer = setTimeout(() => { if (banner) banner.style.display = 'none'; }, 1500);
+      // Persistent banner: keep visible during active download
+      if (banner) {
+        clearTimeout(downloadBannerTimer);
+        banner.style.display = 'block';
+        bannerIcon.textContent = data.stage === 'extracting' ? '📦' : '📥';
+        bannerLabel.textContent = data.label || '下载中...';
       }
-      // Always update download manager item progress (handled above by historyContainer querySelector)
+      if (bannerPct) bannerPct.textContent = pctText;
+      if (bannerBar) { bannerBar.style.width = (ratio * 100) + '%'; bannerBar.style.background = 'var(--theme-color)'; }
+      // Update download manager item progress (handled above by historyContainer querySelector)
     }
   }
 
@@ -340,6 +345,8 @@ function initApp() {
         'system'
       );
       showStatus('❌ 下载失败: ' + (data.error || '未知错误'), 'error');
+    } else if (data.type === 'system_message') {
+      appendMessage(data.message, 'system');
     } else if (data.type === 'llamacpp_download') {
       handleLlamaDownloadProgress(data);
     }
@@ -1186,8 +1193,11 @@ function initApp() {
   // Reset scroll hint when user manually scrolls
   chatContainer.addEventListener('scroll', function() {
     const threshold = 200;
-    if (chatContainer.scrollTop + chatContainer.clientHeight >= chatContainer.scrollHeight - threshold) {
+    const atBottom = chatContainer.scrollTop + chatContainer.clientHeight >= chatContainer.scrollHeight - threshold;
+    if (atBottom) {
       hideScrollHint();
+    } else if (!state.isAgentThinking && !scrollHintEl) {
+      showScrollHint();
     }
   });
 
@@ -1615,6 +1625,7 @@ function initApp() {
             try { appendMessage(msg.content, msg.role); }
             catch (e) { console.error('[History] Failed to render message:', e, msg); }
           });
+          scrollToBottom(true);
         }
       }
     } catch (e) {
