@@ -3490,6 +3490,46 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Save user message to DB
                     save_message("user", query, ws_session_id)
 
+                    # Auto-reconstruct context for continuation queries ("继续", "下一步", etc.)
+                    if _is_continuation_query(query):
+                        try:
+                            conn_cont = sqlite3.connect(DB_PATH)
+                            conn_cont.row_factory = sqlite3.Row
+                            latest_task = conn_cont.execute(
+                                "SELECT id, user_query, status FROM tasks "
+                                "WHERE session_id=? ORDER BY id DESC LIMIT 1",
+                                (ws_session_id,)
+                            ).fetchone()
+                            if latest_task:
+                                tid = latest_task["id"]
+                                original_goal = latest_task["user_query"] or ""
+                                steps = conn_cont.execute(
+                                    "SELECT step_number, tool_name, tool_label, "
+                                    "result_preview, success FROM task_steps "
+                                    "WHERE task_id=? ORDER BY step_number", (tid,)
+                                ).fetchall()
+                                step_lines = []
+                                for s in steps[-30:]:
+                                    label = s["tool_label"] or s["tool_name"]
+                                    preview = (s["result_preview"] or "")[:120]
+                                    step_lines.append(
+                                        f"步骤{s['step_number']}: {label} "
+                                        f"({'✓' if s['success'] else '✗'}) "
+                                        f"{preview}"
+                                    )
+                                step_summary = "\n".join(step_lines)
+                                query = (
+                                    f"【原始任务目标】{original_goal}\n\n"
+                                    "你需要继续执行这个任务。以下是之前已完成的执行步骤摘要：\n"
+                                    "--- 已完成步骤 ---\n"
+                                    f"{step_summary}\n"
+                                    "请根据以上原始目标和已完成步骤，从上次中断的地方继续执行。"
+                                    "不要重复读取已经成功获得的文件内容，直接使用已有的结果继续下一步。"
+                                )
+                            conn_cont.close()
+                        except Exception as e:
+                            print(f"[WS] Continuation context error: {e}")
+
                 is_heartbeat = False
             except asyncio.TimeoutError:
                 if not heartbeat_enabled or agent_is_running:
