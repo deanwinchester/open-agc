@@ -1051,6 +1051,7 @@ function initApp() {
     const modal = document.getElementById('permission-modal');
     const descEl = document.getElementById('perm-modal-desc');
     const codeEl = document.getElementById('perm-modal-code');
+    const retryBtn = document.getElementById('perm-modal-retry');
     if (!modal) return;
 
     const pathMatch = errorText.match(/(?:\/[\w\-\.\/]+)+/);
@@ -1058,6 +1059,15 @@ function initApp() {
     descEl.textContent = '该操作因系统权限不足而失败。请在终端中执行以下命令后重试：';
     codeEl.textContent = `# macOS / Linux\nsudo chmod -R 755 ${path}\n\n# 或授予当前用户所有权\nsudo chown -R $(whoami) ${path}`;
     modal.classList.add('active');
+
+    if (retryBtn) {
+      retryBtn.onclick = function () {
+        modal.classList.remove('active');
+        // Click the retry bar's "继续" button to tell agent to retry
+        const altBtn = document.querySelector('.retry-bar .retry-btn-alt');
+        if (altBtn) altBtn.click();
+      };
+    }
   }
 
   // =============================================
