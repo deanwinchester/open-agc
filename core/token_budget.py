@@ -9,7 +9,7 @@ from typing import List, Dict, Optional, Tuple
 
 
 # Default budget allocation
-DEFAULT_MAX_TOKENS = 64000
+DEFAULT_MAX_TOKENS = 128000
 DEFAULT_SYSTEM_RATIO = 0.20
 DEFAULT_HISTORY_RATIO = 0.50
 DEFAULT_TOOL_RATIO = 0.30

@@ -67,6 +67,11 @@ class ShellTool(BaseTool):
                             "type": "integer",
                             "description": "Optional timeout in seconds (default 120, max 600).",
                             "default": 120
+                        },
+                        "detach": {
+                            "type": "boolean",
+                            "description": "设为 true 以启动常驻服务（服务器/守护进程），命令不会阻塞任务，系统不会等待它结束。适用于启动 ComfyUI、Web 服务等长期运行的程序。默认 false。",
+                            "default": False
                         }
                     },
                     "required": ["command"]
@@ -109,10 +114,14 @@ class ShellTool(BaseTool):
             return "Error: No command provided."
 
         timeout = kwargs.get("timeout", 120)
+        detach = kwargs.get("detach", False)
         timeout = min(max(timeout, 1), 600)  # Clamp 1-600s
         # Auto-extend timeout for package managers (pip/uv/npm all download large files)
         if not kwargs.get("timeout") and _looks_like_download(command, ""):
             timeout = 180  # 10 min for package manager commands
+        # For detach mode, use short timeout — just enough to detect startup errors
+        if detach:
+            timeout = min(timeout, 30)
         interrupt_check: Optional[Callable[[], bool]] = kwargs.get("interrupt_check")
         progress_cb: Optional[Callable] = kwargs.get("_progress_cb")
 
@@ -294,6 +303,14 @@ class ShellTool(BaseTool):
                                 }
                         tail = _read_tail(out_path, 3000)
                         hint = ""
+                        server_tag = ""
+                        if detach or _looks_like_server(command, tail):
+                            server_tag = f"\n[SERVER_PROCESS] pid={proc.pid}"
+                            tag = "（用户指定）" if detach else ""
+                            hint += (
+                                f"\n检测到这是一个常驻服务进程{tag}。系统不会自动等待它结束，"
+                                f"任务不会被阻塞。如需手动停止服务，请在任务管理中终止。\n"
+                            )
                         if _looks_like_download(command, tail):
                             hint = (
                                 "\n⚠️ 这看起来像是一个下载/安装任务。建议使用 queue_download 工具下载大文件，"
@@ -304,6 +321,7 @@ class ShellTool(BaseTool):
                             f"当前输出 ({_read_file_size(out_path)} bytes):\n"
                             f"{tail}\n"
                             f"{hint}"
+                            f"{server_tag}"
                             f"输出文件: {out_path}\n"
                             f"进程将继续在后台运行。"
                         )
@@ -426,6 +444,48 @@ def _looks_like_download(command: str, output: str) -> bool:
             return True
     # Also check for large download indicators
     if re.search(r'\d+\.?\d*\s*(GiB|MiB|GB|MB)', output):
+        return True
+    return False
+
+
+def _looks_like_server(command: str, output: str) -> bool:
+    """Detect if a shell command looks like a long-running server/daemon process."""
+    server_patterns = [
+        # Common server frameworks
+        r'\buvicorn\b', r'\bgunicorn\b', r'\bwaitress\b', r'\bhypercorn\b',
+        r'\bdaphne\b', r'\bflask run\b', r'\bdjango runserver\b', r'\bfastapi run\b',
+        r'\bnode\s+(server|app|index|main)\.(js|ts|mjs)\b',
+        r'\bnpm (start|run start|run dev|run serve|run server)\b',
+        r'\byarn (start|run start)\b', r'\bpnpm (start|run start)\b',
+        r'\bng serve\b', r'\bvue serve\b', r'\bnpx serve\b',
+        r'\bpython\s+.*\b(main|server|app|bot|daemon)\.py\b',
+        r'\bpython\s+-m\s+http\.server\b', r'\bpython\s+-m\s+https\.server\b',
+        r'\bgunicorn\b', r'\bcelery\s+worker\b', r'\bairflow\s+(scheduler|webserver)\b',
+        r'\bjupyter (notebook|lab|server)\b', r'\bstreamlit run\b', r'\bgradio\b',
+        r'\bcomfyui\b', r'\boobabooga\b', r'\btext-generation-webui\b',
+        # Container/VM
+        r'\bdocker (run|compose up|start)\b',
+        r'\bminikube\b', r'\bkubectl\b',
+        # Generic daemon patterns
+        r'\b--daemon\b', r'\b-D\s*$', r'\bdetach\b',
+        # Server output keywords
+        r'listening on', r'listening at', r'running on', r'running at',
+        r'server started', r'started server', r'serving on', r'serving at',
+        r'http://0\.0\.0\.0', r'http://localhost', r'port \d+',
+        r'Uvicorn running on', r'Application startup complete',
+        r'started on port', r'bound to',
+    ]
+    cmd_lower = command.lower()
+    out_lower = output.lower()
+    for p in server_patterns:
+        if re.search(p, cmd_lower, re.IGNORECASE) or re.search(p, out_lower, re.IGNORECASE):
+            return True
+    # If output has timestamped log lines (HH:MM:SS) — strong indicator of a
+    # running server/daemon, since this function is only called after timeout
+    # (the process has been running for 120s+ producing log-like output)
+    lines = output.strip().split('\n')
+    timestamped = sum(1 for l in lines if re.search(r'\d{1,2}:\d{2}:\d{2}', l))
+    if timestamped >= 1:
         return True
     return False
 

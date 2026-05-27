@@ -286,7 +286,11 @@
                     <h1>📋 任务管理</h1>
                     <p class="view-desc">查看 Agent 执行过的所有任务及其详情</p>
                 </header>
-                <div class="view-toolbar">
+                <div class="sub-tabs" style="display:flex;gap:0;margin-bottom:0.5rem;border-bottom:1px solid var(--border-color);">
+                    <button class="sub-tab active" data-subview="tasks" style="padding:0.4rem 1rem;cursor:pointer;border:none;background:none;color:var(--text-primary);border-bottom:2px solid var(--accent-color);font-size:0.85rem;">📋 任务列表</button>
+                    <button class="sub-tab" data-subview="processes" style="padding:0.4rem 1rem;cursor:pointer;border:none;background:none;color:var(--text-secondary);border-bottom:2px solid transparent;font-size:0.85rem;">🖥️ 进程管理</button>
+                </div>
+                <div class="view-toolbar" id="task-view-toolbar">
                     <div class="search-box">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                             stroke-width="2">
@@ -298,6 +302,7 @@
                     <div class="filter-pills">
                         <button class="filter-pill active" data-filter="all">全部</button>
                         <button class="filter-pill" data-filter="running">进行中</button>
+                        <button class="filter-pill" data-filter="detached">🟢 常驻</button>
                         <button class="filter-pill" data-filter="scheduled">定时</button>
                         <button class="filter-pill" data-filter="completed">已完成</button>
                         <button class="filter-pill" data-filter="failed">失败</button>
@@ -321,6 +326,21 @@
                         </svg>
                         <p>暂无任务记录</p>
                         <small>当 Agent 在会话中执行工具操作时，任务将自动记录在此</small>
+                    </div>
+                </div>
+
+                <!-- ===== Processes Sub-View ===== -->
+                <div id="processes-container" style="display:none;">
+                    <div style="margin-bottom:1rem;display:flex;align-items:center;gap:1rem;">
+                        <h2 style="margin:0;font-size:1rem;">🟢 活跃进程</h2>
+                        <button id="refresh-processes-btn" class="btn-secondary" style="padding:4px 10px;font-size:0.8rem;">刷新</button>
+                        <span style="font-size:0.8rem;color:var(--text-secondary)" id="process-count-label">0 个进程</span>
+                    </div>
+                    <div id="process-list">
+                        <div class="empty-state">
+                            <p>暂无活跃进程</p>
+                            <small>长时间运行的 shell 命令（如服务器、守护进程）会显示在此</small>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -483,6 +503,15 @@
                                 <input type="checkbox" id="heartbeat-toggle">
                                 <span class="toggle-label">启用长驻看守模式</span>
                             </label>
+                        </div>
+
+                        <div class="field" style="margin-top: 1rem;">
+                            <label>最大智能纠偏次数</label>
+                            <div class="model-row" style="gap:0.5rem;">
+                                <input type="number" id="max-correction-attempts" class="input-styled" value="5" min="0"
+                                    max="100" style="width:100px;">
+                                <span class="field-hint" style="margin:0;">到达迭代上限后允许 AI 自我审查纠偏的次数，0=禁用</span>
+                            </div>
                         </div>
                     </section>
 

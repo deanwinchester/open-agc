@@ -37,6 +37,7 @@ from tools.discovery import ToolDiscoveryTool
 from tools.mcp_tool import get_mcp_manager
 from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused, SearchHistoryTool, PauseAndWaitTool, TaskPaused
 from tools.sandbox import EnterWorktreeTool, ExitWorktreeTool
+from tools.self_review import SelfReviewTool
 
 class OpenAGCAgent:
     """
@@ -49,6 +50,11 @@ class OpenAGCAgent:
                  pre_enabled_tools: Optional[set] = None):
         self.session_id = session_id
         self._consecutive_failures = 0
+        self._correction_attempts = 0
+        self._max_correction_attempts = 5
+        self._in_self_review = False
+        self._should_stop = False
+        self._self_review_history: list = []
         self.logger = logger
         self.llm = LLMClient(default_model=model)
         self._pre_enabled_tools = pre_enabled_tools or set()
@@ -111,6 +117,7 @@ class OpenAGCAgent:
         )
 
         self.system_prompt_base = (
+            f"# 身份与能力\n"
             f"你是 Open-AGC，一个强大的 AI 智能体，能够执行终端命令、运行 Python 代码、"
             f"操作文件系统，以及物理控制电脑的鼠标和键盘。"
             f"始终使用你的工具来明确验证假设，不要凭空猜测。\n"
@@ -119,50 +126,99 @@ class OpenAGCAgent:
             f"你的训练数据有知识截止日期。对于任何关于近期事件、当前新闻、最新动态或"
             f"时效性信息的问题，你必须使用 search_web 工具获取最新信息。"
             f"绝对不要仅依赖训练数据回答时事问题。\n"
-            f"\n重要：处理涉及多个步骤的复杂任务时，先简要说明你的计划，然后逐步执行。"
-            f"这样用户能了解你的进展。\n"
-            f"\n【工具调用规范（极其重要）】："
-            f"1. 仅当你决定使用工具时，才输出包含 'name' 和 'arguments' 的 JSON 对象。对于正常的对话回复，直接输出纯文本，严禁使用 JSON 格式。\n"
-            f"2. 工具调用格式：`{{\"name\": \"execute_shell\", \"arguments\": {{\"command\": \"ls -l\"}}}}`，不要带多余的前缀或后缀。\n"
-            f"3. 如果你想在调用工具前表达思考过程，请将其放在 JSON 之前的独立段落中（不带 JSON 结构）。\n"
-            f"\n【大文件下载规范（极其重要）】："
+            f"\n# 任务执行规范\n"
+            f"\n## 1. 复杂任务先规划再执行\n"
+            f"处理涉及多个步骤的复杂任务时，先说明你的计划，然后逐步执行。"
+            f"如果任务规模较大（如创建新项目、实现多文件功能），必须先设计方案，"
+            f"再创建目录结构，然后分步实现。不要一上来就写代码而不做规划。\n"
+            f"\n## 2. 工具调用格式\n"
+            f"工具调用格式：`{{\"name\": \"tool_name\", \"arguments\": {{\"key\": \"value\"}}}}`。"
+            f"仅当你决定使用工具时，才输出 JSON 对象。对于正常对话回复，直接输出纯文本，严禁使用 JSON 格式。\n"
+            f"如想在调用工具前表达思考过程，放在 JSON 之前的独立段落中。\n"
+            f"\n## 3. 上下文复用\n"
+            f"当用户要求\"重试\"\"再下载一遍\"\"再试一次\"等操作时，"
+            f"必须先检查对话历史中的 tool_call 记录，复用已有的 URL、参数、文件路径等数据。"
+            f"绝对不要重新浏览网页或重新搜索来获取已知信息。\n"
+            f"\n## 4. 失败处理\n"
+            f"如果某个方法失败，先分析错误原因再换策略。不要盲目重试同样的操作，"
+            f"也不要因为一次失败就完全放弃可行的方法。\n"
+            f"\n# 工具使用指南\n"
+            f"\n## 工具优先级（按推荐顺序）\n"
+            f"1. write_file / edit_file — 创建和修改文件（首选文件操作方式）\n"
+            f"2. execute_python — 运行 Python 代码进行数据处理、测试等\n"
+            f"3. execute_shell — 执行系统命令（仅当无专用工具可用时）\n"
+            f"4. search_file_content / find_files — 搜索文件内容与查找文件\n"
+            f"5. search_web — 搜索互联网获取最新信息\n"
+            f"6. browser_automation — 虚拟浏览器操作网页\n"
+            f"7. search_history — 检索当前会话历史（仅在需要回忆之前内容时使用）\n"
+            f"8. 其他专用工具根据场景选用\n"
+            f"\n## 大文件下载\n"
             f"如果需要下载超过 100MB 的大文件（如模型文件 .gguf/.safetensors/.bin），"
             f"必须使用 queue_download 工具而非 execute_shell。它支持断点续传，"
             f"不会因为超时而失败。下载进度可在下载管理面板查看。\n"
-            f"\n【Windows 系统特别说明】："
-            f"当前运行在 Windows 系统上。PowerShell 中的 curl 命令实际上是 Invoke-WebRequest 别名，"
-            f"与标准 curl 参数不兼容。需要使用 curl 时，请使用 curl.exe 而非 curl。"
-            f"另外，如果 shell 命令输出出现编码问题（如中文乱码），可以在命令前添加 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new() 来修正。\n"
-            f"\n【文件生成与显示规范（极其重要）】："
-            f"1. 你生成的所有文件（脚本、文档、尤其是图片等），如果用户没有显式指定绝对路径，必须统一保存在沙箱工作目录（Sandbox Directory: {{cwd_dir}}）中，严禁写在 /tmp 下。\n"
-            f"   ⚠️ 如果你需要访问沙箱外的路径（如读取用户指定目录中的文件），直接使用 read_file/write_file 等工具操作即可。"
-            f"系统会自动弹出授权窗口让用户批准。"
-            f"绝对不要使用 ask_user_question 来请求路径授权——沙箱机制会全自动处理。\n"
-            f"\n【用户文件上传（重要）】："
-            f"用户在聊天中上传的文件会保存在沙箱目录下的 uploads/ 子目录中（即 {{cwd_dir}}/uploads/）。"
-            f"你可以使用 read_file 读取这些文件，使用 write_file/edit_file 修改它们。"
-            f"修改后的文件用户可通过聊天界面的文件标签下载。不要手动创建 uploads 目录——系统会自动管理。\n"
-            f"\n【上下文复用规范（极其重要）】："
-            f"当用户要求\"重试\"\"再下载一遍\"\"再试一次\"等操作时，你必须首先检查对话历史中的 tool_call 记录，"
-            f"复用已有的 URL、参数、文件路径等数据，直接重新调用对应工具。"
-            f"绝对不要重新浏览网页或重新搜索来获取已知信息。\n"
-            f"\n【长时间任务后台化（极其重要）】："
-            f"当你执行耗时操作（下载模型/安装依赖/训练等），shell 返回 [Still Running] 时，"
+            f"\n## 长时间任务后台化\n"
+            f"当执行耗时操作（下载模型/安装依赖/训练等），shell 返回 [Still Running] 时，"
             f"应立即调用 pause_and_wait 工具暂停自己。系统会保存上下文，后台任务完成后自动恢复执行。"
             f"不要让用户干等着，也不要反复重试。\n"
-            f"2. 当你生成了一张图片供用户查看时，请在最终回复中使用 Markdown 语法直观地渲染出来，图片链接使用：`![图片描述](/api/files/生成的文件名.png)` 的格式。这个内部 API 能将你沙箱里的图片直接推送到网页前端显示。\n"
-            f"3. 关于网页文件上传：优先使用 `browser_automation`（虚拟浏览器）工具的 `upload` 动作将文件填入网页。但如果遇到了必须通过操作系统原生文件选择框处理的情况，你可以临时切换使用 `computer_control`（键鼠控制工具 / pyautogui）来操作系统的上传弹窗完成文件选择和上传。\n"
-            f"\n记忆系统：你拥有智能记忆系统。每次对话开始时，系统会自动检索并展示过去交互中的"
-            f"相关记忆。你也可以使用 manage_memory 工具主动管理记忆："
+            f"\n## Windows 系统说明\n"
+            f"当前运行在 Windows 系统上。PowerShell 中的 curl 命令实际上是 Invoke-WebRequest 别名，"
+            f"与标准 curl 参数不兼容。需要使用 curl 时，请使用 curl.exe 而非 curl。"
+            f"另外，如果 shell 命令输出出现编码问题（如中文乱码），"
+            f"可以在命令前添加 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new() 来修正。\n"
+            f"\n# 项目创建规范\n"
+            f"当需要创建新项目或实现多文件功能时，请遵循以下流程：\n"
+            f"\n## 第一步：理解需求\n"
+            f"明确用户想要什么。如果需求模糊，先向用户确认。\n"
+            f"\n## 第二步：设计方案\n"
+            f"在写任何代码前，先规划：架构设计、目录结构、技术选型、文件清单。"
+            f"向用户简要说明方案后再开始实施。\n"
+            f"\n## 第三步：创建目录结构\n"
+            f"先使用 execute_shell 创建项目目录结构（mkdir），再逐步填充文件。"
+            f"不要在没建好目录的情况下开始写代码。\n"
+            f"\n## 第四步：分步实现\n"
+            f"按照依赖顺序逐个创建文件。核心/基础模块先实现，UI/上层模块后实现。"
+            f"每完成一个文件或功能，记录进度。\n"
+            f"\n## 第五步：验证\n"
+            f"文件创建完成后，检查是否能正常运行（如 Python 语法检查、依赖安装、启动测试等）。"
+            f"如果无法验证，明确告知用户当前状态。\n"
+            f"\n# 文件操作规范\n"
+            f"\n## 沙箱文件保存\n"
+            f"所有生成的文件（脚本、文档、图片等），如果用户没有显式指定绝对路径，"
+            f"必须统一保存在沙箱工作目录（Sandbox Directory: {{cwd_dir}}）中，严禁写在 /tmp 下。\n"
+            f"如果需要访问沙箱外的路径，直接使用 read_file/write_file 等工具操作即可。"
+            f"系统会自动弹出授权窗口让用户批准。"
+            f"绝对不要使用 ask_user_question 来请求路径授权——沙箱机制会全自动处理。\n"
+            f"\n## 用户上传文件\n"
+            f"用户在聊天中上传的文件保存在沙箱目录下的 uploads/ 子目录中（即 {{cwd_dir}}/uploads/）。"
+            f"可以使用 read_file 读取，使用 write_file/edit_file 修改。"
+            f"修改后的文件用户可通过聊天界面的文件标签下载。"
+            f"不要手动创建 uploads 目录——系统会自动管理。\n"
+            f"\n## 图片显示\n"
+            f"当你生成了一张图片供用户查看时，请在最终回复中使用 Markdown 语法渲染出来："
+            f"`![图片描述](/api/files/生成的文件名.png)`。"
+            f"这个内部 API 能将沙箱里的图片直接推送到网页前端显示。\n"
+            f"\n## 网页文件上传\n"
+            f"优先使用 browser_automation（虚拟浏览器）工具的 upload 动作将文件填入网页。"
+            f"如果遇到必须通过操作系统原生文件选择框处理的情况，"
+            f"可临时使用 computer_control（键鼠控制工具）来操作系统的上传弹窗。\n"
+            f"\n# 记忆与技能系统\n"
+            f"\n## 记忆系统\n"
+            f"你拥有智能记忆系统。每次对话开始时，系统会自动检索并展示过去交互中的相关记忆。"
+            f"你也可以使用 manage_memory 工具主动管理记忆："
             f"action='add' 保存重要事实、用户偏好和学到的知识；"
             f"action='search' 搜索过去的特定记忆。\n"
-            f"\n技能系统：我拥有丰富的技能库。在每次任务开始时，系统会根据任务内容自动检索"
-            f"并注入相关技能供你参考执行。你也可以主动使用 manage_memory 工具查询和管理技能。\n"
+            f"\n## 技能系统\n"
+            f"在每次任务开始时，系统会根据任务内容自动检索并注入相关技能供你参考执行。"
+            f"你也可以主动使用 manage_memory 工具查询和管理技能。"
             f"如果你成功完成了一项之前未完成过的复杂任务，并且得到了用户的正面反馈，"
             f"必须主动询问用户是否需要将过程保存为新技能。"
-            f"如用户同意，请使用 `save_learned_skill` 工具。\n"
+            f"如用户同意，请使用 save_learned_skill 工具。\n"
+            f"\n## 自我审查机制\n"
+            f"当任务接近最大迭代次数或你感觉陷入循环时，可以调用 self_review 工具进行自我审查。"
+            f"系统会在达到迭代上限时自动提示你使用此工具。通过审查你可以获得额外的执行机会。"
+            f"请诚实评估：如果确实陷入无效循环，及时报告用户比浪费计算资源更好。\n"
         )
-        
+
         self.messages: List[Dict[str, Any]] = [
             {
                 "role": "system",
@@ -200,7 +256,8 @@ class OpenAGCAgent:
             "search_history": SearchHistoryTool(),
             "pause_and_wait": PauseAndWaitTool(),
             "enter_sandbox_mode": EnterWorktreeTool(),
-            "exit_sandbox_mode": ExitWorktreeTool()
+            "exit_sandbox_mode": ExitWorktreeTool(),
+            "self_review": SelfReviewTool()
         }
 
         # Tool display names (Chinese-friendly)
@@ -226,7 +283,8 @@ class OpenAGCAgent:
             "search_history": "检索会话历史",
             "pause_and_wait": "暂停并等待后台完成",
             "enter_sandbox_mode": "进入沙箱模式",
-            "exit_sandbox_mode": "退出沙箱模式"
+            "exit_sandbox_mode": "退出沙箱模式",
+            "self_review": "自我审查任务进度"
         }
 
         # Load auto-generated tools (persisted from previous sessions)
@@ -261,7 +319,7 @@ class OpenAGCAgent:
         CORE_TOOL_NAMES = {"execute_shell", "read_file", "write_file", "edit_file",
                            "search_file_content", "find_files", "search_available_tools",
                            "ask_user_question", "search_history", "queue_download", "pause_and_wait",
-                           "execute_python", "search_web"}
+                           "execute_python", "search_web", "self_review"}
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
 
         # Adaptive resident: auto-load frequently used non-core tools
@@ -498,7 +556,8 @@ class OpenAGCAgent:
         if not responded:
             print(f"[Agent] Sandbox wait timeout for {sb.path}")
             _sandbox_waits.pop(self.session_id, None)
-            return f"Sandbox authorization timeout for path: {sb.path}"
+            from tools.interaction import TaskPaused
+            raise TaskPaused(f"等待权限授权超时，转入后台挂起状态，请确认权限后恢复执行。路径: {sb.path}")
 
         action = result_holder.get("action", "deny_once")
         try:
@@ -706,7 +765,7 @@ class OpenAGCAgent:
         "code": {
             "keywords": ["写代码", "编程", "实现", "开发", "python", "javascript",
                          "create", "implement", "coding", "programming"],
-            "config": {"max_iterations": 20, "temperature": 0.1}
+            "config": {"max_iterations": 40, "temperature": 0.1}
         },
         "deploy": {
             "keywords": ["部署", "上线", "发布", "deploy", "release", "publish",
@@ -716,22 +775,22 @@ class OpenAGCAgent:
         "analysis": {
             "keywords": ["分析", "检查", "审查", "review", "analyze", "audit",
                          "统计", "报告"],
-            "config": {"max_iterations": 15, "temperature": 0.3}
+            "config": {"max_iterations": 20, "temperature": 0.3}
         },
         "research": {
             "keywords": ["搜索", "查找", "研究", "调查", "search", "research",
                          "find", "what is", "how to"],
-            "config": {"max_iterations": 10, "temperature": 0.5}
+            "config": {"max_iterations": 30, "temperature": 0.5}
         },
         "creative": {
             "keywords": ["写文章", "设计", "创作", "write", "design", "create content",
                          "生成图片"],
-            "config": {"max_iterations": 15, "temperature": 0.7}
+            "config": {"max_iterations": 20, "temperature": 0.7}
         },
         "filesystem": {
             "keywords": ["整理文件", "重命名", "移动", "复制", "organize", "rename",
                          "move", "copy", "clean"],
-            "config": {"max_iterations": 10, "temperature": 0.1}
+            "config": {"max_iterations": 15, "temperature": 0.1}
         },
     }
 
@@ -756,11 +815,10 @@ class OpenAGCAgent:
             if sample_count >= 5:
                 avg_iters = stats.get("avg_iterations", base_config["max_iterations"])
                 success_rate = stats.get("success_rate", 1.0)
-                # Use the higher of (average + 5) or minimum 8
+                # Use the higher of (average * 1.3) or minimum 8
                 tuned = max(int(avg_iters * 1.3), 8)
-                # Don't increase beyond default; don't go below 5
-                tuned = min(tuned, base_config["max_iterations"])
-                tuned = max(tuned, 5)
+                # Allow growth beyond default, but ensure it's at least the default
+                tuned = max(tuned, base_config["max_iterations"])
                 base_config = {**base_config, "max_iterations": tuned}
                 if success_rate < 0.5 and sample_count >= 3:
                     base_config["max_iterations"] = max(base_config["max_iterations"], 15)
@@ -861,6 +919,7 @@ class OpenAGCAgent:
             "分别", "同时", "多个", "所有", "each", "all", "every",
             "first.*then", "先.*再", "先.*然后",
             "部署", "deploy", "migrate", "迁移",
+            "深度研究", "全面分析", "架构梳理", "长期任务"
         ]
         match_count = 0
         for kw in complexity_keywords:
@@ -874,7 +933,8 @@ class OpenAGCAgent:
                 area_count += 1
 
         # Delegate if high complexity or multi-domain
-        return match_count >= 2 or area_count >= 3 or len(text) > 200
+        # Note: Do not use len(text) > 200 because users often paste long error logs for simple one-shot fixes.
+        return match_count >= 2 or area_count >= 3
 
     def _decompose_task(self, task_input: str) -> List[Dict]:
         """Use LLM to decompose a complex task into sub-tasks."""
@@ -944,10 +1004,21 @@ class OpenAGCAgent:
             duration = result.get("duration", 0)
             tc = result.get("tool_calls", 0)
             files = result.get("output_files", [])
+            steps = result.get("steps", [])
             parts.append(
                 f"### 子任务 {i} [{status}] （{duration:.1f}s, {tc} 步）\n"
                 f"{summary}\n"
             )
+            if steps:
+                step_lines = ["\n**执行步骤：**"]
+                for si, step in enumerate(steps, 1):
+                    s_status = "✅" if step.get("success") else "❌"
+                    tool_name = step.get("tool", "?")
+                    args = step.get("args", "")[:120]
+                    step_lines.append(
+                        f"- {s_status} `{tool_name}` {args}"
+                    )
+                parts.append("\n".join(step_lines) + "\n")
             if files:
                 parts.append(f"📄 产出文件: {', '.join(files)}\n")
 
@@ -1186,9 +1257,15 @@ class OpenAGCAgent:
     def run_turn(self, user_input: str, verbose: bool = False,
                  progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
                  images: Optional[List[str]] = None,
-                 task_id: Optional[int] = None) -> str:
+                 task_id: Optional[int] = None,
+                 skip_rag: bool = False) -> str:
         """
         Execute a single turn of reasoning and action.
+
+        Args:
+            skip_rag: If True, skip memory/skill/experience/knowledge-graph retrieval
+                      and system prompt rebuild. Used when resuming interrupted tasks
+                      where the full conversation context is already loaded in messages.
         """
         self.is_interrupted = False
         self.task_id = task_id
@@ -1203,54 +1280,56 @@ class OpenAGCAgent:
                 
         _task_start = _time.time()
 
-        # Auto-retrieve relevant memories for this query
-        def _msg_text(m):
-            c = m.get("content", "")
-            if isinstance(c, list):
-                return " ".join(p.get("text", "") for p in c if p.get("type") == "text")
-            return c
-
-        recent_context = "\n".join([_msg_text(m) for m in self.messages[-3:] if m["role"] == "user"])
         memory_context = ""
-        try:
-            # Dual search: semantic (ChromaDB) → FTS5 fallback
-            results = self.memory_store.search_semantic(recent_context, top_k=3)
-            if not results:
-                results = self.memory_store.search_memories(recent_context, top_k=3)
-            if results:
-                memory_context = "\n".join([f"- {r['content']} (Type: {r['memory_type']})" for r in results])
-        except Exception as e:
-            if verbose: print(f"Memory retrieval error: {e}")
-
-        # Auto-retrieve relevant skills for this query
         skill_context = ""
-        self._active_skills = []
-        try:
-            self.skill_store.refresh()
-            matched_skills = self.skill_store.retrieve(recent_context, top_k=3)
-            if matched_skills:
-                self._active_skills = [s["filename"] for s in matched_skills]
-                skill_context = self.skill_store.format_skills_for_prompt(matched_skills)
-        except Exception as e:
-            if verbose: print(f"Skill retrieval error: {e}")
-
-        # Retrieve relevant past experience (reflections + trajectories)
         experience_context = ""
-        try:
-            experience = self.reflection_engine.retrieve_experience(recent_context, top_k=2)
-            if experience.get("reflections") or experience.get("trajectories"):
-                experience_context = self.reflection_engine.format_experience_for_prompt(experience)
-        except Exception as e:
-            if verbose: print(f"Experience retrieval error: {e}")
-
-        # Retrieve knowledge graph context
         kg_context = ""
-        try:
-            kg_results = self.knowledge_graph.retrieve_context(recent_context, top_k=5)
-            if kg_results:
-                kg_context = self.knowledge_graph.format_context(kg_results)
-        except Exception as e:
-            if verbose: print(f"Knowledge graph retrieval error: {e}")
+
+        if not skip_rag:
+            # Auto-retrieve relevant memories for this query
+            def _msg_text(m):
+                c = m.get("content", "")
+                if isinstance(c, list):
+                    return " ".join(p.get("text", "") for p in c if p.get("type") == "text")
+                return c
+
+            recent_context = "\n".join([_msg_text(m) for m in self.messages[-3:] if m["role"] == "user"])
+            try:
+                # Dual search: semantic (ChromaDB) → FTS5 fallback
+                results = self.memory_store.search_semantic(recent_context, top_k=3)
+                if not results:
+                    results = self.memory_store.search_memories(recent_context, top_k=3)
+                if results:
+                    memory_context = "\n".join([f"- {r['content']} (Type: {r['memory_type']})" for r in results])
+            except Exception as e:
+                if verbose: print(f"Memory retrieval error: {e}")
+
+            # Auto-retrieve relevant skills for this query
+            self._active_skills = []
+            try:
+                self.skill_store.refresh()
+                matched_skills = self.skill_store.retrieve(recent_context, top_k=3)
+                if matched_skills:
+                    self._active_skills = [s["filename"] for s in matched_skills]
+                    skill_context = self.skill_store.format_skills_for_prompt(matched_skills)
+            except Exception as e:
+                if verbose: print(f"Skill retrieval error: {e}")
+
+            # Retrieve relevant past experience (reflections + trajectories)
+            try:
+                experience = self.reflection_engine.retrieve_experience(recent_context, top_k=2)
+                if experience.get("reflections") or experience.get("trajectories"):
+                    experience_context = self.reflection_engine.format_experience_for_prompt(experience)
+            except Exception as e:
+                if verbose: print(f"Experience retrieval error: {e}")
+
+            # Retrieve knowledge graph context
+            try:
+                kg_results = self.knowledge_graph.retrieve_context(recent_context, top_k=5)
+                if kg_results:
+                    kg_context = self.knowledge_graph.format_context(kg_results)
+            except Exception as e:
+                if verbose: print(f"Knowledge graph retrieval error: {e}")
 
         # Ensure System Prompt is always fresh and has the latest MEMORY.md and episodic context
         if self.messages and self.messages[0]["role"] == "system":
@@ -1294,6 +1373,11 @@ class OpenAGCAgent:
                                 max_iterations=plan.get("max_iterations", 10),
                                 progress_callback=progress_callback,
                                 llm_client=self.llm,
+                                agent_context=self,
+                                session_whitelist=self._session_sandbox_whitelist,
+                                network_whitelist=self._session_network_whitelist,
+                                permission_whitelist=self._session_permission_whitelist,
+                                session_id=self.session_id,
                             )
                             batch_futures[executor.submit(sub.run)] = plan
                         for future in concurrent.futures.as_completed(batch_futures):
@@ -1311,7 +1395,15 @@ class OpenAGCAgent:
                                     if not (dep_ids & set(p.get("depends_on", [])))]
                 result_text = self._synthesize_results(user_input, sub_results)
                 self.messages.append({"role": "assistant", "content": result_text})
-                return result_text
+
+                # Let the main agent reflect on sub-agent results for a natural final response
+                try:
+                    reflection, _ = self.llm.chat(messages=self.messages, tools=None)
+                    final = reflection.choices[0].message.content or result_text
+                    self.messages.append({"role": "assistant", "content": final})
+                    return final
+                except Exception:
+                    return result_text
 
         step = 1
 
@@ -1326,17 +1418,23 @@ class OpenAGCAgent:
                     # Explicit config value always wins
                     if "max_iterations" in config:
                         max_iterations = config["max_iterations"]
+                    if "max_correction_attempts" in config:
+                        self._max_correction_attempts = config["max_correction_attempts"]
         except Exception:
             pass
 
         current_iter = 0
         step_counter = 0
+        self._correction_attempts = 0
+        self._should_stop = False
+        self._self_review_history = []
 
         # Tool loop detection state
-        recent_tool_calls = []
+        self._recent_tool_calls: list = []
         MAX_REPEATED_TOOL_CALLS = 3
-        
-        while current_iter < max_iterations:
+        effective_max = max_iterations + (self._max_correction_attempts if self._max_correction_attempts > 0 else 0)
+
+        while current_iter < effective_max:
             if self.is_interrupted:
                 self._record_skill_feedback(success=False, task_input=user_input,
                                             duration=_time.time() - _task_start)
@@ -1354,7 +1452,34 @@ class OpenAGCAgent:
             current_iter += 1
             if verbose:
                 print(f"[Agent Loop Iteration {current_iter}/{max_iterations}] Calling LLM...")
-            
+
+            # Check if self-review decided to stop — inject final answer request (before review prompt)
+            if self._should_stop and not self._in_self_review:
+                if verbose:
+                    print("[Agent] Self-review recommended stop, requesting final answer.")
+                self.messages.append({
+                    "role": "user",
+                    "content": "根据你的自我审查结果，请立即给出最终答复告知用户当前进展。"
+                })
+                # Only do this once; reset flag so we don't re-inject
+                self._should_stop = False
+
+            # Max iterations reached — inject self-review prompt
+            if current_iter > max_iterations and self._max_correction_attempts > 0 and not self._in_self_review:
+                remaining = self._max_correction_attempts - self._correction_attempts
+                if remaining > 0:
+                    self._correction_attempts += 1
+                    self._in_self_review = True
+                    review_msg = (
+                        f"[系统提示] 你已经达到了最大迭代次数（{max_iterations}），但你还有 {remaining} 次自我审查纠偏机会。"
+                        f"请调用 self_review 工具评估当前进度，判断是否陷入循环。"
+                        f"如果还有必要继续，系统会允许额外执行。"
+                        f"如果确实已无进展，请回复最终答案告知用户。"
+                    )
+                    self.messages.append({"role": "user", "content": review_msg})
+                    if verbose:
+                        print(f"[Agent] ⚠️ Max iterations reached, injected self-review prompt ({self._correction_attempts}/{self._max_correction_attempts})")
+
             # Notify: thinking
             if progress_callback:
                 progress_callback({"event": "thinking", "iteration": current_iter})
@@ -1515,15 +1640,15 @@ class OpenAGCAgent:
                     # Tool Loop Detection Check
                     call_signature = f"{function_name}:{function_args}"
                     call_hash = hashlib.md5(call_signature.encode('utf-8')).hexdigest()
-                    recent_tool_calls.append(call_hash)
-                    
+                    self._recent_tool_calls.append(call_hash)
+
                     # Keep only the last 10 calls in the memory window
-                    if len(recent_tool_calls) > 10:
-                        recent_tool_calls.pop(0)
-                        
+                    if len(self._recent_tool_calls) > 10:
+                        self._recent_tool_calls.pop(0)
+
                     # Check if the exact same tool with the exact same args was called too many times recently
                     # This often happens when the agent gets stuck in an error loop
-                    loop_count = recent_tool_calls.count(call_hash)
+                    loop_count = self._recent_tool_calls.count(call_hash)
                     
                     if loop_count >= MAX_REPEATED_TOOL_CALLS:
                         result = (f"System Guard: Blocked due to critical loop. "
@@ -1561,9 +1686,12 @@ class OpenAGCAgent:
                                     # Auto-background: shell returning [Still Running] means process
                                     # is still running after timeout — system takes over automatically
                                     # instead of relying on the LLM to call pause_and_wait
+                                    # Exception: if [SERVER_PROCESS] detected, don't background — let agent see
+                                    is_server = "[SERVER_PROCESS]" in result if isinstance(result, str) else False
                                     if (function_name == "execute_shell"
                                             and isinstance(result, str)
-                                            and result.startswith("[Still Running]")):
+                                            and result.startswith("[Still Running]")
+                                            and not is_server):
                                         if progress_callback:
                                             progress_callback({
                                                 "event": "task_backgrounded",
@@ -1637,7 +1765,7 @@ class OpenAGCAgent:
                     result_str = str(result)
 
                     # Context Compaction: compress long tool results to preserve context window
-                    result_str = self._compress_tool_result(result_str, function_name)
+                    # result_str = self._compress_tool_result(result_str, function_name)
 
                     # Notify: tool done
                     if progress_callback:
@@ -1679,6 +1807,25 @@ class OpenAGCAgent:
                         "name": function_name,
                         "content": result_str
                     })
+
+                    # Handle self_review results
+                    if function_name == "self_review":
+                        self._in_self_review = False
+                        self._self_review_history.append(result_str)
+                        # Parse JSON from result to extract continue_processing
+                        try:
+                            import re as _re
+                            json_match = _re.search(r'原始 JSON：(\{.*\})', result_str, _re.DOTALL)
+                            if json_match:
+                                review_data = json.loads(json_match.group(1))
+                                if not review_data.get("continue_processing", True):
+                                    self._should_stop = True
+                                    if verbose:
+                                        print("[Agent] Self-review recommended stop, will exit after this iteration.")
+                        except Exception:
+                            pass
+                        # Reset consecutive failures counter after self-review
+                        self._consecutive_failures = 0
 
                     # Context preservation: detect consecutive failures and remind model of original task
                     is_failure = not tool_success or result_str.startswith("Error") or result_str.startswith("System Guard") or result_str.startswith("Sandbox")
@@ -1782,6 +1929,15 @@ class OpenAGCAgent:
                                     duration=_time.time() - _task_start)
         cat = self._classify_task_category(user_input)
         self._save_task_stats(cat, current_iter, False)
+        if self._self_review_history:
+            summaries = "; ".join(
+                h.split("进度总结：")[1].split("\n")[0][:80] if "进度总结：" in h else "N/A"
+                for h in self._self_review_history[-3:]
+            )
+            return (
+                f"[MAX_ITERATIONS_REACHED] Agent stopped after {self._correction_attempts} correction attempts. "
+                f"Review history: {summaries}"
+            )
         return "[MAX_ITERATIONS_REACHED] Agent stopped: Reached maximum iterations without a final answer. The task may be incomplete."
 
     def _classify_task_category(self, user_input: str) -> str:

@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 from typing import Any, Dict, Optional
 from pydantic import Field
 
@@ -11,7 +12,6 @@ class ComputerTool(BaseTool):
         "Control the physical computer mouse and keyboard. "
         "Allows you to click, move the mouse, type text, and press keys."
     )
-
     def __init__(self, **data):
         super().__init__(**data)
         # Import pyautogui lazily to avoid issues if not installed or running headlessly
@@ -20,7 +20,7 @@ class ComputerTool(BaseTool):
         # Failsafe: moving mouse to corner will abort
         pyautogui.FAILSAFE = True
         # Add a slight delay after every pyautogui call
-        pyautogui.PAUSE = 0.5 
+        pyautogui.PAUSE = 0.5
 
     def get_openai_schema(self) -> Dict[str, Any]:
         return {
@@ -62,67 +62,75 @@ class ComputerTool(BaseTool):
             }
         }
 
+    @staticmethod
+    def _get_lock():
+        lock = getattr(ComputerTool, '__execute_lock', None)
+        if lock is None:
+            lock = threading.Lock()
+            ComputerTool.__execute_lock = lock
+        return lock
+
     def execute(self, **kwargs) -> str:
-        action = kwargs.get("action")
-        
-        try:
-            if action == 'mouse_move':
-                x = kwargs.get('x')
-                y = kwargs.get('y')
-                if x is None or y is None:
-                    return "Error: x and y coordinates required for mouse_move."
-                pyautogui.moveTo(x, y, duration=0.5)
-                return f"Mouse moved to ({x}, {y})"
-                
-            elif action == 'mouse_click':
-                x = kwargs.get('x')
-                y = kwargs.get('y')
-                if x is not None and y is not None:
-                    pyautogui.click(x, y)
-                    return f"Clicked at ({x}, {y})"
+        with self._get_lock():
+            action = kwargs.get("action")
+
+            try:
+                if action == 'mouse_move':
+                    x = kwargs.get('x')
+                    y = kwargs.get('y')
+                    if x is None or y is None:
+                        return "Error: x and y coordinates required for mouse_move."
+                    pyautogui.moveTo(x, y, duration=0.5)
+                    return f"Mouse moved to ({x}, {y})"
+
+                elif action == 'mouse_click':
+                    x = kwargs.get('x')
+                    y = kwargs.get('y')
+                    if x is not None and y is not None:
+                        pyautogui.click(x, y)
+                        return f"Clicked at ({x}, {y})"
+                    else:
+                        pyautogui.click()
+                        return "Clicked at current location"
+
+                elif action == 'type_text':
+                    text = kwargs.get('text')
+                    if not text:
+                        return "Error: text required for type_text."
+                    pyautogui.write(text, interval=0.05)
+                    return f"Typed text: {text}"
+
+                elif action == 'press_key':
+                    key = kwargs.get('key')
+                    if not key:
+                        return "Error: key required for press_key."
+                    pyautogui.press(key)
+                    return f"Pressed key: {key}"
+
+                elif action == 'hotkey':
+                    keys = kwargs.get('keys')
+                    if not keys or not isinstance(keys, list):
+                        return "Error: list of keys required for hotkey."
+                    pyautogui.hotkey(*keys)
+                    return f"Pressed hotkey: {'+'.join(keys)}"
+
+                elif action == 'screenshot':
+                    screenshot_path = os.path.abspath("screenshot.png")
+                    pyautogui.screenshot(screenshot_path)
+                    import base64
+                    try:
+                        with open(screenshot_path, "rb") as f:
+                            b64 = base64.b64encode(f.read()).decode("ascii")
+                        img_url = f"data:image/png;base64,{b64}"
+                        return (
+                            f"Screenshot saved to {screenshot_path}\n"
+                            f"[SCREENSHOT_DATA:{img_url}]"
+                        )
+                    except Exception:
+                        return f"Screenshot saved to {screenshot_path}"
+
                 else:
-                    pyautogui.click()
-                    return "Clicked at current location"
-                    
-            elif action == 'type_text':
-                text = kwargs.get('text')
-                if not text:
-                    return "Error: text required for type_text."
-                pyautogui.write(text, interval=0.05)
-                return f"Typed text: {text}"
-                
-            elif action == 'press_key':
-                key = kwargs.get('key')
-                if not key:
-                    return "Error: key required for press_key."
-                pyautogui.press(key)
-                return f"Pressed key: {key}"
-                
-            elif action == 'hotkey':
-                keys = kwargs.get('keys')
-                if not keys or not isinstance(keys, list):
-                    return "Error: list of keys required for hotkey."
-                pyautogui.hotkey(*keys)
-                return f"Pressed hotkey: {'+'.join(keys)}"
-                
-            elif action == 'screenshot':
-                screenshot_path = os.path.abspath("screenshot.png")
-                pyautogui.screenshot(screenshot_path)
-                # Encode as base64 for LLM vision feedback
-                import base64
-                try:
-                    with open(screenshot_path, "rb") as f:
-                        b64 = base64.b64encode(f.read()).decode("ascii")
-                    img_url = f"data:image/png;base64,{b64}"
-                    return (
-                        f"Screenshot saved to {screenshot_path}\n"
-                        f"[SCREENSHOT_DATA:{img_url}]"
-                    )
-                except Exception:
-                    return f"Screenshot saved to {screenshot_path}"
-                
-            else:
-                return f"Error: Unknown action '{action}'"
-                
-        except Exception as e:
-            return f"Error executing computer control ({action}): {str(e)}"
+                    return f"Error: Unknown action '{action}'"
+
+            except Exception as e:
+                return f"Error executing computer control ({action}): {str(e)}"

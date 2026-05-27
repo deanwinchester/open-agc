@@ -4,6 +4,7 @@ import json
 import asyncio
 import sqlite3
 import threading
+import signal
 import time as _time
 from datetime import datetime, timezone, timedelta
 
@@ -738,8 +739,8 @@ def save_task_context(task_id: int, messages: list):
     """Save agent conversation messages as a JSON snapshot for resume."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # Only keep last 30 messages to avoid huge snapshots
-    snapshot = json.dumps(messages[-30:], ensure_ascii=False)
+    # Save full context, relying on token_budget.py for pruning instead of hard limits
+    snapshot = json.dumps(messages, ensure_ascii=False)
     cursor.execute("UPDATE tasks SET context_snapshot=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                    (snapshot, task_id))
     conn.commit()
@@ -1181,7 +1182,8 @@ def load_config() -> dict:
         "email_imap_server": "",
         "email_smtp_server": "",
         "owner_email": "",
-        "mcp_servers": {}
+        "mcp_servers": {},
+        "max_correction_attempts": 5
     }
 
 class ConfigUpdate(BaseModel):
@@ -1207,6 +1209,7 @@ class ConfigUpdate(BaseModel):
     tool_permissions: Optional[Dict[str, Any]] = None
     searxng_url: str = ""
     searxng_port: int = 8888
+    max_correction_attempts: int = 5
 
 @app.get("/api/settings")
 async def get_settings(session_id: int = None):
@@ -1263,6 +1266,7 @@ async def get_settings(session_id: int = None):
         "tool_permissions": config.get("tool_permissions", {}),
         "searxng_url": config.get("searxng_url", ""),
         "searxng_port": config.get("searxng_port", 8888),
+        "max_correction_attempts": config.get("max_correction_attempts", 5),
     }
 
 @app.post("/api/settings")
@@ -1332,6 +1336,7 @@ async def update_settings(config_update: ConfigUpdate):
         config["searxng_url"] = config_update.searxng_url
         config["searxng_port"] = config_update.searxng_port
         set_key(env_file, "SEARXNG_URL", config_update.searxng_url)
+        config["max_correction_attempts"] = config_update.max_correction_attempts
         os.environ["SEARXNG_URL"] = config_update.searxng_url
 
         # Save per-session email config when session_id is provided
@@ -2613,6 +2618,8 @@ async def get_task_detail(task_id: int):
             "tool_label": s["tool_label"],
             "args_preview": s["args_preview"],
             "result_preview": s["result_preview"],
+            "full_result": s["full_result"],
+            "full_args": s["full_args"],
             "success": bool(s["success"]),
             "thinking_content": s["thinking_content"],
             "created_at": s["created_at"]
@@ -2645,9 +2652,49 @@ async def get_task_detail(task_id: int):
             "max_resume_count": task_row["max_resume_count"] if "max_resume_count" in task_row.keys() else 10,
             "interruption_reason": task_row["interruption_reason"] if "interruption_reason" in task_row.keys() else None,
             "session_id": task_row["session_id"] if "session_id" in task_row.keys() else None,
-            "session_name": task_row["session_name"] if "session_name" in task_row.keys() else None
+            "session_name": task_row["session_name"] if "session_name" in task_row.keys() else None,
+            "total_tokens": task_row["total_tokens"] if "total_tokens" in task_row.keys() else 0,
+            "total_cost": task_row["total_cost"] if "total_cost" in task_row.keys() else 0.0
         }
     }
+
+@app.get("/api/tasks/{task_id}/steps")
+async def get_task_steps(task_id: int, page: int = 1, page_size: int = 50):
+    """Get paginated steps for a task."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) as cnt FROM task_steps WHERE task_id=?", (task_id,))
+    total = cursor.fetchone()["cnt"]
+
+    offset = (page - 1) * page_size
+    cursor.execute(
+        "SELECT step_number, tool_name, tool_label, args_preview, result_preview, "
+        "full_result, full_args, success, thinking_content, created_at "
+        "FROM task_steps WHERE task_id=? ORDER BY step_number ASC LIMIT ? OFFSET ?",
+        (task_id, page_size, offset)
+    )
+    step_rows = cursor.fetchall()
+    conn.close()
+
+    steps = []
+    for s in step_rows:
+        steps.append({
+            "step_number": s["step_number"],
+            "tool_name": s["tool_name"],
+            "tool_label": s["tool_label"],
+            "args_preview": s["args_preview"],
+            "result_preview": s["result_preview"],
+            "full_result": s["full_result"],
+            "full_args": s["full_args"],
+            "success": bool(s["success"]),
+            "thinking_content": s["thinking_content"],
+            "created_at": s["created_at"]
+        })
+
+    return {"steps": steps, "total": total, "page": page, "page_size": page_size,
+            "total_pages": max(1, (total + page_size - 1) // page_size)}
 
 @app.post("/api/tasks/{task_id}/interrupt")
 async def interrupt_task(task_id: int):
@@ -2787,6 +2834,130 @@ async def update_schedule(task_id: int, req: ScheduleTaskRequest):
     conn.commit()
     conn.close()
     return {"status": "success"}
+
+
+# ── Process Management (Background/Server Processes) ──
+
+@app.get("/api/processes")
+async def list_processes():
+    """List all active background/server processes."""
+    from tools.shell import get_background_processes, get_orphan_processes
+    procs = {}
+    for tid, info in get_background_processes().items():
+        pinfo = dict(info)
+        pid = pinfo.get("pid")
+        pinfo["alive"] = _is_pid_alive(pid) if pid else False
+        pinfo["uptime"] = _time.time() - pinfo.get("started_at", _time.time()) if pinfo.get("started_at") else 0
+        procs[tid] = pinfo
+    orphans = {}
+    for oid, info in get_orphan_processes().items():
+        pinfo = dict(info)
+        pid = pinfo.get("pid")
+        pinfo["alive"] = _is_pid_alive(pid) if pid else False
+        pinfo["uptime"] = _time.time() - pinfo.get("started_at", _time.time()) if pinfo.get("started_at") else 0
+        orphans[oid] = pinfo
+    return {"processes": procs, "orphans": orphans}
+
+
+@app.get("/api/tasks/{task_id}/process")
+async def get_task_process(task_id: int):
+    """Get process info for a specific task."""
+    from tools.shell import get_background_processes
+    pinfo = get_background_processes().get(str(task_id))
+    if not pinfo:
+        raise HTTPException(status_code=404, detail="No process found for this task")
+    result = dict(pinfo)
+    pid = result.get("pid")
+    result["alive"] = _is_pid_alive(pid) if pid else False
+    result["uptime"] = _time.time() - result.get("started_at", _time.time()) if result.get("started_at") else 0
+    return result
+
+
+@app.get("/api/tasks/{task_id}/logs")
+async def get_task_logs(task_id: int, lines: int = 50):
+    """Read tail of a task's process output file."""
+    from tools.shell import get_background_processes
+    pinfo = get_background_processes().get(str(task_id))
+    out_file = pinfo.get("output_file", "") if pinfo else ""
+    if not out_file or not os.path.exists(out_file):
+        # Try reading from task's stored output_files
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT output_files FROM tasks WHERE id=?", (task_id,)).fetchone()
+        conn.close()
+        if row and row["output_files"]:
+            files = json.loads(row["output_files"])
+            if files:
+                out_file = files[0]
+    if not out_file or not os.path.exists(out_file):
+        raise HTTPException(status_code=404, detail="No log file found")
+    try:
+        with open(out_file, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        tail_lines = content.split("\n")[-lines:]
+        return {
+            "file": out_file,
+            "total_lines": content.count("\n") + 1,
+            "lines": tail_lines,
+            "size": len(content),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read log file: {e}")
+
+
+def _kill_process_on_platform(pid: int) -> str:
+    """Kill a process cross-platform. Returns status message."""
+    try:
+        _os.kill(pid, 0)
+    except OSError:
+        return f"Process {pid} is not running."
+    try:
+        if sys.platform == "win32":
+            import subprocess
+            try:
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                               capture_output=True, timeout=5)
+            except Exception:
+                _os.kill(pid, getattr(signal, "CTRL_BREAK_EVENT", 9))
+        else:
+            _os.kill(pid, getattr(signal, "SIGTERM", 15))
+            import time as _t
+            _t.sleep(2)
+            try:
+                _os.kill(pid, 0)
+                _os.kill(pid, getattr(signal, "SIGKILL", 9))
+            except OSError:
+                pass
+        return f"Process {pid} terminated."
+    except Exception as e:
+        return f"Failed to kill process {pid}: {e}"
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Check if a PID is alive."""
+    try:
+        _os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+@app.post("/api/tasks/{task_id}/kill")
+async def kill_task_process(task_id: int):
+    """Kill a task's background/server process."""
+    from tools.shell import get_background_processes, cleanup_background_process
+    pinfo = get_background_processes().get(str(task_id))
+    if not pinfo:
+        raise HTTPException(status_code=404, detail="No tracked process found for this task")
+    pid = pinfo.get("pid")
+    if not pid:
+        raise HTTPException(status_code=404, detail="No PID found")
+    result = _kill_process_on_platform(pid)
+    cleanup_background_process(str(task_id))
+    update_task_status(task_id, "interrupted",
+                       f"进程 (PID {pid}) 已被用户手动终止。",
+                       interruption_reason="user")
+    return {"status": "success", "message": result}
 
 
 # ── SearXNG Management ──
@@ -2979,6 +3150,7 @@ async def websocket_endpoint(websocket: WebSocket):
             import queue as thread_queue
             progress_queue = thread_queue.Queue()
             has_taken_action = False
+            agent = None
 
             def progress_callback(event: dict):
                 nonlocal has_taken_action, ws_task_id
@@ -2991,6 +3163,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 # Record task steps (offset on resume to continue numbering)
                 adjusted_step = event.get("step", 0) + step_offset
+                event["step"] = adjusted_step
 
                 if ws_task_id and event.get("event") == "tool_start":
                     try:
@@ -3170,7 +3343,7 @@ async def websocket_endpoint(websocket: WebSocket):
             import concurrent.futures
             agent_future = loop.run_in_executor(
                 None, 
-                lambda: agent.run_turn(query, False, progress_callback, images=images, task_id=ws_task_id)
+                lambda: agent.run_turn(query, False, progress_callback, images=images, task_id=ws_task_id, skip_rag=bool(resume_task_id))
             )
             
             # Handle agent progress and check for interruption
@@ -3402,7 +3575,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             conn2.row_factory = sqlite3.Row
                             steps = conn2.execute(
                                 "SELECT step_number, tool_name, tool_label, args_preview, "
-                                "result_preview, full_result, success FROM task_steps "
+                                "result_preview, full_result, full_args, success FROM task_steps "
                                 "WHERE task_id=? ORDER BY step_number", (task_id,)).fetchall()
                             # Also fetch the original task goal
                             task_row = conn2.execute(
@@ -3417,53 +3590,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             if ctx:
                                 session_history = ctx
                             original_goal = (task_row["user_query"] if task_row else "")
-                            # Build step summary so agent knows what was already done
-                            step_summary_lines = []
-                            for s in steps[-30:]:
-                                label = s['tool_label'] or s['tool_name']
-                                preview = (s['result_preview'] or '')[:120]
-                                step_summary_lines.append(
-                                    f"步骤{s['step_number']}: {label} "
-                                    f"({'✓' if s['success'] else '✗'}) "
-                                    f"{preview}"
-                                )
-                            step_summary = "\n".join(step_summary_lines) if step_summary_lines else ""
-
-                            # Extract key findings from full_result for resume context
-                            key_findings = []
-                            seen_urls = set()
-                            for s in steps:
-                                fr = s['full_result'] or ''
-                                if not fr:
-                                    continue
-                                step_urls = re.findall(r'(?:https?|ftp)://[^\s\'"<>]{5,}', fr)
-                                for u in step_urls:
-                                    if u not in seen_urls:
-                                        seen_urls.add(u)
-                                        key_findings.append(f"📎 URL: {u}")
-                                # Detect extracted data patterns
-                                if s['tool_name'] == 'execute_shell' and s['success']:
-                                    if re.search(r'(?:m3u8|mp4|\.ts)', fr, re.IGNORECASE):
-                                        short = fr[:500].replace('\n', ' ').replace('\r', '')[:120]
-                                        key_findings.append(f"📄 命令产出: {short}")
-
-                            findings_block = ""
-                            if key_findings:
-                                findings_block = (
-                                    "\n--- 之前的关键发现 ---\n"
-                                    + "\n".join(key_findings[:15])
-                                    + "\n---\n"
-                                )
-
-                            query = (
-                                f"【原始任务目标】{original_goal}\n\n"
-                                "你需要继续执行这个任务。以下是之前已完成的执行步骤摘要：\n"
-                                "--- 已完成步骤 ---\n"
-                                f"{step_summary}\n"
-                                f"{findings_block}"
-                                "请根据以上原始目标和已完成步骤，从上次中断的地方继续执行。"
-                                "不要重复读取已经成功获得的文件内容，直接使用已有的结果继续下一步。"
-                            )
+                            query = "【系统提示】任务已恢复，请根据历史上下文，从上次中断的地方继续执行任务。"
                         except Exception as e:
                             print(f"[WS] Resume error: {e}")
                             query = "继续执行未完成的任务。"
@@ -3491,41 +3618,18 @@ async def websocket_endpoint(websocket: WebSocket):
                     save_message("user", query, ws_session_id)
 
                     # Auto-reconstruct context for continuation queries ("继续", "下一步", etc.)
-                    if _is_continuation_query(query):
+                    if _is_continuation_query(query) and not resume_id_for_run:
                         try:
                             conn_cont = sqlite3.connect(DB_PATH)
                             conn_cont.row_factory = sqlite3.Row
                             latest_task = conn_cont.execute(
-                                "SELECT id, user_query, status FROM tasks "
+                                "SELECT id FROM tasks "
                                 "WHERE session_id=? ORDER BY id DESC LIMIT 1",
                                 (ws_session_id,)
                             ).fetchone()
                             if latest_task:
-                                tid = latest_task["id"]
-                                original_goal = latest_task["user_query"] or ""
-                                steps = conn_cont.execute(
-                                    "SELECT step_number, tool_name, tool_label, "
-                                    "result_preview, success FROM task_steps "
-                                    "WHERE task_id=? ORDER BY step_number", (tid,)
-                                ).fetchall()
-                                step_lines = []
-                                for s in steps[-30:]:
-                                    label = s["tool_label"] or s["tool_name"]
-                                    preview = (s["result_preview"] or "")[:120]
-                                    step_lines.append(
-                                        f"步骤{s['step_number']}: {label} "
-                                        f"({'✓' if s['success'] else '✗'}) "
-                                        f"{preview}"
-                                    )
-                                step_summary = "\n".join(step_lines)
-                                query = (
-                                    f"【原始任务目标】{original_goal}\n\n"
-                                    "你需要继续执行这个任务。以下是之前已完成的执行步骤摘要：\n"
-                                    "--- 已完成步骤 ---\n"
-                                    f"{step_summary}\n"
-                                    "请根据以上原始目标和已完成步骤，从上次中断的地方继续执行。"
-                                    "不要重复读取已经成功获得的文件内容，直接使用已有的结果继续下一步。"
-                                )
+                                resume_id_for_run = latest_task["id"]
+                                session_history = get_task_context(resume_id_for_run)
                             conn_cont.close()
                         except Exception as e:
                             print(f"[WS] Continuation context error: {e}")
@@ -3573,6 +3677,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
                 
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 err_str = str(e).lower()
                 error_msg = f"Agent Encountered Error: {str(e)}"
                 if "api_key" in err_str or "authentication" in err_str or "not found" in err_str or "key" in err_str:
@@ -3703,13 +3809,13 @@ def _broadcast_to_websockets(message: dict):
         except ValueError: pass
 
 
-def _broadcast_task_history(task_id: int, session_id: int):
+def _broadcast_task_history(task_id: int, session_id: int, task_status: str = "interrupted"):
     """Fetch task steps and broadcast as history_steps for UI rendering."""
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT step_number, tool_name, tool_label, args_preview, result_preview, full_result, success "
+            "SELECT step_number, tool_name, tool_label, args_preview, result_preview, full_result, full_args, success "
             "FROM task_steps WHERE task_id=? ORDER BY step_number ASC", (task_id,)).fetchall()
         conn.close()
         if not rows:
@@ -3723,6 +3829,7 @@ def _broadcast_task_history(task_id: int, session_id: int):
                 "args_preview": r["args_preview"] or "",
                 "result_preview": r["result_preview"] or "",
                 "full_result": r["full_result"] or "",
+                "full_args": r["full_args"] or "",
                 "success": bool(r["success"]),
             })
         _broadcast_to_websockets({
@@ -3730,7 +3837,7 @@ def _broadcast_task_history(task_id: int, session_id: int):
             "task_id": task_id,
             "session_id": session_id,
             "steps": steps,
-            "task_status": "interrupted",
+            "task_status": task_status,
         })
     except Exception as e:
         print(f"[Task] Failed to broadcast task history: {e}")
@@ -3784,15 +3891,29 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         pass
 
     step_counter = 0
+    step_offset = 0
+    if is_resume:
+        try:
+            off_conn = sqlite3.connect(DB_PATH)
+            off_conn.row_factory = sqlite3.Row
+            max_step = off_conn.execute(
+                "SELECT COALESCE(MAX(step_number), 0) FROM task_steps WHERE task_id=?",
+                (task_id,)).fetchone()[0]
+            step_offset = max_step
+            off_conn.close()
+        except Exception:
+            pass
 
     def progress_cb(event: dict):
         nonlocal step_counter
         if event.get("event") == "tool_start":
             step_counter += 1
+            display_step = event.get("step", step_counter) + step_offset
+            event["step"] = display_step
             try:
                 add_task_step(
                     task_id=task_id,
-                    step_number=event.get("step", step_counter),
+                    step_number=display_step,
                     tool_name=event.get("tool", ""),
                     tool_label=event.get("tool_label", ""),
                     args_preview=event.get("args_preview", ""),
@@ -3803,13 +3924,14 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
             except Exception:
                 pass
         elif event.get("event") == "tool_done":
+            done_step = event.get("step", step_counter) + step_offset
             try:
                 conn = sqlite3.connect(DB_PATH)
                 cursor = conn.cursor()
                 cursor.execute(
                     "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=?",
                     (event.get("result_preview", ""), event.get("full_result", event.get("result_preview", "")),
-                     1 if event.get("success") else 0, task_id, event.get("step", step_counter))
+                     1 if event.get("success") else 0, task_id, done_step)
                 )
                 conn.commit()
                 conn.close()
@@ -3833,7 +3955,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                  f"原始任务: {user_query}")
 
         # Broadcast reconstructed history steps so they appear in the session
-        _broadcast_task_history(task_id, bg_session_id)
+        _broadcast_task_history(task_id, bg_session_id, "running")
 
     update_task_status(task_id, "running")
 
@@ -3876,7 +3998,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     
     try:
         msg_count_before = len(agent.messages)
-        response = agent.run_turn(query, False, progress_cb, task_id=task_id)
+        response = agent.run_turn(query, False, progress_cb, task_id=task_id, skip_rag=bool(context_messages))
 
         # If user already interrupted this task, don't overwrite the status
         try:
@@ -3927,6 +4049,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         _broadcast_to_websockets({
             "type": "message",
             "role": "agent",
+            "background": True,
             "session_id": bg_session_id,
             "content": f"**{'🔄 自动恢复' if is_resume else '⏰ 定时'}任务完成**: {user_query[:40]}...\n\n{response[:500]}"
         })
@@ -4015,6 +4138,8 @@ def start_task_scheduler():
     
     threading.Thread(target=scheduler_loop, daemon=True).start()
 
+_SERVER_START_TIME = datetime.now(timezone.utc)  # Used by BgMonitor to detect restart-induced process loss
+
 def start_background_monitor():
     """Monitor backgrounded tasks — check download/process completion and auto-resume."""
     def monitor_loop():
@@ -4026,7 +4151,7 @@ def start_background_monitor():
                 conn = sqlite3.connect(DB_PATH)
                 conn.row_factory = sqlite3.Row
                 bg_tasks = conn.execute(
-                    "SELECT id, user_query, resume_count, max_resume_count, created_at FROM tasks "
+                    "SELECT id, user_query, resume_count, max_resume_count, created_at, updated_at FROM tasks "
                     "WHERE status='backgrounded' AND resume_count < max_resume_count"
                 ).fetchall()
                 if bg_tasks:
@@ -4101,29 +4226,39 @@ def start_background_monitor():
                                     if pinfo:
                                         print(f"[BgMonitor] Task {tid}: adopted orphan process")
 
-                        # Fallback 2: check for stale backgrounded tasks (> 30 min, no process track)
+                        # Fallback 2: handle backgrounded tasks with no process info (e.g. after restart)
                         if not pinfo:
                             try:
-                                created_str = task["created_at"]
-                                if created_str:
-                                    from datetime import datetime, timezone, timedelta
-                                    created_dt = datetime.strptime(created_str, '%Y-%m-%d %H:%M:%S')
-                                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                                updated_str = task["updated_at"] or task["created_at"]
+                                if updated_str:
+                                    updated_dt = datetime.strptime(updated_str, '%Y-%m-%d %H:%M:%S')
+                                    updated_dt = updated_dt.replace(tzinfo=timezone.utc)
                                     now = datetime.now(timezone.utc)
-                                    age = now - created_dt
-                                    if age > timedelta(minutes=30):
-                                        print(f"[BgMonitor] Task {tid}: no process info for {age.total_seconds()/60:.0f}min — marking failed")
-                                        update_task_status(tid, "background_failed",
-                                            "后台进程信息丢失（可能因服务重启），无法恢复",
-                                            interruption_reason="process_lost")
-                                        ctx = get_task_context(tid)
-                                        if ctx:
-                                            ctx.append({"role": "user", "content": (
-                                                "【系统通知】后台命令的进程信息已丢失（可能因服务重启）。"
-                                                "请重新开始任务，或检查是否有残留进程需要手动处理。"
-                                            )})
-                                            save_task_context(tid, ctx)
-                                        continue
+                                    age = now - updated_dt
+
+                                    # Only fail if task was backgrounded BEFORE this server started
+                                    # (process info was lost during restart)
+                                    if updated_dt < _SERVER_START_TIME:
+                                        # Give 2h grace period — the shell process might still be running
+                                        if age > timedelta(hours=2):
+                                            print(f"[BgMonitor] Task {tid}: bg'd before server restart, no process info for {age.total_seconds()/60:.0f}min — marking failed")
+                                            update_task_status(tid, "background_failed",
+                                                "后台进程信息因服务重启丢失，无法恢复",
+                                                interruption_reason="process_lost")
+                                            ctx = get_task_context(tid)
+                                            if ctx:
+                                                ctx.append({"role": "user", "content": (
+                                                    "【系统通知】后台命令的进程信息已丢失（可能因服务重启）。"
+                                                    "请重新开始任务，或检查是否有残留进程需要手动处理。"
+                                                )})
+                                                save_task_context(tid, ctx)
+                                            continue
+                                    else:
+                                        # Task bg'd after startup — process info should exist, don't fail.
+                                        # Log periodically to aid debugging.
+                                        mins = age.total_seconds() / 60
+                                        if mins > 60 and int(mins) % 10 == 0:
+                                            print(f"[BgMonitor] Task {tid}: bg'd post-startup, no process info for {mins:.0f}min (waiting)")
                             except Exception as ts_err:
                                 print(f"[BgMonitor] Task {tid}: time-check error: {ts_err}")
 
@@ -4131,6 +4266,9 @@ def start_background_monitor():
                             pid = pinfo.get("pid")
                             out_file = pinfo.get("output_file", "")
                             command = pinfo.get("command", "")
+                            started_at = pinfo.get("started_at", 0)
+                            uptime = _time.time() - started_at if started_at else 0
+                            is_long_running = uptime > 1800  # 30+ minutes
                             should_resume = False
                             try:
                                 _os.kill(pid, 0)  # No signal, just check existence
@@ -4139,14 +4277,32 @@ def start_background_monitor():
                                     cur_size = _os.path.getsize(out_file)
                                     prev = _output_staleness.get(str(tid), {})
                                     prev_size = prev.get("size", -1)
-                                    prev_count = prev.get("count", 0)
                                     if cur_size == prev_size and cur_size > 0:
                                         # File not growing — increment staleness counter
-                                        new_count = prev_count + 1
+                                        new_count = prev.get("count", 0) + 1
                                         _output_staleness[str(tid)] = {"size": cur_size, "count": new_count}
-                                        if new_count >= 3:  # 30s of no change
-                                            should_resume = True
-                                            print(f"[BgMonitor] Task {tid}: output stale 30s — treating as done")
+                                        if is_long_running:
+                                            # Long-running server: 15-min output freeze → detach
+                                            if new_count >= 90:  # 90 * 10s = 15min
+                                                print(f"[BgMonitor] Task {tid}: long-running ({uptime/60:.0f}min), output frozen 15min — detaching")
+                                                cleanup_background_process(str(tid))
+                                                _output_staleness.pop(str(tid), None)
+                                                update_task_status(tid, "detached",
+                                                    f"后台进程持续运行 {uptime/60:.0f} 分钟，已被识别为常驻服务，系统已解除监控。")
+                                                ctx = get_task_context(tid)
+                                                if ctx:
+                                                    ctx.append({"role": "user", "content": (
+                                                        f"【系统通知】后台进程（PID {pid}）已持续运行 {uptime/60:.0f} 分钟，"
+                                                        f"被识别为常驻服务进程。系统已解除监控，进程仍在后台运行。"
+                                                        f"如需手动停止，请在任务管理中终止该进程。"
+                                                    )})
+                                                    save_task_context(tid, ctx)
+                                                continue
+                                        else:
+                                            # Normal process: 30s output freeze → resume
+                                            if new_count >= 3:
+                                                should_resume = True
+                                                print(f"[BgMonitor] Task {tid}: output stale 30s — treating as done")
                                     else:
                                         # File still growing — reset staleness
                                         _output_staleness[str(tid)] = {"size": cur_size, "count": 0}
