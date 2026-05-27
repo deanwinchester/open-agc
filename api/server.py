@@ -2908,7 +2908,7 @@ async def get_task_logs(task_id: int, lines: int = 50):
 def _kill_process_on_platform(pid: int) -> str:
     """Kill a process cross-platform. Returns status message."""
     try:
-        _os.kill(pid, 0)
+        os.kill(pid, 0)
     except OSError:
         return f"Process {pid} is not running."
     try:
@@ -2918,14 +2918,14 @@ def _kill_process_on_platform(pid: int) -> str:
                 subprocess.run(["taskkill", "/F", "/PID", str(pid)],
                                capture_output=True, timeout=5)
             except Exception:
-                _os.kill(pid, getattr(signal, "CTRL_BREAK_EVENT", 9))
+                os.kill(pid, getattr(signal, "CTRL_BREAK_EVENT", 9))
         else:
-            _os.kill(pid, getattr(signal, "SIGTERM", 15))
+            os.kill(pid, getattr(signal, "SIGTERM", 15))
             import time as _t
             _t.sleep(2)
             try:
-                _os.kill(pid, 0)
-                _os.kill(pid, getattr(signal, "SIGKILL", 9))
+                os.kill(pid, 0)
+                os.kill(pid, getattr(signal, "SIGKILL", 9))
             except OSError:
                 pass
         return f"Process {pid} terminated."
@@ -2936,7 +2936,7 @@ def _kill_process_on_platform(pid: int) -> str:
 def _is_pid_alive(pid: int) -> bool:
     """Check if a PID is alive."""
     try:
-        _os.kill(pid, 0)
+        os.kill(pid, 0)
         return True
     except (OSError, ProcessLookupError):
         return False
@@ -4271,7 +4271,7 @@ def start_background_monitor():
                             is_long_running = uptime > 1800  # 30+ minutes
                             should_resume = False
                             try:
-                                _os.kill(pid, 0)  # No signal, just check existence
+                                os.kill(pid, 0)  # No signal, just check existence
                                 # Process still running — check if output file stopped growing
                                 if out_file and _os.path.exists(out_file):
                                     cur_size = _os.path.getsize(out_file)
