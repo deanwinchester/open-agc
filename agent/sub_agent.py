@@ -7,33 +7,48 @@ context window exhaustion and enable parallel execution.
 import json
 import time as _time
 import re
+import threading
 from typing import List, Dict, Any, Optional, Callable
 
 
 # Tool sets for common sub-task types
 TOOL_SETS: Dict[str, List[str]] = {
     "filesystem": ["read_file", "write_file", "execute_shell"],
-    "code": ["execute_python", "execute_shell", "read_file"],
-    "web": ["browser_automation", "search_web"],
-    "analysis": ["execute_python", "read_file", "search_web"],
-    "deploy": ["execute_shell", "read_file", "write_file"],
-    "research": ["search_web", "read_file"],
+    "code": ["execute_python", "execute_shell", "read_file", "ask_user_question"],
+    "web": ["browser_automation", "search_web", "ask_user_question"],
+    "analysis": ["execute_python", "read_file", "search_web", "ask_user_question"],
+    "deploy": ["execute_shell", "read_file", "write_file", "ask_user_question"],
+    "research": ["search_web", "read_file", "ask_user_question"],
 }
 
 
 class SubAgent:
     """Lightweight child agent with its own context and tool set."""
 
+    # Tools that maintain global/singleton state — serialize access with locks
+    STATEFUL_TOOLS = {"browser_automation", "computer_control"}
+    _tool_locks: Dict[str, threading.Lock] = {}
+
     def __init__(self, task: str, tools: List[str],
                  parent_tools: Dict,
                  max_iterations: int = 10,
                  progress_callback: Optional[Callable] = None,
-                 llm_client=None):
+                 llm_client=None,
+                 agent_context=None,
+                 session_whitelist=None,
+                 network_whitelist=None,
+                 permission_whitelist=None,
+                 session_id=None):
         self.task = task
         self.max_iterations = max_iterations
         self.progress_callback = progress_callback
         self.llm = llm_client
         self.is_interrupted = False
+        self._agent_context = agent_context
+        self._session_whitelist = session_whitelist or set()
+        self._network_whitelist = network_whitelist or set()
+        self._permission_whitelist = permission_whitelist or set()
+        self._session_id = session_id
 
         # Build system prompt
         now = _time.strftime("%Y-%m-%d %H:%M:%S")
@@ -75,6 +90,9 @@ class SubAgent:
 
         current_iter = 0
         tool_call_count = 0
+        recent_tool_calls = []
+        steps = []
+        MAX_REPEATED_TOOL_CALLS = 3
 
         while current_iter < self.max_iterations:
             if self.is_interrupted:
@@ -121,14 +139,90 @@ class SubAgent:
                     except Exception:
                         func_args = {}
 
+                    # Tool loop detection
+                    call_hash = f"{func_name}:{json.dumps(func_args, sort_keys=True)}"
+                    recent_tool_calls.append(call_hash)
+                    if len(recent_tool_calls) > 10:
+                        recent_tool_calls.pop(0)
+                    loop_count = recent_tool_calls.count(call_hash)
+
+                    if self.progress_callback:
+                        self.progress_callback({
+                            "event": "tool_start",
+                            "tool": func_name,
+                            "step": tool_call_count,
+                            "args_preview": tc.function.arguments[:200],
+                            "sub_task": self.task[:50]
+                        })
+
+                    # Block if stuck in a loop
+                    if loop_count >= MAX_REPEATED_TOOL_CALLS:
+                        result = (f"System Guard: Blocked due to critical loop. "
+                                  f"You have called `{func_name}` with these exact arguments "
+                                  f"{loop_count} times recently. "
+                                  f"You are likely stuck in a loop. "
+                                  f"YOU MUST change your approach or use different parameters.")
+                        success = False
+                        self.messages.append({
+                            "role": "tool",
+                            "content": str(result),
+                            "tool_call_id": tc.id,
+                            "name": func_name,
+                        })
+                        if self.progress_callback:
+                            self.progress_callback({
+                                "event": "tool_done",
+                                "tool": func_name,
+                                "step": tool_call_count,
+                                "success": False,
+                                "result_preview": str(result)[:200],
+                                "sub_task": self.task[:50],
+                            })
+                        steps.append({
+                            "tool": func_name,
+                            "args": tc.function.arguments[:200],
+                            "result_preview": str(result)[:300],
+                            "success": False,
+                        })
+                        continue
+
                     tool = self.available_tools.get(func_name)
+                    success = False
                     if not tool:
                         result = f"Error: Tool '{func_name}' not available in this sub-agent"
                     else:
                         try:
-                            result = tool.execute(**func_args)
+                            extra_kwargs = {
+                                "_session_whitelist": self._session_whitelist,
+                                "_progress_cb": self.progress_callback,
+                                "_network_whitelist": self._network_whitelist,
+                                "_permission_whitelist": self._permission_whitelist,
+                                "_session_id": self._session_id,
+                            }
+                            # Serialize access for stateful tools shared across threads
+                            if func_name in self.STATEFUL_TOOLS:
+                                if func_name not in self._tool_locks:
+                                    self._tool_locks[func_name] = threading.Lock()
+                                self._tool_locks[func_name].acquire()
+                                try:
+                                    result = tool.execute(
+                                        interrupt_check=lambda: self.is_interrupted,
+                                        _agent_context=self._agent_context,
+                                        **extra_kwargs,
+                                        **func_args,
+                                    )
+                                finally:
+                                    self._tool_locks[func_name].release()
+                            else:
+                                result = tool.execute(
+                                    interrupt_check=lambda: self.is_interrupted,
+                                    _agent_context=self._agent_context,
+                                    **extra_kwargs,
+                                    **func_args,
+                                )
                             if len(result) > 15000:
                                 result = result[:15000] + "\n...[truncated]"
+                            success = True
                         except Exception as e:
                             result = f"Error executing {func_name}: {e}"
 
@@ -141,10 +235,19 @@ class SubAgent:
 
                     if self.progress_callback:
                         self.progress_callback({
-                            "type": "tool_done",
+                            "event": "tool_done",
                             "tool": func_name,
+                            "step": tool_call_count,
+                            "success": success,
+                            "result_preview": str(result)[:200],
                             "sub_task": self.task[:50],
                         })
+                    steps.append({
+                        "tool": func_name,
+                        "args": tc.function.arguments[:200],
+                        "result_preview": str(result)[:300],
+                        "success": success,
+                    })
 
                 continue
 
@@ -163,7 +266,8 @@ class SubAgent:
                 "iterations_used": current_iter,
                 "tool_calls": tool_call_count,
                 "duration": _time.time() - start_time,
+                "steps": steps,
             }
 
         return {"success": False, "summary": f"Max iterations ({self.max_iterations}) reached",
-                "duration": _time.time() - start_time, "output_files": []}
+                "duration": _time.time() - start_time, "output_files": [], "steps": steps}

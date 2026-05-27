@@ -1688,6 +1688,59 @@ textarea {
     overflow-y: auto;
 }
 
+/* Task Step Detail Modal */
+.task-step-detail-modal {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 10000;
+    align-items: center;
+    justify-content: center;
+}
+.task-step-detail-modal.active { display: flex; }
+.task-step-detail-backdrop {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.4);
+}
+.task-step-detail-panel {
+    position: relative;
+    background: var(--bg-inner);
+    backdrop-filter: none;
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: var(--radius-md);
+    width: min(90vw, 700px);
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+}
+.task-step-detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.5rem;
+    border-bottom: var(--border-glass);
+}
+.task-step-detail-title {
+    font-weight: 700;
+    font-size: 1rem;
+}
+.task-step-detail-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: var(--text-secondary);
+    line-height: 1;
+}
+.task-step-detail-close:hover { color: var(--text-primary); }
+.task-step-detail-body {
+    padding: 1.5rem;
+    overflow-y: auto;
+    flex: 1;
+}
+
 /* ==========================================================================
    Settings Views
    ========================================================================== */

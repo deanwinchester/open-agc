@@ -37,6 +37,8 @@ export async function loadSettingsConfig() {
     document.getElementById('sandbox-mode-toggle').checked = data.sandbox_mode ?? true;
     document.getElementById('sandbox-dir-input').value = data.sandbox_dir || '';
     document.getElementById('llamacpp-ctx-size').value = data.llamacpp_ctx_size || 32768;
+    const maxCorrectionEl = document.getElementById('max-correction-attempts');
+    if (maxCorrectionEl) maxCorrectionEl.value = data.max_correction_attempts ?? 5;
     document.getElementById('http-proxy-input').value = data.http_proxy || '';
     document.getElementById('heartbeat-toggle').checked = data.heartbeat_enabled ?? false;
 
@@ -307,7 +309,8 @@ async function saveSettings() {
     session_id: state.currentSessionId || 1,
     tool_permissions: null,
     searxng_url: document.getElementById('searxng-url-input')?.value?.trim() || '',
-    searxng_port: 8888
+    searxng_port: 8888,
+    max_correction_attempts: parseInt(document.getElementById('max-correction-attempts')?.value) || 5
   };
 
   // Include current tool_permissions in save

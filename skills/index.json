@@ -96,9 +96,9 @@
         "能当",
         "需要"
       ],
-      "usage_count": 13,
-      "success_rate": 0.821557996381,
-      "last_used": "2026-05-21T14:07:29.756888"
+      "usage_count": 16,
+      "success_rate": 0.7889157793617491,
+      "last_used": "2026-05-27T09:04:12.821491"
     },
     {
       "filename": "doc_writer.md",
@@ -129,9 +129,9 @@
         "能当",
         "需要"
       ],
-      "usage_count": 7,
-      "success_rate": 0.8083459000000001,
-      "last_used": "2026-05-21T13:56:42.864118"
+      "usage_count": 11,
+      "success_rate": 0.80135574499,
+      "last_used": "2026-05-27T09:04:12.816491"
     },
     {
       "filename": "example_skill.md",
@@ -177,9 +177,9 @@
         "需要",
         "搜索"
       ],
-      "usage_count": 65,
-      "success_rate": 0.5892169953289017,
-      "last_used": "2026-05-21T16:14:52.870210"
+      "usage_count": 75,
+      "success_rate": 0.5650391327116905,
+      "last_used": "2026-05-27T09:04:12.819490"
     },
     {
       "filename": "file_organizer.md",
@@ -211,9 +211,9 @@
         "或按",
         "归类"
       ],
-      "usage_count": 22,
-      "success_rate": 0.6957858088851842,
-      "last_used": "2026-05-21T14:07:29.757891"
+      "usage_count": 25,
+      "success_rate": 0.6782278546772992,
+      "last_used": "2026-05-25T14:37:49.036231"
     },
     {
       "filename": "git_workflow.md",
@@ -251,9 +251,9 @@
         "需要",
         "作流"
       ],
-      "usage_count": 12,
-      "success_rate": 0.6822792503910001,
-      "last_used": "2026-05-20T16:00:27.428264"
+      "usage_count": 15,
+      "success_rate": 0.578381573535039,
+      "last_used": "2026-05-26T16:03:53.876763"
     },
     {
       "filename": "system_monitor.md",
@@ -286,9 +286,9 @@
         "能当",
         "能指"
       ],
-      "usage_count": 16,
-      "success_rate": 0.33196353178053517,
-      "last_used": "2026-05-19T21:05:18.717783"
+      "usage_count": 18,
+      "success_rate": 0.2688904607422335,
+      "last_used": "2026-05-26T16:24:59.987646"
     },
     {
       "filename": "web_scraper.md",
@@ -385,9 +385,9 @@
         "自动",
         "布技"
       ],
-      "usage_count": 23,
-      "success_rate": 0.2582388841734333,
-      "last_used": "2026-05-19T21:05:18.718125"
+      "usage_count": 25,
+      "success_rate": 0.39917349618048104,
+      "last_used": "2026-05-25T13:18:46.104654"
     },
     {
       "filename": "xiaohongshu_publish.md",

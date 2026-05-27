@@ -307,14 +307,14 @@ function initApp() {
     if (data.type === 'status') {
       if (!isBackground && isForCurrentSession) showThinkingStatus(t('agent_thinking'));
     } else if (data.type === 'progress') {
-      if (data.task_id && !isBackground && isForCurrentSession) state.currentTaskId = data.task_id;
+      if (data.task_id && isForCurrentSession) state.currentTaskId = data.task_id;
       if (isForCurrentSession) handleProgressEvent(data);
       if (isBackground) updateTaskBadge();
     } else if (data.type === 'message') {
-      if (!isBackground && isForCurrentSession) { hideThinkingStatus(); hideProgressContainer(); }
+      if (isForCurrentSession) { hideThinkingStatus(); hideProgressContainer(); }
       appendMessage(data.content, data.role || 'agent');
       if (!isBackground && isForCurrentSession && state.wasVoiceQuery) { speakText(data.content); state.wasVoiceQuery = false; }
-      if (!isBackground && isForCurrentSession) { state.isAgentThinking = false; state.currentTaskId = null; updateInputState(); }
+      if (isForCurrentSession) { state.isAgentThinking = false; state.currentTaskId = null; updateInputState(); }
       updateTaskBadge();
     } else if (data.type === 'error') {
       if (!isBackground) {
@@ -707,14 +707,22 @@ function initApp() {
       stepsEl.appendChild(stepEl);
       progressSteps[data.step] = stepEl;
 
+      // Auto-expand container if it was collapsed (e.g. reused history card)
+      if (stepsEl.style.maxHeight === '0px') {
+        stepsEl.style.maxHeight = stepsEl.scrollHeight + 'px';
+        setTimeout(function() {
+          if (stepsEl.style.maxHeight !== '0px' && stepsEl.style.maxHeight !== 'none') {
+            stepsEl.style.maxHeight = 'none';
+          }
+        }, 350);
+      }
+
       // Update current step in header
       const headerTitle = progressInline.querySelector('.progress-title');
       const currentStepEl = progressInline.querySelector('.progress-current-step');
       if (headerTitle) headerTitle.textContent = `⚡ 执行中 · ${progressStepCount} 步`;
       if (currentStepEl) currentStepEl.textContent = ` : ${data.tool_label || data.tool}`;
-      
-      // Auto-expand removed to keep progress collapsed by default
-      
+
       scrollToBottom();
       progressStepData[data.step] = {
         type: 'tool', step: data.step, tool: data.tool,
@@ -843,7 +851,7 @@ function initApp() {
           <span class="progress-current-step" style="margin-left: 8px; color: var(--text-secondary); opacity: 0.8; font-size: 0.8rem;"></span>
         </div>
         <div class="progress-inline-right">
-          ${data.task_status === 'interrupted'
+          ${['interrupted', 'backgrounded', 'background_failed'].includes(data.task_status)
             ? `<button class="btn-resume-task" data-task-id="${data.task_id}" title="继续执行">▶ 继续</button>`
             : ''}
           <span class="progress-toggle-icon collapsed">▸</span>
@@ -915,13 +923,27 @@ function initApp() {
       stepsEl.appendChild(stepEl);
     });
 
-    // Insert after last user message
+    // Insert after last user message, but if this is a running task, we might just append it
     const userMsgs = chatContainer.querySelectorAll('.message.user');
     const lastUser = userMsgs[userMsgs.length - 1];
     if (lastUser) {
       lastUser.insertAdjacentElement('afterend', historyCard);
     } else {
       chatContainer.appendChild(historyCard);
+    }
+
+    if (data.task_status === 'running') {
+      state.isAgentThinking = true;
+      state.currentTaskId = data.task_id;
+      // Reuse history card as live progress card so tool_start events append to it
+      historyCard.classList.remove('completed');
+      const titleEl = historyCard.querySelector('.progress-title');
+      if (titleEl) titleEl.textContent = `🐼 执行中 · ${stepCount} 步`;
+      progressInline = historyCard;
+      progressStepsEl = stepsEl;
+      progressStepCount = stepCount;
+      showThinkingStatus('恢复执行中...');
+      updateInputState();
     }
 
     // Toggle collapse/expand
@@ -1093,7 +1115,11 @@ function initApp() {
     }
 
     messageDiv.innerHTML = `<div class="avatar">${avatarSvg}</div><div class="content">${imagesHtml}${filesHtml}${formattedContent}</div>`;
-    chatContainer.appendChild(messageDiv);
+    if (progressInline && role === 'user') {
+      chatContainer.insertBefore(messageDiv, progressInline);
+    } else {
+      chatContainer.appendChild(messageDiv);
+    }
     // Cap chat messages at 100, remove oldest 50 beyond limit
     const msgs = chatContainer.querySelectorAll('.message');
     if (msgs.length > 100) {

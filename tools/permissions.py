@@ -97,52 +97,8 @@ def _is_authorized(category: str, config: dict = None,
 
 
 def _check_domain_allowed(url: str, config: dict = None) -> Tuple[bool, str]:
-    """Check if a URL's domain is in the allowed list."""
-    from urllib.parse import urlparse
-    try:
-        parsed = urlparse(url)
-        domain = parsed.hostname or ""
-    except Exception:
-        return (True, "")  # Can't parse — allow
-
-    if not domain:
-        return (True, "")
-
-    # Always allow localhost and common dev domains
-    if domain in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
-        return (True, "")
-
-    if not config:
-        return (True, "")
-
-    perms = config.get("tool_permissions", {})
-    if isinstance(perms, str):
-        try:
-            perms = json.loads(perms)
-        except Exception:
-            perms = {}
-
-    network = perms.get("network", {})
-    # Check exact match and wildcard (e.g., *.huggingface.co)
-    for pattern, status in network.items():
-        if status in ("allow", "session_allow"):
-            if pattern.startswith("*."):
-                if domain.endswith(pattern[1:]) or domain == pattern[2:]:
-                    return (True, "")
-            elif domain == pattern:
-                return (True, "")
-
-    # Check if previously denied
-    for pattern, status in network.items():
-        if status in ("deny", "permanent_deny"):
-            if pattern.startswith("*."):
-                if domain.endswith(pattern[1:]) or domain == pattern[2:]:
-                    return (False, f"域名 {domain} 已被永久拒绝访问")
-            elif domain == pattern:
-                return (False, f"域名 {domain} 已被拒绝访问")
-
-    # Unknown domain — return False but not a hard block
-    return (False, f"域名 {domain} 未在白名单中。请在 tool_permissions.network 中添加。")
+    """All URLs are allowed. Network access restriction has been removed."""
+    return (True, "")
 
 def extract_urls_from_command(command: str) -> list:
     """Extract URLs from a shell command."""

@@ -14,6 +14,8 @@ class BrowserAutomationTool:
     使用独立后台线程运行 Playwright 以避免与 FastAPI/Asyncio 发生冲突。
     """
     _instance = None
+    _execute_lock = threading.Lock()  # Serialize concurrent execute() calls across threads
+    _lock = threading.Lock()          # Protect thread startup from races
     name: str = "browser_automation"
     description: str = (
         "虚拟沙盒浏览器工具。使用 playwright 进行隔离环境下的网页控制与数据抓取。"
@@ -38,7 +40,6 @@ class BrowserAutomationTool:
         self.res_queue = queue.Queue()
         self._init_queue = queue.Queue()  # Separate queue for init signals only
         self.thread = None
-        self._lock = threading.Lock()  # Protect thread startup from races
         self._initialized = True
 
     @staticmethod
@@ -337,57 +338,50 @@ class BrowserAutomationTool:
     def execute(self, action: str, url: str = "", selector: str = "", text: str = "",
                 key: str = "", path: str = "", wait_time: int = 1, **kwargs) -> str:
         """执行浏览器自动化相关操作，代理到后台线程"""
-        if action == "close":
-            if self.thread and self.thread.is_alive():
-                self.cmd_queue.put({"action": "QUIT"})
-                self.thread.join(timeout=3)
-                self.thread = None
-            return "浏览器已关闭"
+        with self._execute_lock:
+            if action == "close":
+                if self.thread and self.thread.is_alive():
+                    self.cmd_queue.put({"action": "QUIT"})
+                    self.thread.join(timeout=3)
+                    self.thread = None
+                return "浏览器已关闭"
 
-        # Phase 1: Ensure browser thread is running
-        self._start_browser_thread()
-        
-        # Phase 2: Wait for initialization result (only if we are not already initialized)
-        # In a singleton, the thread might be starting. We check _init_queue for status.
-        # But wait, _start_browser_thread is safe to call. 
-        # We need a way to know if we need to wait for a FRESH init.
-        # Let's use a timeout on the first command if the thread was just started.
-        try:
-            # Check the init queue for success/error
-            # If the thread was already running, this queue might be empty, which is fine.
-            init_res = self._init_queue.get(timeout=0.1)
-            if init_res.get("status") == "error":
-                return f"Error: {init_res.get('message')}"
-        except queue.Empty:
-            pass
+            # Phase 1: Ensure browser thread is running
+            self._start_browser_thread()
 
-        # Phase 3: Send command and wait for response
-        try:
-            self.cmd_queue.put({
-                "action": action, 
-                "url": url, 
-                "selector": selector, 
-                "text": text,
-                "key": key,
-                "path": path,
-                "wait_time": wait_time
-            })
-            
-            # Use a longer timeout (60s) in case the browser is still initializing/installing
-            res = self.res_queue.get(timeout=60)
-            if res.get("status") == "error":
-                return f"Error: {res.get('message')}"
-            return res.get("message", "")
+            # Phase 2: Wait for initialization result
+            try:
+                init_res = self._init_queue.get(timeout=0.1)
+                if init_res.get("status") == "error":
+                    return f"Error: {init_res.get('message')}"
+            except queue.Empty:
+                pass
 
-        except queue.Empty:
-            # Check if the thread died while we were waiting
-            if self.thread is None or not self.thread.is_alive():
-                self.thread = None
-                return "Error: 浏览器线程已崩溃，下次调用将自动重启。请重试此操作。"
-            return "Error: 浏览器操作超时 (30秒)，页面可能加载缓慢，请增大 wait_time 参数后重试"
-        except Exception as e:
-            print(f"[Browser] 执行异常: {str(e)}\n{traceback.format_exc()}")
-            return f"Error: 浏览器通讯异常 - {str(e)}"
+            # Phase 3: Send command and wait for response
+            try:
+                self.cmd_queue.put({
+                    "action": action,
+                    "url": url,
+                    "selector": selector,
+                    "text": text,
+                    "key": key,
+                    "path": path,
+                    "wait_time": wait_time
+                })
+
+                res = self.res_queue.get(timeout=60)
+                if res.get("status") == "error":
+                    return f"Error: {res.get('message')}"
+                return res.get("message", "")
+
+            except queue.Empty:
+                if self.thread is None or not self.thread.is_alive():
+                    self.thread = None
+                    return "Error: 浏览器线程已崩溃，下次调用将自动重启。请重试此操作。"
+                return "Error: 浏览器操作超时 (30秒)，页面可能加载缓慢，请增大 wait_time 参数后重试"
+            except Exception as e:
+                print(f"[Browser] 执行异常: {str(e)}\n{traceback.format_exc()}")
+                return f"Error: 浏览器通讯异常 - {str(e)}"
 
     def get_openai_schema(self) -> dict:
         return {
