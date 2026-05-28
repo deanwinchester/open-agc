@@ -1554,7 +1554,6 @@ class OpenAGCAgent:
             if current_iter > max_iterations and self._max_correction_attempts > 0 and not self._in_self_review:
                 remaining = self._max_correction_attempts - self._correction_attempts
                 if remaining > 0:
-                    self._correction_attempts += 1
                     self._in_self_review = True
                     review_msg = (
                         f"[系统提示] 你已经达到了最大迭代次数（{max_iterations}），但你还有 {remaining} 次自我审查纠偏机会。"
@@ -1564,7 +1563,7 @@ class OpenAGCAgent:
                     )
                     self.messages.append({"role": "user", "content": review_msg})
                     if verbose:
-                        print(f"[Agent] ⚠️ Max iterations reached, injected self-review prompt ({self._correction_attempts}/{self._max_correction_attempts})")
+                        print(f"[Agent] ⚠️ Max iterations reached, injected self-review prompt (attempt {self._correction_attempts + 1}/{self._max_correction_attempts})")
 
             # Notify: thinking
             if progress_callback:
@@ -1897,6 +1896,7 @@ class OpenAGCAgent:
                     # Handle self_review results
                     if function_name == "self_review":
                         self._in_self_review = False
+                        self._correction_attempts += 1  # Count only actual self-review calls
                         self._self_review_history.append(result_str)
                         # Parse JSON from result to extract continue_processing
                         try:
@@ -1975,6 +1975,14 @@ class OpenAGCAgent:
                 
             # 2. Check if model provided a text response (final answer)
             if message.content:
+                # If self-review prompt was injected but LLM skipped the tool call,
+                # reset and retry — don't exit the loop prematurely
+                if self._in_self_review:
+                    self._in_self_review = False
+                    if verbose:
+                        print("[Agent] LLM skipped self_review tool call, retrying review cycle")
+                    continue
+
                 final_answer = message.content
                 if self.logger:
                     self.logger.log_agent_response(final_answer)
