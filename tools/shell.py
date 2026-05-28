@@ -275,6 +275,24 @@ class ShellTool(BaseTool):
                         poll_stop.set()
                         poll_thread.join(timeout=2)
                         out_file.close()
+                        output_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+
+                        # If ZERO output after full timeout: process is hung (e.g. sudo waiting
+                        # for password with no TTY, deadlocked pipe). Kill it instead of lying.
+                        if output_size == 0:
+                            try:
+                                os.kill(proc.pid, getattr(signal, "SIGKILL", 9))
+                            except OSError:
+                                pass
+                            elapsed = round(time.time() - _t0, 1)
+                            return (
+                                f"[HUNG] 进程在 {elapsed}s 内无任何输出，已终止。\n"
+                                f"可能原因：sudo 需要密码但无终端输入、命令卡在交互式提示、或进程死锁。\n"
+                                f"建议：sudo 命令请添加 -S 从 stdin 读密码，或 -n 跳过密码，"
+                                f"或使用 `echo password | sudo -S command`。\n"
+                                f"命令: {command[:200]}"
+                            )
+
                         # Register as background process for system monitoring
                         task_id = kwargs.get("_task_id") or kwargs.get("task_id", 0)
                         if not task_id or task_id == 0:

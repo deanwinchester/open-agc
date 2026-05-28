@@ -2953,10 +2953,40 @@ async def kill_task_process(task_id: int):
     if not pid:
         raise HTTPException(status_code=404, detail="No PID found")
     result = _kill_process_on_platform(pid)
+    command = pinfo.get("command", "")[:200]
     cleanup_background_process(str(task_id))
     update_task_status(task_id, "interrupted",
                        f"进程 (PID {pid}) 已被用户手动终止。",
                        interruption_reason="user")
+
+    # Notify the agent to resume if the task was backgrounded (waiting on this process)
+    try:
+        bg_conn = sqlite3.connect(DB_PATH)
+        bg_conn.row_factory = sqlite3.Row
+        task_row = bg_conn.execute(
+            "SELECT status, task_type FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        bg_conn.close()
+        if task_row and task_row["status"] in ("backgrounded", "running"):
+            ctx = get_task_context(task_id)
+            if ctx:
+                ctx.append({"role": "user", "content": (
+                    f"【系统通知】你手动终止了后台进程 (PID {pid})。\n"
+                    f"命令: {command}\n"
+                    f"该进程已被终止，请根据当前情况继续任务。"
+                )})
+                save_task_context(task_id, ctx)
+                print(f"[Process] Task {task_id} process (PID {pid}) killed by user — resuming agent")
+                # Resume via background task directly (not _direct_resume_background_task
+                # which overwrites the status message for download-specific flow)
+                threading.Thread(
+                    target=_run_background_task,
+                    args=(task_id, "", ctx, True),
+                    daemon=True
+                ).start()
+    except Exception as resume_err:
+        print(f"[Process] Failed to resume task {task_id} after kill: {resume_err}")
+
     return {"status": "success", "message": result}
 
 
