@@ -5,6 +5,9 @@ import threading
 import hashlib
 from typing import List, Dict, Any, Optional, Callable
 import os
+import sys
+import platform
+import shutil
 import queue
 
 from core.paths import get_data_path, get_skills_dir
@@ -38,6 +41,92 @@ from tools.mcp_tool import get_mcp_manager
 from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused, SearchHistoryTool, PauseAndWaitTool, TaskPaused
 from tools.sandbox import EnterWorktreeTool, ExitWorktreeTool
 from tools.self_review import SelfReviewTool
+
+
+def _detect_system_env() -> str:
+    """Detect the current system environment and return a description string for the system prompt."""
+
+    # OS detection
+    system = platform.system()  # "Darwin", "Windows", "Linux"
+    os_name = system
+    if system == "Darwin":
+        mac_ver = platform.mac_ver()[0]
+        os_name = f"macOS {mac_ver}" if mac_ver else "macOS"
+    elif system == "Windows":
+        win_ver = platform.version()
+        os_name = f"Windows {win_ver}" if win_ver else "Windows"
+    elif system == "Linux":
+        try:
+            import subprocess
+            distro = subprocess.run(["lsb_release", "-ds"], capture_output=True, text=True, timeout=3).stdout.strip()
+            os_name = distro or "Linux"
+        except Exception:
+            os_name = "Linux"
+
+    # Architecture
+    arch = platform.machine()  # "arm64", "x86_64", etc.
+
+    # Shell
+    default_shell = os.environ.get("SHELL", "unknown").split("/")[-1]  # "zsh", "bash", etc.
+
+    # Python
+    py_ver = platform.python_version()
+
+    # Package managers
+    pkg_managers = []
+    if shutil.which("brew"):
+        pkg_managers.append("brew")
+    if shutil.which("apt"):
+        pkg_managers.append("apt")
+    if shutil.which("pip3"):
+        pkg_managers.append("pip3")
+    elif shutil.which("pip"):
+        pkg_managers.append("pip")
+
+    pkg_hint = ", ".join(pkg_managers) if pkg_managers else "未检测到常见包管理器"
+
+    # Home directory
+    home = os.path.expanduser("~")
+
+    # Sudo check (non-invasive: check if sudo binary exists and user has recent sudo timestamp)
+    sudo_available = "sudo" if shutil.which("sudo") else ""
+    sudo_hint = ""
+    if sudo_available and system != "Windows":
+        sudo_hint = (
+            "sudo 可用。注意：在子进程中运行时，sudo 没有 TTY 无法交互式输入密码。"
+            "需要使用 -S 从 stdin 读密码，或用 -n 跳过密码（需 NOPASSWD 配置），"
+            "或使用 `echo password | sudo -S command`"
+        )
+
+    parts = [
+        f"# 系统环境",
+        f"- 操作系统：{os_name}",
+        f"- 架构：{arch}",
+        f"- 默认 Shell：{default_shell}",
+        f"- Python 版本：{py_ver}",
+        f"- 包管理器：{pkg_hint}",
+        f"- 用户主目录：{home}",
+    ]
+
+    if system == "Windows":
+        parts.append(
+            f"- **Windows 注意事项**：PowerShell 中的 curl 命令是 Invoke-WebRequest 别名，"
+            f"需使用 curl.exe。中文乱码可在命令前添加 "
+            f"`$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()`。"
+        )
+    elif system == "Darwin":
+        parts.append(
+            f"- **macOS 注意事项**：使用 brew 安装软件。Shell 工具使用 zsh/bash，"
+            f"不支持 PowerShell 语法。系统偏好中文界面。"
+        )
+    elif system == "Linux":
+        parts.append(f"- **Linux 注意事项**：使用 apt/yum 安装软件，标准 POSIX shell 环境。")
+
+    if sudo_hint:
+        parts.append(f"- **sudo 注意事项**：{sudo_hint}")
+
+    return "\n".join(parts)
+
 
 class OpenAGCAgent:
     """
@@ -160,11 +249,7 @@ class OpenAGCAgent:
             f"当执行耗时操作（下载模型/安装依赖/训练等），shell 返回 [Still Running] 时，"
             f"应立即调用 pause_and_wait 工具暂停自己。系统会保存上下文，后台任务完成后自动恢复执行。"
             f"不要让用户干等着，也不要反复重试。\n"
-            f"\n## Windows 系统说明\n"
-            f"当前运行在 Windows 系统上。PowerShell 中的 curl 命令实际上是 Invoke-WebRequest 别名，"
-            f"与标准 curl 参数不兼容。需要使用 curl 时，请使用 curl.exe 而非 curl。"
-            f"另外，如果 shell 命令输出出现编码问题（如中文乱码），"
-            f"可以在命令前添加 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new() 来修正。\n"
+            f"\n{{system_env}}\n"
             f"\n# 项目创建规范\n"
             f"当需要创建新项目或实现多文件功能时，请遵循以下流程：\n"
             f"\n## 第一步：理解需求\n"
@@ -368,6 +453,7 @@ class OpenAGCAgent:
         
         prompt = self.system_prompt_base.replace("{current_time}", current_time).replace("{current_date}", current_date)
         prompt = prompt.replace("{cwd_dir}", self.sandbox_dir or os.getcwd())
+        prompt = prompt.replace("{system_env}", _detect_system_env())
         
         # Inject Episodic Memory Context
         if memory_context:
