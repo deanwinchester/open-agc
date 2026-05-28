@@ -62,6 +62,6 @@ def get_bin_dir() -> str:
 
 def get_models_dir() -> str:
     """Get the directory for storing LLM models."""
-    dir_path = os.path.join(get_base_dir(), "models")
+    dir_path = os.path.join(get_data_dir(), "models")
     os.makedirs(dir_path, exist_ok=True)
     return dir_path

@@ -1,48 +1,84 @@
-# 使用官方 Python 基础镜像
-FROM python:3.10-slim
+# ============================================================
+# Build args
+# ============================================================
+ARG BUILD_REGISTRY=
+ARG PIP_INDEX_URL=
+ARG APP_VERSION=0.0.0
 
-# 设置环境变量
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PORT=8000
+# ============================================================
+# Single-stage runtime image
+# ============================================================
+FROM ${BUILD_REGISTRY}python:3.10-slim
 
-# 安装系统依赖 (包括 xvfb 用于支持 PyAutoGUI 的无头模式，以及相关图形库)
-RUN apt-get update && apt-get install -y \
+# ── Environment ──
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    PORT=8000 \
+    APP_VERSION=${APP_VERSION}
+
+# ── OCI labels ──
+LABEL org.opencontainers.image.title="Open-AGC" \
+      org.opencontainers.image.description="AI Agent Framework" \
+      org.opencontainers.image.source="https://github.com/deanwinchester/open-agc" \
+      org.opencontainers.image.version="${APP_VERSION}"
+
+# ── System deps (xvfb for headless PyAutoGUI, browser deps, Docker CLI) ──
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
+    ca-certificates \
     xvfb \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
+    libgl1 \
+    libglib2.0-0t64 \
     libnss3 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
+    libatk1.0-0t64 \
+    libatk-bridge2.0-0t64 \
+    libcups2t64 \
     libdbus-1-3 \
     libxcomposite1 \
     libxrandr2 \
     libgbm1 \
-    libasound2 \
+    libasound2t64 \
     x11-utils \
+    docker.io \
     && rm -rf /var/lib/apt/lists/*
 
-# 设置工作目录
 WORKDIR /app
 
-# 复制依赖文件
+# ── VERSION file (baked into image) ──
+COPY VERSION .
+
+# ── Python dependencies (layer cache friendly) ──
 COPY requirements.txt .
+RUN pip install --no-cache-dir ${PIP_INDEX_URL:+--index-url $PIP_INDEX_URL} -r requirements.txt
 
-# 安装 Python 依赖
-RUN pip install --no-cache-dir -r requirements.txt
-
-# 安装 Playwright 的浏览器二进制文件及系统依赖
+# ── Playwright browser binary ──
 RUN playwright install --with-deps chromium
 
-# 复制应用程序代码
-COPY . .
+# ── Application source code only (no config, no secrets) ──
+COPY core ./core
+COPY tools ./tools
+COPY agent ./agent
+COPY api ./api
+COPY skills ./skills
+COPY plugins ./plugins
+COPY static ./static
+COPY main.py launcher.py gui_app.py ./
 
-# 暴露端口
+# ── docker-compose.yml for self-upgrade ──
+COPY docker-compose.yml ./
+
+# ── Entrypoint ──
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# ── Runtime config/workspace paths (must be volume-mounted) ──
+VOLUME ["/app/data", "/app/workspace"]
+
 EXPOSE 8000
 
-# 启动命令：使用 xvfb 运行 uvicorn 服务器，以支持那些需要显示器的依赖操作（如 pyautogui）
-CMD ["sh", "-c", "xvfb-run -a -s \"-screen 0 1280x800x24\" uvicorn api.server:app --host 0.0.0.0 --port $PORT"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -f http://localhost:8000/api/plugins || exit 1
+
+ENTRYPOINT ["docker-entrypoint.sh"]
