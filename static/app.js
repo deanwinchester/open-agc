@@ -75,11 +75,6 @@ function initApp() {
   loadVendorScripts();
   initI18n();
   initNavigation();
-  // Restore last active page on refresh (skip chat — it's the default)
-  try {
-    const lastView = localStorage.getItem('lastViewId');
-    if (lastView && lastView !== 'chat') switchView(lastView);
-  } catch (e) {}
   loadPlugins();
   initSettingsListeners();
   initAIDesignListeners();
