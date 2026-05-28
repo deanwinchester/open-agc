@@ -34,7 +34,6 @@ MANIFEST
 # Data
 /data/
 bin/
-models/
 
 # macOS
 .DS_Store

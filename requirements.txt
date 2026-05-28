@@ -11,6 +11,7 @@ websockets>=11.0
 pywebview>=5.0
 playwright
 pyautogui
+packaging>=21.0
 Pillow
 opencv-python
 httptools

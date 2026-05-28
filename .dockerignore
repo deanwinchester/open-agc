@@ -1,0 +1,49 @@
+# ── Sensitive: API keys, credentials, config ──
+.env
+.env.*
+data/config.json
+data/.env
+
+# ── Python virtual environments ──
+venv/
+build_venv/
+.venv/
+ENV/
+
+# ── Node / JS build artifacts ──
+node_modules/
+package-lock.json
+
+# ── Runtime user data (volume-mount at runtime) ──
+data/
+workspace/
+
+# ── Build artifacts ──
+build/
+build_data/
+dist/
+*.egg-info/
+*.egg
+
+# ── Git / IDE / Claude ──
+.git/
+.gitignore
+.gitmodules
+.claude/
+.vscode/
+.idea/
+
+# ── Python cache ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ── OS metadata ──
+.DS_Store
+Thumbs.db
+
+# ── Logs / test files ──
+*.log
+test_*.py
+verify_*.py
