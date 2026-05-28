@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Build and Release
 
 on:
   release:
@@ -9,12 +9,11 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push:
+  docker:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
     steps:
       - uses: actions/checkout@v4
 
@@ -46,3 +45,87 @@ jobs:
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read VERSION
+        id: version
+        shell: bash
+        run: echo "version=$(cat VERSION)" >> $GITHUB_OUTPUT
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install build tools
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+          pip install pywebview pywin32
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller open_agc.spec --clean --noconfirm --distpath dist --workpath build\work
+
+      - name: Create ZIP package
+        shell: powershell
+        run: |
+          $ver = "${{ steps.version.outputs.version }}"
+          Compress-Archive -Path "dist\Open-AGC\*" -DestinationPath "dist\Open-AGC-$ver-Windows-x64.zip" -Force
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Open-AGC-*.zip
+
+  macos:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read VERSION
+        id: version
+        run: echo "version=$(cat VERSION)" >> $GITHUB_OUTPUT
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install build tools
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+          pip install pywebview
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller open_agc.spec --clean --noconfirm --distpath dist --workpath build/work
+
+      - name: Create DMG
+        run: |
+          APP_NAME="Open-AGC"
+          VERSION="${{ steps.version.outputs.version }}"
+          DMG_NAME="${APP_NAME}-${VERSION}-macOS-$(uname -m).dmg"
+          DMG_DIR="dist/dmg_staging"
+          rm -rf "${DMG_DIR}"
+          mkdir -p "${DMG_DIR}"
+          cp -R "dist/${APP_NAME}.app" "${DMG_DIR}/"
+          ln -s /Applications "${DMG_DIR}/Applications"
+          hdiutil create -volname "${APP_NAME}" -srcfolder "${DMG_DIR}" -ov -format UDZO "dist/${DMG_NAME}"
+          rm -rf "${DMG_DIR}"
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Open-AGC-*.dmg
