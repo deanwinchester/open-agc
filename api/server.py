@@ -1136,14 +1136,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def read_index():
     return FileResponse("static/index.html")
 
-# SPA fallback: all unmatched paths serve index.html (History API routing)
-@app.get("/{full_path:path}")
-async def spa_fallback(full_path: str):
-    # Don't intercept API, static, or WebSocket paths
-    if full_path.startswith(("api/", "static/", "ws")):
-        raise HTTPException(status_code=404)
-    return FileResponse("static/index.html")
-
 @app.get("/api/files/{file_path:path}")
 async def get_sandbox_file(file_path: str):
     """Serve files dynamically from the current sandbox directory to the UI."""
@@ -3049,6 +3041,17 @@ async def control_searxng(req: SearXNGControlRequest):
         return {"status": "success", "message": "SearXNG stopped"}
     else:
         raise HTTPException(status_code=400, detail="Invalid action")
+
+
+# ── SPA fallback (must be the LAST route; all API routes defined above) ──
+
+@app.get("/{full_path:path}")
+async def spa_fallback(full_path: str):
+    """Catch-all for frontend History API routes. All API/static/ws paths
+    are matched by earlier routes/mounts, so this only fires for unknown paths."""
+    if full_path.startswith(("api/", "static/", "ws")):
+        raise HTTPException(status_code=404)
+    return FileResponse("static/index.html")
 
 
 # Initialize a global agent instance
