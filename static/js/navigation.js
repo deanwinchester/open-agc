@@ -1,8 +1,9 @@
-// View navigation system
+// View navigation system (History API routing)
 import { state } from './state.js';
 import { switchSession, renameSession, deleteSession, clearSession } from './sessions.js';
 
-export function switchView(viewId) {
+// Internal: DOM switch only (no history.pushState)
+function _activateView(viewId) {
   const views = document.querySelectorAll('.view');
   views.forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-item[data-view]').forEach(n => n.classList.remove('active'));
@@ -29,12 +30,43 @@ export function switchView(viewId) {
   if (viewId === 'settings-plugins') w.loadPluginManager?.();
   if (viewId === 'tasks') w.loadTasks?.();
   if (viewId === 'downloads') w.loadDownloadHistory?.();
-
-  // Persist active view so refresh stays on the same page
-  try { localStorage.setItem('lastViewId', viewId); } catch (e) {}
 }
 
+// Public: switch to a view, updating browser history
+export function switchView(viewId) {
+  // Update URL without reload
+  const url = '/' + viewId;
+  if (window.location.pathname !== url) {
+    history.pushState({view: viewId}, '', url);
+  }
+  _activateView(viewId);
+}
+
+// Read view from current URL path
+function _viewFromPath() {
+  const path = window.location.pathname;
+  const viewId = path.replace(/^\//, '').split('/')[0]; // first segment only
+  // Map known views; fallback to chat for root or unknown paths
+  const known = ['chat', 'tasks', 'settings-models', 'settings-skills', 'settings-mcp',
+                 'downloads', 'settings-plugins'];
+  return known.includes(viewId) ? viewId : 'chat';
+}
+
+// Browser back/forward
+window.addEventListener('popstate', (e) => {
+  const viewId = e.state?.view || _viewFromPath();
+  _activateView(viewId);
+});
+
 export function initNavigation() {
+  // Set initial view from URL on page load
+  const initialView = _viewFromPath();
+  _activateView(initialView);
+  // Sync URL if at root (no path)
+  if (window.location.pathname === '/' || window.location.pathname === '') {
+    history.replaceState({view: 'chat'}, '', '/chat');
+  }
+
   document.querySelector('.sidebar-content')?.addEventListener('click', (e) => {
     // Collapsible section header (plugin menu sections)
     const sectionHeader = e.target.closest('.sidebar-section-header.collapsible');
