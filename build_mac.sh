@@ -13,7 +13,13 @@
 set -e
 
 APP_NAME="Open-AGC"
-VERSION="1.0.0"
+
+# Read VERSION from file
+if [ -f VERSION ]; then
+    VERSION=$(cat VERSION)
+else
+    VERSION="0.0.0"
+fi
 BUILD_ARCH="${1:-$(uname -m)}"
 
 echo "============================================="

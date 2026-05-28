@@ -42,6 +42,10 @@ datas = [
 if os.path.exists('.env.example'):
     datas.append(('.env.example', '.'))
 
+# VERSION file (required by core/version.py)
+if os.path.exists('VERSION'):
+    datas.append(('VERSION', '.'))
+
 # Merge package data files
 datas += litellm_datas
 datas += openai_datas

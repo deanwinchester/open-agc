@@ -7,7 +7,13 @@ REM ===========================================
 setlocal enabledelayedexpansion
 
 set APP_NAME=Open-AGC
-set VERSION=1.0.0
+
+:: Read VERSION from file
+if exist VERSION (
+    set /p VERSION=<VERSION
+) else (
+    set VERSION=0.0.0
+)
 
 echo =============================================
 echo   Build %APP_NAME% v%VERSION% for Windows

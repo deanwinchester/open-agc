@@ -5,7 +5,13 @@ setlocal
 cd /d "%~dp0"
 
 set APP_NAME=Open-AGC
-set VERSION=1.0.0
+
+:: Read VERSION from file
+if exist VERSION (
+    set /p VERSION=<VERSION
+) else (
+    set VERSION=0.0.0
+)
 
 echo =============================================
 echo   🐼 Building %APP_NAME% v%VERSION% (Windows)
