@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr2 \
     libgbm1 \
     libasound2t64 \
+    xauth \
     x11-utils \
     docker.io \
     && rm -rf /var/lib/apt/lists/*
