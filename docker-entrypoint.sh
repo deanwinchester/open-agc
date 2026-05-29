@@ -10,4 +10,4 @@ fi
 
 # Phase 2: Start the main application
 exec xvfb-run -a -s "-screen 0 1280x800x24" \
-    uvicorn api.server:app --host 0.0.0.0 --port "${PORT:-8000}"
+    python -m uvicorn api.server:app --host 0.0.0.0 --port "${PORT:-8000}"
