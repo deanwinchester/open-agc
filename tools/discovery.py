@@ -79,6 +79,15 @@ _CJK_KEYWORDS = {
     "后台": "background pause",
     "沙箱": "sandbox",
     "隔离": "sandbox isolate",
+    # Config & system
+    "配置": "config configure setting setup",
+    "设置": "config setting setup",
+    "API": "api key config",
+    "密钥": "api key secret token config",
+    "插件": "plugin",
+    "扩展": "plugin extension",
+    "MCP": "mcp server config",
+    "系统设置": "system config setting setup",
 }
 
 
@@ -123,7 +132,8 @@ class ToolDiscoveryTool(BaseTool):
     description: str = (
         "Search and discover advanced tools based on your current needs. "
         "Use this tool when you need capabilities that are not in your current tool list "
-        "(e.g., 'browser', 'web search', 'email', 'python', etc.). "
+        "(e.g., 'browser', 'web search', 'email', 'python', 'system config', "
+        "'plugin development', 'MCP', etc.). "
         "It will search the system's deferred tools pool and enable the matching tools. "
         "You can then use them in your NEXT step."
     )
