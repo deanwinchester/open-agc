@@ -6,7 +6,18 @@ ARG PIP_INDEX_URL=
 ARG APP_VERSION=0.0.0
 
 # ============================================================
-# Single-stage runtime image
+# Stage 1: Build frontend assets
+# ============================================================
+FROM node:20-slim AS frontend-builder
+WORKDIR /build
+COPY package.json ./
+RUN npm install
+COPY vite.config.mjs ./
+COPY static ./static
+RUN npm run build
+
+# ============================================================
+# Stage 2: Runtime image
 # ============================================================
 FROM ${BUILD_REGISTRY}python:3.10-slim
 
@@ -29,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     xvfb \
+    xauth \
     libgl1 \
     libglib2.0-0t64 \
     libnss3 \
@@ -40,7 +52,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr2 \
     libgbm1 \
     libasound2t64 \
-    xauth \
     x11-utils \
     docker.io \
     && rm -rf /var/lib/apt/lists/*
@@ -66,6 +77,9 @@ COPY skills ./skills
 COPY plugins ./plugins
 COPY static ./static
 COPY main.py launcher.py gui_app.py ./
+
+# ── Frontend build output from Stage 1 ──
+COPY --from=frontend-builder /build/static/dist ./static/dist
 
 # ── docker-compose.yml for self-upgrade ──
 COPY docker-compose.yml ./
