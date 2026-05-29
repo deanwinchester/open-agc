@@ -41,6 +41,8 @@ from tools.mcp_tool import get_mcp_manager
 from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused, SearchHistoryTool, PauseAndWaitTool, TaskPaused
 from tools.sandbox import EnterWorktreeTool, ExitWorktreeTool
 from tools.self_review import SelfReviewTool
+from tools.system_config import ConfigureSystemTool
+from tools.plugin_dev import DevelopPluginTool
 
 
 def _detect_system_env() -> str:
@@ -302,6 +304,13 @@ class OpenAGCAgent:
             f"当任务接近最大迭代次数或你感觉陷入循环时，可以调用 self_review 工具进行自我审查。"
             f"系统会在达到迭代上限时自动提示你使用此工具。通过审查你可以获得额外的执行机会。"
             f"请诚实评估：如果确实陷入无效循环，及时报告用户比浪费计算资源更好。\n"
+            f"\n## 扩展工具系统\n"
+            f"当前可用的工具是核心工具子集。如果你的任务需要以下能力，但它们不在当前工具列表中，"
+            f"请使用 search_available_tools 工具搜索并启用：\n"
+            f"- 系统配置管理（查看/修改配置、管理 API 密钥、MCP 服务器）——搜索「配置」「设置」「API」\n"
+            f"- 插件开发（生成新插件脚手架、安装插件）——搜索「插件」\n"
+            f"- 以及其他未默认启用的专用工具\n"
+            f"搜索成功后，工具将在你的下一轮回复中可用。\n"
         )
 
         self.messages: List[Dict[str, Any]] = [
@@ -342,7 +351,9 @@ class OpenAGCAgent:
             "pause_and_wait": PauseAndWaitTool(),
             "enter_sandbox_mode": EnterWorktreeTool(),
             "exit_sandbox_mode": ExitWorktreeTool(),
-            "self_review": SelfReviewTool()
+            "self_review": SelfReviewTool(),
+            "configure_system": ConfigureSystemTool(),
+            "develop_plugin": DevelopPluginTool(),
         }
 
         # Tool display names (Chinese-friendly)
@@ -369,7 +380,9 @@ class OpenAGCAgent:
             "pause_and_wait": "暂停并等待后台完成",
             "enter_sandbox_mode": "进入沙箱模式",
             "exit_sandbox_mode": "退出沙箱模式",
-            "self_review": "自我审查任务进度"
+            "self_review": "自我审查任务进度",
+            "configure_system": "系统配置管理",
+            "develop_plugin": "插件开发",
         }
 
         # Load auto-generated tools (persisted from previous sessions)
@@ -401,10 +414,10 @@ class OpenAGCAgent:
             print(f"[Agent] Failed to load MCP tools: {e}")
 
         # Progressive Disclosure Setup
-        CORE_TOOL_NAMES = {"execute_shell", "read_file", "write_file", "edit_file",
+        CORE_TOOL_NAMES = {"execute_shell", "manage_memory", "read_file", "write_file", "edit_file",
                            "search_file_content", "find_files", "search_available_tools",
                            "ask_user_question", "search_history", "queue_download", "pause_and_wait",
-                           "execute_python", "search_web", "self_review"}
+                           "execute_python", "search_web", "self_review", "configure_system"}
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
 
         # Adaptive resident: auto-load frequently used non-core tools
