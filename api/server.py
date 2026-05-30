@@ -3043,6 +3043,58 @@ async def control_searxng(req: SearXNGControlRequest):
         raise HTTPException(status_code=400, detail="Invalid action")
 
 
+# ── Version & Upgrade ──
+
+@app.get("/api/version")
+async def get_version_info():
+    """Return current version + latest release from GitHub."""
+    from core.version import get_version
+    current = get_version()
+    latest = None
+    try:
+        resp = requests.get(
+            "https://api.github.com/repos/deanwinchester/open-agc/releases/latest",
+            timeout=10,
+            headers={"Accept": "application/vnd.github.v3+json"},
+        )
+        if resp.status_code == 200:
+            latest = resp.json().get("tag_name", "").lstrip("v")
+    except Exception:
+        pass
+    return {
+        "current": current,
+        "latest": latest,
+        "upgrade_available": bool(latest and latest != current),
+    }
+
+
+class UpgradeRequest(BaseModel):
+    confirm: bool = True
+
+@app.post("/api/upgrade")
+async def trigger_upgrade(req: UpgradeRequest = None):
+    """Trigger a source-code upgrade. Docker-only — downloads and installs the
+    latest release tarball, then exits (container restarts with new code)."""
+    try:
+        from core.auto_upgrade import AutoUpgrader
+        upgrader = AutoUpgrader()
+        upgrader.latest_version = upgrader.fetch_latest_release()
+        if not upgrader.latest_version:
+            raise HTTPException(status_code=502, detail="无法连接到 GitHub，请检查网络")
+        if not upgrader.is_upgrade_available():
+            return {"status": "up_to_date", "message": f"已是最新版本 v{upgrader.current_version}"}
+        # Run upgrade synchronously — this exits the process
+        success = upgrader.check_and_upgrade()
+        if success:
+            return {"status": "upgrading", "message": f"正在升级到 v{upgrader.latest_version}，即将重启..."}
+        else:
+            raise HTTPException(status_code=500, detail="升级失败，请查看日志")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"升级异常: {str(e)}")
+
+
 # ── SPA fallback (must be the LAST route; all API routes defined above) ──
 
 @app.get("/{full_path:path}")

@@ -82,6 +82,7 @@ function initApp() {
   initScheduleModal();
   initLlamaListeners();
   initSearXNGListeners();
+  checkVersion();
 
   // =============================================
   // DOM References
@@ -1664,6 +1665,40 @@ function initApp() {
     }
     console.log('[PERF] fetchInitialData done', (performance.now() - window._perf.start).toFixed(1), 'ms');
   }
+
+  // Version check + manual upgrade
+  async function checkVersion() {
+    try {
+      const res = await fetch('/api/version');
+      const data = await res.json();
+      const verEl = document.getElementById('version-text');
+      const badgeEl = document.getElementById('upgrade-badge');
+      if (verEl) verEl.textContent = 'v' + data.current;
+      if (data.upgrade_available && badgeEl) {
+        badgeEl.style.display = 'inline-block';
+        badgeEl.title = '发现新版本 v' + data.latest + '，点击升级';
+        badgeEl.addEventListener('click', () => {
+          if (!confirm('发现新版本 v' + data.latest + '，是否升级？\n\n升级后将自动重启服务。')) return;
+          badgeEl.textContent = '⏳ 升级中...';
+          badgeEl.style.cursor = 'default';
+          fetch('/api/upgrade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+            .then(r => r.json().then(d => { if (!r.ok) throw new Error(d.detail); return d; }))
+            .then(d => {
+              badgeEl.textContent = '✅ 已升级';
+              setTimeout(() => { location.reload(); }, 3000);
+            })
+            .catch(e => {
+              showStatus('❌ 升级失败: ' + e.message, 'error');
+              badgeEl.textContent = '⬆ 升级';
+              badgeEl.style.cursor = 'pointer';
+            });
+        });
+      }
+    } catch (e) {
+      console.error('Version check failed:', e);
+    }
+  }
+  window.checkVersion = checkVersion;
 
   fetchInitialData().then(() => {
     window._perf.connected = performance.now();
