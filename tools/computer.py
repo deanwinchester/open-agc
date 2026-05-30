@@ -16,11 +16,15 @@ class ComputerTool(BaseTool):
         super().__init__(**data)
         # Import pyautogui lazily to avoid issues if not installed or running headlessly
         global pyautogui
-        import pyautogui
-        # Failsafe: moving mouse to corner will abort
-        pyautogui.FAILSAFE = True
-        # Add a slight delay after every pyautogui call
-        pyautogui.PAUSE = 0.5
+        try:
+            import pyautogui
+            # Failsafe: moving mouse to corner will abort
+            pyautogui.FAILSAFE = True
+            # Add a slight delay after every pyautogui call
+            pyautogui.PAUSE = 0.5
+        except ImportError as e:
+            print(f"[ComputerTool] pyautogui not available: {e}. "
+                  "Install python3-tk or disable computer_control tool.")
 
     def get_openai_schema(self) -> Dict[str, Any]:
         return {
