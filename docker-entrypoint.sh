@@ -20,7 +20,8 @@ echo "[Entrypoint] Starting uvicorn on port $PORT..."
 # Start Xvfb in background if available (for headless GUI tools)
 if command -v Xvfb >/dev/null 2>&1; then
     echo "[Entrypoint] Starting Xvfb display :99..."
-    Xvfb :99 -screen 0 1280x800x24 &
+    touch /root/.Xauthority
+    Xvfb :99 -ac -screen 0 1280x800x24 &
     export DISPLAY=:99
     sleep 1
 fi
