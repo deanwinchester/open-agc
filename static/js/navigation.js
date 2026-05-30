@@ -87,6 +87,7 @@ export function initNavigation() {
     const navItem = e.target.closest('.nav-item[data-view]');
     if (navItem) {
       (window.switchView || switchView)(navItem.dataset.view);
+      closeSidebar();
       return;
     }
 
@@ -98,6 +99,7 @@ export function initNavigation() {
     // Session click (switch to this session)
     if (!e.target.closest('.session-rename-btn') && !e.target.closest('.session-delete-btn') && !e.target.closest('.session-clear-btn')) {
       switchSession(sessionId);
+      closeSidebar();
       return;
     }
 
@@ -126,4 +128,22 @@ export function initNavigation() {
       }
     }
   });
+}
+
+// Mobile: toggle sidebar open/close
+export function toggleSidebar() {
+  const sidebar = document.querySelector('.sidebar');
+  const overlay = document.getElementById('sidebar-overlay');
+  if (!sidebar) return;
+  const isOpen = sidebar.classList.toggle('open');
+  if (overlay) overlay.classList.toggle('open', isOpen);
+}
+
+// Mobile: close sidebar
+export function closeSidebar() {
+  const sidebar = document.querySelector('.sidebar');
+  const overlay = document.getElementById('sidebar-overlay');
+  if (!sidebar) return;
+  sidebar.classList.remove('open');
+  if (overlay) overlay.classList.remove('open');
 }

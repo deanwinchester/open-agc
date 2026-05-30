@@ -4,7 +4,7 @@
 import './style.css';
 import { state } from './js/state.js';
 import { escapeHtml, showStatus, t, initI18n, formatTimeAgo, formatTime } from './js/utils.js';
-import { switchView, initNavigation } from './js/navigation.js';
+import { switchView, initNavigation, toggleSidebar, closeSidebar } from './js/navigation.js';
 import { loadPlugins, loadPluginManager, loadMarketplace } from './js/plugins.js';
 import { loadSessions, createSession, switchSession, deleteSession, renameSession } from './js/sessions.js';
 import { initSettingsListeners, loadSkillsConfig, loadAgents, openAIDesignModal, closeAIDesignModal, initAIDesignListeners } from './js/settings.js';
@@ -14,6 +14,8 @@ import { refreshSearXNGStatus, initSearXNGListeners } from './js/searxng.js';
 
 // Expose to window for cross-module calls
 window.switchView = switchView;
+window.toggleSidebar = toggleSidebar;
+window.closeSidebar = closeSidebar;
 window.showStatus = showStatus;
 window.loadPluginManager = loadPluginManager;
 window.loadMarketplace = loadMarketplace;
@@ -1619,6 +1621,10 @@ function initApp() {
     await createSession();
     // createSession -> switchSession already reconnects the WebSocket
   });
+
+  // Mobile: hamburger menu toggle
+  document.getElementById('menu-toggle')?.addEventListener('click', toggleSidebar);
+  document.getElementById('sidebar-overlay')?.addEventListener('click', closeSidebar);
 
   // =============================================
   // Real-time Polling
