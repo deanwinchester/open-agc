@@ -2937,3 +2937,240 @@ input:checked + .slider::before { transform: translateX(16px); }
 .viz-output { background: #e5e7eb; color: #374151; border: 1px solid #d1d5db; }
 .viz-arrow  { color: var(--text-secondary); font-size: 0.65rem; padding: 0 2px; }
 .viz-down   { padding: 1px 0; }
+
+/* ==========================================================================
+   Mobile Responsive
+   ========================================================================== */
+
+/* Hamburger button — hidden on desktop */
+.hamburger-btn {
+    display: none;
+    position: fixed;
+    top: 0.4rem;
+    left: 0.4rem;
+    z-index: 200;
+    width: 36px;
+    height: 36px;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--text-primary);
+    backdrop-filter: var(--blur-glass);
+    -webkit-backdrop-filter: var(--blur-glass);
+}
+
+/* Sidebar overlay — hidden on desktop */
+.sidebar-overlay {
+    display: none;
+}
+
+@media (max-width: 768px) {
+    /* ── App container ── */
+    .app-container {
+        padding: 0;
+        gap: 0;
+    }
+
+    /* ── Sidebar → overlay drawer ── */
+    .sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        z-index: 300;
+        width: 260px;
+        height: 100vh;
+        height: 100dvh;
+        transform: translateX(-100%);
+        transition: transform 0.25s ease;
+        border-right: 1px solid var(--border-color);
+        padding-top: 0;
+    }
+    .sidebar.open {
+        transform: translateX(0);
+    }
+
+    .sidebar-overlay {
+        display: block;
+        position: fixed;
+        inset: 0;
+        z-index: 250;
+        background: rgba(0, 0, 0, 0.45);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.25s ease;
+    }
+    .sidebar-overlay.open {
+        opacity: 1;
+        pointer-events: auto;
+    }
+
+    .hamburger-btn {
+        display: flex;
+    }
+    .sidebar-toggle-spacer {
+        display: block;
+        width: 36px;
+        height: 36px;
+        flex-shrink: 0;
+    }
+
+    /* ── Chat header ── */
+    .chat-header {
+        padding: 0.4rem 0.5rem 0.4rem 0.25rem;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+    }
+    .chat-header h1 {
+        font-size: 1rem;
+    }
+    #agent-selector {
+        max-width: 100px;
+        font-size: 11px;
+    }
+    #current-model-badge {
+        font-size: 10px;
+    }
+
+    /* ── Chat body ── */
+    .chat-history {
+        padding: 0.5rem;
+    }
+
+    /* ── Messages ── */
+    .message {
+        max-width: 100%;
+    }
+    .message .avatar {
+        width: 30px;
+        height: 30px;
+        min-width: 30px;
+    }
+    .message .content {
+        padding: 0.4rem 0.6rem;
+        font-size: 0.82rem;
+    }
+    .progress-inline {
+        margin-left: 0;
+    }
+
+    /* ── Input area ── */
+    .input-container {
+        padding: 0.3rem 0.5rem;
+    }
+    .input-box textarea {
+        font-size: 0.82rem;
+        max-height: 120px;
+    }
+
+    /* ── Detail panel (mobile: stack, not split) ── */
+    .chat-body.split-view {
+        flex-direction: column;
+    }
+    .chat-body.split-view .chat-history {
+        flex: 0 0 auto;
+        max-height: 50vh;
+        max-height: 50dvh;
+    }
+    .chat-body.split-view .detail-panel {
+        flex: 1 1 auto;
+        min-height: 200px;
+        border-left: none;
+        border-top: 1px solid var(--border-color);
+    }
+
+    /* ── Session items (touch: always show actions) ── */
+    .session-item .session-actions {
+        display: flex;
+    }
+
+    /* ── Task items ── */
+    .task-list {
+        padding: 0.5rem;
+    }
+    .task-item {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.3rem;
+        padding: 0.5rem;
+    }
+    .task-item-status {
+        align-self: flex-start;
+    }
+    .task-item-actions {
+        opacity: 1;
+        position: static;
+    }
+    .task-filters {
+        flex-wrap: wrap;
+        gap: 0.25rem;
+    }
+
+    /* ── Settings forms ── */
+    .settings-section {
+        padding: 0.75rem;
+    }
+    .setting-row {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.3rem;
+    }
+    .setting-row label {
+        min-width: auto;
+    }
+
+    /* ── View headers ── */
+    .view-header {
+        padding: 0.75rem;
+    }
+    .view-header h2 {
+        font-size: 1rem;
+    }
+
+    /* ── Modal ── */
+    .modal-box {
+        max-width: 95vw;
+        max-height: 85vh;
+        max-height: 85dvh;
+    }
+
+    /* ── Main content ── */
+    .main-content {
+        border-radius: 0;
+    }
+
+    /* ── Downloads ── */
+    .download-item {
+        flex-direction: column;
+        gap: 0.3rem;
+    }
+    .download-item-actions {
+        align-self: stretch;
+    }
+
+    /* ── Sidebar footer (version) ── */
+    .sidebar-footer {
+        padding: 0.3rem 0.75rem;
+    }
+
+    #global-download-banner {
+        left: 0;
+        right: 0;
+        width: auto;
+        margin: 0 0.5rem;
+    }
+}
+
+/* Touch devices: always show hover-dependent actions */
+@media (hover: none) and (pointer: coarse) {
+    .session-item .session-actions,
+    .task-item-actions {
+        display: flex;
+        opacity: 1;
+    }
+    .task-item:hover .task-item-actions {
+        opacity: 1;
+    }
+}
