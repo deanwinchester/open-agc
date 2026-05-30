@@ -1,13 +1,9 @@
 #!/bin/bash
-# Don't use set -e — Phase 1 failures must not prevent Phase 2
 
-# Phase 1: Auto-upgrade check (Docker deployments only)
-echo "[Entrypoint] Starting..."
-if [ -S /var/run/docker.sock ]; then
-    python -m core.auto_upgrade 2>&1 || echo "[Entrypoint] Auto-upgrade check failed, continuing..."
-else
-    echo "[Entrypoint] Docker socket not found -- skipping auto-upgrade check"
-fi
+echo "[Entrypoint] Open-AGC container starting..."
+
+# Phase 1: Auto-upgrade check (code-based, no Docker socket needed)
+python -m core.auto_upgrade 2>&1 || echo "[Entrypoint] Auto-upgrade check failed, continuing..."
 
 # Phase 2: Start the main application
 echo "[Entrypoint] Starting uvicorn on port ${PORT:-8000}..."
