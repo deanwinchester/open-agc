@@ -176,6 +176,7 @@ class OpenAGCAgent:
         # Store config for later use
         self.sandbox_dir = None
         self.browser_headless = False
+        budget_cfg = {}
         if os.path.exists(config_path):
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
