@@ -8,6 +8,7 @@ export const state = {
   currentLang: 'zh-CN',
   wasVoiceQuery: false,
   currentTaskId: null,
+  activeTaskCount: 0,
   progressSteps: {},
   progressStepData: {},
   progressContainer: null,
