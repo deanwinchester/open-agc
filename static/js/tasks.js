@@ -369,92 +369,122 @@ async function openTaskDetail(taskId) {
       <div class="detail-section">
         <div class="detail-section-title" style="display:flex;justify-content:space-between;align-items:center">
           <span>执行步骤</span>
-          <span class="task-step-pagination-info" style="font-size:0.75rem;color:var(--text-secondary)"></span>
+          <span style="display:flex;align-items:center;gap:0.5rem;font-weight:normal;font-size:0.78rem;">
+            <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer;">
+              <input type="checkbox" id="step-auto-refresh">
+              <span>自动刷新</span>
+            </label>
+            <span class="step-total-label" style="color:var(--text-secondary);font-size:0.75rem;"></span>
+          </span>
         </div>
-        <div class="task-detail-steps">
+        <div class="task-detail-steps" style="max-height:60vh;overflow-y:auto;">
           <div class="loading-indicator" style="padding:1rem"><div class="spinner"></div><span>加载步骤...</span></div>
         </div>
-        <div class="task-step-pagination" style="display:flex;justify-content:center;align-items:center;gap:0.5rem;padding:0.5rem 0">
-          <button class="pagination-btn step-page-prev" disabled>◀ 上一页</button>
-          <span class="step-page-info" style="font-size:0.8rem;color:var(--text-secondary)"></span>
-          <button class="pagination-btn step-page-next" disabled>下一页 ▶</button>
-        </div>
+        <div id="step-load-more" style="display:none;text-align:center;padding:0.5rem;font-size:0.78rem;color:var(--text-secondary);cursor:pointer;">⬇ 加载更多</div>
       </div>
     `;
 
-    // Load steps with pagination
-    async function loadStepPage(page) {
-      const container = content.querySelector('.task-detail-steps');
-      const paginationInfo = content.querySelector('.task-step-pagination-info');
-      const pageInfo = content.querySelector('.step-page-info');
-      const prevBtn = content.querySelector('.step-page-prev');
-      const nextBtn = content.querySelector('.step-page-next');
-      const countLabel = content.querySelector('.task-step-count-label');
+    // Infinite scroll state
+    var _stepPage = 1, _stepTotal = 0, _stepLoading = false, _stepAllLoaded = false;
 
-      container.innerHTML = '<div class="loading-indicator" style="padding:1rem"><div class="spinner"></div><span>加载步骤...</span></div>';
+    // Load steps
+    async function loadStepPage(page, append) {
+      if (_stepLoading) return;
+      _stepLoading = true;
+      var container = content.querySelector('.task-detail-steps');
+      var countLabel = content.querySelector('.task-step-count-label');
+      var totalLabel = content.querySelector('.step-total-label');
+
+      if (!append) container.innerHTML = '<div class="loading-indicator" style="padding:1rem"><div class="spinner"></div><span>加载步骤...</span></div>';
 
       try {
-        const resp = await fetch(`/api/tasks/${taskId}/steps?page=${page}&page_size=${stepState.pageSize}`);
-        const stepData = await resp.json();
-        const steps = stepData.steps || [];
-        stepState.page = stepData.page || page;
-        stepState.totalPages = stepData.total_pages || 1;
-        stepState.total = stepData.total || 0;
+        var resp = await fetch('/api/tasks/' + taskId + '/steps?page=' + page + '&page_size=50');
+        var stepData = await resp.json();
+        var steps = stepData.steps || [];
+        _stepTotal = stepData.total || 0;
+        _stepPage = page;
 
-        if (countLabel) countLabel.textContent = stepState.total;
+        if (countLabel) countLabel.textContent = _stepTotal;
+        if (totalLabel) totalLabel.textContent = '\u5171 ' + _stepTotal + ' \u6761';
 
-        if (steps.length === 0) {
-          container.innerHTML = '<div style="padding:1rem;color:var(--text-secondary);text-align:center">暂无步骤</div>';
+        if (steps.length === 0 && !append) {
+          container.innerHTML = '<div style="padding:1rem;color:var(--text-secondary);text-align:center">\u6682\u65e0\u6b65\u9aa4</div>';
+          _stepLoading = false;
           return;
         }
 
-        container.innerHTML = steps.map(step => `
-          <div class="task-step-card ${step.success ? 'success' : step.success === false ? 'failed' : 'running'}" data-step-number="${step.step_number}">
-            <div class="task-step-header">
-              <span>${step.success ? '✅' : step.success === false ? '❌' : '⏳'}</span>
-              <span class="task-step-title">${step.step_number}. ${escapeHtml(step.tool_label || step.tool_name)}</span>
-              <span class="task-step-expand-hint" style="margin-left:auto;font-size:0.7rem;color:var(--text-secondary)">点击查看详情 ▸</span>
-            </div>
-            ${step.args_preview ? `<div class="task-step-result" style="color:var(--text-secondary);margin-bottom:0.3rem">${escapeHtml(step.args_preview)}</div>` : ''}
-            ${step.result_preview ? `<div class="task-step-result">${escapeHtml(step.result_preview.substring(0, 300))}${step.result_preview.length > 300 ? '...' : ''}</div>` : ''}
-          </div>
-        `).join('');
+        var html = '';
+        for (var i = 0; i < steps.length; i++) {
+          var st = steps[i];
+          html += '<div class="task-step-card ' + (st.success ? 'success' : st.success === false ? 'failed' : 'running') + '" data-step-number="' + st.step_number + '">'
+            + '<div class="task-step-header">'
+            + '<span>' + (st.success ? '\u2705' : st.success === false ? '\u274c' : '\u23f3') + '</span>'
+            + '<span class="task-step-title">' + st.step_number + '. ' + escapeHtml(st.tool_label || st.tool_name) + '</span>'
+            + '<span class="task-step-expand-hint" style="margin-left:auto;font-size:0.7rem;color:var(--text-secondary)">\u70b9\u51fb\u67e5\u770b\u8be6\u60c5 \u25b8</span>'
+            + '</div>'
+            + (st.args_preview ? '<div class="task-step-result" style="color:var(--text-secondary);margin-bottom:0.3rem">' + escapeHtml(st.args_preview) + '</div>' : '')
+            + (st.result_preview ? '<div class="task-step-result">' + escapeHtml(st.result_preview.substring(0, 300)) + (st.result_preview.length > 300 ? '...' : '') + '</div>' : '')
+            + '</div>';
+        }
 
-        // Click to show full detail modal
-        container.querySelectorAll('.task-step-card').forEach(card => {
-          card.addEventListener('click', () => {
-            const num = parseInt(card.dataset.stepNumber);
-            const step = steps.find(s => s.step_number === num);
-            if (step) showTaskStepDetail(step);
+        if (append) {
+          container.insertAdjacentHTML('beforeend', html);
+        } else {
+          container.innerHTML = html;
+        }
+
+        // Click detail
+        container.querySelectorAll('.task-step-card').forEach(function(card) {
+          card.addEventListener('click', function() {
+            var num = parseInt(card.dataset.stepNumber);
+            for (var j = 0; j < steps.length; j++) {
+              if (steps[j].step_number === num) { showTaskStepDetail(steps[j]); break; }
+            }
           });
         });
 
-        // Update pagination
-        const rangeStart = (stepState.page - 1) * stepState.pageSize + 1;
-        const rangeEnd = Math.min(stepState.page * stepState.pageSize, stepState.total);
-        paginationInfo.textContent = `(${rangeStart}-${rangeEnd} / ${stepState.total})`;
-        pageInfo.textContent = `${stepState.page} / ${stepState.totalPages}`;
-        prevBtn.disabled = stepState.page <= 1;
-        nextBtn.disabled = stepState.page >= stepState.totalPages;
-        prevBtn.dataset.page = stepState.page - 1;
-        nextBtn.dataset.page = stepState.page + 1;
+        _stepAllLoaded = (_stepPage * 50) >= _stepTotal;
+        var loadMore = document.getElementById('step-load-more');
+        if (loadMore) {
+          loadMore.style.display = _stepAllLoaded ? 'none' : 'block';
+          if (!_stepAllLoaded) loadMore.textContent = '\u2b07 \u52a0\u8f7d\u66f4\u591a (' + (_stepPage * 50) + ' / ' + _stepTotal + ')';
+        }
       } catch (e) {
-        container.innerHTML = '<div style="padding:1rem;color:var(--error);text-align:center">加载步骤失败</div>';
+        if (!append) container.innerHTML = '<div style="padding:1rem;color:var(--error);text-align:center">\u52a0\u8f7d\u6b65\u9aa4\u5931\u8d25</div>';
       }
+      _stepLoading = false;
     }
-
-    // Wire pagination buttons
-    content.querySelector('.step-page-prev').addEventListener('click', () => {
-      const p = parseInt(content.querySelector('.step-page-prev').dataset.page);
-      if (p >= 1) loadStepPage(p);
-    });
-    content.querySelector('.step-page-next').addEventListener('click', () => {
-      const p = parseInt(content.querySelector('.step-page-next').dataset.page);
-      if (p <= stepState.totalPages) loadStepPage(p);
-    });
-
     // Load first page
-    loadStepPage(1);
+    var stepsContainer = content.querySelector('.task-detail-steps');
+    stepsContainer.addEventListener('scroll', function() {
+      if (_stepLoading || _stepAllLoaded) return;
+      if (stepsContainer.scrollTop + stepsContainer.clientHeight >= stepsContainer.scrollHeight - 100) {
+        loadStepPage(_stepPage + 1, true);
+      }
+    });
+    var loadMoreBtn = document.getElementById('step-load-more');
+    if (loadMoreBtn) {
+      loadMoreBtn.addEventListener('click', function() {
+        if (!_stepLoading && !_stepAllLoaded) loadStepPage(_stepPage + 1, true);
+      });
+    }
+    var _stepAR = null;
+    function startAutoRefresh() {
+      if (_stepAR) { clearInterval(_stepAR); }
+      _stepAR = setInterval(function() { loadStepPage(1, false); }, 5000);
+    }
+    function stopAutoRefresh() {
+      if (_stepAR) { clearInterval(_stepAR); _stepAR = null; }
+    }
+    var refreshCb = document.getElementById('step-auto-refresh');
+    if (refreshCb) {
+      refreshCb.checked = (task.status === 'running' || task.status === 'backgrounded');
+      refreshCb.addEventListener('change', function() {
+        if (refreshCb.checked) startAutoRefresh(); else stopAutoRefresh();
+      });
+      if (refreshCb.checked) startAutoRefresh();
+    }
+    loadStepPage(1, false);
 
     // Load process info (for running/detached tasks)
     if (task.status === 'running' || task.status === 'detached') {

@@ -715,11 +715,6 @@ def _resolve_todo_for_query(query: str) -> int:
 
     return 0
 
-def _is_continuation_query(query: str) -> bool:
-    """Legacy wrapper — returns True if query matches any active todo."""
-    return _resolve_todo_for_query(query) > 0
-
-
 def _resolve_task_for_query(session_id: int, query: str) -> int:
     """
     Determine the task_id for an incoming query BEFORE agent execution.
@@ -750,7 +745,7 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
                 except Exception:
                     is_recent = False
 
-                if is_recent and _is_continuation_query(query):
+                if is_recent and _resolve_todo_for_query(query) > 0:
                     print(f"[Task] Continuing task {tid} for session {session_id} (continuation: {query[:50]})")
                     update_task_status(tid, "running")
                     return tid
@@ -3833,21 +3828,22 @@ async def websocket_endpoint(websocket: WebSocket):
                         except Exception:
                             pass
 
-                    if _is_continuation_query(query) and not resume_id_for_run:
-                        try:
-                            conn_cont = sqlite3.connect(DB_PATH)
-                            conn_cont.row_factory = sqlite3.Row
-                            latest_task = conn_cont.execute(
-                                "SELECT id FROM tasks "
-                                "WHERE session_id=? ORDER BY id DESC LIMIT 1",
-                                (ws_session_id,)
-                            ).fetchone()
-                            if latest_task:
-                                resume_id_for_run = latest_task["id"]
-                                session_history = get_task_context(resume_id_for_run)
-                            conn_cont.close()
-                        except Exception as e:
-                            print(f"[WS] Continuation context error: {e}")
+                        if not resume_id_for_run:
+                            try:
+                                conn_cont = sqlite3.connect(DB_PATH)
+                                conn_cont.row_factory = sqlite3.Row
+                                latest_task = conn_cont.execute(
+                                    "SELECT id FROM tasks "
+                                    "WHERE session_id=? AND status IN ('interrupted','backgrounded','background_failed')"
+                                    "ORDER BY id DESC LIMIT 1",
+                                    (ws_session_id,)
+                                ).fetchone()
+                                if latest_task:
+                                    resume_id_for_run = latest_task["id"]
+                                    session_history = get_task_context(resume_id_for_run)
+                                conn_cont.close()
+                            except Exception as e:
+                                print(f"[WS] Continuation context error: {e}")
 
                 is_heartbeat = False
             except asyncio.TimeoutError:
