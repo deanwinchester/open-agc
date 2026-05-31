@@ -1737,6 +1737,26 @@ function initApp() {
   }
   window.checkVersion = checkVersion;
 
+  async function loadLogs() {
+    try {
+      const el = document.getElementById('log-content');
+      if (!el) return;
+      el.textContent = '加载中...';
+      const res = await fetch('/api/logs?lines=200');
+      const data = await res.json();
+      el.textContent = data.lines.join('\n') || '(空)';
+    } catch (e) {
+      console.error('Failed to load logs:', e);
+      const el = document.getElementById('log-content');
+      if (el) el.textContent = '❌ 加载失败: ' + e.message;
+    }
+  }
+  window.loadLogs = loadLogs;
+
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('#log-refresh-btn')) loadLogs();
+  });
+
   fetchInitialData().then(() => {
     window._perf.connected = performance.now();
     console.log('[PERF] connectWebSocket', (performance.now() - window._perf.start).toFixed(1), 'ms');
