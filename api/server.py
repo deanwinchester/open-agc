@@ -3606,14 +3606,39 @@ async def websocket_endpoint(websocket: WebSocket):
                                     # Save as tool_step in the task flow
                                     if ws_task_id:
                                         import json as _jj
-                                        save_message("tool_step", _jj.dumps({
+                                        _interject_data = {
                                             "step": -1,
                                             "tool": "user_interjection",
                                             "tool_label": "用户插入",
                                             "args_preview": q[:200],
                                             "success": True,
                                             "output": ""
-                                        }, ensure_ascii=False), ws_session_id)
+                                        }
+                                        save_message("tool_step", _jj.dumps(_interject_data, ensure_ascii=False), ws_session_id)
+                                        # Also broadcast as a progress event so frontend shows it live
+                                        await _safe_send({
+                                            "type": "progress",
+                                            "event": "tool_start",
+                                            "step": -1,
+                                            "tool": "user_interjection",
+                                            "tool_label": "用户插入",
+                                            "args_preview": q[:200],
+                                            "task_id": ws_task_id,
+                                            "session_id": ws_session_id,
+                                            "background": False
+                                        })
+                                        await _safe_send({
+                                            "type": "progress",
+                                            "event": "tool_done",
+                                            "step": -1,
+                                            "tool": "user_interjection",
+                                            "tool_label": "用户插入",
+                                            "result_preview": q[:200],
+                                            "success": True,
+                                            "task_id": ws_task_id,
+                                            "session_id": ws_session_id,
+                                            "background": False
+                                        })
                                     print(f"[WS] Queued message to agent session {ws_session_id}")
                         receive_task = None
                     except WebSocketDisconnect:
