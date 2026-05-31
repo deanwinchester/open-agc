@@ -4216,14 +4216,25 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                 except Exception:
                     pass
 
-        # Push final result to clients
-        _broadcast_to_websockets({
-            "type": "message",
-            "role": "agent",
-            "background": True,
-            "session_id": bg_session_id,
-            "content": f"**{'🔄 自动恢复' if is_resume else '⏰ 定时'}任务完成**: {user_query[:40]}...\n\n{response[:500]}"
-        })
+        # Push final result to clients (skip silent heartbeat OK)
+        _skip_broadcast = False
+        if response and response.strip() == "HEARTBEAT_OK":
+            try:
+                _hc = sqlite3.connect(DB_PATH)
+                _ht = _hc.execute("SELECT task_type FROM tasks WHERE id=?", (task_id,)).fetchone()
+                if _ht and _ht[0] == 'heartbeat':
+                    _skip_broadcast = True
+                _hc.close()
+            except Exception:
+                pass
+        if not _skip_broadcast:
+            _broadcast_to_websockets({
+                "type": "message",
+                "role": "agent",
+                "background": True,
+                "session_id": bg_session_id,
+                "content": f"**{'🔄 自动恢复' if is_resume else '⏰ 定时'}任务完成**: {user_query[:40]}...\n\n{response[:500]}"
+            })
 
         return response
     except Exception as e:
