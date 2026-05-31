@@ -685,6 +685,17 @@ function initApp() {
     }
 
     if (event === 'tool_start') {
+      state.activeTaskCount++;
+      var mtBadge = document.getElementById('multi-task-badge');
+      if (state.activeTaskCount > 1) {
+        if (mtBadge) mtBadge.classList.add('visible');
+        var pc = document.querySelector('.progress-inline');
+        if (pc) pc.style.display = 'none';
+      } else {
+        if (mtBadge) mtBadge.classList.remove('visible');
+        var pc = document.querySelector('.progress-inline');
+        if (pc) pc.style.display = '';
+      }
       progressStepCount++;
       const stepEl = document.createElement('div');
       stepEl.className = 'progress-step running';
@@ -730,6 +741,10 @@ function initApp() {
     }
 
     if (event === 'tool_done') {
+      state.activeTaskCount = Math.max(0, state.activeTaskCount - 1);
+      if (state.activeTaskCount <= 1) {
+        var _mtb = document.getElementById('multi-task-badge'); if (_mtb) _mtb.style.display = 'none';
+      }
       const stepEl = progressSteps[data.step];
       if (stepEl) {
         stepEl.classList.remove('running');

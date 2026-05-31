@@ -1122,7 +1122,7 @@ connected_websockets: list = []  # List of active WebSocket connections
 
 _sandbox_waits: dict = {}  # {session_id: {"event": threading.Event, "result": dict}} — sandbox auth waits
 
-_active_agents: dict = {}  # {session_id: OpenAGCAgent} — for non-blocking message injection
+_active_agents: dict = {}  # {session_id: {task_id: OpenAGCAgent}} — multi-task concurrent support
 _background_agents: dict = {}  # {task_id: OpenAGCAgent} — background tasks for interrupt
 
 _session_enabled_tools: dict = {}  # {session_id: set(tool_names)} — progressive tool persistence
@@ -2749,7 +2749,8 @@ async def interrupt_task(task_id: int):
         conn_i.close()
         if row_i:
             sid = row_i[0]
-            fg_agent = _active_agents.get(sid)
+            fg_agents = _active_agents.get(sid, {})
+            fg_agent = next(iter(fg_agents.values())) if fg_agents else None
             if fg_agent:
                 fg_agent.is_interrupted = True
     except Exception:
@@ -3392,7 +3393,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                     })
                                     # Inject failure info into the running agent so it can retry
                                     try:
-                                        agent_ref = _active_agents.get(ws_session_id)
+                                        _aa_dict = _active_agents.get(ws_session_id, {})
+                                        agent_ref = next(iter(_aa_dict.values())) if _aa_dict else None
                                         if agent_ref:
                                             agent_ref.pending_messages.append(
                                                 f"【系统通知】下载失败了。\n文件: {label}\n错误: {err}\n"
@@ -3410,7 +3412,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                 if already_done:
                                     label = already_done[1] or already_done[2] or f"download #{dl_id}"
                                     try:
-                                        agent_ref = _active_agents.get(ws_session_id)
+                                        _aa_dict = _active_agents.get(ws_session_id, {})
+                                        agent_ref = next(iter(_aa_dict.values())) if _aa_dict else None
                                         if agent_ref:
                                             agent_ref.pending_messages.append(
                                                 f"【系统通知】后台下载已完成。\n文件: {label}\n"
@@ -3514,7 +3517,7 @@ async def websocket_endpoint(websocket: WebSocket):
             agent = OpenAGCAgent(model=current_model, session_id=ws_session_id,
                                  logger=session_logger,
                                  pre_enabled_tools=_session_enabled_tools.get(ws_session_id))
-            _active_agents[ws_session_id] = agent
+            _active_agents.setdefault(ws_session_id, {})[ws_task_id or 0] = agent
             
             # Inject custom agent profile prompt if specified
             if agent_profile_name and agent_profile_name != "default":
@@ -3594,10 +3597,23 @@ async def websocket_endpoint(websocket: WebSocket):
                             # Non-blocking input: queue message to agent
                             q = user_msg.get("query", user_msg.get("text", ""))
                             if q.strip():
-                                a = _active_agents.get(ws_session_id)
+                                # Get the most recent agent for this session
+                                _aa_sess = _active_agents.get(ws_session_id, {})
+                                a = next(iter(_aa_sess.values())) if _aa_sess else None
                                 if a:
                                     a.queue_message(q)
                                     save_message("user", q, ws_session_id)
+                                    # Save as tool_step in the task flow
+                                    if ws_task_id:
+                                        import json as _jj
+                                        save_message("tool_step", _jj.dumps({
+                                            "step": -1,
+                                            "tool": "user_interjection",
+                                            "tool_label": "用户插入",
+                                            "args_preview": q[:200],
+                                            "success": True,
+                                            "output": ""
+                                        }, ensure_ascii=False), ws_session_id)
                                     print(f"[WS] Queued message to agent session {ws_session_id}")
                         receive_task = None
                     except WebSocketDisconnect:
@@ -3605,7 +3621,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         # Immediately remove from broadcast list
                         if websocket in connected_websockets:
                             connected_websockets.remove(websocket)
-                        _active_agents.pop(ws_session_id, None)
+                        _active_agents.pop(ws_session_id, None)  # nested dict cleaned up
                         # Don't interrupt — let agent finish in background
                         # Reconnecting clients will replay completed steps
                         receive_task = None
@@ -3916,13 +3932,13 @@ async def websocket_endpoint(websocket: WebSocket):
         print("Client disconnected")
         if websocket in connected_websockets:
             connected_websockets.remove(websocket)
-        _active_agents.pop(ws_session_id, None)
+        _active_agents.pop(ws_session_id, None)  # nested dict cleaned up
         _session_enabled_tools.pop(ws_session_id, None)
     except Exception as e:
         print(f"WebSocket error: {e}")
         if websocket in connected_websockets:
             connected_websockets.remove(websocket)
-        _active_agents.pop(ws_session_id, None)
+        _active_agents.pop(ws_session_id, None)  # nested dict cleaned up
         _session_enabled_tools.pop(ws_session_id, None)
 
 def start_email_listener():
@@ -4739,7 +4755,7 @@ def start_guardian_loop():
                                 continue  # doing but no timestamp, skip
 
                         # ── Layer 2: Check active agents ──
-                        if bg_session_id in _active_agents:
+                        if _active_agents.get(bg_session_id):
                             print(f"[Guardian] Phase 2: active agent in session {bg_session_id}, skipping")
                             continue
                         if _background_agents:
