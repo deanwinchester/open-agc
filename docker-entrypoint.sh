@@ -2,45 +2,58 @@
 
 echo "[Entrypoint] Open-AGC container starting..."
 
-# Phase 1: Auto-upgrade — restore persisted upgrade or check for new version
-UPGRADE_DIR="/app/data/upgrade"
-UPGRADE_VERSION_FILE="$UPGRADE_DIR/VERSION"
+# ── Auto-upgrade: download latest release from GitHub ──
+CURRENT_VER=$(cat /app/VERSION | tr -d 'vV \n')
+echo "[Entrypoint] Current version: $CURRENT_VER"
 
-if [ -f "$UPGRADE_VERSION_FILE" ]; then
-    PERSISTED_VER=$(cat "$UPGRADE_VERSION_FILE" | tr -d 'vV \n')
-    IMAGE_VER=$(cat /app/VERSION | tr -d 'vV \n')
-    echo "[Entrypoint] Found persisted upgrade: v$PERSISTED_VER (image: v$IMAGE_VER)"
-    if [ "$PERSISTED_VER" != "$IMAGE_VER" ]; then
-        echo "[Entrypoint] Restoring v$PERSISTED_VER from persistent storage..."
-        for dir in core tools agent api skills plugins static; do
-            if [ -d "$UPGRADE_DIR/$dir" ]; then
-                cp -r "$UPGRADE_DIR/$dir/" "/app/$dir/" 2>/dev/null || true
+LATEST_VER=$(curl -sf https://api.github.com/repos/deanwinchester/open-agc/releases/latest \
+    2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('tag_name','').lstrip('v'))" 2>/dev/null)
+
+if [ -n "$LATEST_VER" ] && [ "$LATEST_VER" != "$CURRENT_VER" ]; then
+    echo "[Entrypoint] ⬆️ Upgrade available: v$CURRENT_VER -> v$LATEST_VER"
+    echo "[Entrypoint] Downloading v$LATEST_VER source code..."
+
+    TARBALL_URL="https://github.com/deanwinchester/open-agc/archive/refs/tags/v$LATEST_VER.tar.gz"
+    curl -sL "$TARBALL_URL" -o /tmp/upgrade.tar.gz
+    if [ $? -eq 0 ] && [ -s /tmp/upgrade.tar.gz ]; then
+        cd /tmp
+        tar xzf upgrade.tar.gz
+        EXTRACTED=$(find /tmp -maxdepth 1 -name "open-agc-*" -type d | head -1)
+
+        if [ -n "$EXTRACTED" ]; then
+            echo "[Entrypoint] Applying v$LATEST_VER..."
+            # Copy code files (merge, not replace)
+            for dir in core tools agent api skills plugins static; do
+                if [ -d "$EXTRACTED/$dir" ]; then
+                    cp -r "$EXTRACTED/$dir/" "/app/$dir/" 2>/dev/null || true
+                fi
+            done
+            for file in main.py launcher.py gui_app.py requirements.txt docker-entrypoint.sh; do
+                if [ -f "$EXTRACTED/$file" ]; then
+                    cp "$EXTRACTED/$file" "/app/$file" 2>/dev/null || true
+                fi
+            done
+            cp "$EXTRACTED/VERSION" /app/VERSION 2>/dev/null || true
+
+            # Update pip dependencies if requirements changed
+            if [ -f "$EXTRACTED/requirements.txt" ]; then
+                echo "[Entrypoint] Updating Python dependencies..."
+                pip install --no-cache-dir -r "$EXTRACTED/requirements.txt" 2>&1 || true
             fi
-        done
-        for file in main.py launcher.py gui_app.py requirements.txt docker-entrypoint.sh; do
-            if [ -f "$UPGRADE_DIR/$file" ]; then
-                cp "$UPGRADE_DIR/$file" "/app/$file" 2>/dev/null || true
-            fi
-        done
-        cp "$UPGRADE_VERSION_FILE" /app/VERSION
-        echo "[Entrypoint] ✅ Restored v$PERSISTED_VER from persistent storage"
+
+            echo "[Entrypoint] ✅ Upgrade to v$LATEST_VER applied successfully"
+        else
+            echo "[Entrypoint] ⚠️ Could not find extracted source"
+        fi
+        rm -rf /tmp/upgrade.tar.gz /tmp/open-agc-*
     else
-        echo "[Entrypoint] Persisted version matches image, skipping restore"
+        echo "[Entrypoint] ⚠️ Failed to download upgrade tarball"
     fi
+else
+    echo "[Entrypoint] ✅ Up to date (v$CURRENT_VER)"
 fi
 
-# Phase 2: Auto-upgrade check (GitHub)
-echo "[Entrypoint] Checking for upgrades..."
-python -m core.auto_upgrade 2>&1
-UPGRADE_EXIT=$?
-if [ $UPGRADE_EXIT -eq 0 ]; then
-    echo "[Entrypoint] ✅ Upgrade check complete (up to date or not applicable)"
-elif [ $UPGRADE_EXIT -eq 42 ]; then
-    echo "[Entrypoint] ✅ Upgrade applied — code persisted to data/upgrade/"
-    echo "[Entrypoint] Container will restart..."
-fi
-
-# Phase 3: Pre-flight checks
+# ── Pre-flight checks ──
 echo "[Entrypoint] Python: $(python --version)"
 echo "[Entrypoint] xvfb-run: $(which xvfb-run)"
 
@@ -64,12 +77,11 @@ if command -v Xvfb >/dev/null 2>&1; then
     sleep 1
 fi
 
-# Start uvicorn in background so we can check if it's alive
+# Start uvicorn in background and wait for it
 python -m uvicorn api.server:app --host 0.0.0.0 --port "$PORT" --log-level info &
 UVICORN_PID=$!
 echo "[Entrypoint] uvicorn PID: $UVICORN_PID"
 
-# Wait and check
 for i in $(seq 1 30); do
     sleep 2
     if curl -sf http://localhost:$PORT/api/plugins > /dev/null 2>&1; then

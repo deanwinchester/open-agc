@@ -3073,20 +3073,17 @@ class UpgradeRequest(BaseModel):
 
 @app.post("/api/upgrade")
 async def trigger_upgrade(req: UpgradeRequest = None):
-    """Trigger a source-code upgrade. Docker-only — downloads and installs the
-    latest release tarball, then exits (container restarts with new code)."""
+    """Trigger a source-code upgrade. Downloads and applies latest code in-place."""
     try:
         from core.auto_upgrade import AutoUpgrader
         upgrader = AutoUpgrader()
-        upgrader.latest_version = upgrader.fetch_latest_release()
-        if not upgrader.latest_version:
+        if not upgrader.fetch_latest_release():
             raise HTTPException(status_code=502, detail="无法连接到 GitHub，请检查网络")
         if not upgrader.is_upgrade_available():
             return {"status": "up_to_date", "message": f"已是最新版本 v{upgrader.current_version}"}
-        # Run upgrade synchronously — this exits the process
-        success = upgrader.check_and_upgrade()
+        success = upgrader.perform_upgrade()
         if success:
-            return {"status": "upgrading", "message": f"正在升级到 v{upgrader.latest_version}，即将重启..."}
+            return {"status": "upgraded", "message": f"已升级到 v{upgrader.latest_version}，无需重启"}
         else:
             raise HTTPException(status_code=500, detail="升级失败，请查看日志")
     except HTTPException:
