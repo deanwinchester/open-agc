@@ -3095,6 +3095,46 @@ async def trigger_upgrade(req: UpgradeRequest = None):
         raise HTTPException(status_code=500, detail=f"升级异常: {str(e)}")
 
 
+# ── Log Viewer ──
+
+_AGENT_LOG_FILE = None
+
+def _ensure_agent_log() -> str:
+    global _AGENT_LOG_FILE
+    if _AGENT_LOG_FILE is None:
+        from core.paths import get_data_dir
+        _AGENT_LOG_FILE = os.path.join(get_data_dir(), "logs", "agent.log")
+        os.makedirs(os.path.dirname(_AGENT_LOG_FILE), exist_ok=True)
+    return _AGENT_LOG_FILE
+
+def log_agent_error(msg: str):
+    """Write an agent error to the persistent log file and rotate at 1MB."""
+    log_path = _ensure_agent_log()
+    try:
+        if os.path.exists(log_path) and os.path.getsize(log_path) > 1024 * 1024:
+            os.rename(log_path, log_path + ".old")
+        with open(log_path, "a", encoding="utf-8") as f:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
+
+@app.get("/api/logs")
+async def get_logs(lines: int = 200):
+    """Return the last N lines of the agent log file."""
+    log_path = _ensure_agent_log()
+    if not os.path.exists(log_path):
+        return {"lines": [], "total": 0}
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        all_lines = content.split("\n")
+        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        return {"lines": tail, "total": len(all_lines)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── SPA fallback (must be the LAST route; all API routes defined above) ──
 
 @app.get("/{full_path:path}")
@@ -3804,6 +3844,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 traceback.print_exc()
                 err_str = str(e).lower()
                 # Log error to stderr only — don't pollute the chat session
+                log_agent_error(str(e))
                 print(f"[Agent Error] {e}")
                 # Only show API key hint in chat (actionable by user); hide internal errors
                 if "api_key" in err_str or "authentication" in err_str or "not found" in err_str or "key" in err_str:

@@ -168,6 +168,16 @@
                     </svg>
                     <span>插件管理</span>
                 </nav>
+                <nav class="nav-item" data-view="logs" id="nav-logs">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <polyline points="14 2 14 8 20 8"></polyline>
+                        <line x1="16" y1="13" x2="8" y2="13"></line>
+                        <line x1="16" y1="17" x2="8" y2="17"></line>
+                        <polyline points="10 9 9 9 8 9"></polyline>
+                    </svg>
+                    <span>日志查看</span>
+                </nav>
 
                 <div class="sidebar-divider"></div>
 
@@ -900,6 +910,20 @@
 
             <!-- Training views moved to plugins/open-agc-train/static/plugin.js -->
             <!-- ============ View: Downloads ============ -->
+            <!-- ============ View: Logs ============ -->
+            <div class="view" id="view-logs">
+                <header class="view-header" style="display:flex; align-items:center; justify-content:space-between;">
+                    <div>
+                        <h1>📋 日志查看</h1>
+                        <p class="view-desc">Agent 运行日志，最近 200 条</p>
+                    </div>
+                    <button class="btn btn-primary" id="log-refresh-btn" style="font-size:0.8rem; padding:0.3rem 0.8rem;">🔄 刷新</button>
+                </header>
+                <div class="log-container" style="flex:1; overflow:auto; padding:0 2rem 1rem 2rem;">
+                    <pre id="log-content" style="background:var(--bg-inner); border:1px solid var(--border-color); border-radius:8px; padding:1rem; font-size:0.78rem; line-height:1.5; overflow:auto; min-height:300px; white-space:pre-wrap; word-break:break-all;"></pre>
+                </div>
+            </div>
+
             <div class="view" id="view-downloads">
                 <header class="view-header">
                     <h1>下载管理</h1>

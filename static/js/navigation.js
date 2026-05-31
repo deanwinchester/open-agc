@@ -30,6 +30,7 @@ function _activateView(viewId) {
   if (viewId === 'settings-plugins') w.loadPluginManager?.();
   if (viewId === 'tasks') w.loadTasks?.();
   if (viewId === 'downloads') w.loadDownloadHistory?.();
+  if (viewId === 'logs') w.loadLogs?.();
 }
 
 // Public: switch to a view, updating browser history
@@ -48,7 +49,7 @@ function _viewFromPath() {
   const viewId = path.replace(/^\//, '').split('/')[0]; // first segment only
   // Map known views; fallback to chat for root or unknown paths
   const known = ['chat', 'tasks', 'settings-models', 'settings-skills', 'settings-mcp',
-                 'downloads', 'settings-plugins'];
+                 'downloads', 'settings-plugins', 'logs'];
   return known.includes(viewId) ? viewId : 'chat';
 }
 
