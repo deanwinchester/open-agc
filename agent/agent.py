@@ -468,7 +468,35 @@ class OpenAGCAgent:
         prompt = self.system_prompt_base.replace("{current_time}", current_time).replace("{current_date}", current_date)
         prompt = prompt.replace("{cwd_dir}", self.sandbox_dir or os.getcwd())
         prompt = prompt.replace("{system_env}", _detect_system_env())
-        
+
+        # Inject all available tool names (tool schemas loaded progressively for non-core tools)
+        tool_list_lines = ["\n## 全量工具列表\n"]
+        tool_list_lines.append("以下是你可用的所有工具（核心工具已加载完整用法，其余工具通过 search_available_tools 加载完整用法）：\n")
+        # Group core vs extended
+        CORE_NAMES = {"execute_shell", "read_file", "write_file", "edit_file",
+                       "search_file_content", "find_files", "execute_python",
+                       "search_web", "manage_memory", "ask_user_question",
+                       "search_history", "queue_download", "pause_and_wait",
+                       "self_review", "search_available_tools", "configure_system"}
+        core_lines = []
+        ext_lines = []
+        for name, tool in sorted(self.full_available_tools.items()):
+            label = self.tool_display_names.get(name, name)
+            is_core = name in CORE_NAMES
+            prefix = "✅" if is_core else "🔧"
+            desc = getattr(tool, 'description', '')[:60]
+            line = f"  {prefix} {label}"
+            if desc:
+                line += f" — {desc}"
+            (core_lines if is_core else ext_lines).append(line)
+        if core_lines:
+            tool_list_lines.append("核心工具（已就绪）：")
+            tool_list_lines.extend(core_lines)
+        if ext_lines:
+            tool_list_lines.append("扩展工具（需通过 search_available_tools 唤醒）：")
+            tool_list_lines.extend(ext_lines)
+        prompt += "\n".join(tool_list_lines)
+
         # Inject Episodic Memory Context
         if memory_context:
             prompt += f"\n--- 历史记忆回溯 (Episodic Memory) ---\n{memory_context}\n"
