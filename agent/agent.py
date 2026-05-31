@@ -455,8 +455,39 @@ class OpenAGCAgent:
         # Prepare OpenAI format tool schema
         self.tool_schemas = [tool.get_openai_schema() for tool in self.available_tools.values()]
 
+        # Refresh system prompt with full tool list now that full_available_tools is ready
+        self.messages[0]["content"] = self._build_system_prompt()
+
         # Track which skills were injected in the current turn for feedback loop
         self._active_skills: List[str] = []
+
+    def _build_tool_list_section(self) -> str:
+        """Build a markdown section listing all available tools (core + extended)."""
+        lines = ["\n## 全量工具列表\n",
+                 "以下是你可用的所有工具"
+                 "（核心工具已加载完整用法，其余工具通过 search_available_tools 加载完整用法）：\n"]
+        CORE_NAMES = {"execute_shell", "read_file", "write_file", "edit_file",
+                       "search_file_content", "find_files", "execute_python",
+                       "search_web", "manage_memory", "ask_user_question",
+                       "search_history", "queue_download", "pause_and_wait",
+                       "self_review", "search_available_tools", "configure_system"}
+        core_items = []
+        ext_items = []
+        for name, tool in sorted(self.full_available_tools.items()):
+            label = self.tool_display_names.get(name, name)
+            is_core = name in CORE_NAMES
+            desc = getattr(tool, 'description', '')[:60]
+            item = f"  {'✅' if is_core else '🔧'} {label}"
+            if desc:
+                item += f" — {desc}"
+            (core_items if is_core else ext_items).append(item)
+        if core_items:
+            lines.append("核心工具（已就绪）：")
+            lines.extend(core_items)
+        if ext_items:
+            lines.append("扩展工具（需通过 search_available_tools 唤醒）：")
+            lines.extend(ext_items)
+        return "\n".join(lines)
 
     def _build_system_prompt(self, memory_context: str = "", skill_context: str = "",
                              experience_context: str = "", kg_context: str = "") -> str:
@@ -469,33 +500,9 @@ class OpenAGCAgent:
         prompt = prompt.replace("{cwd_dir}", self.sandbox_dir or os.getcwd())
         prompt = prompt.replace("{system_env}", _detect_system_env())
 
-        # Inject all available tool names (tool schemas loaded progressively for non-core tools)
-        tool_list_lines = ["\n## 全量工具列表\n"]
-        tool_list_lines.append("以下是你可用的所有工具（核心工具已加载完整用法，其余工具通过 search_available_tools 加载完整用法）：\n")
-        # Group core vs extended
-        CORE_NAMES = {"execute_shell", "read_file", "write_file", "edit_file",
-                       "search_file_content", "find_files", "execute_python",
-                       "search_web", "manage_memory", "ask_user_question",
-                       "search_history", "queue_download", "pause_and_wait",
-                       "self_review", "search_available_tools", "configure_system"}
-        core_lines = []
-        ext_lines = []
-        for name, tool in sorted(self.full_available_tools.items()):
-            label = self.tool_display_names.get(name, name)
-            is_core = name in CORE_NAMES
-            prefix = "✅" if is_core else "🔧"
-            desc = getattr(tool, 'description', '')[:60]
-            line = f"  {prefix} {label}"
-            if desc:
-                line += f" — {desc}"
-            (core_lines if is_core else ext_lines).append(line)
-        if core_lines:
-            tool_list_lines.append("核心工具（已就绪）：")
-            tool_list_lines.extend(core_lines)
-        if ext_lines:
-            tool_list_lines.append("扩展工具（需通过 search_available_tools 唤醒）：")
-            tool_list_lines.extend(ext_lines)
-        prompt += "\n".join(tool_list_lines)
+        # Inject all available tool names (built after full_available_tools is populated)
+        if hasattr(self, 'full_available_tools'):
+            prompt += self._build_tool_list_section()
 
         # Inject Episodic Memory Context
         if memory_context:
