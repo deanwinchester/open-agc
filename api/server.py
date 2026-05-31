@@ -4616,8 +4616,21 @@ def start_background_monitor():
             _t.sleep(10)
     threading.Thread(target=monitor_loop, daemon=True).start()
 
+def _heartbeat_plan_context(plan: dict) -> str:
+    """Mechanically extract a summary from a plan for heartbeat LLM context."""
+    total = len(plan.get("steps", []))
+    done = sum(1 for s in plan["steps"] if s["status"] == "done")
+    doing = [s for s in plan["steps"] if s["status"] == "doing"]
+    lines = [f"目标: {plan.get('goal', '')}", f"步骤进度: {done}/{total}"]
+    for s in doing:
+        lines.append(f"当前执行中: {s.get('desc', '')}")
+        if s.get("result"):
+            lines.append(f"  已有结果: {s['result'][:200]}")
+    return "\n".join(lines)
+
+
 def start_guardian_loop():
-    """Background guardian (长驻看守) — runs heartbeats server-side, only when no WS connected."""
+    """Background guardian (长驻看守) — Phase 1: lightweight LLC check / Phase 2: full agent resume."""
     def _guardian_loop():
         while True:
             try:
@@ -4629,59 +4642,151 @@ def start_guardian_loop():
                 interval = cfg.get("heartbeat_interval", 60)
 
                 # If any WebSocket is connected, let the WS handler handle heartbeats
-                # (it has access to live session context and is more accurate)
                 if connected_websockets:
                     _time.sleep(max(interval, 10))
                     continue
 
-                guardian_query = (
-                    "【系统指令】后台巡视时间已到。请检查系统状态、后台任务或"
-                    "之前的计划是否需要继续。如果一切正常无需操作，"
-                    "请且仅回复 'HEARTBEAT_OK'。"
-                )
-
-                # Load session context (same as WS handler does for heartbeats)
                 bg_session_id = 1
-                session_history = []
+
+                # ── Phase 1: Lightweight heartbeat ──
+                # Build minimal context: identity + time + todos + plan summaries
+                hb_context = "你是 Open-AGC 的巡检助手。"
+                hb_context += f"\n当前时间：{_time.strftime('%Y-%m-%d %H:%M')}\n"
+
+                # Load todos
                 try:
-                    conn = sqlite3.connect(DB_PATH)
-                    conn.row_factory = sqlite3.Row
-                    rows = conn.execute(
-                        "SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 20) ORDER BY id ASC",
-                        (bg_session_id,)
-                    ).fetchall()
-                    conn.close()
-                    for row in rows:
-                        role = row["role"]
-                        if role == "tool_step":
-                            continue
-                        if role == "agent":
-                            role = "assistant"
-                        session_history.append({"role": role, "content": row["content"]})
+                    from tools.task_plan import load_todos as _hb_load_todos, format_todo_list_for_prompt as _hb_fmt_todos
+                    _hb_todos = _hb_load_todos()
+                    _hb_todo_text = _hb_fmt_todos(_hb_todos)
+                    if _hb_todo_text:
+                        hb_context += f"\n{_hb_todo_text}\n"
                 except Exception:
                     pass
 
-                # Create a lightweight agent with session context
-                from agent.agent import OpenAGCAgent
-                agent = OpenAGCAgent(model=cfg.get("default_model", "moonshot/kimi-latest"))
-                if session_history:
-                    agent.messages.extend(session_history)
+                # Load plan summaries for active todos
+                try:
+                    from tools.task_plan import load_plan as _hb_load_plan
+                    from core.paths import get_data_dir
+                    _plans_dir = os.path.join(get_data_dir(), "plans")
+                    if os.path.isdir(_plans_dir):
+                        for fn in os.listdir(_plans_dir):
+                            if fn.startswith("plan_") and fn.endswith(".json"):
+                                pid = fn.replace("plan_", "").replace(".json", "")
+                                _p = _hb_load_plan(plan_id=pid)
+                                if _p:
+                                    hb_context += f"\n## 关联任务计划\n{_heartbeat_plan_context(_p)}\n"
+                except Exception:
+                    pass
 
-                # Run heartbeat inline (no _run_background_task — it rewrites queries as resume)
-                response = agent.run_turn(
-                    guardian_query, verbose=False,
-                    progress_callback=lambda e: None,
-                    skip_rag=True
+                hb_context += (
+                    "\n请判断：如果一切正常无需操作，仅回复 HEARTBEAT_OK。\n"
+                    "如果待办项需要恢复执行，回复 RESUME:{id}。\n"
+                    "如果某项反复失败需要标记受阻，回复 STUCK:{id}。\n"
                 )
 
-                if response and response.strip() != "HEARTBEAT_OK":
-                    _broadcast_to_websockets({
-                        "type": "message",
-                        "role": "agent",
-                        "background": True,
-                        "session_id": bg_session_id,
-                        "content": response[:500]
-                    })
+                # Call LLM directly (no tools, no chat history, no full system prompt)
+                from core.llm_client import LLMClient
+                _hb_llm = LLMClient(default_model=cfg.get("default_model", "moonshot/kimi-latest"))
+                _hb_response, _ = _hb_llm.chat(
+                    [{"role": "system", "content": hb_context}]
+                )
+                _hb_reply = _hb_response.choices[0].message.content or ""
+
+                # ── Parse heartbeat response ──
+                if _hb_reply.strip().startswith("HEARTBEAT_OK"):
+                    # All good, nothing to do
+                    pass
+
+                elif _hb_reply.strip().startswith("RESUME:"):
+                    # Phase 2: Full agent resume
+                    try:
+                        resume_id = int(_hb_reply.strip().split(":")[1].split()[0])
+                        _hb_model = cfg.get("default_model", "moonshot/kimi-latest")
+
+                        # Load plan for context
+                        _hb_plan_context = ""
+                        try:
+                            for pid in _hb_plan_ids:
+                                _p = _hb_load_plan(plan_id=pid)
+                                if _p:
+                                    _hb_plan_context += f"\n{_heartbeat_plan_context(_p)}\n"
+                        except Exception:
+                            pass
+
+                        # Create full agent with session history
+                        from agent.agent import OpenAGCAgent
+                        _hb_agent = OpenAGCAgent(model=_hb_model)
+                        try:
+                            conn = sqlite3.connect(DB_PATH)
+                            conn.row_factory = sqlite3.Row
+                            rows = conn.execute(
+                                "SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 15) ORDER BY id ASC",
+                                (bg_session_id,)
+                            ).fetchall()
+                            conn.close()
+                            _hb_session = []
+                            for row in rows:
+                                r = row["role"]
+                                if r == "tool_step":
+                                    continue
+                                if r == "agent":
+                                    r = "assistant"
+                                _hb_session.append({"role": r, "content": row["content"]})
+                            if _hb_session:
+                                _hb_agent.messages.extend(_hb_session)
+                        except Exception:
+                            pass
+
+                        # Inject plan context into system prompt
+                        if _hb_plan_context and _hb_agent.messages and _hb_agent.messages[0]["role"] == "system":
+                            _hb_agent.messages[0]["content"] += "\n\n## 当前任务计划\n" + _hb_plan_context
+
+                        # Add todo list
+                        try:
+                            _hb_todo_text = _hb_fmt_todos(_hb_todos)
+                            if _hb_todo_text and _hb_agent.messages and _hb_agent.messages[0]["role"] == "system":
+                                _hb_agent.messages[0]["content"] += "\n\n" + _hb_todo_text
+                        except Exception:
+                            pass
+
+                        resume_query = f"请继续执行待办事项 #{resume_id}：{_hb_todos['items'][resume_id-1]['desc']}" if resume_id <= len(_hb_todos.get("items",[])) else ""
+                        if resume_query:
+                            # Get plan detail for the specific todo item
+                            try:
+                                _hb_plan_text = ""
+                                for pid in _hb_plan_ids:
+                                    _p = _hb_load_plan(plan_id=pid)
+                                    if _p:
+                                        from tools.task_plan import format_plan_for_prompt as _hb_fmt_plan
+                                        _hb_plan_text += "\n" + _hb_fmt_plan(_p)
+                                if _hb_plan_text:
+                                    resume_query += f"\n\n## 关联任务计划详情\n{_hb_plan_text}"
+                            except Exception:
+                                pass
+
+                            print(f"[Guardian] Phase 2: Resuming todo #{resume_id}")
+                            _hb_agent.run_turn(
+                                resume_query, verbose=False,
+                                progress_callback=lambda e: None,
+                                skip_rag=True
+                            )
+                    except Exception as resume_err:
+                        print(f"[Guardian] Phase 2 error: {resume_err}")
+
+                elif _hb_reply.strip().startswith("STUCK:"):
+                    # Mark item as stuck in todos
+                    try:
+                        stuck_id = int(_hb_reply.strip().split(":")[1].split()[0])
+                        from tools.task_plan import load_todos as _hb_load_t2, save_todos as _hb_save_t2
+                        _hb_t2 = _hb_load_t2()
+                        for item in _hb_t2["items"]:
+                            if item["id"] == stuck_id and item["status"] == "doing":
+                                item["status"] = "stuck"
+                                item["updated"] = _time.strftime("%Y-%m-%d %H:%M")
+                                _hb_save_t2(_hb_t2)
+                                print(f"[Guardian] Todo #{stuck_id} marked stuck")
+                    except Exception:
+                        pass
 
                 _time.sleep(max(interval, 10))
             except Exception as e:
@@ -4689,7 +4794,7 @@ def start_guardian_loop():
                 _time.sleep(30)
 
     threading.Thread(target=_guardian_loop, daemon=True).start()
-    print("[Guardian] Started (deferring to WS heartbeat when connected)")
+    print("[Guardian] Started (Phase 1 + Phase 2)")
 
 # Start background listeners
 start_background_monitor()

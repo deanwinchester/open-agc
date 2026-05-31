@@ -110,10 +110,79 @@ def format_plan_for_prompt(plan: dict) -> str:
     return "\n".join(lines)
 
 
+# ── Todo List ──
+
+_MAX_TODOS = 10
+_MAX_TODO_DESC = 100
+
+
+def _get_todos_path():
+    from core.paths import get_data_dir
+    d = get_data_dir()
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "todos.json")
+
+
+def load_todos() -> dict:
+    path = _get_todos_path()
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"items": []}
+
+
+def save_todos(data: dict) -> bool:
+    path = _get_todos_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def _new_todo_id(items: list) -> int:
+    return max((i.get("id", 0) for i in items), default=0) + 1
+
+
+def format_todo_list_for_prompt(todos: dict = None) -> str:
+    """Format todos as a compact section for system prompt injection."""
+    if todos is None:
+        todos = load_todos()
+    items = todos.get("items", [])
+    if not items:
+        return ""
+    lines = ["## 当前待办事项"]
+    icons = {"todo": "⬜", "doing": "🔄", "done": "✅", "stuck": "🔴"}
+    for item in items:
+        icon = icons.get(item.get("status", "todo"), "⬜")
+        desc = item.get("desc", "")[:_MAX_TODO_DESC]
+        updated = item.get("updated", "")
+        extra = f"（{updated}）" if updated else ""
+        lines.append(f"  {icon} {desc} {extra}".strip())
+    return "\n".join(lines)
+
+
+def _heartbeat_plan_context(plan: dict) -> str:
+    """Mechanically extract a summary from a plan for heartbeat LLM context."""
+    total = len(plan.get("steps", []))
+    done = sum(1 for s in plan["steps"] if s["status"] == "done")
+    doing = [s for s in plan["steps"] if s["status"] == "doing"]
+    lines = [f"目标: {plan.get('goal', '')}", f"步骤进度: {done}/{total}"]
+    for s in doing:
+        lines.append(f"当前执行中: {s.get('desc', '')}")
+        if s.get("result"):
+            lines.append(f"  已有结果: {s['result'][:200]}")
+    return "\n".join(lines)
+
+
 class TaskPlanTool(BaseTool):
     name: str = "manage_task_plan"
     description: str = (
-        "管理任务计划。用于制定任务步骤、跟踪进度、记录关键结果。\n\n"
+        "管理任务计划和待办事项。用于制定任务步骤、跟踪进度、记录关键结果。\n\n"
         "适用场景：\n"
         "- 涉及多步骤的复杂任务（爬虫、批量下载、多文件处理等）\n"
         "- 可能会被中断的长时间任务\n"
@@ -122,7 +191,15 @@ class TaskPlanTool(BaseTool):
         "- create：根据 goal 和 steps 创建新计划，系统自动生成 plan_id\n"
         "- update：更新步骤状态(done/doing/todo)、添加关键发现、记录创建的文件\n"
         "- show：查看当前计划内容和进度\n"
-        "- check：检查是否所有步骤已完成，未完成时禁止结束任务"
+        "- check：检查是否所有步骤已完成，未完成时禁止结束任务\n\n"
+        "待办事项操作：\n"
+        "- todo_add(desc=...)：添加一条待办事项（最多 10 项）\n"
+        "- todo_start(id=N)：标记待办为执行中\n"
+        "- todo_done(id=N)：标记待办为已完成\n"
+        "- todo_stuck(id=N, reason=...)：标记待办为受阻\n"
+        "- todo_reset(id=N)：将完成或受阻的待办重置为待执行\n"
+        "- todo_list()：查看当前所有待办事项\n"
+        "注意：创建 plan 时请同时添加对应的 todo 项。所有复杂任务都应该有 todo。"
     )
 
     def execute(self, action: str = "show", goal: str = "",
@@ -130,9 +207,80 @@ class TaskPlanTool(BaseTool):
                 step_status: str = "", step_result: str = "",
                 key_findings: list = None,
                 created_files: list = None,
-                task_id: int = None, **kwargs) -> str:
+                task_id: int = None,
+                desc: str = "", reason: str = "",
+                todo_id: int = None,
+                **kwargs) -> str:
         steps = steps or []
 
+        # ── Todo operations ──
+        if action == "todo_add":
+            if not desc:
+                return "[TaskPlan] todo_add 需要 desc 参数。"
+            todos = load_todos()
+            if len(todos["items"]) >= _MAX_TODOS:
+                return f"[TaskPlan] ⚠️ 待办事项已达上限 {_MAX_TODOS} 项，请先完成一些再添加。"
+            if len(desc) > _MAX_TODO_DESC:
+                desc = desc[:_MAX_TODO_DESC]
+            todos["items"].append({
+                "id": _new_todo_id(todos["items"]),
+                "desc": desc,
+                "status": "todo",
+                "updated": time.strftime("%Y-%m-%d %H:%M"),
+            })
+            save_todos(todos)
+            return f"[TaskPlan] ✅ 已添加待办: {desc}\n\n{format_todo_list_for_prompt(todos)}"
+
+        if action == "todo_start":
+            todos = load_todos()
+            for item in todos["items"]:
+                if item["id"] == todo_id:
+                    item["status"] = "doing"
+                    item["updated"] = time.strftime("%Y-%m-%d %H:%M")
+                    save_todos(todos)
+                    return f"[TaskPlan] 🔄 已开始: {item['desc']}\n\n{format_todo_list_for_prompt(todos)}"
+            return f"[TaskPlan] ⚠️ 未找到 id={todo_id} 的待办项。"
+
+        if action == "todo_done":
+            todos = load_todos()
+            for item in todos["items"]:
+                if item["id"] == todo_id:
+                    item["status"] = "done"
+                    item["updated"] = time.strftime("%Y-%m-%d %H:%M")
+                    save_todos(todos)
+                    return f"[TaskPlan] ✅ 已完成: {item['desc']}\n\n{format_todo_list_for_prompt(todos)}"
+            return f"[TaskPlan] ⚠️ 未找到 id={todo_id} 的待办项。"
+
+        if action == "todo_stuck":
+            todos = load_todos()
+            for item in todos["items"]:
+                if item["id"] == todo_id:
+                    item["status"] = "stuck"
+                    item["updated"] = time.strftime("%Y-%m-%d %H:%M")
+                    if reason:
+                        item["reason"] = reason[:_MAX_TODO_DESC]
+                    save_todos(todos)
+                    return f"[TaskPlan] 🔴 已标记受阻: {item['desc']}（{reason or '无原因'}）\n\n{format_todo_list_for_prompt(todos)}"
+            return f"[TaskPlan] ⚠️ 未找到 id={todo_id} 的待办项。"
+
+        if action == "todo_reset":
+            todos = load_todos()
+            for item in todos["items"]:
+                if item["id"] == todo_id:
+                    item["status"] = "todo"
+                    item["updated"] = time.strftime("%Y-%m-%d %H:%M")
+                    item.pop("reason", None)
+                    save_todos(todos)
+                    return f"[TaskPlan] ⬜ 已重置: {item['desc']}\n\n{format_todo_list_for_prompt(todos)}"
+            return f"[TaskPlan] ⚠️ 未找到 id={todo_id} 的待办项。"
+
+        if action == "todo_list":
+            todos = load_todos()
+            if not todos["items"]:
+                return "[TaskPlan] 📋 当前无待办事项。"
+            return f"[TaskPlan] 📋 待办事项\n\n{format_todo_list_for_prompt(todos)}"
+
+        # ── Plan operations ──
         if action == "create":
             if not goal:
                 return "[TaskPlan] 创建计划需要 goal 参数（任务目标）。"
@@ -263,19 +411,19 @@ class TaskPlanTool(BaseTool):
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["create", "update", "show", "check"],
-                            "description": "操作类型：create=创建计划, update=更新进度, show=查看计划, check=检查完成"
+                            "enum": ["create", "update", "show", "check",
+                                     "todo_add", "todo_start", "todo_done",
+                                     "todo_stuck", "todo_reset", "todo_list"],
+                            "description": "操作类型"
                         },
                         "goal": {
                             "type": "string",
-                            "description": "任务目标描述（创建时必填）"
+                            "description": "任务目标描述（create 时必填）"
                         },
                         "steps": {
                             "type": "array",
-                            "items": {
-                                "type": "string"
-                            },
-                            "description": "执行步骤列表（创建时必填）。例如：['分析网站结构', '下载所有页面', '提取数据']"
+                            "items": {"type": "string"},
+                            "description": "执行步骤列表（create 时必填）"
                         },
                         "step_id": {
                             "type": "integer",
@@ -293,7 +441,7 @@ class TaskPlanTool(BaseTool):
                         "key_findings": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "关键发现列表。例如 URL、API 响应、文件路径等"
+                            "description": "关键发现列表"
                         },
                         "created_files": {
                             "type": "array",
@@ -305,6 +453,18 @@ class TaskPlanTool(BaseTool):
                                 }
                             },
                             "description": "创建的文件/文件夹及其用途"
+                        },
+                        "todo_id": {
+                            "type": "integer",
+                            "description": "待办事项 ID（todo_start/done/stuck/reset 时必填）"
+                        },
+                        "desc": {
+                            "type": "string",
+                            "description": "待办事项描述（todo_add 时必填，最长 100 字）"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "受阻原因（todo_stuck 时必填）"
                         }
                     },
                     "required": ["action"]
