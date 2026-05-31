@@ -2939,6 +2939,43 @@ input:checked + .slider::before { transform: translateX(16px); }
 .viz-down   { padding: 1px 0; }
 
 /* ==========================================================================
+   Tool Step Cards (inline message type)
+   ========================================================================== */
+.tool-step-card {
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    background: var(--bg-inner);
+}
+.tool-step-card.done {
+    border-left: 3px solid var(--success-color, #22c55e);
+}
+.tool-step-card.failed {
+    border-left: 3px solid var(--error-color, #ef4444);
+}
+.tool-step-header {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.5rem;
+    cursor: pointer;
+    user-select: none;
+    background: var(--bg-panel);
+}
+.tool-step-header:hover {
+    background: var(--bg-hover, rgba(0,0,0,0.03));
+}
+.tool-step-icon {
+    font-size: 0.85rem;
+    line-height: 1;
+}
+.tool-step-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+/* ==========================================================================
    Mobile Responsive
    ========================================================================== */
 

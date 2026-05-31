@@ -272,16 +272,9 @@ function initApp() {
     // Route progress/message/status events to the correct session
     const evtSession = data.session_id != null ? data.session_id : (data.task_session_id != null ? data.task_session_id : null);
     const isForCurrentSession = evtSession == null || evtSession == state.currentSessionId;
-    // Cache off-session messages in the session chat cache
-    if (evtSession != null && !isForCurrentSession && (data.type === 'message' || data.type === 'progress')) {
-      window._sessionChatCache = window._sessionChatCache || {};
-      // Store raw events for the session — will be replayed on switch
-      if (!window._sessionChatCache['_evt_' + evtSession]) window._sessionChatCache['_evt_' + evtSession] = [];
-      var evtArr = window._sessionChatCache['_evt_' + evtSession];
-      evtArr.push({type: data.type, data: data});
-      if (evtArr.length > 100) evtArr.splice(0, evtArr.length - 50);
-      // Update task badge to show cross-session activity
-      if (data.type === 'progress') updateTaskBadge();
+    // Update task badge for cross-session progress
+    if (evtSession != null && !isForCurrentSession && data.type === 'progress') {
+      updateTaskBadge();
       return;
     }
 
@@ -1096,7 +1089,27 @@ function initApp() {
     }
 
     let formattedContent = content;
-    if (role === 'agent' || role === 'system') {
+    if (role === 'tool_step') {
+      try {
+        var ts = JSON.parse(content);
+        var statusIcon = ts.success ? '✅' : '❌';
+        var statusClass = ts.success ? 'done' : 'failed';
+        var stepLabel = ts.tool_label || ts.tool || '';
+        formattedContent = '<div class="tool-step-card ' + statusClass + '" data-step="' + ts.step + '">'
+          + '<div class="tool-step-header">'
+          + '<span class="tool-step-icon">' + statusIcon + '</span>'
+          + '<span class="tool-step-label">' + escapeHtml(stepLabel) + '</span>'
+          + '<span class="tool-step-toggle" style="margin-left:auto;cursor:pointer;font-size:0.7rem;color:var(--text-secondary);">▼</span>'
+          + '</div>'
+          + '<div class="tool-step-args" style="font-size:0.78rem;padding:0.3rem 0.6rem;background:var(--bg-inner);border-radius:4px;margin:0.3rem 0;overflow-x:auto;white-space:nowrap;">' + escapeHtml(ts.args_preview || '') + '</div>'
+          + '<div class="tool-step-body" style="display:none;font-size:0.78rem;">'
+          + (ts.output ? '<pre class="tool-step-output" style="background:var(--bg-inner);padding:0.4rem;border-radius:4px;overflow-x:auto;max-height:200px;font-size:0.72rem;line-height:1.4;margin:0.3rem 0;">' + escapeHtml(ts.output) + '</pre>' : '')
+          + (ts.result_preview ? '<div class="tool-step-result" style="padding:0.3rem 0;color:var(--text-secondary);">' + escapeHtml(ts.result_preview) + '</div>' : '')
+          + '</div></div>';
+      } catch (e) {
+        formattedContent = content;
+      }
+    } else if (role === 'agent' || role === 'system') {
       formattedContent = marked.parse(content);
     }
 
@@ -1134,6 +1147,17 @@ function initApp() {
       for (let i = 0; i < 50; i++) {
         if (msgs[i] && msgs[i].parentNode) msgs[i].remove();
       }
+    }
+    if (role === 'tool_step') {
+      messageDiv.querySelector('.tool-step-header')?.addEventListener('click', function() {
+        var body = messageDiv.querySelector('.tool-step-body');
+        var toggle = messageDiv.querySelector('.tool-step-toggle');
+        if (body) {
+          var isHidden = body.style.display === 'none' || body.style.display === '';
+          body.style.display = isHidden ? 'block' : 'none';
+          if (toggle) toggle.textContent = isHidden ? '▲' : '▼';
+        }
+      });
     }
     messageDiv.querySelectorAll('pre code').forEach((block) => { hljs.highlightElement(block); });
     scrollToBottom();
@@ -1470,7 +1494,10 @@ function initApp() {
     messageInput.value = '';
     messageInput.style.height = 'auto';
     // If agent is already running, queue as pending message without resetting state
-    if (state.isAgentThinking) return;
+    if (state.isAgentThinking) {
+      showStatus('消息已发送，Agent 忙，稍后处理', 'info');
+      return;
+    }
     // Reset progress state for new turn
     progressInline = null;
     progressStepsEl = null;

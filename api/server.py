@@ -3245,6 +3245,8 @@ async def websocket_endpoint(websocket: WebSocket):
             has_taken_action = False
             agent = None
 
+            # Accumulate shell output per step for tool_step message persistence
+            _step_outputs: dict = {}
             def progress_callback(event: dict):
                 nonlocal has_taken_action, ws_task_id
                 """Thread-safe: push progress events from thread pool into queue."""
@@ -3257,6 +3259,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Record task steps (offset on resume to continue numbering)
                 adjusted_step = event.get("step", 0) + step_offset
                 event["step"] = adjusted_step
+
+                # Accumulate shell output per step for tool_step persistence
+                if event.get("event") == "shell_output":
+                    text = event.get("text", "")
+                    if text:
+                        prev = _step_outputs.get(adjusted_step, "")
+                        _step_outputs[adjusted_step] = (prev + text)[-8000:]  # cap at 8K chars
 
                 if ws_task_id and event.get("event") == "tool_start":
                     try:
@@ -3353,6 +3362,24 @@ async def websocket_endpoint(websocket: WebSocket):
                         conn.close()
                     except Exception as e:
                         print(f"[Task] Failed to update step: {e}")
+
+                # Save tool_step as a message in the chat flow (survives page refresh)
+                if ws_session_id and event.get("event") == "tool_done":
+                    try:
+                        import json as _js
+                        step_output = _step_outputs.pop(adjusted_step, "")
+                        ts_content = _js.dumps({
+                            "step": adjusted_step,
+                            "tool": event.get("tool", ""),
+                            "tool_label": event.get("tool_label", ""),
+                            "args_preview": event.get("args_preview", ""),
+                            "result_preview": event.get("result_preview", ""),
+                            "success": event.get("success", True),
+                            "output": step_output[:5000],
+                        }, ensure_ascii=False)
+                        save_message("tool_step", ts_content, ws_session_id)
+                    except Exception as e:
+                        print(f"[Task] Failed to save tool_step message: {e}")
 
                 # Attach task_id to the event so frontend can track it
                 if ws_task_id:
