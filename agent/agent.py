@@ -41,6 +41,7 @@ from tools.mcp_tool import get_mcp_manager
 from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused, SearchHistoryTool, PauseAndWaitTool, TaskPaused
 from tools.sandbox import EnterWorktreeTool, ExitWorktreeTool
 from tools.self_review import SelfReviewTool
+from tools.task_plan import TaskPlanTool, format_plan_for_prompt, load_plan
 from tools.system_config import ConfigureSystemTool
 from tools.plugin_dev import DevelopPluginTool
 
@@ -304,6 +305,16 @@ class OpenAGCAgent:
             f"优先使用 browser_automation（虚拟浏览器）工具的 upload 动作将文件填入网页。"
             f"如果遇到必须通过操作系统原生文件选择框处理的情况，"
             f"可临时使用 computer_control（键鼠控制工具）来操作系统的上传弹窗。\n"
+            f"\n## 任务计划管理\n"
+            f"对于涉及多个步骤的复杂任务（如爬虫、批量下载、多文件处理），应使用 manage_task_plan 工具管理任务进度：\n"
+            f"1. 分析需求后，调用 manage_task_plan(create) 制定步骤和目标\n"
+            f"2. 每完成一个重要步骤，调用 manage_task_plan(update) 标记完成、记录关键结果\n"
+            f"3. 发现重要中间数据（URL、API 响应、文件路径等），记入 key_findings\n"
+            f"4. 创建文件/文件夹时，注明用途以便后续理解\n"
+            f"5. 任务中断恢复时，先调用 manage_task_plan(show) 了解当前进展\n"
+            f"6. 认为自己完成任务时，必须先调用 manage_task_plan(check) 确认没有遗漏步骤\n"
+            f"7. 只有 check 通过后才能结束任务——禁止擅自结束未完成的任务\n"
+            f"注意：简单的一次性任务（单条命令、查询信息等）不需要创建计划。\n"
             f"\n# 记忆与技能系统\n"
             f"\n## 记忆系统\n"
             f"你拥有智能记忆系统。每次对话开始时，系统会自动检索并展示过去交互中的相关记忆。"
@@ -370,6 +381,7 @@ class OpenAGCAgent:
             "self_review": SelfReviewTool(),
             "configure_system": ConfigureSystemTool(),
             "develop_plugin": DevelopPluginTool(),
+            "manage_task_plan": TaskPlanTool(),
         }
 
         # Tool display names (Chinese-friendly)
@@ -399,6 +411,7 @@ class OpenAGCAgent:
             "self_review": "自我审查任务进度",
             "configure_system": "系统配置管理",
             "develop_plugin": "插件开发",
+            "manage_task_plan": "管理任务计划",
         }
 
         # Load auto-generated tools (persisted from previous sessions)
@@ -433,7 +446,8 @@ class OpenAGCAgent:
         CORE_TOOL_NAMES = {"execute_shell", "manage_memory", "read_file", "write_file", "edit_file",
                            "search_file_content", "find_files", "search_available_tools",
                            "ask_user_question", "search_history", "queue_download", "pause_and_wait",
-                           "execute_python", "search_web", "self_review", "configure_system"}
+                           "execute_python", "search_web", "self_review", "configure_system",
+                           "manage_task_plan"}
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
 
         # Adaptive resident: auto-load frequently used non-core tools
@@ -1483,12 +1497,22 @@ class OpenAGCAgent:
 
         # Ensure System Prompt is always fresh and has the latest MEMORY.md and episodic context
         if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = self._build_system_prompt(
+            system_content = self._build_system_prompt(
                 memory_context=memory_context,
                 skill_context=skill_context,
                 experience_context=experience_context,
                 kg_context=kg_context,
             )
+            # Inject task plan if task_id is set
+            if self.task_id:
+                try:
+                    from tools.task_plan import load_plan as _load_plan, format_plan_for_prompt as _fmt_plan
+                    _plan = _load_plan(plan_id=None, task_id=self.task_id)
+                    if _plan:
+                        system_content += "\n\n" + _fmt_plan(_plan)
+                except Exception:
+                    pass
+            self.messages[0]["content"] = system_content
 
         # Sub-agent delegation for complex tasks
         if self._should_delegate(user_input):
