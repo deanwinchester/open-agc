@@ -1091,6 +1091,8 @@ _background_agents: dict = {}  # {task_id: OpenAGCAgent} — background tasks fo
 
 _session_enabled_tools: dict = {}  # {session_id: set(tool_names)} — progressive tool persistence
 
+_guardian_resume_lock = threading.Lock()  # Prevents concurrent Phase 2 executions
+
 def _broadcast_to_websockets(data: dict):
     """Send data to all connected WebSocket clients."""
     import asyncio
@@ -4252,7 +4254,8 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         _background_agents.pop(task_id, None)
 
 def start_task_scheduler():
-    """Background thread that handles scheduled tasks and long-run auto-resume."""
+    """Background thread that handles scheduled tasks only.
+    Auto-resume is handled by the guardian loop (Phase 1 + Phase 2)."""
     def scheduler_loop():
         print("[TaskScheduler] Started")
         while True:
@@ -4293,52 +4296,6 @@ def start_task_scheduler():
                         daemon=True
                     ).start()
 
-
-                # 2. Auto-resume interrupted tasks (skip user interrupts)
-                cursor.execute(
-                    "SELECT id, title, user_query, status, interruption_reason, resume_count, "
-                    "max_resume_count, updated_at, task_type FROM tasks "
-                    "WHERE status='interrupted' AND interruption_reason != 'user' "
-                    "AND resume_count < max_resume_count"
-                )
-                resume_candidates = cursor.fetchall()
-
-                for task in resume_candidates:
-                    task_id = task["id"]
-                    rc = task["resume_count"]
-
-                    # Check backoff: has enough time passed since last update?
-                    if not _is_backoff_elapsed(task["updated_at"], rc):
-                        continue
-
-                    # Check progress evidence
-                    has_progress = _has_recent_progress(task_id)
-                    is_longrun = task["task_type"] in ("longrun", "heartbeat", "scheduled")
-
-                    # Dynamic max_resume_count
-                    effective_max = _MAX_RESUME_WITH_PROGRESS if has_progress else _MAX_RESUME_NO_PROGRESS
-                    if not is_longrun and not has_progress:
-                        effective_max = 3  # quick fail for stuck oneshot tasks
-
-                    if rc >= effective_max:
-                        if not has_progress and not is_longrun:
-                            update_task_status(task_id, "stuck",
-                                "任务无进展，已自动标记为停滞",
-                                interruption_reason="no_progress")
-                            print(f"[TaskScheduler] Task #{task_id} marked stuck (no progress)")
-                        continue
-
-                    print(f"[TaskScheduler] Auto-resuming task #{task_id} "
-                          f"(resume #{rc + 1}/{effective_max}, progress={has_progress})")
-
-                    increment_task_resume(task_id)
-                    ctx = get_task_context(task_id)
-
-                    threading.Thread(
-                        target=_run_background_task,
-                        args=(task_id, task["user_query"], ctx, True),
-                        daemon=True
-                    ).start()
 
                 conn.close()
             except Exception as e:
@@ -4698,80 +4655,161 @@ def start_guardian_loop():
                     pass
 
                 elif _hb_reply.strip().startswith("RESUME:"):
-                    # Phase 2: Full agent resume
+                    # ── Layer 0: Lock ──
+                    if not _guardian_resume_lock.acquire(blocking=False):
+                        print("[Guardian] Phase 2: lock held, skipping")
+                        _time.sleep(max(interval, 10))
+                        continue
+
                     try:
                         resume_id = int(_hb_reply.strip().split(":")[1].split()[0])
-                        _hb_model = cfg.get("default_model", "moonshot/kimi-latest")
 
-                        # Load plan for context
-                        _hb_plan_context = ""
+                        # ── Layer 1: Re-read todos, confirm stale ──
+                        from tools.task_plan import load_todos as _hb_reload_todos
+                        _hb_current_todos = _hb_reload_todos()
+                        _hb_target = None
+                        for item in _hb_current_todos.get("items", []):
+                            if item["id"] == resume_id:
+                                _hb_target = item
+                                break
+                        if not _hb_target:
+                            print(f"[Guardian] Phase 2: todo #{resume_id} not found, skipping")
+                            continue
+                        if _hb_target["status"] == "doing":
+                            updated = _hb_target.get("updated", "")
+                            if updated:
+                                try:
+                                    from datetime import datetime as _hb_dt
+                                    _hb_t = _hb_dt.strptime(updated, "%Y-%m-%d %H:%M")
+                                    if (_hb_dt.now() - _hb_t).total_seconds() < 7200:
+                                        print(f"[Guardian] Phase 2: todo #{resume_id} recently active, skipping")
+                                        continue
+                                except Exception:
+                                    pass
+                            else:
+                                continue  # doing but no timestamp, skip
+
+                        # ── Layer 2: Check active agents ──
+                        if bg_session_id in _active_agents:
+                            print(f"[Guardian] Phase 2: active agent in session {bg_session_id}, skipping")
+                            continue
+                        if _background_agents:
+                            # Check if any background agent belongs to this session
+                            _has_bg = False
+                            try:
+                                _bg_ids = [k for k in _background_agents.keys() if k and k > 0]
+                                if _bg_ids:
+                                    _bg_conn = sqlite3.connect(DB_PATH)
+                                    _bg_row = _bg_conn.execute(
+                                        "SELECT session_id FROM tasks WHERE id IN ({}) AND session_id=?".format(
+                                            ",".join("?" for _ in _bg_ids)
+                                        ), (*_bg_ids, bg_session_id)
+                                    ).fetchone()
+                                    if _bg_row:
+                                        _has_bg = True
+                                    _bg_conn.close()
+                            except Exception:
+                                pass
+                            if _has_bg:
+                                print(f"[Guardian] Phase 2: background agent for session {bg_session_id}, skipping")
+                                continue
+
+                        # ── Phase 2: Execute ──
+                        _hb_model = cfg.get("default_model", "moonshot/kimi-latest")
+                        print(f"[Guardian] Phase 2: Resuming todo #{resume_id} ({_hb_target['desc']})")
+
+                        # Create a task record for visibility
+                        _hb_task_id = None
                         try:
-                            for pid in _hb_plan_ids:
-                                _p = _hb_load_plan(plan_id=pid)
-                                if _p:
-                                    _hb_plan_context += f"\n{_heartbeat_plan_context(_p)}\n"
+                            _hb_tc = sqlite3.connect(DB_PATH)
+                            _hb_cur = _hb_tc.execute(
+                                "INSERT INTO tasks (title, user_query, status, task_type) "
+                                "VALUES (?, ?, 'running', 'todo_resume')",
+                                (f"🔄 恢复: {_hb_target['desc'][:50]}", _hb_target['desc'])
+                            )
+                            _hb_tc.commit()
+                            _hb_task_id = _hb_cur.lastrowid
+                            _hb_tc.close()
                         except Exception:
                             pass
 
-                        # Create full agent with session history
+                        # Build context: session history + plan + todo
                         from agent.agent import OpenAGCAgent
                         _hb_agent = OpenAGCAgent(model=_hb_model)
                         try:
-                            conn = sqlite3.connect(DB_PATH)
-                            conn.row_factory = sqlite3.Row
-                            rows = conn.execute(
+                            _hb_conn_c = sqlite3.connect(DB_PATH)
+                            _hb_conn_c.row_factory = sqlite3.Row
+                            _hb_rows = _hb_conn_c.execute(
                                 "SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 15) ORDER BY id ASC",
                                 (bg_session_id,)
                             ).fetchall()
-                            conn.close()
-                            _hb_session = []
-                            for row in rows:
+                            _hb_conn_c.close()
+                            _hb_session_c = []
+                            for row in _hb_rows:
                                 r = row["role"]
                                 if r == "tool_step":
                                     continue
                                 if r == "agent":
                                     r = "assistant"
-                                _hb_session.append({"role": r, "content": row["content"]})
-                            if _hb_session:
-                                _hb_agent.messages.extend(_hb_session)
+                                _hb_session_c.append({"role": r, "content": row["content"]})
+                            if _hb_session_c:
+                                _hb_agent.messages.extend(_hb_session_c)
                         except Exception:
                             pass
 
-                        # Inject plan context into system prompt
-                        if _hb_plan_context and _hb_agent.messages and _hb_agent.messages[0]["role"] == "system":
-                            _hb_agent.messages[0]["content"] += "\n\n## 当前任务计划\n" + _hb_plan_context
-
-                        # Add todo list
+                        # Inject plan + todo into system prompt
                         try:
-                            _hb_todo_text = _hb_fmt_todos(_hb_todos)
-                            if _hb_todo_text and _hb_agent.messages and _hb_agent.messages[0]["role"] == "system":
-                                _hb_agent.messages[0]["content"] += "\n\n" + _hb_todo_text
+                            _hb_extra = "\n\n## 关联任务计划\n"
+                            for pid in _hb_plan_ids:
+                                _p = _hb_load_plan(plan_id=pid)
+                                if _p:
+                                    _hb_extra += _heartbeat_plan_context(_p) + "\n"
+                            _hb_extra += "\n" + _hb_fmt_todos(_hb_current_todos)
+                            if _hb_extra and _hb_agent.messages and _hb_agent.messages[0]["role"] == "system":
+                                _hb_agent.messages[0]["content"] += _hb_extra
                         except Exception:
                             pass
 
-                        resume_query = f"请继续执行待办事项 #{resume_id}：{_hb_todos['items'][resume_id-1]['desc']}" if resume_id <= len(_hb_todos.get("items",[])) else ""
-                        if resume_query:
-                            # Get plan detail for the specific todo item
-                            try:
-                                _hb_plan_text = ""
-                                for pid in _hb_plan_ids:
-                                    _p = _hb_load_plan(plan_id=pid)
-                                    if _p:
-                                        from tools.task_plan import format_plan_for_prompt as _hb_fmt_plan
-                                        _hb_plan_text += "\n" + _hb_fmt_plan(_p)
-                                if _hb_plan_text:
-                                    resume_query += f"\n\n## 关联任务计划详情\n{_hb_plan_text}"
-                            except Exception:
-                                pass
+                        _hb_query = f"请继续执行待办事项 #{resume_id}：{_hb_target['desc']}"
+                        # Load full plan detail
+                        try:
+                            for pid in _hb_plan_ids:
+                                _p = _hb_load_plan(plan_id=pid)
+                                if _p:
+                                    from tools.task_plan import format_plan_for_prompt as _hb_fmt_plan
+                                    _hb_query += f"\n\n## 关联任务计划详情\n{_hb_fmt_plan(_p)}"
+                        except Exception:
+                            pass
 
-                            print(f"[Guardian] Phase 2: Resuming todo #{resume_id}")
+                        # Register to _background_agents (for interrupt and dedup)
+                        _background_agents[_hb_task_id or 0] = _hb_agent
+
+                        try:
                             _hb_agent.run_turn(
-                                resume_query, verbose=False,
+                                _hb_query, verbose=False,
                                 progress_callback=lambda e: None,
                                 skip_rag=True
                             )
+                        finally:
+                            _background_agents.pop(_hb_task_id, None)
+
+                        # Mark todo as done after successful execution
+                        try:
+                            _hb_target["status"] = "done"
+                            _hb_target["updated"] = _time.strftime("%Y-%m-%d %H:%M")
+                            from tools.task_plan import save_todos as _hb_save_t2
+                            _hb_save_t2(_hb_current_todos)
+                        except Exception:
+                            pass
+
+                        # Update task status
+                        if _hb_task_id:
+                            update_task_status(_hb_task_id, "completed")
+
                     except Exception as resume_err:
                         print(f"[Guardian] Phase 2 error: {resume_err}")
+                    finally:
+                        _guardian_resume_lock.release()
 
                 elif _hb_reply.strip().startswith("STUCK:"):
                     # Mark item as stuck in todos
