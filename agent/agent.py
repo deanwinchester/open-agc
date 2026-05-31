@@ -127,6 +127,21 @@ def _detect_system_env() -> str:
     if sudo_hint:
         parts.append(f"- **sudo 注意事项**：{sudo_hint}")
 
+    # Docker detection and persistence guidance
+    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+        from core.paths import get_data_dir, get_skills_dir, get_bin_dir
+        parts.append(
+            f"- **Docker 持久化指导**：\n"
+            f"  1. 下载的文件和生成的脚本必须放在 workspace/ 或 data/ 下——"
+            f"仅这两个目录是持久化卷（VOLUME），其它目录在容器重启后会丢失\n"
+            f"  2. 学到的技能(save_learned_skill)自动持久化到 data/skills/\n"
+            f"  3. 安装的系统包(apt/pip)重启后会丢失，用完后即刻完成任务，"
+            f"不要依赖重启后仍存在\n"
+            f"  4. 持久数据目录: {get_data_dir()}\n"
+            f"  5. 技能目录: {get_skills_dir()}\n"
+            f"  6. 二进制目录: {get_bin_dir()}"
+        )
+
     return "\n".join(parts)
 
 

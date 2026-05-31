@@ -33,18 +33,29 @@ def get_data_path(filename: str) -> str:
     return os.path.join(get_data_dir(), filename)
 
 def get_skills_dir() -> str:
-    """Get the skills directory."""
-    dir_path = os.path.join(get_base_dir(), "skills")
+    """Get the skills directory (under data/ for Docker persistence)."""
+    dir_path = os.path.join(get_data_dir(), "skills")
     os.makedirs(dir_path, exist_ok=True)
-    
-    # If it's empty, try to populate it with default skills from the bundled app
+
+    # Migration: copy old skills from <base>/skills/ to <data>/skills/ if empty
+    old_skills = os.path.join(get_base_dir(), "skills")
+    if os.path.isdir(old_skills) and old_skills != dir_path and not os.listdir(dir_path):
+        try:
+            for item in os.listdir(old_skills):
+                src = os.path.join(old_skills, item)
+                dst = os.path.join(dir_path, item)
+                if os.path.isfile(src) and item.endswith(".md"):
+                    shutil.copy2(src, dst)
+        except OSError:
+            pass
+
+    # If still empty, populate with default skills from the bundled app
     if not os.listdir(dir_path):
         if getattr(sys, 'frozen', False):
-            # PyInstaller creates a temp folder and stores path in _MEIPASS
             bundled_skills = os.path.join(sys._MEIPASS, "skills")
         else:
             bundled_skills = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills")
-            
+
         if os.path.exists(bundled_skills) and bundled_skills != dir_path:
             for item in os.listdir(bundled_skills):
                 src = os.path.join(bundled_skills, item)
@@ -55,8 +66,8 @@ def get_skills_dir() -> str:
     return dir_path
 
 def get_bin_dir() -> str:
-    """Get the directory for storing binary executables."""
-    dir_path = os.path.join(get_base_dir(), "bin")
+    """Get the directory for storing binary executables (under data/ for Docker persistence)."""
+    dir_path = os.path.join(get_data_dir(), "bin")
     os.makedirs(dir_path, exist_ok=True)
     return dir_path
 
