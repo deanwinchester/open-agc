@@ -165,6 +165,30 @@ class AutoUpgrader:
                 success = False
         return success
 
+    def persist_upgrade(self, src_dir: str) -> bool:
+        """Copy upgraded files to data/upgrade/ for Docker persistence across restarts."""
+        try:
+            from core.paths import get_data_dir
+            upgrade_dir = os.path.join(get_data_dir(), "upgrade")
+            shutil.rmtree(upgrade_dir, ignore_errors=True)
+            os.makedirs(upgrade_dir, exist_ok=True)
+            for name in UPGRADE_SOURCES:
+                src = os.path.join(src_dir, name)
+                dst = os.path.join(upgrade_dir, name)
+                if not os.path.exists(src):
+                    continue
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst)
+                else:
+                    shutil.copy2(src, dst)
+            with open(os.path.join(upgrade_dir, "VERSION"), "w") as f:
+                f.write(self.latest_version + "\n")
+            logger.info("Upgrade persisted to %s", upgrade_dir)
+            return True
+        except Exception as e:
+            logger.warning("Failed to persist upgrade: %s", e)
+            return False
+
     def check_and_upgrade(self) -> bool:
         """Check for upgrade and perform it if AUTO_UPGRADE is enabled.
 
@@ -200,6 +224,9 @@ class AutoUpgrader:
 
             set_version(self.latest_version)
 
+            # Persist to data/upgrade/ for Docker container restart survival
+            self.persist_upgrade(src_dir)
+
             if not self.install_deps():
                 logger.warning("Dependency update had errors -- may need manual fix")
         finally:
@@ -220,7 +247,7 @@ def run_auto_upgrade() -> None:
         upgrader = AutoUpgrader()
         upgraded = upgrader.check_and_upgrade()
         if upgraded:
-            logger.info("Exiting for container restart")
-            sys.exit(0)
+            logger.info("Upgrade applied — exiting for restart (code 42)")
+            sys.exit(42)  # 42 = upgrade applied, entrypoint detects this
     except Exception as e:
         logger.error("Unexpected error during upgrade check: %s", e)
