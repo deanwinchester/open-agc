@@ -4614,67 +4614,71 @@ def start_background_monitor():
     threading.Thread(target=monitor_loop, daemon=True).start()
 
 def start_guardian_loop():
-    """Background guardian (长驻看守) — runs heartbeats server-side, independent of WebSocket."""
+    """Background guardian (长驻看守) — runs heartbeats server-side, only when no WS connected."""
     def _guardian_loop():
-        _guardian_task_id = None
         while True:
             try:
                 cfg = load_config()
                 if not cfg.get("heartbeat_enabled", False):
-                    _guardian_task_id = None
                     _time.sleep(30)
                     continue
 
                 interval = cfg.get("heartbeat_interval", 60)
+
+                # If any WebSocket is connected, let the WS handler handle heartbeats
+                # (it has access to live session context and is more accurate)
+                if connected_websockets:
+                    _time.sleep(max(interval, 10))
+                    continue
+
                 guardian_query = (
                     "【系统指令】后台巡视时间已到。请检查系统状态、后台任务或"
                     "之前的计划是否需要继续。如果一切正常无需操作，"
                     "请且仅回复 'HEARTBEAT_OK'。"
                 )
 
-                # Create or reuse a guardian task
-                conn = sqlite3.connect(DB_PATH)
-                if _guardian_task_id is None:
-                    cursor = conn.execute(
-                        "INSERT INTO tasks (title, user_query, status, task_type) "
-                        "VALUES (?, ?, 'backgrounded', 'heartbeat')",
-                        ("🔍 长驻看守", guardian_query)
-                    )
-                    conn.commit()
-                    _guardian_task_id = cursor.lastrowid
+                # Load session context (same as WS handler does for heartbeats)
+                bg_session_id = 1
+                session_history = []
+                try:
+                    conn = sqlite3.connect(DB_PATH)
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute(
+                        "SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 20) ORDER BY id ASC",
+                        (bg_session_id,)
+                    ).fetchall()
                     conn.close()
-                else:
-                    conn.close()
-                    # Check if the previous heartbeat finished
-                    check_conn = sqlite3.connect(DB_PATH)
-                    prev_status = check_conn.execute(
-                        "SELECT status FROM tasks WHERE id=?", (_guardian_task_id,)
-                    ).fetchone()
-                    check_conn.close()
-                    if prev_status and prev_status[0] == 'running':
-                        _time.sleep(interval * 0.5)
-                        continue
-                    # Reuse the task — reset for new heartbeat
-                    update_task_status(
-                        _guardian_task_id, "backgrounded",
-                        f"后台巡视 v{_time.strftime('%H:%M:%S')}",
-                        interruption_reason="backgrounded"
-                    )
+                    for row in rows:
+                        role = row["role"]
+                        if role == "tool_step":
+                            continue
+                        if role == "agent":
+                            role = "assistant"
+                        session_history.append({"role": role, "content": row["content"]})
+                except Exception:
+                    pass
 
-                # Run one heartbeat cycle via background task
-                threading.Thread(
-                    target=_run_background_task,
-                    args=(_guardian_task_id, guardian_query, None, True),
-                    daemon=True
-                ).start()
+                # Create a lightweight agent with session context
+                from agent.agent import OpenAGCAgent
+                agent = OpenAGCAgent(model=cfg.get("default_model", "moonshot/kimi-latest"))
+                if session_history:
+                    agent.messages.extend(session_history)
 
-                # Broadcast guardian status to any connected client
-                _broadcast_to_websockets({
-                    "type": "guardian_status",
-                    "active": True,
-                    "task_id": _guardian_task_id,
-                    "interval": interval,
-                })
+                # Run heartbeat inline (no _run_background_task — it rewrites queries as resume)
+                response = agent.run_turn(
+                    guardian_query, verbose=False,
+                    progress_callback=lambda e: None,
+                    skip_rag=True
+                )
+
+                if response and response.strip() != "HEARTBEAT_OK":
+                    _broadcast_to_websockets({
+                        "type": "message",
+                        "role": "agent",
+                        "background": True,
+                        "session_id": bg_session_id,
+                        "content": response[:500]
+                    })
 
                 _time.sleep(max(interval, 10))
             except Exception as e:
@@ -4682,7 +4686,7 @@ def start_guardian_loop():
                 _time.sleep(30)
 
     threading.Thread(target=_guardian_loop, daemon=True).start()
-    print("[Guardian] Started")
+    print("[Guardian] Started (deferring to WS heartbeat when connected)")
 
 # Start background listeners
 start_background_monitor()
