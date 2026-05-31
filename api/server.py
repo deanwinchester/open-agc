@@ -692,14 +692,7 @@ def _resolve_todo_for_query(query: str) -> int:
     # Use LLM to determine association (only when todos exist and query is ambiguous)
     try:
         from core.llm_client import LLMClient
-        from core.paths import get_data_path
-        import json
-        cfg_path = get_data_path("config.json")
-        model = "gpt-4o-mini"  # cheap, fast
-        if os.path.exists(cfg_path):
-            with open(cfg_path) as f:
-                cfg = json.load(f)
-                model = cfg.get("default_model", "gpt-4o-mini")
+        _model = load_config().get("default_model", "moonshot/kimi-latest")
 
         todo_lines = "\n".join(f"{i['id']}. {i['desc']} ({i['status']})" for i in active)
         prompt = (
@@ -707,7 +700,7 @@ def _resolve_todo_for_query(query: str) -> int:
             f"用户新输入：「{query[:200]}」\n\n"
             f"回答：如果是续接某个待办，仅回复数字 id；如果无关或全新任务，仅回复 0。"
         )
-        llm = LLMClient(default_model=model)
+        llm = LLMClient(default_model=_model)
         resp, _ = llm.chat([{"role": "user", "content": prompt}])
         text = resp.choices[0].message.content.strip()
         # Extract number
