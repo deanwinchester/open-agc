@@ -65,17 +65,6 @@ export async function switchSession(sessionId) {
   // Restore from cache or load from server
   if (window._sessionChatCache[sessionId]) {
     chatContainer.innerHTML = window._sessionChatCache[sessionId];
-    // Replay any cached events that arrived while away
-    var cachedEvents = window._sessionChatCache['_evt_' + sessionId] || [];
-    if (cachedEvents.length) {
-      cachedEvents.forEach(function(evt) {
-        if (evt.type === 'progress' && evt.data && window.handleProgressEvent) {
-          window.handleProgressEvent(evt.data);
-        }
-      });
-      // Keep last 50 events to avoid unbounded growth
-      if (cachedEvents.length > 50) cachedEvents.splice(0, cachedEvents.length - 50);
-    }
     if (chatContainer.lastChild) chatContainer.lastChild.scrollIntoView?.({behavior: 'smooth'});
   } else {
     chatContainer.innerHTML = '';

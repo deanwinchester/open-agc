@@ -1997,6 +1997,15 @@ class OpenAGCAgent:
                         print("[Agent] LLM skipped self_review tool call, retrying review cycle")
                     continue
 
+                # Check for pending user messages that arrived during the LLM call.
+                # If any exist, inject them and continue the loop instead of exiting.
+                injected = self._check_pending_messages(user_input)
+                if injected:
+                    self.messages.append({"role": "user", "content": injected})
+                    if verbose:
+                        print(f"[Agent] Injected pending message before final answer, continuing loop")
+                    continue
+
                 final_answer = message.content
                 if self.logger:
                     self.logger.log_agent_response(final_answer)
