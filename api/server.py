@@ -3157,6 +3157,8 @@ async def websocket_endpoint(websocket: WebSocket):
         session_history = []
         for row in rows:
             role = row["role"]
+            if role in ("tool_step",):  # skip internal display messages
+                continue
             if role == "agent":
                 role = "assistant"
             session_history.append({"role": role, "content": row["content"]})
