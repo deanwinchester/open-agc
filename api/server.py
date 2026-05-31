@@ -4552,7 +4552,79 @@ def start_background_monitor():
             _t.sleep(10)
     threading.Thread(target=monitor_loop, daemon=True).start()
 
+def start_guardian_loop():
+    """Background guardian (长驻看守) — runs heartbeats server-side, independent of WebSocket."""
+    def _guardian_loop():
+        _guardian_task_id = None
+        while True:
+            try:
+                cfg = load_config()
+                if not cfg.get("heartbeat_enabled", False):
+                    _guardian_task_id = None
+                    _time.sleep(30)
+                    continue
+
+                interval = cfg.get("heartbeat_interval", 60)
+                guardian_query = (
+                    "【系统指令】后台巡视时间已到。请检查系统状态、后台任务或"
+                    "之前的计划是否需要继续。如果一切正常无需操作，"
+                    "请且仅回复 'HEARTBEAT_OK'。"
+                )
+
+                # Create or reuse a guardian task
+                conn = sqlite3.connect(DB_PATH)
+                if _guardian_task_id is None:
+                    cursor = conn.execute(
+                        "INSERT INTO tasks (title, user_query, status, task_type) "
+                        "VALUES (?, ?, 'backgrounded', 'heartbeat')",
+                        ("🔍 长驻看守", guardian_query)
+                    )
+                    conn.commit()
+                    _guardian_task_id = cursor.lastrowid
+                    conn.close()
+                else:
+                    conn.close()
+                    # Check if the previous heartbeat finished
+                    check_conn = sqlite3.connect(DB_PATH)
+                    prev_status = check_conn.execute(
+                        "SELECT status FROM tasks WHERE id=?", (_guardian_task_id,)
+                    ).fetchone()
+                    check_conn.close()
+                    if prev_status and prev_status[0] == 'running':
+                        _time.sleep(interval * 0.5)
+                        continue
+                    # Reuse the task — reset for new heartbeat
+                    update_task_status(
+                        _guardian_task_id, "backgrounded",
+                        f"后台巡视 v{_time.strftime('%H:%M:%S')}",
+                        interruption_reason="backgrounded"
+                    )
+
+                # Run one heartbeat cycle via background task
+                threading.Thread(
+                    target=_run_background_task,
+                    args=(_guardian_task_id, guardian_query, None, True),
+                    daemon=True
+                ).start()
+
+                # Broadcast guardian status to any connected client
+                _broadcast_to_websockets({
+                    "type": "guardian_status",
+                    "active": True,
+                    "task_id": _guardian_task_id,
+                    "interval": interval,
+                })
+
+                _time.sleep(max(interval, 10))
+            except Exception as e:
+                print(f"[Guardian] Error: {e}")
+                _time.sleep(30)
+
+    threading.Thread(target=_guardian_loop, daemon=True).start()
+    print("[Guardian] Started")
+
 # Start background listeners
 start_background_monitor()
 start_email_listener()
 start_task_scheduler()
+start_guardian_loop()
