@@ -658,25 +658,73 @@ _CONTINUATION_PREFIXES = frozenset({
 })
 
 
+def _resolve_todo_for_query(query: str) -> int:
+    """
+    Determine which todo (if any) this query is continuing.
+    Returns todo_id, or 0 for new task.
+    """
+    # Quick keyword check (no LLM)
+    q = query.strip().lower()
+    for kw in ["继续", "继续搞", "继续做", "继续下载", "接着", "retry", "continue",
+               "再来", "再试", "重新", "唤醒", "恢复", "resume", "next", "yes", "继续做"]:
+        if kw and (q.startswith(kw) or q == kw):
+            # Continuation of any active todo — return first active
+            try:
+                from tools.task_plan import load_todos
+                for item in load_todos().get("items", []):
+                    if item.get("status") in ("doing", "todo"):
+                        return item["id"]
+            except Exception:
+                pass
+            return 0
+
+    # Load todos — if none active, no need for LLM
+    try:
+        from tools.task_plan import load_todos
+        todos = load_todos()
+        active = [i for i in todos.get("items", []) if i.get("status") in ("doing", "todo")]
+    except Exception:
+        active = []
+
+    if not active:
+        return 0  # No active todos → definitely new task
+
+    # Use LLM to determine association (only when todos exist and query is ambiguous)
+    try:
+        from core.llm_client import LLMClient
+        from core.paths import get_data_path
+        import json
+        cfg_path = get_data_path("config.json")
+        model = "gpt-4o-mini"  # cheap, fast
+        if os.path.exists(cfg_path):
+            with open(cfg_path) as f:
+                cfg = json.load(f)
+                model = cfg.get("default_model", "gpt-4o-mini")
+
+        todo_lines = "\n".join(f"{i['id']}. {i['desc']} ({i['status']})" for i in active)
+        prompt = (
+            f"当前待办：\n{todo_lines}\n\n"
+            f"用户新输入：「{query[:200]}」\n\n"
+            f"回答：如果是续接某个待办，仅回复数字 id；如果无关或全新任务，仅回复 0。"
+        )
+        llm = LLMClient(default_model=model)
+        resp, _ = llm.chat([{"role": "user", "content": prompt}])
+        text = resp.choices[0].message.content.strip()
+        # Extract number
+        import re
+        nums = re.findall(r'\d+', text)
+        if nums:
+            todo_id = int(nums[0])
+            if any(i["id"] == todo_id for i in active):
+                return todo_id
+    except Exception:
+        pass
+
+    return 0
+
 def _is_continuation_query(query: str) -> bool:
-    """Heuristic: does this query look like a continuation of the previous task?"""
-    q = query.strip()
-    if not q:
-        return False
-    # Very short queries (<15 chars Chinese, <20 chars English) are likely continuations
-    if len(q) < 15:
-        return True
-    # Starts with continuation markers
-    q_lower = q.lower()
-    for prefix in _CONTINUATION_PREFIXES:
-        if q_lower.startswith(prefix):
-            return True
-    # Single entity name (no verb), 2-6 Chinese chars without action verbs
-    import re
-    has_verb = re.search(r'[下载搜索查找播放打开创建删除修改更新]', q) is not None
-    if not has_verb and 2 <= len(re.findall(r'[一-鿿]', q)) <= 8:
-        return True
-    return False
+    """Legacy wrapper — returns True if query matches any active todo."""
+    return _resolve_todo_for_query(query) > 0
 
 
 def _resolve_task_for_query(session_id: int, query: str) -> int:
@@ -3779,7 +3827,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Save user message to DB
                     save_message("user", query, ws_session_id)
 
-                    # Auto-reconstruct context for continuation queries ("继续", "下一步", etc.)
+                    # Auto-reconstruct context for continuation queries
+                    _resolved_todo = _resolve_todo_for_query(query)
+                    if _resolved_todo > 0:
+                        try:
+                            from tools.task_plan import load_todos as _ct_load
+                            _ct_todos = _ct_load()
+                            for _ct_item in _ct_todos.get("items", []):
+                                if _ct_item["id"] == _resolved_todo:
+                                    query += f"\n\n[关联待办 #{_resolved_todo}] {_ct_item['desc']}"
+                                    break
+                        except Exception:
+                            pass
+
                     if _is_continuation_query(query) and not resume_id_for_run:
                         try:
                             conn_cont = sqlite3.connect(DB_PATH)
@@ -3822,7 +3882,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if response == "BUSY":
                     continue
                     
-                if is_heartbeat and response and response.strip() == "HEARTBEAT_OK":
+                if is_heartbeat and response and "HEARTBEAT_OK" in response:
                     # Silent heartbeat, do nothing
                     continue
                 
@@ -4650,7 +4710,7 @@ def start_guardian_loop():
                 _hb_reply = _hb_response.choices[0].message.content or ""
 
                 # ── Parse heartbeat response ──
-                if _hb_reply.strip().startswith("HEARTBEAT_OK"):
+                if "HEARTBEAT_OK" in _hb_reply:
                     # All good, nothing to do
                     pass
 
