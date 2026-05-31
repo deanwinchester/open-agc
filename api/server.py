@@ -3402,8 +3402,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception as e:
                         print(f"[Task] Failed to update step: {e}")
 
-                # Save tool_step as a message in the chat flow (survives page refresh)
-                if ws_session_id and event.get("event") == "tool_done":
+                # Save tool_step as a message in the chat flow (skip for heartbeats)
+                if ws_session_id and not is_heartbeat and event.get("event") == "tool_done":
                     try:
                         import json as _js
                         step_output = _step_outputs.pop(adjusted_step, "")
@@ -3579,10 +3579,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     try:
                         event = progress_queue.get_nowait()
                         event["session_id"] = ws_session_id
-                        await _safe_send({
-                            "type": "progress",
-                            **event
-                        })
+                        if not is_heartbeat:
+                            await _safe_send({
+                                "type": "progress",
+                                **event
+                            })
                     except thread_queue.Empty:
                         break
 
@@ -4072,8 +4073,22 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         except Exception:
             pass
 
+    # Detect heartbeat tasks — suppress all progress broadcasts and chat messages
+    _is_heartbeat = False
+    try:
+        _hb_conn = sqlite3.connect(DB_PATH)
+        _hb_row = _hb_conn.execute("SELECT task_type FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if _hb_row and _hb_row[0] == 'heartbeat':
+            _is_heartbeat = True
+        _hb_conn.close()
+    except Exception:
+        pass
+
     def progress_cb(event: dict):
         nonlocal step_counter
+        # Suppress all progress broadcasts for heartbeat tasks
+        if _is_heartbeat:
+            return
         if event.get("event") == "tool_start":
             step_counter += 1
             display_step = event.get("step", step_counter) + step_offset
@@ -4117,7 +4132,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         agent.messages.extend(context_messages)
 
     query = user_query
-    if is_resume:
+    if is_resume and not _is_heartbeat:
         query = (f"【系统指令 - 自动恢复】你之前因为执行步骤过多被系统自动中断了。"
                  f"请根据之前的上下文继续完成未完成的任务。"
                  f"原始任务: {user_query}")
@@ -4139,30 +4154,31 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     except Exception as e:
         print(f"[BgTask] Orphan adoption error: {e}")
 
-    # Notify connected clients
-    step_count_str = ""
-    if is_resume:
-        try:
-            _sc = _get_task_step_count(task_id)
-            if _sc:
-                step_count_str = f"，共 {_sc} 个历史步骤"
-        except Exception:
-            pass
+    # Notify connected clients (skip for heartbeat tasks)
+    if not _is_heartbeat:
+        step_count_str = ""
+        if is_resume:
+            try:
+                _sc = _get_task_step_count(task_id)
+                if _sc:
+                    step_count_str = f"，共 {_sc} 个历史步骤"
+            except Exception:
+                pass
 
-    resume_msg = (
-        f"🔄 **任务自动恢复**\n\n"
-        f"任务 **#{task_id}** 已自动恢复执行{step_count_str}，正在继续之前未完成的工作。\n\n"
-        f"[📋 查看任务详情](task://{task_id}) · [🔗 任务中心](switch:view/tasks)"
-    ) if is_resume else (
-        f"⏰ **定时任务执行**\n\n"
-        f"任务 **#{task_id}**: {user_query[:80]}"
-    )
-    _broadcast_to_websockets({
-        "type": "message",
-        "role": "system",
-        "session_id": bg_session_id,
-        "content": resume_msg
-    })
+        resume_msg = (
+            f"🔄 **任务自动恢复**\n\n"
+            f"任务 **#{task_id}** 已自动恢复执行{step_count_str}，正在继续之前未完成的工作。\n\n"
+            f"[📋 查看任务详情](task://{task_id}) · [🔗 任务中心](switch:view/tasks)"
+        ) if is_resume else (
+            f"⏰ **定时任务执行**\n\n"
+            f"任务 **#{task_id}**: {user_query[:80]}"
+        )
+        _broadcast_to_websockets({
+            "type": "message",
+            "role": "system",
+            "session_id": bg_session_id,
+            "content": resume_msg
+        })
     
     try:
         msg_count_before = len(agent.messages)
@@ -4213,18 +4229,8 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                 except Exception:
                     pass
 
-        # Push final result to clients (skip silent heartbeat OK)
-        _skip_broadcast = False
-        if response and response.strip() == "HEARTBEAT_OK":
-            try:
-                _hc = sqlite3.connect(DB_PATH)
-                _ht = _hc.execute("SELECT task_type FROM tasks WHERE id=?", (task_id,)).fetchone()
-                if _ht and _ht[0] == 'heartbeat':
-                    _skip_broadcast = True
-                _hc.close()
-            except Exception:
-                pass
-        if not _skip_broadcast:
+        # Push final result to clients (skip heartbeat tasks entirely)
+        if not _is_heartbeat:
             _broadcast_to_websockets({
                 "type": "message",
                 "role": "agent",
