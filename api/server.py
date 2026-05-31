@@ -3732,6 +3732,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if not heartbeat_enabled or agent_is_running:
                     continue
                 # Trigger Heartbeat
+                resume_id_for_run = None
                 query = "【系统指令】后台巡视时间已到。请检查系统状态、后台任务或之前的计划是否需要继续。如果一切正常无需操作，请且仅回复 'HEARTBEAT_OK'。"
                 retry_model = None
                 agent_profile_name = None
