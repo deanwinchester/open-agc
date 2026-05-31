@@ -1512,6 +1512,15 @@ class OpenAGCAgent:
                         system_content += "\n\n" + _fmt_plan(_plan)
                 except Exception:
                     pass
+            # Inject todo list
+            try:
+                from tools.task_plan import load_todos as _load_todos, format_todo_list_for_prompt as _fmt_todos
+                _todos = _load_todos()
+                _todo_text = _fmt_todos(_todos)
+                if _todo_text:
+                    system_content += "\n\n" + _todo_text
+            except Exception:
+                pass
             self.messages[0]["content"] = system_content
 
         # Sub-agent delegation for complex tasks
