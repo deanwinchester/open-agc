@@ -197,6 +197,10 @@
                     <div style="display: flex; align-items: center; gap: 12px;">
                         <div id="token-usage-display" style="font-size: 11px; color: var(--text-secondary); opacity: 0.8; font-family: monospace;"></div>
                         <div class="model-badge" id="current-model-badge">加载中...</div>
+                        <div class="guardian-badge" id="guardian-badge" style="display:none; align-items:center; gap:4px; font-size:11px; color:var(--success-color,#22c55e); white-space:nowrap;" title="长驻看守模式已启用">
+                            <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--success-color,#22c55e); animation:pulse 2s infinite;"></span>
+                            <span>看守中</span>
+                        </div>
                     </div>
                 </header>
 
@@ -520,6 +524,19 @@
                             <label class="toggle-container">
                                 <input type="checkbox" id="heartbeat-toggle">
                                 <span class="toggle-label">启用长驻看守模式</span>
+                            </label>
+                        </div>
+
+                        <div class="field" style="margin-top: 0.5rem;">
+                            <label style="display:flex; align-items:center; gap:0.5rem;">
+                                <span>巡视间隔：</span>
+                                <select id="heartbeat-interval" class="input-styled" style="width:auto;">
+                                    <option value="30">30 秒</option>
+                                    <option value="60" selected>60 秒</option>
+                                    <option value="120">2 分钟</option>
+                                    <option value="300">5 分钟</option>
+                                    <option value="600">10 分钟</option>
+                                </select>
                             </label>
                         </div>
 

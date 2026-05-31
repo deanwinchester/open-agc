@@ -1679,6 +1679,10 @@ function initApp() {
       if (settingsRes.ok) {
         const data = await settingsRes.json();
         currentModelBadge.textContent = data.default_model || 'gpt-4o';
+        if (data.heartbeat_enabled) {
+          const badge = document.getElementById('guardian-badge');
+          if (badge) badge.style.display = 'flex';
+        }
       }
       await loadSessions();
       const historyRes = await fetch(`/api/history?session_id=${state.currentSessionId}`);

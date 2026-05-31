@@ -41,6 +41,8 @@ export async function loadSettingsConfig() {
     if (maxCorrectionEl) maxCorrectionEl.value = data.max_correction_attempts ?? 5;
     document.getElementById('http-proxy-input').value = data.http_proxy || '';
     document.getElementById('heartbeat-toggle').checked = data.heartbeat_enabled ?? false;
+    const hbInterval = document.getElementById('heartbeat-interval');
+    if (hbInterval) hbInterval.value = String(data.heartbeat_interval ?? 60);
 
     document.getElementById('email-listener-toggle').checked = data.email_listener_enabled ?? false;
     document.getElementById('owner-email-input').value = data.owner_email || '';
@@ -299,7 +301,7 @@ async function saveSettings() {
     llamacpp_ctx_size: parseInt(document.getElementById('llamacpp-ctx-size')?.value) || 32768,
     http_proxy: document.getElementById('http-proxy-input')?.value?.trim() || '',
     heartbeat_enabled: document.getElementById('heartbeat-toggle')?.checked ?? false,
-    heartbeat_interval: 60,
+    heartbeat_interval: parseInt(document.getElementById('heartbeat-interval')?.value) || 60,
     email_listener_enabled: document.getElementById('email-listener-toggle')?.checked ?? false,
     email_account: document.getElementById('email-account-input')?.value?.trim() || '',
     email_password: document.getElementById('email-password-input')?.value || (document.getElementById('email-password-input')?.placeholder === '***' ? '***' : ''),
