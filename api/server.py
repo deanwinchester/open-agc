@@ -4230,17 +4230,42 @@ def start_task_scheduler():
                     ).start()
 
 
-                # 2. Auto-resume longrun tasks interrupted by faults (exclude max_iterations)
+                # 2. Auto-resume interrupted tasks (skip user interrupts)
                 cursor.execute(
-                    "SELECT * FROM tasks WHERE task_type='longrun' AND status='interrupted' "
-                    "AND interruption_reason != 'max_iterations' AND interruption_reason != 'user' "
+                    "SELECT id, title, user_query, status, interruption_reason, resume_count, "
+                    "max_resume_count, updated_at, task_type FROM tasks "
+                    "WHERE status='interrupted' AND interruption_reason != 'user' "
                     "AND resume_count < max_resume_count"
                 )
-                resume_tasks = cursor.fetchall()
+                resume_candidates = cursor.fetchall()
 
-                for task in resume_tasks:
+                for task in resume_candidates:
                     task_id = task["id"]
-                    print(f"[TaskScheduler] Auto-resuming longrun task #{task_id}: {task['title']}")
+                    rc = task["resume_count"]
+
+                    # Check backoff: has enough time passed since last update?
+                    if not _is_backoff_elapsed(task["updated_at"], rc):
+                        continue
+
+                    # Check progress evidence
+                    has_progress = _has_recent_progress(task_id)
+                    is_longrun = task["task_type"] in ("longrun", "heartbeat", "scheduled")
+
+                    # Dynamic max_resume_count
+                    effective_max = _MAX_RESUME_WITH_PROGRESS if has_progress else _MAX_RESUME_NO_PROGRESS
+                    if not is_longrun and not has_progress:
+                        effective_max = 3  # quick fail for stuck oneshot tasks
+
+                    if rc >= effective_max:
+                        if not has_progress and not is_longrun:
+                            update_task_status(task_id, "stuck",
+                                "任务无进展，已自动标记为停滞",
+                                interruption_reason="no_progress")
+                            print(f"[TaskScheduler] Task #{task_id} marked stuck (no progress)")
+                        continue
+
+                    print(f"[TaskScheduler] Auto-resuming task #{task_id} "
+                          f"(resume #{rc + 1}/{effective_max}, progress={has_progress})")
 
                     increment_task_resume(task_id)
                     ctx = get_task_context(task_id)
@@ -4258,6 +4283,52 @@ def start_task_scheduler():
             _time.sleep(30)  # Check every 30 seconds
     
     threading.Thread(target=scheduler_loop, daemon=True).start()
+
+
+
+# ── Backoff resume helpers ──
+
+_BACKOFF_SCHEDULE = [30, 30, 120, 120, 300, 300]
+_MAX_RESUME_WITH_PROGRESS = 50
+_MAX_RESUME_NO_PROGRESS = 10
+
+def _has_recent_progress(task_id: int) -> bool:
+    """Check if a task has any successful tool steps in its history."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM task_steps WHERE task_id=? AND success=1", (task_id,)
+        ).fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception:
+        return False
+
+def _get_backoff_delay(resume_count: int) -> int:
+    """Return seconds to wait before next resume. Returns -1 when maxed out."""
+    if resume_count >= len(_BACKOFF_SCHEDULE):
+        return -1
+    return _BACKOFF_SCHEDULE[resume_count]
+
+def _is_backoff_elapsed(updated_at_str: str, resume_count: int) -> bool:
+    """Check if backoff period has elapsed since task was last updated."""
+    delay = _get_backoff_delay(resume_count)
+    if delay < 0:
+        return False
+    try:
+        from datetime import datetime, timezone
+        if not updated_at_str:
+            return True
+        if 'T' not in updated_at_str:
+            updated_at_str = updated_at_str.replace(' ', 'T')
+        if not updated_at_str.endswith('Z') and '+' not in updated_at_str:
+            updated_at_str += 'Z'
+        updated = datetime.fromisoformat(updated_at_str)
+        now = datetime.now(timezone.utc)
+        return (now - updated).total_seconds() >= delay
+    except Exception:
+        return True
+
 
 _SERVER_START_TIME = datetime.now(timezone.utc)  # Used by BgMonitor to detect restart-induced process loss
 

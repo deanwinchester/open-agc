@@ -163,7 +163,7 @@ export async function loadTasks(resetPage = false) {
 
     container.innerHTML = '';
     data.tasks.forEach(task => {
-      const statusIcon = { running: '⏳', completed: '✅', failed: '❌', interrupted: '⏸️', scheduled: '⏰', paused: '⏸️', detached: '🟢' }[task.status] || '📋';
+      const statusIcon = { running: '⏳', completed: '✅', failed: '❌', interrupted: '⏸️', scheduled: '⏰', paused: '⏸️', detached: '🟢', stuck: '🔴' }[task.status] || '📋';
       const timeAgo = formatTimeAgo(task.created_at);
 
       const typeBadge = {
@@ -296,7 +296,7 @@ async function openTaskDetail(taskId) {
     const task = data.task;
 
     title.textContent = task.title;
-    const statusIcon = { running: '⏳', completed: '✅', failed: '❌', interrupted: '⏸️', scheduled: '⏰', paused: '⏸️', detached: '🟢' }[task.status] || '📋';
+    const statusIcon = { running: '⏳', completed: '✅', failed: '❌', interrupted: '⏸️', scheduled: '⏰', paused: '⏸️', detached: '🟢', stuck: '🔴' }[task.status] || '📋';
     const typeBadge = { oneshot: '一次性', scheduled: '⏰ 定时', longrun: '🔬 长期' }[task.task_type] || '一次性';
 
     // Token display
