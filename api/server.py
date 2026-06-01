@@ -238,6 +238,25 @@ def init_db():
             cost_estimate REAL DEFAULT 0.0
         )
     ''')
+    # Model call logs (detailed LLM call tracking)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS model_call_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            session_id INTEGER,
+            task_id INTEGER,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            prompt_tokens INTEGER DEFAULT 0,
+            completion_tokens INTEGER DEFAULT 0,
+            total_tokens INTEGER DEFAULT 0,
+            request_data TEXT,
+            response_data TEXT,
+            cache_hit TEXT DEFAULT 'unknown',
+            latency_ms INTEGER DEFAULT 0,
+            cost_estimate REAL DEFAULT 0.0
+        )
+    ''')
     # Ensure datasets storage directory exists
     datasets_dir = os.path.join(os.path.dirname(DB_PATH), "datasets")
     os.makedirs(datasets_dir, exist_ok=True)
@@ -363,6 +382,12 @@ def init_db():
     except Exception:
         pass
 
+    # Add cached_tokens to model_call_logs
+    try:
+        cursor.execute("ALTER TABLE model_call_logs ADD COLUMN cached_tokens INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -383,6 +408,9 @@ def create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_downloads_filename ON downloads(filename)",
         "CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id)",
         "CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_model_call_logs_ts ON model_call_logs(timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_model_call_logs_provider ON model_call_logs(provider)",
+        "CREATE INDEX IF NOT EXISTS idx_model_call_logs_model ON model_call_logs(model)",
     ]
     for idx in indexes:
         try:
@@ -3169,6 +3197,102 @@ async def get_logs(lines: int = 200):
         return {"lines": tail, "total": len(all_lines)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Model Call Logs ──
+
+@app.get("/api/model-logs/filters")
+async def get_model_log_filters():
+    """Return distinct providers and models for filter dropdowns."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        providers = [r["provider"] for r in conn.execute(
+            "SELECT DISTINCT provider FROM model_call_logs ORDER BY provider").fetchall()]
+        models = [r["model"] for r in conn.execute(
+            "SELECT DISTINCT model FROM model_call_logs ORDER BY model").fetchall()]
+        return {"providers": providers, "models": models}
+    except Exception as e:
+        return {"providers": [], "models": []}
+    finally:
+        conn.close()
+
+
+@app.get("/api/model-logs")
+async def get_model_logs(
+    provider: str = "",
+    model: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    cache_hit: str = "",
+    page: int = 1,
+    page_size: int = 50,
+):
+    """Query model call logs with filters and pagination."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        where = []
+        params = []
+        if provider:
+            where.append("provider = ?")
+            params.append(provider)
+        if model:
+            where.append("model = ?")
+            params.append(model)
+        if start_date:
+            where.append("timestamp >= ?")
+            params.append(start_date)
+        if end_date:
+            where.append("timestamp <= ?")
+            params.append(end_date + " 23:59:59")
+        if cache_hit:
+            where.append("cache_hit = ?")
+            params.append(cache_hit)
+
+        sql_where = (" WHERE " + " AND ".join(where)) if where else ""
+
+        # Count total
+        total = conn.execute(
+            "SELECT COUNT(*) as cnt FROM model_call_logs" + sql_where, params
+        ).fetchone()["cnt"]
+
+        # Fetch page
+        offset = (page - 1) * page_size
+        rows = conn.execute(
+            "SELECT id, timestamp, provider, model, prompt_tokens, completion_tokens, "
+            "total_tokens, cache_hit, latency_ms, cost_estimate, cached_tokens "
+            "FROM model_call_logs" + sql_where +
+            " ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            params + [page_size, offset],
+        ).fetchall()
+
+        logs = [dict(r) for r in rows]
+        return {"logs": logs, "total": total, "page": page, "page_size": page_size}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+
+@app.get("/api/model-logs/{log_id}")
+async def get_model_log_detail(log_id: int):
+    """Return full detail for a single model call log."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM model_call_logs WHERE id = ?", (log_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Log not found")
+        return dict(row)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
 
 
 # ── SPA fallback (must be the LAST route; all API routes defined above) ──
