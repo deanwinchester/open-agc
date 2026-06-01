@@ -388,7 +388,6 @@ class OpenAGCAgent:
         }
 
         # Add to core tool names so it's always available
-        self._all_tool_names.add("parse_html")
 
         # Tool display names (Chinese-friendly)
         self.tool_display_names = {
