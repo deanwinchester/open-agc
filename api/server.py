@@ -3455,14 +3455,12 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"[WS] Task replay error: {e}")
     
-    async def run_agent_with_progress(query: str, model: str = None, agent_profile_name: str = None, is_heartbeat: bool = False, images: list = None, resume_task_id: int = None):
+    async def run_agent_with_progress(query: str, model: str = None, agent_profile_name: str = None, images: list = None, resume_task_id: int = None):
         """Run agent in a thread and push progress to WebSocket via a Queue.
 
         If resume_task_id is set, steps are appended to the existing task instead of creating a new one.
         """
         nonlocal session_history, last_query, agent_is_running, receive_task, ws_alive, ws_session_id
-        if not is_heartbeat:
-            last_query = query
 
         if agent_is_running:
             return "BUSY"
@@ -3472,7 +3470,6 @@ async def websocket_endpoint(websocket: WebSocket):
         # resume_task_id is used when explicitly resuming; otherwise detect new vs continuation.
         if resume_task_id:
             ws_task_id = resume_task_id
-        elif not is_heartbeat:
             ws_task_id = _resolve_task_for_query(ws_session_id, query)
         else:
             ws_task_id = None
@@ -3502,12 +3499,6 @@ async def websocket_endpoint(websocket: WebSocket):
             def progress_callback(event: dict):
                 nonlocal has_taken_action, ws_task_id
                 """Thread-safe: push progress events from thread pool into queue."""
-                if is_heartbeat:
-                    if event.get("event") == "tool_start":
-                        has_taken_action = True
-                    if not has_taken_action and event.get("event") in ["thinking", "model_switched"]:
-                        return
-
                 # Record task steps (offset on resume to continue numbering)
                 adjusted_step = event.get("step", 0) + step_offset
                 event["step"] = adjusted_step
@@ -3618,7 +3609,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         print(f"[Task] Failed to update step: {e}")
 
                 # Save tool_step as a message in the chat flow (skip for heartbeats)
-                if ws_session_id and not is_heartbeat and event.get("event") == "tool_done":
+                if ws_session_id and event.get("event") == "tool_done":
                     try:
                         import json as _js
                         step_output = _step_outputs.pop(adjusted_step, "")
@@ -3832,8 +3823,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     try:
                         event = progress_queue.get_nowait()
                         event["session_id"] = ws_session_id
-                        if not is_heartbeat:
-                            await _safe_send({
+                        await _safe_send({
                                 "type": "progress",
                                 **event
                             })
@@ -4061,89 +4051,6 @@ async def websocket_endpoint(websocket: WebSocket):
                             except Exception as e:
                                 print(f"[WS] Continuation context error: {e}")
 
-                is_heartbeat = False
-            except asyncio.TimeoutError:
-                if not heartbeat_enabled or agent_is_running:
-                    continue
-                # ── Lightweight Heartbeat (same logic as background guardian Phase 1) ──
-                try:
-                    cfg = load_config()
-                    hb_context = "你是 Open-AGC 的巡检助手。"
-                    hb_context += f"\n当前时间：{_time.strftime('%Y-%m-%d %H:%M')}\n"
-                    # Load todos
-                    try:
-                        from tools.task_plan import load_todos as _hb_load_todos, format_todo_list_for_prompt as _hb_fmt_todos
-                        _hb_t = _hb_load_todos()
-                        _hb_txt = _hb_fmt_todos(_hb_t)
-                        if _hb_txt: hb_context += f"\n{_hb_txt}\n"
-                    except Exception:
-                        pass
-                    # Check for interrupted tasks (from server restart or errors)
-                    try:
-                        conn = sqlite3.connect(DB_PATH)
-                        cur = conn.execute("SELECT id, title, user_query, interruption_reason FROM tasks WHERE status='interrupted' ORDER BY updated_at DESC LIMIT 5")
-                        rows = cur.fetchall()
-                        conn.close()
-                        if rows:
-                            hb_context += "\n## 中断的任务\n以下任务因故中断，尚未恢复：\n"
-                            for r in rows:
-                                reason = r[3] or "unknown"
-                                hb_context += f"- 任务 #{r[0]}: {r[1] or r[2][:80]}（中断原因: {reason}）\n"
-                            hb_context += "如需恢复执行某个任务，回复 RESUME:{id}。\n"
-                    except Exception:
-                        pass
-                    hb_context += "\n请判断：如果一切正常无需操作，仅回复 HEARTBEAT_OK。如果待办项需要恢复执行，回复 RESUME:{id}。如果某项反复失败需要标记受阻，回复 STUCK:{id}。\n"
-                    from core.llm_client import LLMClient
-                    _hb_llm = LLMClient(default_model=cfg.get("default_model", "moonshot/kimi-latest"))
-                    _hb_resp, _ = _hb_llm.chat([{"role": "system", "content": hb_context}])
-                    _hb_reply = _hb_resp.choices[0].message.content or ""
-
-                    if "HEARTBEAT_OK" in _hb_reply:
-                        continue  # Silent heartbeat, do nothing
-                    elif _hb_reply.strip().startswith("RESUME:"):
-                        # Proactive resume — run agent with the task
-                        resume_id_for_run = None
-                        try:
-                            resume_id_for_run = int(_hb_reply.strip().split(":")[1].split()[0])
-                        except Exception:
-                            pass
-                        # Load task context for resume
-                        try:
-                            session_history = get_task_context(resume_id_for_run)
-                        except Exception:
-                            session_history = None
-                        query = f"【心跳恢复】任务 #{resume_id_for_run} 需要恢复执行。"
-                        retry_model = None
-                        agent_profile_name = None
-                        ws_images = None
-                        is_heartbeat = True
-                        # Fall through to run_agent_with_progress below
-                    else:
-                        # Proactive thought from heartbeat
-                        save_message("agent", _hb_reply, ws_session_id)
-                        await _safe_send({"type": "message", "role": "agent", "content": _hb_reply, "session_id": ws_session_id})
-                        continue
-                except Exception as e:
-                    print(f"[WS] Heartbeat error: {e}")
-                    continue
-
-            if not is_heartbeat:
-                # Send immediate acknowledgment
-                await _safe_send({
-                    "type": "status",
-                    "message": "Agent is thinking...",
-                    "session_id": ws_session_id
-                })
-
-            try:
-                response = await run_agent_with_progress(query, retry_model, agent_profile_name, is_heartbeat=is_heartbeat, images=ws_images, resume_task_id=resume_id_for_run)
-
-                if response == "BUSY":
-                    continue
-
-                if is_heartbeat and response and "HEARTBEAT_OK" in response:
-                    # Silent heartbeat, do nothing
-                    continue
 
                 # If it's a heartbeat response that isn't HEARTBEAT_OK, it's a resume or proactive thought.
                 # Ensure it's tagged with the correct session.
@@ -4917,11 +4824,6 @@ def start_guardian_loop():
 
                 interval = cfg.get("heartbeat_interval", 60)
 
-                # If any WebSocket is connected, let the WS handler handle heartbeats
-                if connected_websockets:
-                    _time.sleep(max(interval, 10))
-                    continue
-
                 bg_session_id = 1
 
                 # ── Phase 1: Lightweight heartbeat ──
@@ -5049,8 +4951,33 @@ def start_guardian_loop():
                                 continue
 
                         # ── Phase 2: Execute ──
+                        # Check resume_count threshold
+                        _hb_rc = _hb_target.get("resume_count", 0)
+                        if _hb_rc >= 6:
+                            _hb_target["status"] = "stuck"
+                            _hb_target["updated"] = _time.strftime("%Y-%m-%d %H:%M")
+                            from tools.task_plan import save_todos as _hb_save_t2
+                            _hb_save_t2(_hb_current_todos)
+                            print(f"[Guardian] Todo #{resume_id}: resume_count={_hb_rc} >= 6, marked stuck")
+                            continue
+
+                        # Check if associated task is still running
+                        _hb_assoc_task = _hb_target.get("task_id")
+                        if _hb_assoc_task:
+                            try:
+                                _hb_conn_t = sqlite3.connect(DB_PATH)
+                                _hb_task_status = _hb_conn_t.execute(
+                                    "SELECT status FROM tasks WHERE id=?", (_hb_assoc_task,)
+                                ).fetchone()
+                                _hb_conn_t.close()
+                                if _hb_task_status and _hb_task_status[0] == 'running':
+                                    print(f"[Guardian] Phase 2: todo #{resume_id} task #{_hb_assoc_task} still running, skipping")
+                                    continue
+                            except Exception:
+                                pass
+
                         _hb_model = cfg.get("default_model", "moonshot/kimi-latest")
-                        print(f"[Guardian] Phase 2: Resuming todo #{resume_id} ({_hb_target['desc']})")
+                        print(f"[Guardian] Phase 2: Resuming todo #{resume_id} ({_hb_target['desc']}) resume_count={_hb_rc}")
 
                         # Create a task record for visibility
                         _hb_task_id = None
@@ -5064,6 +4991,10 @@ def start_guardian_loop():
                             _hb_tc.commit()
                             _hb_task_id = _hb_cur.lastrowid
                             _hb_tc.close()
+                            # Write task_id back to todo for dedup
+                            _hb_target["task_id"] = _hb_task_id
+                            from tools.task_plan import save_todos as _hb_save_t2
+                            _hb_save_t2(_hb_current_todos)
                         except Exception:
                             pass
 
@@ -5127,18 +5058,12 @@ def start_guardian_loop():
                         finally:
                             _background_agents.pop(_hb_task_id, None)
 
-                        # Mark todo as done after successful execution
-                        try:
-                            _hb_target["status"] = "done"
+                        # Increment resume_count (not todo status — Agent manages that)
+                        if _hb_target:
+                            _hb_target["resume_count"] = _hb_target.get("resume_count", 0) + 1
                             _hb_target["updated"] = _time.strftime("%Y-%m-%d %H:%M")
                             from tools.task_plan import save_todos as _hb_save_t2
                             _hb_save_t2(_hb_current_todos)
-                        except Exception:
-                            pass
-
-                        # Update task status
-                        if _hb_task_id:
-                            update_task_status(_hb_task_id, "completed")
 
                     except Exception as resume_err:
                         print(f"[Guardian] Phase 2 error: {resume_err}")

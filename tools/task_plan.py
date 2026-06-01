@@ -222,12 +222,15 @@ class TaskPlanTool(BaseTool):
                 return f"[TaskPlan] ⚠️ 待办事项已达上限 {_MAX_TODOS} 项，请先完成一些再添加。"
             if len(desc) > _MAX_TODO_DESC:
                 desc = desc[:_MAX_TODO_DESC]
-            todos["items"].append({
+            new_item = {
                 "id": _new_todo_id(todos["items"]),
                 "desc": desc,
                 "status": "todo",
                 "updated": time.strftime("%Y-%m-%d %H:%M"),
-            })
+                "task_id": task_id,
+                "resume_count": 0,
+            }
+            todos["items"].append(new_item)
             save_todos(todos)
             return f"[TaskPlan] ✅ 已添加待办: {desc}\n\n{format_todo_list_for_prompt(todos)}"
 
@@ -237,6 +240,8 @@ class TaskPlanTool(BaseTool):
                 if item["id"] == todo_id:
                     item["status"] = "doing"
                     item["updated"] = time.strftime("%Y-%m-%d %H:%M")
+                    if task_id:
+                        item["task_id"] = task_id
                     save_todos(todos)
                     return f"[TaskPlan] 🔄 已开始: {item['desc']}\n\n{format_todo_list_for_prompt(todos)}"
             return f"[TaskPlan] ⚠️ 未找到 id={todo_id} 的待办项。"
