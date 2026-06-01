@@ -1709,6 +1709,8 @@ function initApp() {
         if (data.history && data.history.length > 0) {
           chatContainer.innerHTML = '';
           data.history.forEach(msg => {
+            // Skip individual tool_step messages — rendered in history_steps card
+            if (msg.role === 'tool_step') return;
             try { appendMessage(msg.content, msg.role); }
             catch (e) { console.error('[History] Failed to render message:', e, msg); }
           });
