@@ -1108,7 +1108,7 @@ function initApp() {
 
     let formattedContent = content;
     if (role === 'user') {
-      formattedContent = '<pre style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:0.82rem;line-height:1.5;background:var(--bg-inner);padding:0.5rem;border-radius:4px;">' + escapeHtml(content) + '</pre>';
+      formattedContent = escapeHtml(content);
     } else if (role === 'tool_step') {
       try {
         var ts = JSON.parse(content);
