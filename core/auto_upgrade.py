@@ -73,7 +73,19 @@ class AutoUpgrader:
         try:
             return Version(self.latest_version) > Version(self.current_version)
         except Exception:
-            return self.latest_version != self.current_version
+            # Fallback: numeric segment comparison for non-PEP440 versions
+            def _parse(v):
+                return [int(x) for x in v.split('.')]
+            try:
+                cur = _parse(self.current_version)
+                lat = _parse(self.latest_version)
+                while len(cur) < len(lat):
+                    cur.append(0)
+                while len(lat) < len(cur):
+                    lat.append(0)
+                return lat > cur
+            except Exception:
+                return self.latest_version != self.current_version
 
     def download_and_extract_tarball(self, version: str) -> Optional[str]:
         """Download the release source tarball and extract to temp dir."""
