@@ -302,6 +302,9 @@ function initApp() {
       if (isForCurrentSession) handleProgressEvent(data);
       if (isBackground) updateTaskBadge();
     } else if (data.type === 'message') {
+      // Skip individual tool_step messages — they are rendered inside the
+      // history_steps summary card and during live execution via progress events.
+      if (data.role === 'tool_step') return;
       if (isForCurrentSession) { hideThinkingStatus(); hideProgressContainer(); }
       appendMessage(data.content, data.role || 'agent');
       if (!isBackground && isForCurrentSession && state.wasVoiceQuery) { speakText(data.content); state.wasVoiceQuery = false; }
