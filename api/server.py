@@ -3806,15 +3806,13 @@ async def websocket_endpoint(websocket: WebSocket):
                                         })
                                     print(f"[WS] Queued message to agent session {ws_session_id}")
                         receive_task = None
-                    except WebSocketDisconnect:
+                    except (WebSocketDisconnect, RuntimeError):
                         ws_alive = False
-                        # Immediately remove from broadcast list
                         if websocket in connected_websockets:
                             connected_websockets.remove(websocket)
-                        _active_agents.pop(ws_session_id, None)  # nested dict cleaned up
-                        # Don't interrupt — let agent finish in background
-                        # Reconnecting clients will replay completed steps
+                        _active_agents.pop(ws_session_id, None)
                         receive_task = None
+                        # Don't raise — ws_alive=False will let outer loop break
                     except Exception:
                         receive_task = None
 
@@ -3928,10 +3926,13 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         while True:
+            if not ws_alive:
+                print("[WS] Not alive, exiting main loop")
+                break
             config = load_config()
             heartbeat_enabled = config.get("heartbeat_enabled", False)
             heartbeat_interval = config.get("heartbeat_interval", 60)
-            
+
             try:
                 # Wait for user message with timeout for heartbeat
                 if receive_task is None:
@@ -4074,9 +4075,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     "session_id": ws_session_id
                 })
                 
-            except WebSocketDisconnect:
-                print("[WS] Client disconnected")
-                break
+            except (WebSocketDisconnect, RuntimeError) as _ws_err:
+                if "disconnect" in str(_ws_err).lower():
+                    print("[WS] Client disconnected")
+                    break
+                # Not a disconnect RuntimeError — re-raise
+                raise
             except Exception as e:
                 import traceback
                 traceback.print_exc()
