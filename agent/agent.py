@@ -44,6 +44,7 @@ from tools.self_review import SelfReviewTool
 from tools.task_plan import TaskPlanTool, format_plan_for_prompt, load_plan
 from tools.system_config import ConfigureSystemTool
 from tools.plugin_dev import DevelopPluginTool
+from tools.reader_lm import ReaderLMTool
 
 
 def _detect_system_env() -> str:
@@ -258,8 +259,9 @@ class OpenAGCAgent:
             f"4. search_file_content / find_files — 搜索文件内容与查找文件\n"
             f"5. search_web — 搜索互联网获取最新信息\n"
             f"6. browser_automation — 虚拟浏览器操作网页\n"
-            f"7. search_history — 检索当前会话历史（仅在需要回忆之前内容时使用）\n"
-            f"8. 其他专用工具根据场景选用\n"
+            f"7. parse_html — 使用 Reader-lm 将 HTML 源码转为 Markdown（浏览器获取的页面过大时使用）\n"
+            f"8. search_history — 检索当前会话历史（需要回忆之前内容时使用）\n"
+            f"9. 其他专用工具根据场景选用\n"
             f"\n## 大文件下载\n"
             f"如果需要下载超过 100MB 的大文件（如模型文件 .gguf/.safetensors/.bin），"
             f"必须使用 queue_download 工具而非 execute_shell。它支持断点续传，"
@@ -382,7 +384,11 @@ class OpenAGCAgent:
             "configure_system": ConfigureSystemTool(),
             "develop_plugin": DevelopPluginTool(),
             "manage_task_plan": TaskPlanTool(),
+            "parse_html": ReaderLMTool(),
         }
+
+        # Add to core tool names so it's always available
+        self._all_tool_names.add("parse_html")
 
         # Tool display names (Chinese-friendly)
         self.tool_display_names = {
@@ -412,6 +418,7 @@ class OpenAGCAgent:
             "configure_system": "系统配置管理",
             "develop_plugin": "插件开发",
             "manage_task_plan": "管理任务计划",
+            "parse_html": "HTML 转 Markdown",
         }
 
         # Load auto-generated tools (persisted from previous sessions)
@@ -447,7 +454,7 @@ class OpenAGCAgent:
                            "search_file_content", "find_files", "search_available_tools",
                            "ask_user_question", "search_history", "queue_download", "pause_and_wait",
                            "execute_python", "search_web", "self_review", "configure_system",
-                           "manage_task_plan"}
+                           "manage_task_plan", "parse_html"}
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
 
         # Adaptive resident: auto-load frequently used non-core tools
