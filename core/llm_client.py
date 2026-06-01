@@ -341,8 +341,9 @@ class LLMClient:
                                max_tokens: int = 4096) -> List[Dict[str, Any]]:
         """Truncate message history to fit within the context window.
 
-        Keeps system messages and the most recent turns that fit.
-        Drops oldest messages first.
+        Uses TF-IDF relevance scoring to keep the most relevant non-system messages
+        while fitting within `max_tokens`. The last 3 user/assistant messages are
+        always kept as the reference for relevance scoring.
         """
         if not messages:
             return messages
@@ -353,24 +354,79 @@ class LLMClient:
         sys_tokens = self._estimate_tokens(system_msgs)
         available = max(max_tokens - sys_tokens, max_tokens // 4)
 
-        # Keep messages from newest to oldest until we run out of budget
-        kept = []
-        used = 0
-        for msg in reversed(other_msgs):
+        if len(other_msgs) <= 2:
+            # Not enough messages to bother scoring
+            return system_msgs + other_msgs
+
+        # Always keep the last 2 messages (latest query + response)
+        # Use them as the reference for relevance scoring
+        keep_count = min(2, len(other_msgs))
+        always_keep = other_msgs[-keep_count:]
+        candidates = other_msgs[:-keep_count]
+
+        # Build a TF-IDF relevance score for each candidate message
+        import math
+        from collections import Counter
+
+        def _tokenize(text):
+            if isinstance(text, list):
+                text = " ".join(p.get("text", "") for p in text if isinstance(p, dict) and p.get("type") == "text")
+            if not isinstance(text, str):
+                return []
+            text = text.lower()
+            # Split English words, keep Chinese characters
+            result = []
+            for token in text.replace("\n", " ").split():
+                token = token.strip()
+                if not token:
+                    continue
+                result.append(token)
+                # Also add individual Chinese characters for fine-grained matching
+                for ch in token:
+                    if '一' <= ch <= '鿿':
+                        result.append(ch)
+            return result
+
+        # Build reference corpus from always_keep messages
+        ref_text = " ".join(str(m.get("content", "")) for m in always_keep)
+        ref_tokens = _tokenize(ref_text)
+        ref_tf = Counter(ref_tokens)
+        ref_unique = set(ref_tokens)
+
+        # Compute TF-IDF score for each candidate
+        scored = []
+        for msg in candidates:
+            text = str(msg.get("content", ""))
+            tokens = _tokenize(text)
+            tf = Counter(tokens)
+            # TF-IDF: term frequency in this doc * idf (based on presence in ref)
+            score = 0
+            for word, count in tf.items():
+                if word in ref_unique:
+                    score += count * math.log((len(candidates) + 1) / (1 + 1))
+            scored.append((score, msg))
+
+        # Sort by relevance score descending, then preserve original order for ties
+        scored.sort(key=lambda x: (-x[0], candidates.index(x[1])))
+
+        # Fit within budget: keep highest-scoring messages
+        kept = list(always_keep)
+        used = self._estimate_tokens(always_keep)
+        for score, msg in scored:
             msg_tokens = self._estimate_tokens([msg])
-            if used + msg_tokens > available:
-                # Truncate this message's content to fit the remaining budget
+            if used + msg_tokens <= available:
+                kept.insert(0, msg)
+                used += msg_tokens
+            else:
+                # Try truncating this message's content
                 if used < available and msg.get("role") == "user":
                     content = msg.get("content", "")
                     if isinstance(content, str):
-                        truncated_len = (available - used) * 3
-                        msg = {**msg, "content": content[:truncated_len] + "..."}
-                        kept.append(msg)
+                        trunc_len = (available - used) * 3
+                        kept.insert(0, {**msg, "content": content[:trunc_len] + "..."})
+                        used = available
                 break
-            kept.append(msg)
-            used += msg_tokens
 
-        kept.reverse()
         return system_msgs + kept
 
     def _sanitize_for_llamacpp(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
