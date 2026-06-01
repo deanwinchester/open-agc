@@ -564,6 +564,9 @@ class LLMClient:
                         truncated.insert(1, note)
                     kwargs["messages"] = truncated
                     response = litellm.completion(**kwargs)
+                    # Persist compression: replace original messages in-place so
+                    # agent's self.messages reflects the compressed state
+                    messages[:] = truncated
                 t1 = time.time()
 
                 # ── Log model call ──
