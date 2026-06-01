@@ -18,3 +18,4 @@ httptools
 croniter>=2.0.0
 python-multipart>=0.0.18
 mcp>=1.1.2
+chromadb>=0.5.0

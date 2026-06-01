@@ -341,9 +341,8 @@ class LLMClient:
                                max_tokens: int = 4096) -> List[Dict[str, Any]]:
         """Truncate message history to fit within the context window.
 
-        Uses TF-IDF relevance scoring to keep the most relevant non-system messages
-        while fitting within `max_tokens`. The last 3 user/assistant messages are
-        always kept as the reference for relevance scoring.
+        Uses ChromaDB embedding for semantic relevance scoring, falls back to
+        weighted TF-IDF. Always keeps the last 2 non-system messages.
         """
         if not messages:
             return messages
@@ -355,61 +354,26 @@ class LLMClient:
         available = max(max_tokens - sys_tokens, max_tokens // 4)
 
         if len(other_msgs) <= 2:
-            # Not enough messages to bother scoring
             return system_msgs + other_msgs
 
-        # Always keep the last 2 messages (latest query + response)
-        # Use them as the reference for relevance scoring
-        keep_count = min(2, len(other_msgs))
+        # Always keep the last 3 messages as reference
+        keep_count = min(3, len(other_msgs))
         always_keep = other_msgs[-keep_count:]
         candidates = other_msgs[:-keep_count]
 
-        # Build a TF-IDF relevance score for each candidate message
-        import math
-        from collections import Counter
+        scored = self._score_by_embedding(always_keep, candidates)
+        if scored is None:
+            scored = self._score_by_tfidf(always_keep, candidates)
 
-        def _tokenize(text):
-            if isinstance(text, list):
-                text = " ".join(p.get("text", "") for p in text if isinstance(p, dict) and p.get("type") == "text")
-            if not isinstance(text, str):
-                return []
-            text = text.lower()
-            # Split English words, keep Chinese characters
-            result = []
-            for token in text.replace("\n", " ").split():
-                token = token.strip()
-                if not token:
-                    continue
-                result.append(token)
-                # Also add individual Chinese characters for fine-grained matching
-                for ch in token:
-                    if '一' <= ch <= '鿿':
-                        result.append(ch)
-            return result
+        # Role weighting: user messages more important, tool results less
+        _role_weight = {"user": 2.0, "assistant": 1.5, "tool_step": 0.3, "tool": 0.5}
+        for i, (score, msg) in enumerate(scored):
+            w = _role_weight.get(msg.get("role", ""), 1.0)
+            scored[i] = (score * w, msg)
 
-        # Build reference corpus from always_keep messages
-        ref_text = " ".join(str(m.get("content", "")) for m in always_keep)
-        ref_tokens = _tokenize(ref_text)
-        ref_tf = Counter(ref_tokens)
-        ref_unique = set(ref_tokens)
+        # Sort by weighted relevance descending
+        scored.sort(key=lambda x: -x[0])
 
-        # Compute TF-IDF score for each candidate
-        scored = []
-        for msg in candidates:
-            text = str(msg.get("content", ""))
-            tokens = _tokenize(text)
-            tf = Counter(tokens)
-            # TF-IDF: term frequency in this doc * idf (based on presence in ref)
-            score = 0
-            for word, count in tf.items():
-                if word in ref_unique:
-                    score += count * math.log((len(candidates) + 1) / (1 + 1))
-            scored.append((score, msg))
-
-        # Sort by relevance score descending, then preserve original order for ties
-        scored.sort(key=lambda x: (-x[0], candidates.index(x[1])))
-
-        # Fit within budget: keep highest-scoring messages
         kept = list(always_keep)
         used = self._estimate_tokens(always_keep)
         for score, msg in scored:
@@ -417,17 +381,92 @@ class LLMClient:
             if used + msg_tokens <= available:
                 kept.insert(0, msg)
                 used += msg_tokens
-            else:
-                # Try truncating this message's content
-                if used < available and msg.get("role") == "user":
-                    content = msg.get("content", "")
-                    if isinstance(content, str):
-                        trunc_len = (available - used) * 3
-                        kept.insert(0, {**msg, "content": content[:trunc_len] + "..."})
-                        used = available
+            elif used < available and msg.get("role") in ("user", "assistant"):
+                content = str(msg.get("content", ""))
+                if content:
+                    trunc_len = (available - used) * 3
+                    kept.insert(0, {**msg, "content": content[:trunc_len] + "..."})
+                    used = available
                 break
 
         return system_msgs + kept
+
+    def _score_by_embedding(self, ref_msgs: list, candidates: list):
+        """Score candidates by cosine similarity to reference messages using chromadb."""
+        try:
+            from chromadb.utils import embedding_functions
+            import numpy as np
+            from core.paths import get_data_dir
+
+            # Store model in data/ for Docker persistence
+            model_dir = os.path.join(get_data_dir(), "chroma_embedding")
+            os.makedirs(model_dir, exist_ok=True)
+
+            ef = embedding_functions.DefaultEmbeddingFunction(
+                download_path=model_dir
+            )
+
+            ref_text = " ".join(
+                str(m.get("content", ""))[:500] for m in ref_msgs
+            )[:2000]
+            candidate_texts = [
+                str(m.get("content", ""))[:2000] for m in candidates
+            ]
+
+            all_texts = [ref_text] + candidate_texts
+            embeddings = ef(all_texts)
+            ref_emb = np.array(embeddings[0])
+
+            scored = []
+            for i, emb in enumerate(embeddings[1:]):
+                cand_emb = np.array(emb)
+                sim = float(np.dot(ref_emb, cand_emb) / (
+                    np.linalg.norm(ref_emb) * np.linalg.norm(cand_emb) + 1e-8
+                ))
+                scored.append((sim, candidates[i]))
+
+            return scored
+        except Exception as e:
+            print(f"[LLMClient] Embedding scoring failed ({e}), falling back to TF-IDF")
+            return None
+
+    def _score_by_tfidf(self, ref_msgs: list, candidates: list):
+        """Score candidates by weighted TF-IDF. Fallback when embedding unavailable."""
+        import math
+        from collections import Counter
+
+        def _tokenize(text):
+            if isinstance(text, list):
+                text = " ".join(
+                    p.get("text", "") for p in text
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+            if not isinstance(text, str):
+                return []
+            text = text.lower()[:3000]
+            result = []
+            for token in text.replace("\n", " ").split():
+                token = token.strip()
+                if not token:
+                    continue
+                result.append(token)
+                for ch in token:
+                    if '一' <= ch <= '鿿':
+                        result.append(ch)
+            return result
+
+        ref_text = " ".join(str(m.get("content", "")) for m in ref_msgs)
+        ref_tokens = set(_tokenize(ref_text))
+
+        scored = []
+        for msg in candidates:
+            text = str(msg.get("content", ""))
+            tokens = _tokenize(text)
+            tf = Counter(tokens)
+            score = sum(count for word, count in tf.items() if word in ref_tokens)
+            scored.append((score, msg))
+
+        return scored
 
     def _sanitize_for_llamacpp(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Make messages compatible with strict GGUF chat templates.
