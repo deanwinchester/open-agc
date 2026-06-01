@@ -1107,7 +1107,9 @@ function initApp() {
     }
 
     let formattedContent = content;
-    if (role === 'tool_step') {
+    if (role === 'user') {
+      formattedContent = '<pre style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:0.82rem;line-height:1.5;background:var(--bg-inner);padding:0.5rem;border-radius:4px;">' + escapeHtml(content) + '</pre>';
+    } else if (role === 'tool_step') {
       try {
         var ts = JSON.parse(content);
         var statusIcon = ts.success ? '✅' : '❌';
@@ -1153,6 +1155,7 @@ function initApp() {
         }).join('') + '</div>';
     }
 
+    formattedContent = formattedContent.replace(/<\/?(?:style|link|script|meta|base|iframe|object|embed)[^>]*>/gi, '');
     messageDiv.innerHTML = `<div class="avatar">${avatarSvg}</div><div class="content">${imagesHtml}${filesHtml}${formattedContent}</div>`;
     if (progressInline && role === 'user') {
       chatContainer.insertBefore(messageDiv, progressInline);
