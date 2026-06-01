@@ -4859,21 +4859,6 @@ def start_guardian_loop():
                 except Exception:
                     pass
 
-                # Check for interrupted tasks (from server restart or errors)
-                try:
-                    conn = sqlite3.connect(DB_PATH)
-                    cur = conn.execute("SELECT id, title, user_query, interruption_reason FROM tasks WHERE status='interrupted' ORDER BY updated_at DESC LIMIT 5")
-                    rows = cur.fetchall()
-                    conn.close()
-                    if rows:
-                        hb_context += "\n## 中断的任务\n以下任务因故中断，尚未恢复：\n"
-                        for r in rows:
-                            reason = r[3] or "unknown"
-                            hb_context += f"- 任务 #{r[0]}: {r[1] or r[2][:80]}（中断原因: {reason}）\n"
-                        hb_context += "如需恢复执行某个任务，回复 RESUME:{id}。\n"
-                except Exception:
-                    pass
-
                 # Load plan summaries for active todos
                 try:
                     from tools.task_plan import load_plan as _hb_load_plan
@@ -4928,6 +4913,7 @@ def start_guardian_loop():
                                 break
                         if not _hb_target:
                             print(f"[Guardian] Phase 2: todo #{resume_id} not found, skipping")
+                            _time.sleep(max(interval, 10))
                             continue
                         if _hb_target["status"] == "doing":
                             updated = _hb_target.get("updated", "")
@@ -4937,15 +4923,18 @@ def start_guardian_loop():
                                     _hb_t = _hb_dt.strptime(updated, "%Y-%m-%d %H:%M")
                                     if (_hb_dt.now() - _hb_t).total_seconds() < 7200:
                                         print(f"[Guardian] Phase 2: todo #{resume_id} recently active, skipping")
+                                        _time.sleep(max(interval, 10))
                                         continue
                                 except Exception:
                                     pass
                             else:
+                                _time.sleep(max(interval, 10))
                                 continue  # doing but no timestamp, skip
 
                         # ── Layer 2: Check active agents ──
                         if _active_agents.get(bg_session_id):
                             print(f"[Guardian] Phase 2: active agent in session {bg_session_id}, skipping")
+                            _time.sleep(max(interval, 10))
                             continue
                         if _background_agents:
                             # Check if any background agent belongs to this session
@@ -4966,6 +4955,7 @@ def start_guardian_loop():
                                 pass
                             if _has_bg:
                                 print(f"[Guardian] Phase 2: background agent for session {bg_session_id}, skipping")
+                                _time.sleep(max(interval, 10))
                                 continue
 
                         # ── Phase 2: Execute ──
