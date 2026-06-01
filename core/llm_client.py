@@ -3,11 +3,131 @@ import json
 import re
 import uuid
 import base64
+import time
+import sqlite3
 import litellm
 # Fix for PyInstaller bundling issue with tiktoken
 litellm.num_tokens_logging = False
 litellm.supports_token_counter = False
 from typing import List, Dict, Any, Optional, Tuple
+
+from core.paths import get_data_path
+
+# ── Model call logging ──
+_MODEL_LOGS_DB = None
+
+def _get_model_logs_conn() -> sqlite3.Connection:
+    global _MODEL_LOGS_DB
+    if _MODEL_LOGS_DB is None:
+        db_path = get_data_path("chat_history.db")
+        _MODEL_LOGS_DB = sqlite3.connect(db_path, timeout=5)
+        _MODEL_LOGS_DB.execute("PRAGMA journal_mode=WAL")
+    return _MODEL_LOGS_DB
+
+def _init_model_logs_table():
+    """Create the model_call_logs table if it doesn't exist."""
+    try:
+        conn = _get_model_logs_conn()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS model_call_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                session_id INTEGER,
+                task_id INTEGER,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_tokens INTEGER DEFAULT 0,
+                completion_tokens INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
+                request_data TEXT,
+                response_data TEXT,
+                cache_hit TEXT DEFAULT 'unknown',
+                latency_ms INTEGER DEFAULT 0,
+                cost_estimate REAL DEFAULT 0.0
+            )
+        """)
+        conn.commit()
+    except Exception:
+        pass
+
+def _infer_provider(model_name: str) -> str:
+    """Extract provider name from model string."""
+    if not model_name:
+        return "unknown"
+    ml = model_name.lower()
+    if "deepseek" in ml: return "deepseek"
+    if "gpt" in ml or "openai" in ml: return "openai"
+    if "claude" in ml or "anthropic" in ml: return "anthropic"
+    if "gemini" in ml or "google" in ml: return "gemini"
+    if "kimi" in ml or "moonshot" in ml: return "kimi"
+    if "glm" in ml or "zhipu" in ml or "zai" in ml: return "glm"
+    if "qwen" in ml or "alibaba" in ml: return "qwen"
+    if "llama" in ml or "meta" in ml: return "llama"
+    if "llamacpp" in ml: return "local"
+    if "sglang" in ml: return "local"
+    if "/" in model_name:
+        return model_name.split("/")[0]
+    return "unknown"
+
+def _detect_cache_hit(response) -> str:
+    """Check response usage for cache hit indicators."""
+    try:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return "unknown"
+        # Anthropic: prompt_tokens_details.cached_tokens > 0
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details and getattr(details, "cached_tokens", 0) > 0:
+            return "hit"
+        # OpenAI: completion_tokens_details may indicate cached content
+        cd = getattr(usage, "completion_tokens_details", None)
+        if cd and getattr(cd, "cached_tokens", 0) > 0:
+            return "hit"
+    except Exception:
+        pass
+    return "miss"
+
+def _detect_cached_tokens(response) -> int:
+    """Extract cached token count from response usage."""
+    try:
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return 0
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details:
+            return getattr(details, "cached_tokens", 0) or 0
+        cd = getattr(usage, "completion_tokens_details", None)
+        if cd:
+            return getattr(cd, "cached_tokens", 0) or 0
+    except Exception:
+        pass
+    return 0
+
+
+def _log_model_call(provider: str, model: str, prompt_tokens: int,
+                     completion_tokens: int, total_tokens: int,
+                     request_data: str, response_data: str,
+                     cache_hit: str, latency_ms: int,
+                     cached_tokens: int = 0,
+                     session_id: int = None, task_id: int = None):
+    """Insert a model call log entry."""
+    try:
+        _init_model_logs_table()
+        conn = _get_model_logs_conn()
+        cost = (total_tokens / 1000.0) * 0.01
+        conn.execute(
+            """INSERT INTO model_call_logs
+               (session_id, task_id, provider, model, prompt_tokens,
+                completion_tokens, total_tokens, request_data, response_data,
+                cache_hit, latency_ms, cost_estimate, cached_tokens)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (session_id, task_id, provider, model, prompt_tokens,
+             completion_tokens, total_tokens, request_data, response_data,
+             cache_hit, latency_ms, cost, cached_tokens)
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"[ModelLog] Failed to log: {e}")
 
 
 # Optional logging or debugging controls for litellm
@@ -338,7 +458,36 @@ class LLMClient:
                 kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
 
             try:
+                t0 = time.time()
                 response = litellm.completion(**kwargs)
+                t1 = time.time()
+
+                # ── Log model call ──
+                try:
+                    usage = getattr(response, "usage", None)
+                    pt = getattr(usage, "prompt_tokens", 0) if usage else 0
+                    ct = getattr(usage, "completion_tokens", 0) if usage else 0
+                    tt = pt + ct
+                    req_text = json.dumps(messages, ensure_ascii=False)[:50000] if messages else ""
+                    resp_text = ""
+                    if hasattr(response, "choices") and response.choices:
+                        msg = response.choices[0].message
+                        resp_text = (getattr(msg, "content", "") or "")[:50000]
+                    _log_model_call(
+                        provider=_infer_provider(attempt_model),
+                        model=attempt_model,
+                        prompt_tokens=pt,
+                        completion_tokens=ct,
+                        total_tokens=tt,
+                        request_data=req_text,
+                        response_data=resp_text,
+                        cache_hit=_detect_cache_hit(response),
+                        cached_tokens=_detect_cached_tokens(response),
+                        latency_ms=int((t1 - t0) * 1000),
+                    )
+                except Exception as log_e:
+                    print(f"[LLMClient] Logging failed: {log_e}")
+
                 return response, attempt_model
             except Exception as e:
                 last_error = e
@@ -381,12 +530,29 @@ class LLMClient:
             
         try:
             response = litellm.completion(**kwargs)
-            
+
             # Stateful filtering for streaming thought tags
             in_thought_block = False
-            
+
+            # Track accumulated data for logging
+            _stream_start = time.time()
+            _stream_content = ""
+            _last_usage = None
+
             for chunk in response:
-                content = chunk.choices[0].delta.content
+                # Capture usage from final chunk
+                try:
+                    if hasattr(chunk, 'usage') and chunk.usage:
+                        _last_usage = chunk.usage
+                except Exception:
+                    pass
+
+                content = None
+                try:
+                    content = chunk.choices[0].delta.content
+                except Exception:
+                    pass
+
                 if content:
                     # Simple state machine to skip content between tags
                     lower_content = content.lower()
@@ -397,20 +563,44 @@ class LLMClient:
                         if "/think" in lower_content or "/thought" in lower_content:
                             in_thought_block = False
                         continue
-                        
+
                     if "/think" in lower_content or "/thought" in lower_content:
                         in_thought_block = False
                         continue
-                    
+
                     if in_thought_block:
                         continue
-                        
+
                     # Clean the content just in case any markers remain
-                    chunk.choices[0].delta.content = clean_llm_text(content)
-                    if not chunk.choices[0].delta.content:
+                    cleaned = clean_llm_text(content)
+                    chunk.choices[0].delta.content = cleaned
+                    if not cleaned:
                         continue
-                        
+                    _stream_content += cleaned
+
                 yield chunk
+
+            # Log after stream completes
+            pt = getattr(_last_usage, 'prompt_tokens', 0) if _last_usage else 0
+            ct = getattr(_last_usage, 'completion_tokens', 0) if _last_usage else 0
+            if pt or ct or _stream_content:
+                try:
+                    _cached = _detect_cached_tokens(_last_usage) if _last_usage else 0
+                    _log_model_call(
+                        provider=_infer_provider(target_model),
+                        model=target_model,
+                        prompt_tokens=pt,
+                        completion_tokens=ct,
+                        total_tokens=pt + ct,
+                        request_data=json.dumps(messages, ensure_ascii=False)[:50000] if messages else "",
+                        response_data=_stream_content[:50000],
+                        cache_hit="hit" if _cached > 0 else "miss",
+                        cached_tokens=_cached,
+                        latency_ms=int((time.time() - _stream_start) * 1000),
+                    )
+                except Exception as log_e:
+                    print(f"[LLMClient] Stream log failed: {log_e}")
+
         except Exception as e:
             print(f"Error calling LLM stream ({target_model}): {str(e)}")
             raise

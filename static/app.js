@@ -1772,6 +1772,229 @@ function initApp() {
     if (e.target.closest('#log-refresh-btn')) loadLogs();
   });
 
+  // ── Logs sub-tab switching ──
+  document.querySelectorAll('.sub-tab-logs').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.sub-tab-logs').forEach(t => {
+        t.style.color = 'var(--text-secondary)';
+        t.style.borderBottomColor = 'transparent';
+      });
+      tab.style.color = 'var(--text-primary)';
+      tab.style.borderBottomColor = 'var(--accent-color)';
+      const sub = tab.dataset.logsub;
+      document.getElementById('logs-system').style.display = sub === 'system' ? 'flex' : 'none';
+      document.getElementById('logs-model').style.display = sub === 'model' ? 'flex' : 'none';
+      if (sub === 'model') loadModelLogs();
+    });
+  });
+
+  // ── Model call logs state ──
+  let mlState = { page: 1, pageSize: 50, total: 0, filters: {} };
+
+  async function loadModelLogs() {
+    const tbody = document.getElementById('ml-table-body');
+    const info = document.getElementById('ml-page-info');
+    if (!tbody) return;
+    try {
+      const f = mlState.filters;
+      const params = new URLSearchParams();
+      if (f.provider) params.set('provider', f.provider);
+      if (f.model) params.set('model', f.model);
+      if (f.range) {
+        const now = new Date();
+        if (f.range === 'today') {
+          params.set('start_date', now.toISOString().slice(0, 10));
+        } else if (f.range === '7d') {
+          const d = new Date(now - 7 * 86400000);
+          params.set('start_date', d.toISOString().slice(0, 10));
+        } else if (f.range === '30d') {
+          const d = new Date(now - 30 * 86400000);
+          params.set('start_date', d.toISOString().slice(0, 10));
+        }
+      }
+      params.set('page', mlState.page);
+      params.set('page_size', mlState.pageSize);
+
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:2rem;color:var(--text-secondary);">加载中...</td></tr>';
+      const res = await fetch('/api/model-logs?' + params.toString());
+      const data = await res.json();
+      mlState.total = data.total || 0;
+
+      if (!data.logs || data.logs.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:2rem;color:var(--text-secondary);">暂无数据</td></tr>';
+      } else {
+        tbody.innerHTML = data.logs.map(log => {
+          const ts = log.timestamp ? (() => {
+            const d = new Date(log.timestamp + (log.timestamp.includes('Z') || log.timestamp.includes('+') ? '' : 'Z'));
+            const pad = n => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+          })() : '-';
+          const pt = log.prompt_tokens ?? 0;
+          const ct = log.completion_tokens ?? 0;
+          const tt = log.total_tokens ?? 0;
+          const cachedTokens = log.cached_tokens || 0;
+          const cache = log.cache_hit === 'hit'
+            ? `<span style="color:#22c55e;font-weight:600;">✅ ${cachedTokens.toLocaleString()}</span>`
+            : log.cache_hit === 'miss' ? '<span style="color:var(--text-secondary);">❌ 未命中</span>'
+            : '<span style="color:var(--text-secondary);">-</span>';
+          const lat = log.latency_ms ? (log.latency_ms < 1000 ? log.latency_ms + 'ms' : (log.latency_ms / 1000).toFixed(1) + 's') : '-';
+          return `<tr style="border-bottom:1px solid var(--border-color);">
+            <td style="padding:6px 8px;white-space:nowrap;">${ts}</td>
+            <td style="padding:6px 8px;">${escapeHtml(log.provider || '')}</td>
+            <td style="padding:6px 8px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(log.model || '')}">${escapeHtml(log.model || '')}</td>
+            <td style="padding:6px 8px;text-align:right;white-space:nowrap;">${pt}/${ct}/${tt}</td>
+            <td style="padding:6px 8px;text-align:center;">${cache}</td>
+            <td style="padding:6px 8px;text-align:right;white-space:nowrap;">${lat}</td>
+            <td style="padding:6px 8px;text-align:center;"><button class="btn-secondary ml-detail-btn" data-id="${log.id}" style="padding:3px 8px;font-size:0.75rem;">详情</button></td>
+          </tr>`;
+        }).join('');
+      }
+
+      // Pagination
+      const totalPages = Math.max(1, Math.ceil(mlState.total / mlState.pageSize));
+      info.textContent = `第 ${mlState.page} / ${totalPages} 页（共 ${mlState.total} 条）`;
+      document.getElementById('ml-page-prev').style.display = mlState.page <= 1 ? 'none' : '';
+      document.getElementById('ml-page-next').style.display = mlState.page >= totalPages ? 'none' : '';
+
+      // Summary
+      const summary = document.getElementById('ml-summary');
+      if (summary) {
+        const totalTok = data.logs.reduce((s, l) => s + (l.total_tokens || 0), 0);
+        summary.textContent = `共 ${data.logs.length} 条 | Token: ${totalTok.toLocaleString()}`;
+      }
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:2rem;color:var(--error);">加载失败: ${e.message}</td></tr>`;
+    }
+  }
+
+  // ── Load filter dropdown options ──
+  async function loadModelLogFilters() {
+    try {
+      const res = await fetch('/api/model-logs/filters');
+      const data = await res.json();
+      const provSel = document.getElementById('ml-filter-provider');
+      const modelSel = document.getElementById('ml-filter-model');
+      if (provSel && data.providers) {
+        data.providers.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p; opt.textContent = p;
+          provSel.appendChild(opt);
+        });
+      }
+      if (modelSel && data.models) {
+        data.models.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m; opt.textContent = m;
+          modelSel.appendChild(opt);
+        });
+      }
+    } catch (e) { /* filters non-critical */ }
+  }
+
+  // ── Apply filters ──
+  function applyModelLogFilters() {
+    mlState.page = 1;
+    mlState.filters = {
+      provider: document.getElementById('ml-filter-provider')?.value || '',
+      model: document.getElementById('ml-filter-model')?.value || '',
+      range: document.getElementById('ml-filter-range')?.value || '',
+    };
+    loadModelLogs();
+  }
+
+  // ── Wire up model log controls ──
+  document.getElementById('ml-filter-btn')?.addEventListener('click', applyModelLogFilters);
+  document.getElementById('ml-refresh-btn')?.addEventListener('click', () => loadModelLogs());
+  document.getElementById('ml-page-prev')?.addEventListener('click', () => {
+    if (mlState.page > 1) { mlState.page--; loadModelLogs(); }
+  });
+  document.getElementById('ml-page-next')?.addEventListener('click', () => {
+    mlState.page++; loadModelLogs();
+  });
+
+  // ── Model log detail (delegated) ──
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.ml-detail-btn');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    try {
+      const res = await fetch('/api/model-logs/' + id);
+      const d = await res.json();
+      document.getElementById('mld-time').textContent = d.timestamp ? (() => {
+        const dt = new Date(d.timestamp + (d.timestamp.includes('Z') || d.timestamp.includes('+') ? '' : 'Z'));
+        const pad = n => String(n).padStart(2, '0');
+        return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+      })() : '-';
+      document.getElementById('mld-provider').textContent = d.provider || '-';
+      document.getElementById('mld-model').textContent = d.model || '-';
+      document.getElementById('mld-latency').textContent = d.latency_ms ?? 0;
+      document.getElementById('mld-pt').textContent = d.prompt_tokens ?? 0;
+      document.getElementById('mld-ct').textContent = d.completion_tokens ?? 0;
+      document.getElementById('mld-tt').textContent = d.total_tokens ?? 0;
+      const ck = d.cached_tokens || 0;
+      document.getElementById('mld-ck').textContent = ck.toLocaleString();
+      const cacheEl = document.getElementById('mld-cache');
+      cacheEl.innerHTML = d.cache_hit === 'hit' ? `✅ 命中 (${ck.toLocaleString()} tokens)` : (d.cache_hit === 'miss' ? '❌ 未命中' : '-');
+      cacheEl.style.color = d.cache_hit === 'hit' ? '#22c55e' : 'var(--text-secondary)';
+
+      // Format request JSON with syntax highlighting
+      const reqEl = document.getElementById('mld-request');
+      if (d.request_data && d.request_data !== '(无)') {
+        try {
+          const parsed = JSON.parse(d.request_data);
+          const msgs = Array.isArray(parsed) ? parsed : [parsed];
+          // Build sectioned display
+          let html = '';
+          msgs.forEach((msg, i) => {
+            const role = msg.role || 'unknown';
+            const color = role === 'system' ? '#7c3aed' : role === 'user' ? '#2563eb' : role === 'assistant' ? '#059669' : '#64748b';
+            const content = msg.content || '(no content)';
+            const contentStr = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+            html += `<div style="margin-bottom:0.75rem;border-left:3px solid ${color};padding-left:0.5rem;">
+              <div style="font-size:0.7rem;font-weight:700;color:${color};margin-bottom:0.25rem;text-transform:uppercase;">${role}</div>
+              <pre style="margin:0;font-size:0.75rem;white-space:pre-wrap;word-break:break-all;font-family:monospace;">${escapeHtml(contentStr)}</pre>
+            </div>`;
+          });
+          reqEl.innerHTML = html;
+        } catch (e) {
+          reqEl.textContent = d.request_data;
+        }
+      } else {
+        reqEl.textContent = '(无)';
+      }
+
+      // Format response
+      const respEl = document.getElementById('mld-response');
+      if (d.response_data) {
+        try {
+          const parsed = JSON.parse(d.response_data);
+          respEl.textContent = JSON.stringify(parsed, null, 2);
+        } catch (e) {
+          respEl.textContent = d.response_data;
+        }
+      } else {
+        respEl.textContent = '(无)';
+      }
+      document.getElementById('ml-detail-modal').style.display = 'flex';
+    } catch (e) {
+      console.error('Failed to load log detail:', e);
+    }
+  });
+  document.getElementById('ml-detail-close')?.addEventListener('click', () => {
+    document.getElementById('ml-detail-modal').style.display = 'none';
+  });
+  document.getElementById('ml-detail-modal')?.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) e.target.style.display = 'none';
+  });
+
+  // ── Load model logs when the view becomes active ──
+  // Extend loadLogs to also load model log filters on first visit
+  const _origLoadLogs = window.loadLogs;
+  window.loadLogs = function() {
+    _origLoadLogs();
+    loadModelLogFilters();
+  };
+
   fetchInitialData().then(() => {
     window._perf.connected = performance.now();
     console.log('[PERF] connectWebSocket', (performance.now() - window._perf.start).toFixed(1), 'ms');
