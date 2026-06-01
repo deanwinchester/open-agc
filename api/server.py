@@ -388,6 +388,20 @@ def init_db():
     except Exception:
         pass
 
+    # Add token breakdown to tasks
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN prompt_tokens INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN completion_tokens INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN cached_tokens INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -2587,7 +2601,8 @@ async def get_tasks(status: str = None, q: str = None, session_id: int = None,
                "t.created_at, t.updated_at, t.result_summary, "
                "t.session_id, t.schedule_cron, t.schedule_enabled, "
                "t.next_run_at, t.resume_count, "
-               "t.total_tokens, t.total_cost")
+               "t.total_tokens, t.total_cost, "
+               "t.prompt_tokens, t.completion_tokens, t.cached_tokens")
     conditions = []
     params = []
 
@@ -2646,7 +2661,10 @@ async def get_tasks(status: str = None, q: str = None, session_id: int = None,
             "next_run_at": row["next_run_at"] if "next_run_at" in row.keys() else None,
             "resume_count": row["resume_count"] if "resume_count" in row.keys() else 0,
             "total_tokens": row["total_tokens"] if "total_tokens" in row.keys() else 0,
-            "total_cost": row["total_cost"] if "total_cost" in row.keys() else 0.0
+            "total_cost": row["total_cost"] if "total_cost" in row.keys() else 0.0,
+            "prompt_tokens": row["prompt_tokens"] if "prompt_tokens" in row.keys() else 0,
+            "completion_tokens": row["completion_tokens"] if "completion_tokens" in row.keys() else 0,
+            "cached_tokens": row["cached_tokens"] if "cached_tokens" in row.keys() else 0
         })
     return {"tasks": tasks, "total_count": total_count, "page": page, "page_size": page_size,
             "_dbg": {"jm": jm, "t_count": round(t1-t0, 3), "t_query": round(t2-t1, 3), "t_total": round(t2-t0, 3),
@@ -2671,17 +2689,6 @@ async def get_task_detail(task_id: int):
     
     cursor.execute("SELECT * FROM task_steps WHERE task_id = ? ORDER BY step_number ASC", (task_id,))
     step_rows = cursor.fetchall()
-
-    # Aggregate token breakdown from model_call_logs
-    cursor.execute("""
-        SELECT COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-               COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-               COALESCE(SUM(cached_tokens), 0) as cached_tokens,
-               COALESCE(SUM(total_tokens), 0) as total_tokens,
-               COALESCE(SUM(cost_estimate), 0) as total_cost
-        FROM model_call_logs WHERE task_id = ?
-    """, (task_id,))
-    token_row = cursor.fetchone()
     conn.close()
     
     output_files = []
@@ -2735,9 +2742,9 @@ async def get_task_detail(task_id: int):
             "session_name": task_row["session_name"] if "session_name" in task_row.keys() else None,
             "total_tokens": task_row["total_tokens"] if "total_tokens" in task_row.keys() else 0,
             "total_cost": task_row["total_cost"] if "total_cost" in task_row.keys() else 0.0,
-            "prompt_tokens": token_row["prompt_tokens"] if token_row else 0,
-            "completion_tokens": token_row["completion_tokens"] if token_row else 0,
-            "cached_tokens": token_row["cached_tokens"] if token_row else 0
+            "prompt_tokens": task_row["prompt_tokens"] if "prompt_tokens" in task_row.keys() else 0,
+            "completion_tokens": task_row["completion_tokens"] if "completion_tokens" in task_row.keys() else 0,
+            "cached_tokens": task_row["cached_tokens"] if "cached_tokens" in task_row.keys() else 0
         }
     }
 
@@ -3908,7 +3915,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     stats = get_stats_manager().get_task_usage(ws_task_id)
                     if stats:
                         conn_tmp = sqlite3.connect(DB_PATH)
-                        conn_tmp.execute("UPDATE tasks SET total_tokens = ?, total_cost = ? WHERE id = ?", (stats["total"], stats.get("cost", 0.0), ws_task_id))
+                        conn_tmp.execute("UPDATE tasks SET total_tokens = ?, total_cost = ?, prompt_tokens = ?, completion_tokens = ?, cached_tokens = ? WHERE id = ?",
+                                         (stats["total"], stats.get("cost", 0.0), stats.get("prompt", 0), stats.get("completion", 0), stats.get("cached", 0), ws_task_id))
                         conn_tmp.commit()
                         conn_tmp.close()
                 except Exception:

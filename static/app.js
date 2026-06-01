@@ -1880,6 +1880,8 @@ function initApp() {
       const provSel = document.getElementById('ml-filter-provider');
       const modelSel = document.getElementById('ml-filter-model');
       if (provSel && data.providers) {
+        // Clear existing options (except first placeholder)
+        while (provSel.options.length > 1) provSel.remove(1);
         data.providers.forEach(p => {
           const opt = document.createElement('option');
           opt.value = p; opt.textContent = p;
@@ -1887,6 +1889,7 @@ function initApp() {
         });
       }
       if (modelSel && data.models) {
+        while (modelSel.options.length > 1) modelSel.remove(1);
         data.models.forEach(m => {
           const opt = document.createElement('option');
           opt.value = m; opt.textContent = m;

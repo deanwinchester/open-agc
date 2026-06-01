@@ -28,24 +28,28 @@ class StatsManager:
                         cost_estimate REAL DEFAULT 0.0
                     )
                 ''')
+                # Migration: add cached_tokens column
+                try:
+                    conn.execute("ALTER TABLE token_usage ADD COLUMN cached_tokens INTEGER DEFAULT 0")
+                except Exception:
+                    pass
                 conn.commit()
         except Exception as e:
             print(f"[StatsManager] Init error: {e}")
 
-    def record_usage(self, provider: str, model: str, prompt_tokens: int, completion_tokens: int, 
-                     session_id: Optional[int] = None, task_id: Optional[int] = None):
+    def record_usage(self, provider: str, model: str, prompt_tokens: int, completion_tokens: int,
+                     session_id: Optional[int] = None, task_id: Optional[int] = None,
+                     cached_tokens: int = 0):
         """Record token usage for a single request."""
         total_tokens = prompt_tokens + completion_tokens
-        # Simple cost estimation: $0.01 per 1k tokens as a very rough placeholder
-        # Real logic should use a rate dictionary
-        cost_estimate = (total_tokens / 1000.0) * 0.01 
-        
+        cost_estimate = (total_tokens / 1000.0) * 0.01
+
         try:
             with self._get_conn() as conn:
                 conn.execute('''
-                    INSERT INTO token_usage (session_id, task_id, provider, model, prompt_tokens, completion_tokens, total_tokens, cost_estimate)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (session_id, task_id, provider, model, prompt_tokens, completion_tokens, total_tokens, cost_estimate))
+                    INSERT INTO token_usage (session_id, task_id, provider, model, prompt_tokens, completion_tokens, total_tokens, cost_estimate, cached_tokens)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (session_id, task_id, provider, model, prompt_tokens, completion_tokens, total_tokens, cost_estimate, cached_tokens))
         except Exception as e:
             print(f"[StatsManager] Error recording usage: {e}")
 
@@ -80,9 +84,10 @@ class StatsManager:
     def get_task_usage(self, task_id: int) -> Dict[str, int]:
         """Get cumulative usage for a specific task."""
         query = '''
-            SELECT SUM(prompt_tokens) as prompt, 
+            SELECT SUM(prompt_tokens) as prompt,
                    SUM(completion_tokens) as completion,
                    SUM(total_tokens) as total,
+                   SUM(cached_tokens) as cached,
                    SUM(cost_estimate) as cost
             FROM token_usage
             WHERE task_id = ?
@@ -95,8 +100,8 @@ class StatsManager:
                     return dict(row)
         except Exception as e:
             print(f"[StatsManager] Error fetching task usage: {e}")
-            
-        return {"prompt": 0, "completion": 0, "total": 0}
+
+        return {"prompt": 0, "completion": 0, "total": 0, "cached": 0}
 
 # Global singleton will be initialized in api/server.py
 _stats_manager = None

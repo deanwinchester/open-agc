@@ -303,11 +303,15 @@ async function openTaskDetail(taskId) {
     const pt = task.prompt_tokens || 0;
     const ct = task.completion_tokens || 0;
     const ck = task.cached_tokens || 0;
-    const tokenInfo = (task.total_tokens || task.total_cost)
-      ? `<span class="task-meta-chip" title="输入: ${pt.toLocaleString()} · 输出: ${ct.toLocaleString()} · 缓存命中: ${ck.toLocaleString()}">
-           🔤 总计 ${(task.total_tokens || 0).toLocaleString()} tokens
-           ${task.total_cost ? ` (¥${Number(task.total_cost).toFixed(4)})` : ''}
-         </span>`
+    const tt = task.total_tokens || 0;
+    const cost = task.total_cost || 0;
+    const tokenInfo = (tt || cost)
+      ? `<div class="task-meta-chip" style="display:inline-flex;flex-direction:column;gap:2px;padding:6px 10px;">
+           <span>🔤 总计 ${tt.toLocaleString()} tokens ${cost ? `(¥${Number(cost).toFixed(4)})` : ''}</span>
+           <span style="font-size:0.7rem;color:var(--text-secondary);">
+             输入 ${pt.toLocaleString()} · 输出 ${ct.toLocaleString()} · 缓存 ${ck.toLocaleString()}
+           </span>
+         </div>`
       : '';
 
     let scheduleSection = '';
@@ -510,21 +514,20 @@ async function openTaskDetail(taskId) {
       }
     });
 
-    // Auto-refresh if task is running
+    // Auto-refresh status only (respects checkbox, partial update, no flash)
     let refreshInterval;
     if (task.status === 'running') {
       refreshInterval = setInterval(() => {
-        loadStepPage(stepState.page);
-        // Also refresh task status
+        const cb = document.getElementById('step-auto-refresh');
+        if (cb && !cb.checked) return;  // respect checkbox
         fetch(`/api/tasks/${taskId}`).then(r => r.json()).then(d => {
-          if (d.task && d.task.status !== 'running') {
-            clearInterval(refreshInterval);
-            // Update status chip
-            const statusChip = content.querySelector('.task-detail-meta .task-meta-chip:first-child');
-            if (statusChip) {
-              const newIcon = { completed: '✅', failed: '❌', interrupted: '⏸️' }[d.task.status] || '📋';
-              statusChip.textContent = `${newIcon} ${d.task.status}`;
-            }
+          if (!d.task) return;
+          // Update status chip only (no full re-render)
+          const statusChip = content.querySelector('.task-detail-meta .task-meta-chip:first-child');
+          if (statusChip && d.task.status !== task.status) {
+            const newIcon = { completed: '✅', failed: '❌', interrupted: '⏸️' }[d.task.status] || '📋';
+            statusChip.textContent = `${newIcon} ${d.task.status}`;
+            if (d.task.status !== 'running') clearInterval(refreshInterval);
           }
         }).catch(() => {});
       }, 5000);
