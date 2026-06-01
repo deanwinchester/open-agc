@@ -2586,7 +2586,8 @@ async def get_tasks(status: str = None, q: str = None, session_id: int = None,
     columns = ("t.id, t.title, t.user_query, t.status, t.task_type, "
                "t.created_at, t.updated_at, t.result_summary, "
                "t.session_id, t.schedule_cron, t.schedule_enabled, "
-               "t.next_run_at, t.resume_count")
+               "t.next_run_at, t.resume_count, "
+               "t.total_tokens, t.total_cost")
     conditions = []
     params = []
 
@@ -2643,7 +2644,9 @@ async def get_tasks(status: str = None, q: str = None, session_id: int = None,
             "schedule_cron": row["schedule_cron"] if "schedule_cron" in row.keys() else None,
             "schedule_enabled": bool(row["schedule_enabled"]) if "schedule_enabled" in row.keys() else False,
             "next_run_at": row["next_run_at"] if "next_run_at" in row.keys() else None,
-            "resume_count": row["resume_count"] if "resume_count" in row.keys() else 0
+            "resume_count": row["resume_count"] if "resume_count" in row.keys() else 0,
+            "total_tokens": row["total_tokens"] if "total_tokens" in row.keys() else 0,
+            "total_cost": row["total_cost"] if "total_cost" in row.keys() else 0.0
         })
     return {"tasks": tasks, "total_count": total_count, "page": page, "page_size": page_size,
             "_dbg": {"jm": jm, "t_count": round(t1-t0, 3), "t_query": round(t2-t1, 3), "t_total": round(t2-t0, 3),
@@ -2668,6 +2671,17 @@ async def get_task_detail(task_id: int):
     
     cursor.execute("SELECT * FROM task_steps WHERE task_id = ? ORDER BY step_number ASC", (task_id,))
     step_rows = cursor.fetchall()
+
+    # Aggregate token breakdown from model_call_logs
+    cursor.execute("""
+        SELECT COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+               COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+               COALESCE(SUM(cached_tokens), 0) as cached_tokens,
+               COALESCE(SUM(total_tokens), 0) as total_tokens,
+               COALESCE(SUM(cost_estimate), 0) as total_cost
+        FROM model_call_logs WHERE task_id = ?
+    """, (task_id,))
+    token_row = cursor.fetchone()
     conn.close()
     
     output_files = []
@@ -2720,7 +2734,10 @@ async def get_task_detail(task_id: int):
             "session_id": task_row["session_id"] if "session_id" in task_row.keys() else None,
             "session_name": task_row["session_name"] if "session_name" in task_row.keys() else None,
             "total_tokens": task_row["total_tokens"] if "total_tokens" in task_row.keys() else 0,
-            "total_cost": task_row["total_cost"] if "total_cost" in task_row.keys() else 0.0
+            "total_cost": task_row["total_cost"] if "total_cost" in task_row.keys() else 0.0,
+            "prompt_tokens": token_row["prompt_tokens"] if token_row else 0,
+            "completion_tokens": token_row["completion_tokens"] if token_row else 0,
+            "cached_tokens": token_row["cached_tokens"] if token_row else 0
         }
     }
 

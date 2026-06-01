@@ -300,8 +300,14 @@ async function openTaskDetail(taskId) {
     const typeBadge = { oneshot: '一次性', scheduled: '⏰ 定时', longrun: '🔬 长期' }[task.task_type] || '一次性';
 
     // Token display
+    const pt = task.prompt_tokens || 0;
+    const ct = task.completion_tokens || 0;
+    const ck = task.cached_tokens || 0;
     const tokenInfo = (task.total_tokens || task.total_cost)
-      ? `<span class="task-meta-chip">🔤 ${task.total_tokens || 0} tokens${task.total_cost ? ` ($${Number(task.total_cost).toFixed(4)})` : ''}</span>`
+      ? `<span class="task-meta-chip" title="输入: ${pt.toLocaleString()} · 输出: ${ct.toLocaleString()} · 缓存命中: ${ck.toLocaleString()}">
+           🔤 总计 ${(task.total_tokens || 0).toLocaleString()} tokens
+           ${task.total_cost ? ` (¥${Number(task.total_cost).toFixed(4)})` : ''}
+         </span>`
       : '';
 
     let scheduleSection = '';
