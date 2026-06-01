@@ -6,6 +6,7 @@ import base64
 import time
 import sqlite3
 import litellm
+from litellm.exceptions import ContextWindowExceededError
 # Fix for PyInstaller bundling issue with tiktoken
 litellm.num_tokens_logging = False
 litellm.supports_token_counter = False
@@ -492,7 +493,13 @@ class LLMClient:
 
             try:
                 t0 = time.time()
-                response = litellm.completion(**kwargs)
+                try:
+                    response = litellm.completion(**kwargs)
+                except ContextWindowExceededError:
+                    # Context too long — truncate messages and retry
+                    print(f"[LLMClient] Context window exceeded for {attempt_model}, truncating...")
+                    kwargs["messages"] = self._truncate_for_context(messages, max_tokens=1000000)
+                    response = litellm.completion(**kwargs)
                 t1 = time.time()
 
                 # ── Log model call ──
