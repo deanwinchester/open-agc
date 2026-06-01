@@ -131,7 +131,13 @@ def _convert_html(html: str) -> Optional[str]:
     if len(html) > 50000:
         html = html[:50000] + "\n<!-- [truncated] -->"
 
-    prompt = f"Convert the following HTML to Markdown. Return ONLY the markdown, no explanations.\n\n{html}"
+    # Use Qwen2.5 chat template format (ReaderLM-0.5B is based on Qwen2.5)
+    prompt = (
+        f"<|im_start|>system\nConvert the following HTML to Markdown. "
+        f"Return ONLY the markdown output, no extra text.<|im_end|>\n"
+        f"<|im_start|>user\n{html}<|im_end|>\n"
+        f"<|im_start|>assistant\n"
+    )
 
     try:
         resp = requests.post(
@@ -140,9 +146,9 @@ def _convert_html(html: str) -> Optional[str]:
                 "prompt": prompt,
                 "temperature": 0.0,
                 "max_tokens": 4096,
-                "stop": ["<|end|>", "<|im_end|>"],
+                "stop": ["<|im_end|>", "<|endoftext|>"],
             },
-            timeout=60,
+            timeout=120,
         )
         if resp.status_code == 200:
             data = resp.json()
@@ -150,6 +156,11 @@ def _convert_html(html: str) -> Optional[str]:
             return text.strip()
         else:
             print(f"[ReaderLM] API error: {resp.status_code}")
+            try:
+                detail = resp.json()
+                print(f"[ReaderLM] Error detail: {str(detail)[:300]}")
+            except Exception:
+                print(f"[ReaderLM] Response: {resp.text[:300]}")
             return None
     except Exception as e:
         print(f"[ReaderLM] API call failed: {e}")
