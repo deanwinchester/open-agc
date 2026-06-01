@@ -7,7 +7,7 @@ import requests
 from typing import Any, Dict, Optional
 from tools.base import BaseTool
 
-_READER_LM_MODEL = "reader-lm-1.5b.Q8_0.gguf"
+_READER_LM_MODEL = "reader-lm-1.5b-Q8_0.gguf"
 _READER_LM_PORT = 8082
 _READER_LM_SERVER: Optional[subprocess.Popen] = None
 _READER_LM_LOCK = threading.Lock()
@@ -36,7 +36,7 @@ def _download_model() -> bool:
     print(f"[ReaderLM] Model not found, downloading from ModelScope...")
     model_id = "BAAI/Reader-LM"
     filename = _READER_LM_MODEL
-    url = f"https://modelscope.cn/models/{model_id}/resolve/main/{filename}"
+    url = f"https://modelscope.cn/models/{model_id}/resolve/master/{filename}"
 
     try:
         import requests as req
