@@ -4052,8 +4052,17 @@ async def websocket_endpoint(websocket: WebSocket):
                                 print(f"[WS] Continuation context error: {e}")
 
 
-                # If it's a heartbeat response that isn't HEARTBEAT_OK, it's a resume or proactive thought.
-                # Ensure it's tagged with the correct session.
+                # Send thinking status
+                await _safe_send({
+                    "type": "status",
+                    "message": "Agent is thinking...",
+                    "session_id": ws_session_id
+                })
+
+                # Run the agent
+                response = await run_agent_with_progress(query, retry_model, agent_profile_name, images=ws_images, resume_task_id=resume_id_for_run)
+
+                # Save and send the response
                 save_message("agent", response, ws_session_id)
 
 
