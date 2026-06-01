@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Critical rules
+
+- **NEVER push to the `release` branch unless the user explicitly and directly asks you to.** Pushing to `main` is fine. Pushing to `release` triggers CI builds and Docker image releases — only do it on explicit user request.
+
+## Development commands
+
 ## Development commands
 
 ```bash
