@@ -4076,10 +4076,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
                 
             except (WebSocketDisconnect, RuntimeError) as _ws_err:
-                if "disconnect" in str(_ws_err).lower():
+                # WebSocketDisconnect doesn't contain "disconnect" in str() output.
+                # Check by type for WebSocketDisconnect or message for RuntimeError.
+                if isinstance(_ws_err, WebSocketDisconnect) or "disconnect" in str(_ws_err).lower():
                     print("[WS] Client disconnected")
                     break
-                # Not a disconnect RuntimeError — re-raise
+                # Not a disconnect — re-raise
                 raise
             except Exception as e:
                 import traceback
