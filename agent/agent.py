@@ -1678,7 +1678,16 @@ class OpenAGCAgent:
             if usage:
                 prompt_tokens = getattr(usage, 'prompt_tokens', 0)
                 completion_tokens = getattr(usage, 'completion_tokens', 0)
-                
+
+                # Detect cached tokens
+                cached_tokens = 0
+                try:
+                    details = getattr(usage, 'prompt_tokens_details', None)
+                    if details:
+                        cached_tokens = getattr(details, 'cached_tokens', 0) or 0
+                except Exception:
+                    pass
+
                 # Smart Provider Detection
                 model_lower = actual_model.lower()
                 if 'deepseek' in model_lower: provider = 'deepseek'
@@ -1700,7 +1709,8 @@ class OpenAGCAgent:
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     session_id=self.session_id,
-                    task_id=self.task_id
+                    task_id=self.task_id,
+                    cached_tokens=cached_tokens
                 )
                 if progress_callback:
                     progress_callback({
