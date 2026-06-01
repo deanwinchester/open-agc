@@ -478,13 +478,14 @@ async function openTaskDetail(taskId) {
         if (!_stepLoading && !_stepAllLoaded) loadStepPage(_stepPage + 1, true);
       });
     }
-    var _stepAR = null;
+    window._stepAR = null;
     function startAutoRefresh() {
-      if (_stepAR) { clearInterval(_stepAR); }
-      _stepAR = setInterval(function() { loadStepPage(1, false); }, 5000);
+      if (window._stepAR) { clearInterval(window._stepAR); }
+      window._stepAR = setInterval(function() { loadStepPage(1, false); }, 5000);
     }
     function stopAutoRefresh() {
-      if (_stepAR) { clearInterval(_stepAR); _stepAR = null; }
+      if (window._stepAR) { clearInterval(window._stepAR); window._stepAR = null; }
+      if (window._taskDetailRefresh) { clearInterval(window._taskDetailRefresh); window._taskDetailRefresh = null; }
     }
     var refreshCb = document.getElementById('step-auto-refresh');
     if (refreshCb) {
@@ -515,19 +516,19 @@ async function openTaskDetail(taskId) {
     });
 
     // Auto-refresh status only (respects checkbox, partial update, no flash)
-    let refreshInterval;
+    // Store on window so it can be cleaned up when leaving the view
+    if (window._taskDetailRefresh) { clearInterval(window._taskDetailRefresh); window._taskDetailRefresh = null; }
     if (task.status === 'running') {
-      refreshInterval = setInterval(() => {
+      window._taskDetailRefresh = setInterval(() => {
         const cb = document.getElementById('step-auto-refresh');
         if (cb && !cb.checked) return;  // respect checkbox
         fetch(`/api/tasks/${taskId}`).then(r => r.json()).then(d => {
           if (!d.task) return;
-          // Update status chip only (no full re-render)
           const statusChip = content.querySelector('.task-detail-meta .task-meta-chip:first-child');
           if (statusChip && d.task.status !== task.status) {
             const newIcon = { completed: '✅', failed: '❌', interrupted: '⏸️' }[d.task.status] || '📋';
             statusChip.textContent = `${newIcon} ${d.task.status}`;
-            if (d.task.status !== 'running') clearInterval(refreshInterval);
+            if (d.task.status !== 'running') { clearInterval(window._taskDetailRefresh); window._taskDetailRefresh = null; }
           }
         }).catch(() => {});
       }, 5000);

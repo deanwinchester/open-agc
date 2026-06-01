@@ -4,6 +4,10 @@ import { switchSession, renameSession, deleteSession, clearSession } from './ses
 
 // Internal: DOM switch only (no history.pushState)
 function _activateView(viewId) {
+  // Clean up auto-refresh intervals when leaving any view
+  if (window._taskDetailRefresh) { clearInterval(window._taskDetailRefresh); window._taskDetailRefresh = null; }
+  if (window._stepAR) { clearInterval(window._stepAR); window._stepAR = null; }
+
   const views = document.querySelectorAll('.view');
   views.forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-item[data-view]').forEach(n => n.classList.remove('active'));
