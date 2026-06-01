@@ -496,9 +496,17 @@ class LLMClient:
                 try:
                     response = litellm.completion(**kwargs)
                 except ContextWindowExceededError:
-                    # Context too long — truncate messages and retry
-                    print(f"[LLMClient] Context window exceeded for {attempt_model}, truncating...")
-                    kwargs["messages"] = self._truncate_for_context(messages, max_tokens=1000000)
+                    # Context too long — compress and retry
+                    print(f"[LLMClient] Context window exceeded for {attempt_model}, compressing...")
+                    truncated = self._truncate_for_context(messages, max_tokens=1000000)
+                    # Add a compression note so the LLM knows history was trimmed
+                    if len(truncated) < len(messages):
+                        note = {"role": "system", "content": (
+                            "[上下文压缩] 较早的对话历史已被截断以适应该模型的上下文窗口。"
+                            "关键信息已在当前消息中保留，如果需要更早的上下文，请使用 search_history 工具检索。"
+                        )}
+                        truncated.insert(1, note)
+                    kwargs["messages"] = truncated
                     response = litellm.completion(**kwargs)
                 t1 = time.time()
 
