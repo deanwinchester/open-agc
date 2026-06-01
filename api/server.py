@@ -3201,6 +3201,32 @@ async def get_logs(lines: int = 200):
 
 # ── Model Call Logs ──
 
+@app.get("/api/model-logs/status")
+async def get_model_log_status():
+    """Return whether model logging is currently enabled."""
+    from core.llm_client import is_model_logging_enabled
+    return {"enabled": is_model_logging_enabled()}
+
+@app.post("/api/model-logs/toggle")
+async def toggle_model_logging(body: dict):
+    """Enable or disable model call logging."""
+    enabled = body.get("enabled", True)
+    from core.llm_client import set_model_logging
+    set_model_logging(enabled)
+    return {"enabled": enabled}
+
+@app.post("/api/model-logs/clear")
+async def clear_model_logs():
+    """Delete all model call logs."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("DELETE FROM model_call_logs")
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/model-logs/filters")
 async def get_model_log_filters():
     """Return distinct providers and models for filter dropdowns."""

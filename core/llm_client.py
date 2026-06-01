@@ -104,6 +104,37 @@ def _detect_cached_tokens(response) -> int:
     return 0
 
 
+# ── Global logging toggle ──
+_model_logging_enabled = True
+
+def set_model_logging(enabled: bool):
+    global _model_logging_enabled
+    _model_logging_enabled = enabled
+
+def is_model_logging_enabled() -> bool:
+    return _model_logging_enabled
+
+
+def _calculate_cost(provider: str, model: str, prompt_tokens: int,
+                     completion_tokens: int, cached_tokens: int) -> float:
+    """Calculate cost in CNY with provider-specific pricing."""
+    ml = model.lower()
+    # DeepSeek pricing (¥ per 1M tokens)
+    if "deepseek" in ml:
+        uncached = prompt_tokens - cached_tokens
+        if "chat" in ml:  # Flash
+            return (cached_tokens / 1_000_000 * 0.02
+                    + uncached / 1_000_000 * 1.0
+                    + completion_tokens / 1_000_000 * 2.0)
+        else:  # Pro / Reasoner
+            return (cached_tokens / 1_000_000 * 0.025
+                    + uncached / 1_000_000 * 3.0
+                    + completion_tokens / 1_000_000 * 6.0)
+    # Default flat rate
+    tt = prompt_tokens + completion_tokens
+    return (tt / 1000.0) * 0.01
+
+
 def _log_model_call(provider: str, model: str, prompt_tokens: int,
                      completion_tokens: int, total_tokens: int,
                      request_data: str, response_data: str,
@@ -111,10 +142,12 @@ def _log_model_call(provider: str, model: str, prompt_tokens: int,
                      cached_tokens: int = 0,
                      session_id: int = None, task_id: int = None):
     """Insert a model call log entry."""
+    if not _model_logging_enabled:
+        return
     try:
         _init_model_logs_table()
         conn = _get_model_logs_conn()
-        cost = (total_tokens / 1000.0) * 0.01
+        cost = _calculate_cost(provider, model, prompt_tokens, completion_tokens, cached_tokens)
         conn.execute(
             """INSERT INTO model_call_logs
                (session_id, task_id, provider, model, prompt_tokens,

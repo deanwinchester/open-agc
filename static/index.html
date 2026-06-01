@@ -176,7 +176,7 @@
                         <line x1="16" y1="17" x2="8" y2="17"></line>
                         <polyline points="10 9 9 9 8 9"></polyline>
                     </svg>
-                    <span>日志查看</span>
+                    <span>日志管理</span>
                 </nav>
 
                 <div class="sidebar-divider"></div>
@@ -965,7 +965,7 @@
             <div class="view" id="view-logs">
                 <header class="view-header" style="display:flex; align-items:center; justify-content:space-between;">
                     <div>
-                        <h1>📋 日志查看</h1>
+                        <h1>📋 日志管理</h1>
                         <p class="view-desc">系统日志与模型调用记录</p>
                     </div>
                 </header>
@@ -1001,6 +1001,12 @@
                         </select>
                         <button id="ml-filter-btn" class="btn btn-primary" style="font-size:0.8rem;padding:4px 12px;">🔍 查询</button>
                         <button id="ml-refresh-btn" class="btn-secondary" style="font-size:0.8rem;padding:4px 10px;">🔄 刷新</button>
+                        <span style="margin:0 0.25rem;color:var(--text-secondary);">|</span>
+                        <label style="display:flex;align-items:center;gap:4px;font-size:0.78rem;color:var(--text-secondary);cursor:pointer;">
+                            <input type="checkbox" id="ml-toggle" checked style="cursor:pointer;">
+                            记录日志
+                        </label>
+                        <button id="ml-clear-btn" class="btn-secondary" style="font-size:0.78rem;padding:3px 8px;color:#ef4444;">🗑️ 清空日志</button>
                         <span id="ml-summary" style="font-size:0.75rem;color:var(--text-secondary);margin-left:auto;"></span>
                     </div>
 

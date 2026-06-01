@@ -1903,6 +1903,28 @@ function initApp() {
   }
 
   // ── Wire up model log controls ──
+  // ── Toggle logging ──
+  async function updateModelLogToggle(enabled) {
+    try { await fetch('/api/model-logs/toggle', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({enabled}) }); } catch(e) {}
+  }
+  document.getElementById('ml-toggle')?.addEventListener('change', (e) => {
+    updateModelLogToggle(e.target.checked);
+  });
+  // Load initial toggle state
+  fetch('/api/model-logs/status').then(r => r.json()).then(d => {
+    const cb = document.getElementById('ml-toggle');
+    if (cb) cb.checked = d.enabled !== false;
+  }).catch(() => {});
+
+  // ── Clear logs with confirmation ──
+  document.getElementById('ml-clear-btn')?.addEventListener('click', async () => {
+    if (!confirm('确定要清空所有模型调用日志吗？此操作不可恢复。')) return;
+    try {
+      await fetch('/api/model-logs/clear', { method: 'POST' });
+      loadModelLogs();
+    } catch(e) { alert('清空失败: ' + e.message); }
+  });
+
   document.getElementById('ml-filter-btn')?.addEventListener('click', applyModelLogFilters);
   document.getElementById('ml-refresh-btn')?.addEventListener('click', () => loadModelLogs());
   document.getElementById('ml-page-prev')?.addEventListener('click', () => {
@@ -1937,24 +1959,42 @@ function initApp() {
       cacheEl.innerHTML = d.cache_hit === 'hit' ? `✅ 命中 (${ck.toLocaleString()} tokens)` : (d.cache_hit === 'miss' ? '❌ 未命中' : '-');
       cacheEl.style.color = d.cache_hit === 'hit' ? '#22c55e' : 'var(--text-secondary)';
 
-      // Format request JSON with syntax highlighting
+      // Format request JSON with syntax highlighting (show last round, collapse rest)
       const reqEl = document.getElementById('mld-request');
       if (d.request_data && d.request_data !== '(无)') {
         try {
           const parsed = JSON.parse(d.request_data);
           const msgs = Array.isArray(parsed) ? parsed : [parsed];
-          // Build sectioned display
-          let html = '';
-          msgs.forEach((msg, i) => {
+          const total = msgs.length;
+
+          // Last 1-2 messages = current round; everything before = history
+          const cutoff = total >= 2 && msgs[total - 1].role === 'assistant' ? total - 2 : total - 1;
+          const historyMsgs = msgs.slice(0, cutoff);
+          const currentMsgs = msgs.slice(cutoff);
+
+          function renderMsg(msg) {
             const role = msg.role || 'unknown';
             const color = role === 'system' ? '#7c3aed' : role === 'user' ? '#2563eb' : role === 'assistant' ? '#059669' : '#64748b';
             const content = msg.content || '(no content)';
             const contentStr = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
-            html += `<div style="margin-bottom:0.75rem;border-left:3px solid ${color};padding-left:0.5rem;">
-              <div style="font-size:0.7rem;font-weight:700;color:${color};margin-bottom:0.25rem;text-transform:uppercase;">${role}</div>
+            return `<div style="margin-bottom:0.75rem;border-left:3px solid ${color};padding-left:0.5rem;">
+              <div style="font-size:0.7rem;font-weight:700;color:${color};margin-bottom:0.25rem;text-transform:uppercase;">${escapeHtml(role)}</div>
               <pre style="margin:0;font-size:0.75rem;white-space:pre-wrap;word-break:break-all;font-family:monospace;">${escapeHtml(contentStr)}</pre>
             </div>`;
-          });
+          }
+
+          let html = '';
+          // Collapsed history section
+          if (historyMsgs.length > 0) {
+            html += `<details style="margin-bottom:0.5rem;">
+              <summary style="cursor:pointer;font-size:0.78rem;color:var(--accent-color);padding:0.25rem 0;user-select:none;">
+                📜 显示全部对话（共 ${historyMsgs.length} 条历史消息）
+              </summary>
+              <div style="margin-top:0.5rem;">${historyMsgs.map(renderMsg).join('')}</div>
+            </details>`;
+          }
+          // Current round messages
+          currentMsgs.forEach(msg => { html += renderMsg(msg); });
           reqEl.innerHTML = html;
         } catch (e) {
           reqEl.textContent = d.request_data;
