@@ -4074,6 +4074,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     "session_id": ws_session_id
                 })
                 
+            except WebSocketDisconnect:
+                print("[WS] Client disconnected")
+                break
             except Exception as e:
                 import traceback
                 traceback.print_exc()
