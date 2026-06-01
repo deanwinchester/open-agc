@@ -151,7 +151,9 @@ def _convert_html(html: str) -> Optional[str]:
             timeout=120,
         )
         if resp.status_code == 200:
-            data = resp.json()
+            # Parse JSON from raw bytes to prevent mojibake
+            import json as _json
+            data = _json.loads(resp.content)
             text = data.get("choices", [{}])[0].get("text", "")
             return text.strip()
         else:
