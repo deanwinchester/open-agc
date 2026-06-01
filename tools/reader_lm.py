@@ -140,14 +140,17 @@ def _convert_html(html: str) -> Optional[str]:
     )
 
     try:
+        # Use ensure_ascii=False to send UTF-8 directly (not as \\uXXXX escapes)
+        _body = json.dumps({
+            "prompt": prompt,
+            "temperature": 0.0,
+            "max_tokens": 4096,
+            "stop": ["<|im_end|>", "<|endoftext|>"],
+        }, ensure_ascii=False).encode("utf-8")
         resp = requests.post(
             f"http://127.0.0.1:{_READER_LM_PORT}/v1/completions",
-            json={
-                "prompt": prompt,
-                "temperature": 0.0,
-                "max_tokens": 4096,
-                "stop": ["<|im_end|>", "<|endoftext|>"],
-            },
+            data=_body,
+            headers={"Content-Type": "application/json; charset=utf-8"},
             timeout=120,
         )
         if resp.status_code == 200:
