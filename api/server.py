@@ -4065,13 +4065,48 @@ async def websocket_endpoint(websocket: WebSocket):
             except asyncio.TimeoutError:
                 if not heartbeat_enabled or agent_is_running:
                     continue
-                # Trigger Heartbeat
-                resume_id_for_run = None
-                query = "【系统指令】后台巡视时间已到。请检查系统状态、后台任务或之前的计划是否需要继续。如果一切正常无需操作，请且仅回复 'HEARTBEAT_OK'。"
-                retry_model = None
-                agent_profile_name = None
-                ws_images = None
-                is_heartbeat = True
+                # ── Lightweight Heartbeat (same logic as background guardian Phase 1) ──
+                try:
+                    cfg = load_config()
+                    hb_context = "你是 Open-AGC 的巡检助手。"
+                    hb_context += f"\n当前时间：{_time.strftime('%Y-%m-%d %H:%M')}\n"
+                    # Load todos
+                    try:
+                        from tools.task_plan import load_todos as _hb_load_todos, format_todo_list_for_prompt as _hb_fmt_todos
+                        _hb_t = _hb_load_todos()
+                        _hb_txt = _hb_fmt_todos(_hb_t)
+                        if _hb_txt: hb_context += f"\n{_hb_txt}\n"
+                    except Exception:
+                        pass
+                    hb_context += "\n请判断：如果一切正常无需操作，仅回复 HEARTBEAT_OK。如果待办项需要恢复执行，回复 RESUME:{id}。如果某项反复失败需要标记受阻，回复 STUCK:{id}。\n"
+                    from core.llm_client import LLMClient
+                    _hb_llm = LLMClient(default_model=cfg.get("default_model", "moonshot/kimi-latest"))
+                    _hb_resp, _ = _hb_llm.chat([{"role": "system", "content": hb_context}])
+                    _hb_reply = _hb_resp.choices[0].message.content or ""
+
+                    if "HEARTBEAT_OK" in _hb_reply:
+                        continue  # Silent heartbeat, do nothing
+                    elif _hb_reply.strip().startswith("RESUME:"):
+                        # Proactive resume — run agent with the todo
+                        resume_id_for_run = None
+                        try:
+                            resume_id_for_run = int(_hb_reply.strip().split(":")[1].split()[0])
+                        except Exception:
+                            pass
+                        query = f"【心跳恢复】待办项 {resume_id_for_run} 需要恢复执行。"
+                        retry_model = None
+                        agent_profile_name = None
+                        ws_images = None
+                        is_heartbeat = True
+                        # Fall through to run_agent_with_progress below
+                    else:
+                        # Proactive thought from heartbeat
+                        save_message("agent", _hb_reply, ws_session_id)
+                        await _safe_send({"type": "message", "role": "agent", "content": _hb_reply, "session_id": ws_session_id})
+                        continue
+                except Exception as e:
+                    print(f"[WS] Heartbeat error: {e}")
+                    continue
 
             if not is_heartbeat:
                 # Send immediate acknowledgment
@@ -4080,17 +4115,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     "message": "Agent is thinking...",
                     "session_id": ws_session_id
                 })
-            
+
             try:
                 response = await run_agent_with_progress(query, retry_model, agent_profile_name, is_heartbeat=is_heartbeat, images=ws_images, resume_task_id=resume_id_for_run)
-                
+
                 if response == "BUSY":
                     continue
-                    
+
                 if is_heartbeat and response and "HEARTBEAT_OK" in response:
                     # Silent heartbeat, do nothing
                     continue
-                
+
                 # If it's a heartbeat response that isn't HEARTBEAT_OK, it's a resume or proactive thought.
                 # Ensure it's tagged with the correct session.
                 save_message("agent", response, ws_session_id)
