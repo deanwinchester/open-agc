@@ -4078,6 +4078,20 @@ async def websocket_endpoint(websocket: WebSocket):
                         if _hb_txt: hb_context += f"\n{_hb_txt}\n"
                     except Exception:
                         pass
+                    # Check for interrupted tasks (from server restart or errors)
+                    try:
+                        conn = sqlite3.connect(DB_PATH)
+                        cur = conn.execute("SELECT id, title, user_query, interruption_reason FROM tasks WHERE status='interrupted' ORDER BY updated_at DESC LIMIT 5")
+                        rows = cur.fetchall()
+                        conn.close()
+                        if rows:
+                            hb_context += "\n## 中断的任务\n以下任务因故中断，尚未恢复：\n"
+                            for r in rows:
+                                reason = r[3] or "unknown"
+                                hb_context += f"- 任务 #{r[0]}: {r[1] or r[2][:80]}（中断原因: {reason}）\n"
+                            hb_context += "如需恢复执行某个任务，回复 RESUME:{id}。\n"
+                    except Exception:
+                        pass
                     hb_context += "\n请判断：如果一切正常无需操作，仅回复 HEARTBEAT_OK。如果待办项需要恢复执行，回复 RESUME:{id}。如果某项反复失败需要标记受阻，回复 STUCK:{id}。\n"
                     from core.llm_client import LLMClient
                     _hb_llm = LLMClient(default_model=cfg.get("default_model", "moonshot/kimi-latest"))
@@ -4087,13 +4101,18 @@ async def websocket_endpoint(websocket: WebSocket):
                     if "HEARTBEAT_OK" in _hb_reply:
                         continue  # Silent heartbeat, do nothing
                     elif _hb_reply.strip().startswith("RESUME:"):
-                        # Proactive resume — run agent with the todo
+                        # Proactive resume — run agent with the task
                         resume_id_for_run = None
                         try:
                             resume_id_for_run = int(_hb_reply.strip().split(":")[1].split()[0])
                         except Exception:
                             pass
-                        query = f"【心跳恢复】待办项 {resume_id_for_run} 需要恢复执行。"
+                        # Load task context for resume
+                        try:
+                            session_history = get_task_context(resume_id_for_run)
+                        except Exception:
+                            session_history = None
+                        query = f"【心跳恢复】任务 #{resume_id_for_run} 需要恢复执行。"
                         retry_model = None
                         agent_profile_name = None
                         ws_images = None
@@ -4917,6 +4936,21 @@ def start_guardian_loop():
                     _hb_todo_text = _hb_fmt_todos(_hb_todos)
                     if _hb_todo_text:
                         hb_context += f"\n{_hb_todo_text}\n"
+                except Exception:
+                    pass
+
+                # Check for interrupted tasks (from server restart or errors)
+                try:
+                    conn = sqlite3.connect(DB_PATH)
+                    cur = conn.execute("SELECT id, title, user_query, interruption_reason FROM tasks WHERE status='interrupted' ORDER BY updated_at DESC LIMIT 5")
+                    rows = cur.fetchall()
+                    conn.close()
+                    if rows:
+                        hb_context += "\n## 中断的任务\n以下任务因故中断，尚未恢复：\n"
+                        for r in rows:
+                            reason = r[3] or "unknown"
+                            hb_context += f"- 任务 #{r[0]}: {r[1] or r[2][:80]}（中断原因: {reason}）\n"
+                        hb_context += "如需恢复执行某个任务，回复 RESUME:{id}。\n"
                 except Exception:
                     pass
 
