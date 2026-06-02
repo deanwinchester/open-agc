@@ -794,10 +794,10 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
     except Exception as e:
         print(f"[Task] Error resolving task: {e}")
 
-    # Create a brand-new task
-    title = _extract_task_title(query) or query[:60]
-    if len(title) >= 60:
-        title = title[:57] + '...'
+    # Create a brand-new task — store full user query as title so agent always sees the goal
+    title = _extract_task_title(query) or query[:120]
+    if len(title) > 120:
+        title = title[:117] + '...'
     tid = create_task(title, query, session_id=session_id)
     print(f"[Task] Created task {tid} for session {session_id}")
 
