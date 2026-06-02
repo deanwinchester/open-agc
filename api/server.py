@@ -3474,6 +3474,19 @@ async def websocket_endpoint(websocket: WebSocket):
             "error": _llamacpp_download_state.get("error", "")
         })
 
+    # Broadcast history_steps if this session has a recent interrupted/completed task
+    try:
+        _hb_conn = sqlite3.connect(DB_PATH)
+        _hb_row = _hb_conn.execute(
+            "SELECT id, status FROM tasks WHERE session_id=? AND status IN ('interrupted','completed') ORDER BY updated_at DESC LIMIT 1",
+            (ws_session_id,)
+        ).fetchone()
+        _hb_conn.close()
+        if _hb_row:
+            _broadcast_task_history(_hb_row[0], ws_session_id, _hb_row[1])
+    except Exception:
+        pass
+
     # Flag to track whether this connection is still alive
     ws_alive = True
 
