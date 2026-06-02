@@ -757,6 +757,50 @@ def _resolve_todo_for_query(query: str) -> int:
 
     return 0
 
+
+def _resolve_task_goal_via_llm(session_id: int, query: str) -> str:
+    """When query is short, ask LLM if user is confirming a task proposal.
+    Returns the task goal string, or empty string if not confirming."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT role, content FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 10",
+            (session_id,)
+        ).fetchall()
+        conn.close()
+        if len(rows) < 1:
+            return ""
+
+        context_lines = []
+        for r in reversed(rows):
+            content = (r[1] or "")[:500]
+            context_lines.append(f"{r[0]}: {content}")
+        context = "\n".join(context_lines)
+
+        prompt = (
+            "根据以下对话历史和用户的最后一条回复，判断用户是否在确认或同意某个任务提案。\n"
+            "如果是，请直接提取该任务的目标描述（简洁、准确）。\n"
+            "如果不是（用户拒绝、提出新需求、闲聊等），请仅回复 NO。\n\n"
+            f"对话历史：\n{context}\n"
+            f"用户最新回复：{query[:100]}\n\n"
+            "回答（任务目标描述或 NO）："
+        )
+
+        from core.llm_client import LLMClient
+        _cfg = load_config()
+        llm = LLMClient(default_model=_cfg.get("default_model", "moonshot/kimi-latest"))
+        resp, _ = llm.chat([{"role": "user", "content": prompt}])
+        reply = (resp.choices[0].message.content or "").strip()
+
+        if reply.upper() == "NO":
+            return ""
+        reply = reply.strip("\"'「」")
+        return reply[:200]
+    except Exception as e:
+        print(f"[Task] LLM goal resolution error: {e}")
+        return ""
+
+
 def _resolve_task_for_query(session_id: int, query: str) -> int:
     """
     Determine the task_id for an incoming query BEFORE agent execution.
@@ -794,11 +838,13 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
     except Exception as e:
         print(f"[Task] Error resolving task: {e}")
 
-    # Create a brand-new task — store full user query as title so agent always sees the goal
-    title = _extract_task_title(query) or query[:120]
-    if len(title) > 120:
-        title = title[:117] + '...'
-    tid = create_task(title, query, session_id=session_id)
+    # Resolve task goal — if query is short, use LLM to check if user is confirming a proposal
+    task_title = query if len(query.strip()) > 15 else _resolve_task_goal_via_llm(session_id, query)
+    if not task_title:
+        task_title = _extract_task_title(query) or query[:120]
+    if len(task_title) > 120:
+        task_title = task_title[:117] + '...'
+    tid = create_task(task_title, query, session_id=session_id)
     print(f"[Task] Created task {tid} for session {session_id}")
 
     # Adopt any orphan shell processes that belong to this session
