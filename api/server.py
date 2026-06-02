@@ -2302,15 +2302,14 @@ async def get_memory_categories():
 
 @app.get("/api/history")
 async def get_history(session_id: int = None, before_id: int = 0, limit: int = 100):
-    """Retrieve chat history. Filters out tool_step (rendered via history_steps instead).
+    """Retrieve chat history. Keeps last 5 tool_step messages for context.
     Supports pagination: pass before_id to load older messages, limit to control page size."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    where = ["role != 'tool_step'"]
     params = []
+    where = ["session_id=?", "role != 'tool_step'"] if session_id else ["role != 'tool_step'"]
     if session_id:
-        where.append("session_id=?")
         params.append(session_id)
     if before_id > 0:
         where.append("id < ?")
@@ -2318,8 +2317,18 @@ async def get_history(session_id: int = None, before_id: int = 0, limit: int = 1
     sql = "SELECT id, role, content FROM messages WHERE {} ORDER BY id DESC LIMIT ?".format(" AND ".join(where))
     cursor.execute(sql, params + [limit])
     rows = cursor.fetchall()
-    conn.close()
     history = [{"id": r["id"], "role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+    # Include last 5 tool_step messages on initial load (not pagination)
+    if not before_id:
+        cursor.execute(
+            "SELECT id, role, content FROM messages WHERE role='tool_step' AND session_id=? ORDER BY id DESC LIMIT 5",
+            (session_id,) if session_id else ()
+        )
+        for r in reversed(cursor.fetchall()):
+            history.append({"id": r["id"], "role": r["role"], "content": r["content"]})
+    conn.close()
+
     oldest_id = history[0]["id"] if history else 0
     has_more = oldest_id > 1
     return {"history": history, "oldest_id": oldest_id, "has_more": has_more}
