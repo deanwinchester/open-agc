@@ -211,13 +211,19 @@ class ReaderLMTool(BaseTool):
         if url:
             try:
                 import requests as req
-                resp = req.get(url, timeout=30, headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                })
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    "Referer": "https://www.google.com/",
+                }
+                resp = req.get(url, timeout=30, headers=headers)
                 resp.raise_for_status()
                 html = resp.text
             except Exception as e:
-                return f"[ReaderLM] 获取 URL 失败: {e}"
+                return (f"[ReaderLM] 直接获取 URL 失败: {e}\n\n"
+                        "建议先用 browser_automation 打开该页面获取完整 HTML，"
+                        "再将得到的 HTML 传入 parse_html 工具。")
 
         if file_path:
             try:
