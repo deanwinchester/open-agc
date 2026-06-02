@@ -450,6 +450,9 @@ function initApp() {
       if (state.currentTaskId) {
         const oldCard = chatContainer.querySelector(`.progress-inline.completed[data-task-id="${state.currentTaskId}"]`);
         if (oldCard) oldCard.remove();
+        // Also remove any stale live container
+        const oldLive = chatContainer.querySelector(`.progress-inline:not(.completed)[data-task-id="${state.currentTaskId}"]`);
+        if (oldLive) oldLive.remove();
       }
       hideThinkingStatus();
       progressInline = document.createElement('div');
@@ -1538,7 +1541,8 @@ function initApp() {
       showStatus('消息已发送，Agent 忙，稍后处理', 'info');
       return;
     }
-    // Reset progress state for new turn
+    // Reset progress state for new turn — also remove any stale containers
+    if (progressInline && progressInline.parentNode) progressInline.parentNode.removeChild(progressInline);
     progressInline = null;
     progressStepsEl = null;
     progressSteps = {};
