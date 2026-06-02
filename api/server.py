@@ -1020,11 +1020,12 @@ def update_download_progress(download_id: int, progress: float,
     # Notify the linked task (both success and failure)
     if status in ('completed', 'failed'):
         try:
-            cursor.execute("SELECT task_id, label, filename FROM downloads WHERE id=?", (download_id,))
+            cursor.execute("SELECT task_id, label, filename, target_path FROM downloads WHERE id=?", (download_id,))
             dl_row = cursor.fetchone()
             if dl_row:
                 task_id = dl_row[0]
                 label = dl_row[1] or dl_row[2] or f"download #{download_id}"
+                save_path = dl_row[3] or ""
                 if task_id:
                     cursor.execute(
                         "SELECT session_id FROM task_steps WHERE task_id=? AND session_id IS NOT NULL LIMIT 1",
@@ -1033,8 +1034,9 @@ def update_download_progress(download_id: int, progress: float,
                     session_id = sid_row[0] if sid_row else 1
 
                     if status == 'completed':
+                        path_hint = f"\n保存路径: {save_path}" if save_path else ""
                         save_message("system",
-                            f"✅ 下载完成: {label}", session_id)
+                            f"✅ 下载完成: {label}{path_hint}", session_id)
                         try:
                             cursor.execute("SELECT MAX(step_number) FROM task_steps WHERE task_id=?", (task_id,))
                             max_step = cursor.fetchone()[0] or 0
@@ -1058,7 +1060,8 @@ def update_download_progress(download_id: int, progress: float,
                                 if ctx:
                                     ctx.append({"role": "user", "content": (
                                         "【系统通知】后台下载任务已完成，文件已就绪。"
-                                        "请继续执行之前未完成的任务，不要重复下载已有文件。"
+                                        + (f"\n文件位置: {save_path}" if save_path else "")
+                                        + "请继续执行之前未完成的任务，不要重复下载已有文件。"
                                     )})
                                     save_task_context(task_id, ctx)
                                     # Direct resume — wake task immediately instead of waiting for poll
