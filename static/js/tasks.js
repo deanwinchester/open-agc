@@ -424,13 +424,14 @@ async function openTaskDetail(taskId) {
         }
 
         var html = '';
-        // Reverse to show newest steps first
-        for (var i = steps.length - 1; i >= 0; i--) {
+
+        for (var i = 0; i < steps.length; i++) {
           var st = steps[i];
+          var displayNum = _stepTotal - (_stepPage - 1) * 50 - i;
           html += '<div class="task-step-card ' + (st.success ? 'success' : st.success === false ? 'failed' : 'running') + '" data-step-index="' + i + '">'
             + '<div class="task-step-header">'
             + '<span>' + (st.success ? '\u2705' : st.success === false ? '\u274c' : '\u23f3') + '</span>'
-            + '<span class="task-step-title">' + st.step_number + '. ' + escapeHtml(st.tool_label || st.tool_name) + '</span>'
+            + '<span class="task-step-title">' + displayNum + '. ' + escapeHtml(st.tool_label || st.tool_name) + '</span>'
             + '<span class="task-step-expand-hint" style="margin-left:auto;font-size:0.7rem;color:var(--text-secondary)">\u70b9\u51fb\u67e5\u770b\u8be6\u60c5 \u25b8</span>'
             + '</div>'
             + (st.args_preview ? '<div class="task-step-result" style="color:var(--text-secondary);margin-bottom:0.3rem">' + escapeHtml(st.args_preview) + '</div>' : '')
@@ -496,7 +497,7 @@ async function openTaskDetail(taskId) {
           for (var si = steps.length - 1; si >= 0; si--) {
             if (si > maxShown) {
               var st = steps[si];
-              var displayNum = steps.length - si;
+              var displayNum = _stepTotal - (_stepPage - 1) * 50 - si;
               prependHtml += '<div class="task-step-card ' + (st.success ? 'success' : st.success === false ? 'failed' : 'running') + '" data-step-index="' + si + '">'
                 + '<div class="task-step-header">'
                 + '<span>' + (st.success ? '✅' : st.success === false ? '❌' : '⏳') + '</span>'
