@@ -2831,7 +2831,7 @@ async def get_task_steps(task_id: int, page: int = 1, page_size: int = 50):
     cursor.execute(
         "SELECT step_number, tool_name, tool_label, args_preview, result_preview, "
         "full_result, full_args, success, thinking_content, created_at "
-        "FROM task_steps WHERE task_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?",
+        "FROM task_steps WHERE task_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
         (task_id, page_size, offset)
     )
     step_rows = cursor.fetchall()
