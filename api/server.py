@@ -2319,14 +2319,6 @@ async def get_history(session_id: int = None, before_id: int = 0, limit: int = 1
     rows = cursor.fetchall()
     history = [{"id": r["id"], "role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
-    # Include last 5 tool_step messages on initial load (not pagination)
-    if not before_id:
-        cursor.execute(
-            "SELECT id, role, content FROM messages WHERE role='tool_step' AND session_id=? ORDER BY id DESC LIMIT 5",
-            (session_id,) if session_id else ()
-        )
-        for r in reversed(cursor.fetchall()):
-            history.append({"id": r["id"], "role": r["role"], "content": r["content"]})
     conn.close()
 
     oldest_id = history[0]["id"] if history else 0
