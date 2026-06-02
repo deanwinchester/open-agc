@@ -93,14 +93,25 @@ def _ensure_server() -> bool:
                 print(f"[ReaderLM] llama-server binary not found at {server_exe}")
                 return False
 
-        print(f"[ReaderLM] Starting server on port {_READER_LM_PORT}...")
+        # Use configured ctx-size or default to 65536
+        try:
+            _cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "config.json")
+            if os.path.exists(_cfg_path):
+                with open(_cfg_path) as _f:
+                    _cfg = json.load(_f)
+                _ctx = _cfg.get("llamacpp_ctx_size", 65536)
+            else:
+                _ctx = 65536
+        except Exception:
+            _ctx = 65536
+        print(f"[ReaderLM] Starting server on port {_READER_LM_PORT} (ctx={_ctx})...")
         cmd = [
             server_exe,
             "--model", model_path,
             "--port", str(_READER_LM_PORT),
             "--host", "127.0.0.1",
             "--n-gpu-layers", "-1",
-            "--ctx-size", "16384",
+            "--ctx-size", str(_ctx),
         ]
 
         try:
