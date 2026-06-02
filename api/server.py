@@ -759,8 +759,8 @@ def _resolve_todo_for_query(query: str) -> int:
 
 
 def _resolve_task_goal_via_llm(session_id: int, query: str) -> str:
-    """When query is short, ask LLM if user is confirming a task proposal.
-    Returns the task goal string, or empty string if not confirming."""
+    """When user confirms a proposal (agent last msg ends with ?), ask LLM to
+    extract the task goal. Returns goal string or empty string if not confirming."""
     try:
         conn = sqlite3.connect(DB_PATH)
         rows = conn.execute(
@@ -769,6 +769,15 @@ def _resolve_task_goal_via_llm(session_id: int, query: str) -> str:
         ).fetchall()
         conn.close()
         if len(rows) < 1:
+            return ""
+
+        # Only trigger if the last agent message ends with a question mark
+        last_agent = None
+        for r in rows:
+            if r[0] == 'agent':
+                last_agent = r[1] or ""
+                break
+        if not last_agent or not last_agent.strip().endswith(('？', '?', '？\n', '?\n', '？"', '?"')):
             return ""
 
         context_lines = []
