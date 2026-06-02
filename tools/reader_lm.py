@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import subprocess
@@ -77,14 +78,19 @@ def _ensure_server() -> bool:
                 return False
 
         # Find llama-server binary
-        server_exe = os.path.join(_get_bin_dir(), "llama-server")
+        bin_dir = _get_bin_dir()
+        server_exe = os.path.join(bin_dir, "llama-server")
+        if sys.platform == "win32" and not server_exe.endswith(".exe"):
+            server_exe += ".exe"
         if not os.path.exists(server_exe):
             # Try fallback paths
-            alt = os.path.join(_get_bin_dir(), "llama-b8954", "llama-server")
+            alt = os.path.join(bin_dir, "llama-b8954", "llama-server")
+            if sys.platform == "win32" and not alt.endswith(".exe"):
+                alt += ".exe"
             if os.path.exists(alt):
                 server_exe = alt
             else:
-                print(f"[ReaderLM] llama-server binary not found")
+                print(f"[ReaderLM] llama-server binary not found at {server_exe}")
                 return False
 
         print(f"[ReaderLM] Starting server on port {_READER_LM_PORT}...")
