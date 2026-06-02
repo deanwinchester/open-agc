@@ -64,7 +64,22 @@
       "PowerShell(python -c \"import py_compile; py_compile.compile\\('tools/memory.py', doraise=True\\); print\\('OK'\\)\")",
       "Bash(dir \"D:\\\\GitHub\\\\cloud-code\\\\claude-code-source\\\\src\")",
       "Bash(powershell.exe *)",
-      "Bash(/Users/lhh/workspace/open-agc/venv/bin/python *)"
+      "Bash(/Users/lhh/workspace/open-agc/venv/bin/python *)",
+      "PowerShell(venv\\\\Scripts\\\\Activate.ps1; python _test_search3.py 2>&1)",
+      "PowerShell(venv\\\\Scripts\\\\Activate.ps1; python _test_websearch.py 2>&1)",
+      "PowerShell(venv\\\\Scripts\\\\Activate.ps1; python _test_engines.py 2>&1)",
+      "PowerShell(venv\\\\Scripts\\\\Activate.ps1)",
+      "PowerShell(venv\\\\Scripts\\\\Activate.ps1; python _check_search_db.py 2>&1)",
+      "Bash(ls -la venv/bin/python)",
+      "Bash(ls -la venv/Scripts/python.exe)",
+      "Bash(venv/Scripts/python _test_enc.py)",
+      "PowerShell(pip show *)",
+      "PowerShell(docker info *)",
+      "PowerShell(docker pull *)",
+      "PowerShell(docker image ls *)",
+      "PowerShell(npm *)",
+      "PowerShell(docker run *)",
+      "PowerShell(docker save *)"
     ]
   }
 }

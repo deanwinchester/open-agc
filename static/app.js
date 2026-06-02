@@ -680,11 +680,29 @@ function initApp() {
     if (event === 'usage') {
         const usageEl = document.getElementById('token-usage-display');
         if (usageEl) {
-            usageEl.textContent = `Tokens: ${data.total_tokens} (P:${data.prompt_tokens} / C:${data.completion_tokens})`;
+            const cached = data.cached_tokens || 0;
+            usageEl.textContent = `Tokens: ${data.total_tokens} (P:${data.prompt_tokens} / C:${data.completion_tokens}${cached > 0 ? ` +缓存${cached}` : ''})`;
             usageEl.classList.add('updated');
             setTimeout(() => usageEl.classList.remove('updated'), 500);
         }
         return;
+    }
+
+    if (event === 'response') {
+      // LLM response text between tool calls
+      if (data.content) {
+        const responseEl = document.createElement('div');
+        responseEl.className = 'progress-step llm-response';
+        responseEl.innerHTML = `
+          <span class="step-icon">💬</span>
+          <div class="step-body">
+            <span class="step-label">助手回复</span>
+            <span class="step-detail">${escapeHtml(data.content)}</span>
+          </div>`;
+        if (stepsEl) stepsEl.appendChild(responseEl);
+        scrollToBottom();
+      }
+      return;
     }
 
     if (event === 'tool_start') {
@@ -904,18 +922,18 @@ function initApp() {
       stepEl.innerHTML = `
         <span class="step-icon">${isFailed ? '❌' : '✅'}</span>
         <div class="step-body">
-          <span class="step-label">${s.step_number}. ${s.tool_label || s.tool_name}</span>
+          <span class="step-label">${i + 1}. ${s.tool_label || s.tool_name}</span>
           ${s.args_preview ? `<span class="step-detail">${escapeHtml(s.args_preview)}</span>` : ''}
           ${s.result_preview ? `<span class="step-detail">${escapeHtml((s.full_result || s.result_preview).substring(0, 600))}</span>` : ''}
         </div>`;
       
       // Register step data for detail view
-      const stepKey = `hist-${data.task_id}-${s.step_number}`;
+      const stepKey = `hist-${data.task_id}-${i + 1}`;
       // Use full_result from DB for shell commands
       const stepResult = s.full_result || s.result_preview || '';
       progressStepData[stepKey] = {
         type: 'tool',
-        step: s.step_number,
+        step: i + 1,
         tool: s.tool_name,
         tool_label: s.tool_label || s.tool_name,
         full_args: s.full_args || s.args_preview,
@@ -1496,6 +1514,7 @@ function initApp() {
       }
     }
     appendMessage(text || (msgImages.length > 0 ? '[图片]' : '[文件]'), 'user', msgImages, attachedFiles.length > 0 ? [...attachedFiles] : null);
+    scrollToBottom(true);
     const agentSelector = document.getElementById('agent-selector');
     const msg = {
       query: queryText,
@@ -1706,18 +1725,24 @@ function initApp() {
         }
       }
       await loadSessions();
-      const historyRes = await fetch(`/api/history?session_id=${state.currentSessionId}`);
-      if (historyRes.ok) {
-        const data = await historyRes.json();
-        if (data.history && data.history.length > 0) {
-          chatContainer.innerHTML = '';
-          data.history.forEach(msg => {
-            // Skip individual tool_step messages — rendered in history_steps card
-            if (msg.role === 'tool_step') return;
-            try { appendMessage(msg.content, msg.role); }
-            catch (e) { console.error('[History] Failed to render message:', e, msg); }
-          });
-          scrollToBottom(true);
+      // Use the session's own history loading which handles pagination
+      if (typeof switchSession === 'function') {
+        // Load first page via the paginated loader
+        if (!window._sessionPageState) window._sessionPageState = {};
+        window._sessionPageState[state.currentSessionId] = { oldestId: 0, hasMore: true, loading: false };
+        const hRes = await fetch(`/api/history?session_id=${state.currentSessionId}&limit=100`);
+        if (hRes.ok) {
+          const hData = await hRes.json();
+          const st = window._sessionPageState[state.currentSessionId];
+          if (st) { st.oldestId = hData.oldest_id; st.hasMore = hData.has_more; }
+          if (hData.history && hData.history.length > 0) {
+            chatContainer.innerHTML = '';
+            hData.history.forEach(msg => {
+              try { appendMessage(msg.content, msg.role); }
+              catch (e) { console.error('[History] Failed to render message:', e, msg); }
+            });
+            setTimeout(() => scrollToBottom(true), 50);
+          }
         }
       }
     } catch (e) {

@@ -162,7 +162,7 @@ def format_todo_list_for_prompt(todos: dict = None) -> str:
         desc = item.get("desc", "")[:_MAX_TODO_DESC]
         updated = item.get("updated", "")
         extra = f"（{updated}）" if updated else ""
-        lines.append(f"  {icon} {desc} {extra}".strip())
+        lines.append(f"  {icon} [#{item['id']}] {desc} {extra}".strip())
     return "\n".join(lines)
 
 
@@ -211,6 +211,9 @@ class TaskPlanTool(BaseTool):
                 desc: str = "", reason: str = "",
                 todo_id: int = None,
                 **kwargs) -> str:
+        # Agent passes _task_id via extra_kwargs, not as named parameter
+        if task_id is None and kwargs.get("_task_id"):
+            task_id = kwargs["_task_id"]
         steps = steps or []
 
         # ── Todo operations ──
@@ -250,8 +253,8 @@ class TaskPlanTool(BaseTool):
             todos = load_todos()
             for item in todos["items"]:
                 if item["id"] == todo_id:
-                    item["status"] = "done"
-                    item["updated"] = time.strftime("%Y-%m-%d %H:%M")
+                    desc = item["desc"]
+                    todos["items"].remove(item)
                     save_todos(todos)
                     return f"[TaskPlan] ✅ 已完成: {item['desc']}\n\n{format_todo_list_for_prompt(todos)}"
             return f"[TaskPlan] ⚠️ 未找到 id={todo_id} 的待办项。"
@@ -325,6 +328,19 @@ class TaskPlanTool(BaseTool):
                     })
             plan["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             save_plan(plan)
+
+            # Write plan_id back to tasks table so agent can find the plan on next run_turn
+            if task_id:
+                try:
+                    import sqlite3 as _sq3
+                    from core.paths import get_data_path as _gdp
+                    _conn = _sq3.connect(_gdp("chat_history.db"))
+                    _conn.execute("UPDATE tasks SET plan_id=? WHERE id=?", (plan_id, task_id))
+                    _conn.commit()
+                    _conn.close()
+                except Exception:
+                    pass
+
             return f"[TaskPlan] ✅ 计划已创建 (plan_id: {plan_id})\n\n{format_plan_for_prompt(plan)}"
 
         elif action == "update":

@@ -1513,7 +1513,20 @@ class OpenAGCAgent:
             if self.task_id:
                 try:
                     from tools.task_plan import load_plan as _load_plan, format_plan_for_prompt as _fmt_plan
-                    _plan = _load_plan(plan_id=None, task_id=self.task_id)
+                    # Prefer DB plan_id (O(1) lookup), fallback to scanning JSON files
+                    _plan = None
+                    try:
+                        import sqlite3 as _sq3
+                        from core.paths import get_data_path as _gdp
+                        _conn = _sq3.connect(_gdp("chat_history.db"))
+                        _row = _conn.execute("SELECT plan_id FROM tasks WHERE id=?", (self.task_id,)).fetchone()
+                        _conn.close()
+                        if _row and _row[0]:
+                            _plan = _load_plan(plan_id=_row[0])
+                    except Exception:
+                        pass
+                    if not _plan:
+                        _plan = _load_plan(plan_id=None, task_id=self.task_id)
                     if _plan:
                         system_content += "\n\n" + _fmt_plan(_plan)
                 except Exception:
@@ -1738,7 +1751,8 @@ class OpenAGCAgent:
                         "event": "usage",
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
-                        "total_tokens": prompt_tokens + completion_tokens
+                        "total_tokens": prompt_tokens + completion_tokens,
+                        "cached_tokens": cached_tokens,
                     })
             
             # Detect empty response (no content and no tool calls)
@@ -1812,6 +1826,13 @@ class OpenAGCAgent:
                 except Exception as e:
                     pass
             # ------------------------------
+            # Send LLM response text as a progress event before tool calls
+            if message.content and message.content.strip() and progress_callback:
+                progress_callback({
+                    "event": "response",
+                    "content": message.content.strip()[:500],
+                })
+
             if tool_calls:
                 screenshot_urls = []
                 for tool_call in tool_calls:
