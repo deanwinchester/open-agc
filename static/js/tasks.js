@@ -186,7 +186,7 @@ export async function loadTasks(resetPage = false) {
       item.innerHTML = `
         <div class="task-item-icon ${task.status}">${statusIcon}</div>
         <div class="task-item-body">
-          <div class="task-item-title">${typeBadge} ${escapeHtml(task.title)}</div>
+          <div class="task-item-title"><span style="font-size:0.7rem;color:var(--text-secondary);font-weight:400;margin-right:6px;">#${task.id}</span>${typeBadge} ${escapeHtml(task.title)}</div>
           <div class="task-item-meta">
             <span>${timeAgo}</span>
             <span>${task.step_count || 0} 步</span>
@@ -424,9 +424,10 @@ async function openTaskDetail(taskId) {
         }
 
         var html = '';
-        for (var i = 0; i < steps.length; i++) {
+        // Reverse to show newest steps first
+        for (var i = steps.length - 1; i >= 0; i--) {
           var st = steps[i];
-          html += '<div class="task-step-card ' + (st.success ? 'success' : st.success === false ? 'failed' : 'running') + '" data-step-number="' + st.step_number + '">'
+          html += '<div class="task-step-card ' + (st.success ? 'success' : st.success === false ? 'failed' : 'running') + '" data-step-index="' + i + '">'
             + '<div class="task-step-header">'
             + '<span>' + (st.success ? '\u2705' : st.success === false ? '\u274c' : '\u23f3') + '</span>'
             + '<span class="task-step-title">' + st.step_number + '. ' + escapeHtml(st.tool_label || st.tool_name) + '</span>'
@@ -446,10 +447,8 @@ async function openTaskDetail(taskId) {
         // Click detail
         container.querySelectorAll('.task-step-card').forEach(function(card) {
           card.addEventListener('click', function() {
-            var num = parseInt(card.dataset.stepNumber);
-            for (var j = 0; j < steps.length; j++) {
-              if (steps[j].step_number === num) { showTaskStepDetail(steps[j]); break; }
-            }
+            var idx = parseInt(card.dataset.stepIndex);
+            if (idx >= 0 && idx < steps.length) { showTaskStepDetail(steps[idx]); }
           });
         });
 
@@ -481,7 +480,48 @@ async function openTaskDetail(taskId) {
     window._stepAR = null;
     function startAutoRefresh() {
       if (window._stepAR) { clearInterval(window._stepAR); }
-      window._stepAR = setInterval(function() { loadStepPage(1, false); }, 5000);
+      window._stepAR = setInterval(function() {
+        // Partial refresh: only fetch the first page and check for new steps
+        fetch('/api/tasks/' + taskId + '/steps?page=1&page_size=50').then(r => r.json()).then(d => {
+          var steps = d.steps || [];
+          if (!steps.length) return;
+          var container = content.querySelector('.task-detail-steps');
+          if (!container) return;
+          // Get current highest index shown
+          var existing = container.querySelectorAll('.task-step-card');
+          var maxShown = -1;
+          existing.forEach(function(c) { var n = parseInt(c.dataset.stepIndex); if (n > maxShown) maxShown = n; });
+          // Prepend any new steps (higher index than what we've seen, i.e. newer)
+          var prependHtml = '';
+          for (var si = steps.length - 1; si >= 0; si--) {
+            if (si > maxShown) {
+              var st = steps[si];
+              var displayNum = steps.length - si;
+              prependHtml += '<div class="task-step-card ' + (st.success ? 'success' : st.success === false ? 'failed' : 'running') + '" data-step-index="' + si + '">'
+                + '<div class="task-step-header">'
+                + '<span>' + (st.success ? '✅' : st.success === false ? '❌' : '⏳') + '</span>'
+                + '<span class="task-step-title">' + displayNum + '. ' + escapeHtml(st.tool_label || st.tool_name) + '</span>'
+                + '<span class="task-step-expand-hint" style="margin-left:auto;font-size:0.7rem;color:var(--text-secondary)">点击查看详情 ▸</span>'
+                + '</div>'
+                + (st.args_preview ? '<div class="task-step-result" style="color:var(--text-secondary);margin-bottom:0.3rem">' + escapeHtml(st.args_preview) + '</div>' : '')
+                + (st.result_preview ? '<div class="task-step-result">' + escapeHtml(st.result_preview.substring(0, 300)) + (st.result_preview.length > 300 ? '...' : '') + '</div>' : '')
+                + '</div>';
+            }
+          }
+          if (prependHtml) {
+            container.insertAdjacentHTML('afterbegin', prependHtml);
+            // Update step count
+            var total = d.total || 0;
+            if (total > _stepTotal) {
+              _stepTotal = total;
+              var cl = content.querySelector('.task-step-count-label');
+              var tl = content.querySelector('.step-total-label');
+              if (cl) cl.textContent = total;
+              if (tl) tl.textContent = '共 ' + total + ' 条';
+            }
+          }
+        }).catch(function() {});
+      }, 5000);
     }
     function stopAutoRefresh() {
       if (window._stepAR) { clearInterval(window._stepAR); window._stepAR = null; }

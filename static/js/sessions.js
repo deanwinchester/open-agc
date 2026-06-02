@@ -62,28 +62,36 @@ export async function switchSession(sessionId) {
       delete window._sessionChatCache['_evt_' + oldId];
     }
   }
+  // Reset pagination state for this session
+  if (!window._sessionPageState) window._sessionPageState = {};
+  window._sessionPageState[sessionId] = { oldestId: 0, hasMore: true, loading: false };
+
   // Restore from cache or load from server
   if (window._sessionChatCache[sessionId]) {
     chatContainer.innerHTML = window._sessionChatCache[sessionId];
     if (chatContainer.lastChild) chatContainer.lastChild.scrollIntoView?.({behavior: 'smooth'});
   } else {
     chatContainer.innerHTML = '';
-    try {
-      const res = await fetch(`/api/history?session_id=${sessionId}`);
-      const data = await res.json();
-      if (data.history && data.history.length > 0) {
-        data.history.forEach(msg => {
-          try { window.appendMessage?.(msg.content, msg.role); }
-          catch (e) { console.error('[Session] Failed to render message:', e, msg); }
-        });
-      } else {
-        window.appendMessage?.('*控制台*', 'system');
-      }
-    } catch (e) {
-      console.error('Failed to load session history', e);
-      window.appendMessage?.('*控制台*', 'system');
-    }
+    await loadHistoryPage(sessionId, true);
   }
+
+  // Wire up scroll-to-top to load older messages
+  const onScroll = async () => {
+    const st = window._sessionPageState[sessionId];
+    if (!st || st.loading || !st.hasMore) return;
+    if (chatContainer.scrollTop < 100) {
+      st.loading = true;
+      const prevHeight = chatContainer.scrollHeight;
+      await loadHistoryPage(sessionId, false, st.oldestId);
+      // Maintain scroll position after prepending
+      if (chatContainer.scrollHeight > prevHeight) {
+        chatContainer.scrollTop = chatContainer.scrollHeight - prevHeight;
+      }
+      st.loading = false;
+    }
+  };
+  chatContainer.removeEventListener('scroll', onScroll);
+  chatContainer.addEventListener('scroll', onScroll);
   // Reconnect WebSocket to the new session so history_steps are replayed
   if (prevId !== sessionId && window.connectWebSocket) {
     window._intentionalClose = true;
@@ -101,6 +109,41 @@ export async function switchSession(sessionId) {
     window.connectWebSocket();
   }
   renderSessionList();
+}
+
+async function loadHistoryPage(sessionId, scrollToBottom, beforeId) {
+  const chatContainer = document.getElementById('chat-container');
+  if (!chatContainer) return;
+  const params = `session_id=${sessionId}&limit=100${beforeId ? '&before_id=' + beforeId : ''}`;
+  try {
+    const res = await fetch(`/api/history?${params}`);
+    const data = await res.json();
+    const st = window._sessionPageState?.[sessionId];
+    if (st) { st.oldestId = data.oldest_id; st.hasMore = data.has_more; }
+    if (data.history && data.history.length > 0) {
+      if (beforeId) {
+        // Render and move each message to top (reverse to preserve order)
+        const msgs = data.history;
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          window.appendMessage?.(msgs[i].content, msgs[i].role);
+          const added = chatContainer.lastChild;
+          if (added) chatContainer.insertBefore(added, chatContainer.firstChild);
+        }
+      } else {
+        chatContainer.innerHTML = '';
+        data.history.forEach(msg => {
+          window.appendMessage?.(msg.content, msg.role);
+        });
+        if (scrollToBottom) {
+          setTimeout(() => chatContainer.lastChild?.scrollIntoView?.({behavior: 'smooth'}), 50);
+        }
+      }
+    } else if (!beforeId) {
+      window.appendMessage?.('*控制台*', 'system');
+    }
+  } catch (e) {
+    console.error('Failed to load history:', e);
+  }
 }
 
 export async function createSession() {

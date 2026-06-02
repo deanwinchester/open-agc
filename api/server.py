@@ -401,6 +401,10 @@ def init_db():
         cursor.execute("ALTER TABLE tasks ADD COLUMN cached_tokens INTEGER DEFAULT 0")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN plan_id TEXT DEFAULT ''")
+    except Exception:
+        pass
 
     conn.commit()
     conn.close()
@@ -840,7 +844,7 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
                 except Exception:
                     is_recent = False
 
-                if is_recent and _resolve_todo_for_query(query) > 0:
+                if is_recent and len(query.strip()) > 15 and _resolve_todo_for_query(query) > 0:
                     print(f"[Task] Continuing task {tid} for session {session_id} (continuation: {query[:50]})")
                     update_task_status(tid, "running")
                     return tid
@@ -903,7 +907,7 @@ def get_task_context(task_id: int) -> list:
     cursor.execute(
         "SELECT tool_name, tool_label, args_preview, result_preview, full_result, success, "
         "tool_call_id, full_args "
-        "FROM task_steps WHERE task_id=? ORDER BY step_number ASC", (task_id,))
+        "FROM task_steps WHERE task_id=? ORDER BY created_at ASC", (task_id,))
     steps = cursor.fetchall()
     conn.close()
 
@@ -1310,7 +1314,7 @@ def load_config() -> dict:
         "browser_headless": False,
         "http_proxy": "",
         "heartbeat_enabled": False,
-        "heartbeat_interval": 60,
+        "heartbeat_interval": 180,
         "email_listener_enabled": False,
         "email_account": "",
         "email_password": "",
@@ -2294,18 +2298,28 @@ async def get_memory_categories():
     return {"categories": store.get_categories_summary()}
 
 @app.get("/api/history")
-async def get_history(session_id: int = None):
-    """Retrieve chat history. Optionally filter by session_id."""
+async def get_history(session_id: int = None, before_id: int = 0, limit: int = 100):
+    """Retrieve chat history. Filters out tool_step (rendered via history_steps instead).
+    Supports pagination: pass before_id to load older messages, limit to control page size."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
+    where = ["role != 'tool_step'"]
+    params = []
     if session_id:
-        cursor.execute("SELECT role, content FROM messages WHERE session_id=? ORDER BY id ASC LIMIT 500", (session_id,))
-    else:
-        cursor.execute("SELECT role, content FROM messages ORDER BY id ASC LIMIT 500")
+        where.append("session_id=?")
+        params.append(session_id)
+    if before_id > 0:
+        where.append("id < ?")
+        params.append(before_id)
+    sql = "SELECT id, role, content FROM messages WHERE {} ORDER BY id DESC LIMIT ?".format(" AND ".join(where))
+    cursor.execute(sql, params + [limit])
     rows = cursor.fetchall()
     conn.close()
-    return {"history": [{"role": row["role"], "content": row["content"]} for row in rows]}
+    history = [{"id": r["id"], "role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    oldest_id = history[0]["id"] if history else 0
+    has_more = oldest_id > 1
+    return {"history": history, "oldest_id": oldest_id, "has_more": has_more}
 
 
 # ==========================================
@@ -2742,7 +2756,7 @@ async def get_task_detail(task_id: int):
     if not task_row:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    cursor.execute("SELECT * FROM task_steps WHERE task_id = ? ORDER BY step_number ASC", (task_id,))
+    cursor.execute("SELECT * FROM task_steps WHERE task_id = ? ORDER BY created_at ASC", (task_id,))
     step_rows = cursor.fetchall()
     conn.close()
     
@@ -2817,7 +2831,7 @@ async def get_task_steps(task_id: int, page: int = 1, page_size: int = 50):
     cursor.execute(
         "SELECT step_number, tool_name, tool_label, args_preview, result_preview, "
         "full_result, full_args, success, thinking_content, created_at "
-        "FROM task_steps WHERE task_id=? ORDER BY step_number ASC LIMIT ? OFFSET ?",
+        "FROM task_steps WHERE task_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?",
         (task_id, page_size, offset)
     )
     step_rows = cursor.fetchall()
@@ -2889,13 +2903,27 @@ async def delete_task(task_id: int):
     if bg_agent:
         try: bg_agent.set_interrupt_flag()
         except Exception: pass
-    _background_process_info.pop(str(task_id), None)
+    from tools.shell import cleanup_background_process as _cleanup
+    _cleanup(str(task_id))
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM task_steps WHERE task_id = ?", (task_id,))
     cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
     conn.commit()
     conn.close()
+    # Clean up associated todo items
+    try:
+        from tools.task_plan import load_todos as _lt, save_todos as _st
+        _todos = _lt()
+        _changed = False
+        for item in list(_todos.get("items", [])):
+            if item.get("task_id") == task_id:
+                _todos["items"].remove(item)
+                _changed = True
+        if _changed:
+            _st(_todos)
+    except Exception:
+        pass
     return {"status": "success", "message": "Task deleted"}
 
 # ==========================================
@@ -3496,7 +3524,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 steps = cursor.execute(
                     "SELECT step_number, tool_name, tool_label, args_preview, "
                     "result_preview, success FROM task_steps "
-                    "WHERE task_id=? ORDER BY step_number",
+                    "WHERE task_id=? ORDER BY created_at",
                     (last_task["id"],)).fetchall()
                 if steps:
                     await _safe_send({
@@ -3985,7 +4013,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 break
             config = load_config()
             heartbeat_enabled = config.get("heartbeat_enabled", False)
-            heartbeat_interval = config.get("heartbeat_interval", 60)
+            heartbeat_interval = config.get("heartbeat_interval", 180)
 
             try:
                 # Wait for user message with timeout for heartbeat
@@ -4004,8 +4032,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         data = receive_task.result()
                         receive_task = None
                     else:
-                        raise asyncio.TimeoutError()
-                
+                        # ── Timeout: no user message received ──
+                        # Recovery is handled by the background guardian.
+                        continue
+                        if not is_heartbeat:
+                            continue
+
                 user_msg = json.loads(data)
                 msg_type = user_msg.get("type", "query")
                 resume_id_for_run = None
@@ -4035,7 +4067,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             steps = conn2.execute(
                                 "SELECT step_number, tool_name, tool_label, args_preview, "
                                 "result_preview, full_result, full_args, success FROM task_steps "
-                                "WHERE task_id=? ORDER BY step_number", (task_id,)).fetchall()
+                                "WHERE task_id=? ORDER BY created_at", (task_id,)).fetchall()
                             # Also fetch the original task goal
                             task_row = conn2.execute(
                                 "SELECT user_query FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -4285,7 +4317,7 @@ def _broadcast_task_history(task_id: int, session_id: int, task_status: str = "i
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT step_number, tool_name, tool_label, args_preview, result_preview, full_result, full_args, success "
-            "FROM task_steps WHERE task_id=? ORDER BY step_number ASC", (task_id,)).fetchall()
+            "FROM task_steps WHERE task_id=? ORDER BY created_at ASC", (task_id,)).fetchall()
         conn.close()
         if not rows:
             return
@@ -4871,21 +4903,49 @@ def start_background_monitor():
             _t.sleep(10)
     threading.Thread(target=monitor_loop, daemon=True).start()
 
-def _heartbeat_plan_context(plan: dict) -> str:
-    """Mechanically extract a summary from a plan for heartbeat LLM context."""
-    total = len(plan.get("steps", []))
-    done = sum(1 for s in plan["steps"] if s["status"] == "done")
-    doing = [s for s in plan["steps"] if s["status"] == "doing"]
-    lines = [f"目标: {plan.get('goal', '')}", f"步骤进度: {done}/{total}"]
-    for s in doing:
-        lines.append(f"当前执行中: {s.get('desc', '')}")
-        if s.get("result"):
-            lines.append(f"  已有结果: {s['result'][:200]}")
-    return "\n".join(lines)
+def _guardian_resume_task(task_id: int) -> None:
+    """Resume an interrupted task: load context, mark running, execute one turn."""
+    if not _guardian_resume_lock.acquire(blocking=False):
+        print(f"[Guardian] Resume #{task_id}: lock held, skipping")
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        conn.close()
+        if not row or row[0] != 'interrupted':
+            print(f"[Guardian] Resume #{task_id}: not found or not interrupted")
+            return
+
+        cfg = load_config()
+        model = cfg.get("default_model", "moonshot/kimi-latest")
+        from agent.agent import OpenAGCAgent
+        agent = OpenAGCAgent(model=model)
+        try:
+            ctx = get_task_context(task_id)
+            if ctx:
+                agent.messages.extend(ctx)
+        except Exception:
+            pass
+        update_task_status(task_id, "running")
+        _background_agents[task_id] = agent
+        try:
+            agent.run_turn(
+                "【系统恢复】之前执行中断，请继续完成原任务目标。",
+                verbose=False,
+                progress_callback=lambda e: add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", "")) if e.get("event") == "tool_start" else None,
+                skip_rag=True,
+                task_id=task_id,
+            )
+        finally:
+            _background_agents.pop(task_id, None)
+    except Exception as e:
+        print(f"[Guardian] Resume #{task_id} error: {e}")
+    finally:
+        _guardian_resume_lock.release()
 
 
 def start_guardian_loop():
-    """Background guardian (长驻看守) — Phase 1: lightweight LLC check / Phase 2: full agent resume."""
+    """Background guardian — pure code-based polling, no LLM calls."""
     def _guardian_loop():
         while True:
             try:
@@ -4894,258 +4954,21 @@ def start_guardian_loop():
                     _time.sleep(30)
                     continue
 
-                interval = cfg.get("heartbeat_interval", 60)
+                interval = cfg.get("heartbeat_interval", 180)
+                if connected_websockets:
+                    _time.sleep(max(interval, 10))
+                    continue
 
-                bg_session_id = 1
+                conn = sqlite3.connect(DB_PATH)
+                row = conn.execute(
+                    "SELECT id FROM tasks WHERE status='interrupted' AND resume_count < max_resume_count ORDER BY updated_at DESC LIMIT 1"
+                ).fetchone()
+                conn.close()
 
-                # ── Phase 1: Lightweight heartbeat ──
-                # Build minimal context: identity + time + todos + plan summaries
-                hb_context = "你是 Open-AGC 的巡检助手。"
-                hb_context += f"\n当前时间：{_time.strftime('%Y-%m-%d %H:%M')}\n"
-
-                # Load todos
-                try:
-                    from tools.task_plan import load_todos as _hb_load_todos, format_todo_list_for_prompt as _hb_fmt_todos
-                    _hb_todos = _hb_load_todos()
-                    _hb_todo_text = _hb_fmt_todos(_hb_todos)
-                    if _hb_todo_text:
-                        hb_context += f"\n{_hb_todo_text}\n"
-                except Exception:
-                    pass
-
-                # Load plan summaries for active todos
-                try:
-                    from tools.task_plan import load_plan as _hb_load_plan
-                    from core.paths import get_data_dir
-                    _plans_dir = os.path.join(get_data_dir(), "plans")
-                    if os.path.isdir(_plans_dir):
-                        for fn in os.listdir(_plans_dir):
-                            if fn.startswith("plan_") and fn.endswith(".json"):
-                                pid = fn.replace("plan_", "").replace(".json", "")
-                                _p = _hb_load_plan(plan_id=pid)
-                                if _p:
-                                    hb_context += f"\n## 关联任务计划\n{_heartbeat_plan_context(_p)}\n"
-                except Exception:
-                    pass
-
-                hb_context += (
-                    "\n请判断：如果一切正常无需操作，仅回复 HEARTBEAT_OK。\n"
-                    "如果待办项需要恢复执行，回复 RESUME:{id}。\n"
-                    "如果某项反复失败需要标记受阻，回复 STUCK:{id}。\n"
-                )
-
-                # Call LLM directly (no tools, no chat history, no full system prompt)
-                from core.llm_client import LLMClient
-                _hb_llm = LLMClient(default_model=cfg.get("default_model", "moonshot/kimi-latest"))
-                _hb_response, _ = _hb_llm.chat(
-                    [{"role": "system", "content": hb_context}]
-                )
-                _hb_reply = _hb_response.choices[0].message.content or ""
-
-                # ── Parse heartbeat response ──
-                if "HEARTBEAT_OK" in _hb_reply:
-                    # All good, nothing to do
-                    pass
-
-                elif _hb_reply.strip().startswith("RESUME:"):
-                    # ── Layer 0: Lock ──
-                    if not _guardian_resume_lock.acquire(blocking=False):
-                        print("[Guardian] Phase 2: lock held, skipping")
-                        _time.sleep(max(interval, 10))
-                        continue
-
-                    try:
-                        resume_id = int(_hb_reply.strip().split(":")[1].split()[0])
-
-                        # ── Layer 1: Re-read todos, confirm stale ──
-                        from tools.task_plan import load_todos as _hb_reload_todos
-                        _hb_current_todos = _hb_reload_todos()
-                        _hb_target = None
-                        for item in _hb_current_todos.get("items", []):
-                            if item["id"] == resume_id:
-                                _hb_target = item
-                                break
-                        if not _hb_target:
-                            print(f"[Guardian] Phase 2: todo #{resume_id} not found, skipping")
-                            _time.sleep(max(interval, 10))
-                            continue
-                        if _hb_target["status"] == "doing":
-                            updated = _hb_target.get("updated", "")
-                            if updated:
-                                try:
-                                    from datetime import datetime as _hb_dt
-                                    _hb_t = _hb_dt.strptime(updated, "%Y-%m-%d %H:%M")
-                                    if (_hb_dt.now() - _hb_t).total_seconds() < 7200:
-                                        print(f"[Guardian] Phase 2: todo #{resume_id} recently active, skipping")
-                                        _time.sleep(max(interval, 10))
-                                        continue
-                                except Exception:
-                                    pass
-                            else:
-                                _time.sleep(max(interval, 10))
-                                continue  # doing but no timestamp, skip
-
-                        # ── Layer 2: Check active agents ──
-                        if _active_agents.get(bg_session_id):
-                            print(f"[Guardian] Phase 2: active agent in session {bg_session_id}, skipping")
-                            _time.sleep(max(interval, 10))
-                            continue
-                        if _background_agents:
-                            # Check if any background agent belongs to this session
-                            _has_bg = False
-                            try:
-                                _bg_ids = [k for k in _background_agents.keys() if k and k > 0]
-                                if _bg_ids:
-                                    _bg_conn = sqlite3.connect(DB_PATH)
-                                    _bg_row = _bg_conn.execute(
-                                        "SELECT session_id FROM tasks WHERE id IN ({}) AND session_id=?".format(
-                                            ",".join("?" for _ in _bg_ids)
-                                        ), (*_bg_ids, bg_session_id)
-                                    ).fetchone()
-                                    if _bg_row:
-                                        _has_bg = True
-                                    _bg_conn.close()
-                            except Exception:
-                                pass
-                            if _has_bg:
-                                print(f"[Guardian] Phase 2: background agent for session {bg_session_id}, skipping")
-                                _time.sleep(max(interval, 10))
-                                continue
-
-                        # ── Phase 2: Execute ──
-                        # Check resume_count threshold
-                        _hb_rc = _hb_target.get("resume_count", 0)
-                        if _hb_rc >= 6:
-                            _hb_target["status"] = "stuck"
-                            _hb_target["updated"] = _time.strftime("%Y-%m-%d %H:%M")
-                            from tools.task_plan import save_todos as _hb_save_t2
-                            _hb_save_t2(_hb_current_todos)
-                            print(f"[Guardian] Todo #{resume_id}: resume_count={_hb_rc} >= 6, marked stuck")
-                            continue
-
-                        # Check if associated task is still running
-                        _hb_assoc_task = _hb_target.get("task_id")
-                        if _hb_assoc_task:
-                            try:
-                                _hb_conn_t = sqlite3.connect(DB_PATH)
-                                _hb_task_status = _hb_conn_t.execute(
-                                    "SELECT status FROM tasks WHERE id=?", (_hb_assoc_task,)
-                                ).fetchone()
-                                _hb_conn_t.close()
-                                if _hb_task_status and _hb_task_status[0] == 'running':
-                                    print(f"[Guardian] Phase 2: todo #{resume_id} task #{_hb_assoc_task} still running, skipping")
-                                    continue
-                            except Exception:
-                                pass
-
-                        _hb_model = cfg.get("default_model", "moonshot/kimi-latest")
-                        print(f"[Guardian] Phase 2: Resuming todo #{resume_id} ({_hb_target['desc']}) resume_count={_hb_rc}")
-
-                        # Create a task record for visibility
-                        _hb_task_id = None
-                        try:
-                            _hb_tc = sqlite3.connect(DB_PATH)
-                            _hb_cur = _hb_tc.execute(
-                                "INSERT INTO tasks (title, user_query, status, task_type) "
-                                "VALUES (?, ?, 'running', 'todo_resume')",
-                                (f"🔄 恢复: {_hb_target['desc'][:50]}", _hb_target['desc'])
-                            )
-                            _hb_tc.commit()
-                            _hb_task_id = _hb_cur.lastrowid
-                            _hb_tc.close()
-                            # Write task_id back to todo for dedup
-                            _hb_target["task_id"] = _hb_task_id
-                            from tools.task_plan import save_todos as _hb_save_t2
-                            _hb_save_t2(_hb_current_todos)
-                        except Exception:
-                            pass
-
-                        # Build context: session history + plan + todo
-                        from agent.agent import OpenAGCAgent
-                        _hb_agent = OpenAGCAgent(model=_hb_model)
-                        try:
-                            _hb_conn_c = sqlite3.connect(DB_PATH)
-                            _hb_conn_c.row_factory = sqlite3.Row
-                            _hb_rows = _hb_conn_c.execute(
-                                "SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 15) ORDER BY id ASC",
-                                (bg_session_id,)
-                            ).fetchall()
-                            _hb_conn_c.close()
-                            _hb_session_c = []
-                            for row in _hb_rows:
-                                r = row["role"]
-                                if r == "tool_step":
-                                    continue
-                                if r == "agent":
-                                    r = "assistant"
-                                _hb_session_c.append({"role": r, "content": row["content"]})
-                            if _hb_session_c:
-                                _hb_agent.messages.extend(_hb_session_c)
-                        except Exception:
-                            pass
-
-                        # Inject plan + todo into system prompt
-                        try:
-                            _hb_extra = "\n\n## 关联任务计划\n"
-                            for pid in _hb_plan_ids:
-                                _p = _hb_load_plan(plan_id=pid)
-                                if _p:
-                                    _hb_extra += _heartbeat_plan_context(_p) + "\n"
-                            _hb_extra += "\n" + _hb_fmt_todos(_hb_current_todos)
-                            if _hb_extra and _hb_agent.messages and _hb_agent.messages[0]["role"] == "system":
-                                _hb_agent.messages[0]["content"] += _hb_extra
-                        except Exception:
-                            pass
-
-                        _hb_query = f"请继续执行待办事项 #{resume_id}：{_hb_target['desc']}"
-                        # Load full plan detail
-                        try:
-                            for pid in _hb_plan_ids:
-                                _p = _hb_load_plan(plan_id=pid)
-                                if _p:
-                                    from tools.task_plan import format_plan_for_prompt as _hb_fmt_plan
-                                    _hb_query += f"\n\n## 关联任务计划详情\n{_hb_fmt_plan(_p)}"
-                        except Exception:
-                            pass
-
-                        # Register to _background_agents (for interrupt and dedup)
-                        _background_agents[_hb_task_id or 0] = _hb_agent
-
-                        try:
-                            _hb_agent.run_turn(
-                                _hb_query, verbose=False,
-                                progress_callback=lambda e: None,
-                                skip_rag=True
-                            )
-                        finally:
-                            _background_agents.pop(_hb_task_id, None)
-
-                        # Increment resume_count (not todo status — Agent manages that)
-                        if _hb_target:
-                            _hb_target["resume_count"] = _hb_target.get("resume_count", 0) + 1
-                            _hb_target["updated"] = _time.strftime("%Y-%m-%d %H:%M")
-                            from tools.task_plan import save_todos as _hb_save_t2
-                            _hb_save_t2(_hb_current_todos)
-
-                    except Exception as resume_err:
-                        print(f"[Guardian] Phase 2 error: {resume_err}")
-                    finally:
-                        _guardian_resume_lock.release()
-
-                elif _hb_reply.strip().startswith("STUCK:"):
-                    # Mark item as stuck in todos
-                    try:
-                        stuck_id = int(_hb_reply.strip().split(":")[1].split()[0])
-                        from tools.task_plan import load_todos as _hb_load_t2, save_todos as _hb_save_t2
-                        _hb_t2 = _hb_load_t2()
-                        for item in _hb_t2["items"]:
-                            if item["id"] == stuck_id and item["status"] == "doing":
-                                item["status"] = "stuck"
-                                item["updated"] = _time.strftime("%Y-%m-%d %H:%M")
-                                _hb_save_t2(_hb_t2)
-                                print(f"[Guardian] Todo #{stuck_id} marked stuck")
-                    except Exception:
-                        pass
+                if row:
+                    tid = row[0]
+                    print(f"[Guardian] Found interrupted task #{tid}, resuming...")
+                    _guardian_resume_task(tid)
 
                 _time.sleep(max(interval, 10))
             except Exception as e:
@@ -5153,10 +4976,7 @@ def start_guardian_loop():
                 _time.sleep(30)
 
     threading.Thread(target=_guardian_loop, daemon=True).start()
-    print("[Guardian] Started (Phase 1 + Phase 2)")
+    print("[Guardian] Started (code-based polling)")
 
-# Start background listeners
-start_background_monitor()
-start_email_listener()
-start_task_scheduler()
+
 start_guardian_loop()

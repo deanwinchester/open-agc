@@ -4,6 +4,7 @@ import re
 import uuid
 import base64
 import time
+import threading
 import sqlite3
 import litellm
 from litellm.exceptions import ContextWindowExceededError
@@ -15,15 +16,14 @@ from typing import List, Dict, Any, Optional, Tuple
 from core.paths import get_data_path
 
 # ── Model call logging ──
-_MODEL_LOGS_DB = None
+_MODEL_LOGS_DB = threading.local()
 
 def _get_model_logs_conn() -> sqlite3.Connection:
-    global _MODEL_LOGS_DB
-    if _MODEL_LOGS_DB is None:
+    if not hasattr(_MODEL_LOGS_DB, 'conn') or _MODEL_LOGS_DB.conn is None:
         db_path = get_data_path("chat_history.db")
-        _MODEL_LOGS_DB = sqlite3.connect(db_path, timeout=5)
-        _MODEL_LOGS_DB.execute("PRAGMA journal_mode=WAL")
-    return _MODEL_LOGS_DB
+        _MODEL_LOGS_DB.conn = sqlite3.connect(db_path, timeout=5)
+        _MODEL_LOGS_DB.conn.execute("PRAGMA journal_mode=WAL")
+    return _MODEL_LOGS_DB.conn
 
 def _init_model_logs_table():
     """Create the model_call_logs table if it doesn't exist."""
