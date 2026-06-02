@@ -1133,20 +1133,31 @@ function initApp() {
     } else if (role === 'tool_step') {
       try {
         var ts = JSON.parse(content);
-        var statusIcon = ts.success ? '✅' : '❌';
-        var statusClass = ts.success ? 'done' : 'failed';
         var stepLabel = ts.tool_label || ts.tool || '';
-        formattedContent = '<div class="tool-step-card ' + statusClass + '" data-step="' + ts.step + '">'
-          + '<div class="tool-step-header">'
-          + '<span class="tool-step-icon">' + statusIcon + '</span>'
-          + '<span class="tool-step-label">' + escapeHtml(stepLabel) + '</span>'
-          + '<span class="tool-step-toggle" style="margin-left:auto;cursor:pointer;font-size:0.7rem;color:var(--text-secondary);">▼</span>'
-          + '</div>'
-          + '<div class="tool-step-args" style="font-size:0.78rem;padding:0.3rem 0.6rem;background:var(--bg-inner);border-radius:4px;margin:0.3rem 0;overflow-x:auto;white-space:nowrap;">' + escapeHtml(ts.args_preview || '') + '</div>'
-          + '<div class="tool-step-body" style="display:none;font-size:0.78rem;">'
-          + (ts.output ? '<pre class="tool-step-output" style="background:var(--bg-inner);padding:0.4rem;border-radius:4px;overflow-x:auto;max-height:200px;font-size:0.72rem;line-height:1.4;margin:0.3rem 0;">' + escapeHtml(ts.output) + '</pre>' : '')
-          + (ts.result_preview ? '<div class="tool-step-result" style="padding:0.3rem 0;color:var(--text-secondary);">' + escapeHtml(ts.result_preview) + '</div>' : '')
-          + '</div></div>';
+        var preview = ts.args_preview || '';
+        var result = ts.result_preview || '';
+        var icon = ts.success ? '✅' : '❌';
+        // Build compact single line: icon + label + preview snippet
+        var line = '<div style="display:flex;align-items:center;gap:6px;padding:2px 0;font-size:0.8rem;">'
+          + '<span>' + icon + '</span>'
+          + '<span style="font-weight:600;white-space:nowrap;">' + escapeHtml(stepLabel) + '</span>';
+        if (preview) line += '<span style="color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:300px;">' + escapeHtml(preview) + '</span>';
+        if (result) line += '<span style="color:var(--text-secondary);margin-left:auto;font-size:0.72rem;">' + escapeHtml(result.substring(0, 80)) + '</span>';
+        line += '</div>';
+
+        // Merge consecutive tool_steps into a single container
+        var lastMsg = messageDiv.previousElementSibling;
+        if (lastMsg && lastMsg.classList.contains('tool-step-group')) {
+          lastMsg.querySelector('.tool-step-group-body').insertAdjacentHTML('beforeend', line);
+          messageDiv.remove();
+          return;
+        }
+        // Group container will be rendered by the template below
+        messageDiv.className = 'message tool-step-group';
+        formattedContent = '<div class="tool-step-group-body" style="padding:6px 12px;background:var(--bg-inner);border-radius:8px;margin:1px 0;">'
+          + '<div style="font-size:0.72rem;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">⚡ 执行步骤</div>'
+          + line
+          + '</div>';
       } catch (e) {
         formattedContent = content;
       }
