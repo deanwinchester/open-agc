@@ -1527,6 +1527,20 @@ class OpenAGCAgent:
                     system_content += "\n\n" + _todo_text
             except Exception:
                 pass
+            # Inject original task goal (user_query from DB) so agent never loses focus
+            if self.task_id:
+                try:
+                    import sqlite3 as _sq3
+                    from core.paths import get_data_path as _gdp
+                    _conn = _sq3.connect(_gdp("chat_history.db"))
+                    _row = _conn.execute("SELECT user_query FROM tasks WHERE id=?", (self.task_id,)).fetchone()
+                    _conn.close()
+                    if _row and _row[0]:
+                        _goal = _row[0].strip()
+                        if _goal not in system_content:
+                            system_content += f"\n\n## 当前任务目标\n以下是你当前正在执行的任务，请始终聚焦于此目标，不要偏离：\n\n{_goal[:200]}\n"
+                except Exception:
+                    pass
             self.messages[0]["content"] = system_content
 
         # Sub-agent delegation for complex tasks
