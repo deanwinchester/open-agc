@@ -192,20 +192,32 @@ def _convert_html(html: str) -> Optional[str]:
 class ReaderLMTool(BaseTool):
     name: str = "parse_html"
     description: str = (
-        "使用 Reader-lm 小模型将 HTML 源码解析为干净的 Markdown 文本。"
+        "使用 Reader-lm 小模型将 HTML 源码或网页 URL 解析为干净的 Markdown 文本。"
         "当浏览器获取到的页面包含大量 HTML 噪音（导航、广告、脚本等）时使用。\n\n"
         "适用场景：\n"
         "- 从 browser_automation 获取的页面 HTML 需要提取正文\n"
+        "- 直接传入 URL 自动抓取并解析\n"
         "- 需要保留标题、列表、表格结构\n"
         "- HTML 过大不能直接传给大模型\n\n"
         "注意：首次调用会自动下载模型（约 500MB），会提示等待。"
     )
 
-    def execute(self, html: str = "", file_path: str = "", **kwargs) -> str:
+    def execute(self, html: str = "", file_path: str = "", url: str = "", save_path: str = "", **kwargs) -> str:
         agent_ctx = kwargs.get("_agent_context")
 
-        if not html and not file_path:
-            return "[ReaderLM] 需要 html 或 file_path 参数。"
+        if not html and not file_path and not url:
+            return "[ReaderLM] 需要 html、file_path 或 url 参数。"
+
+        if url:
+            try:
+                import requests as req
+                resp = req.get(url, timeout=30, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                })
+                resp.raise_for_status()
+                html = resp.text
+            except Exception as e:
+                return f"[ReaderLM] 获取 URL 失败: {e}"
 
         if file_path:
             try:
@@ -230,6 +242,16 @@ class ReaderLMTool(BaseTool):
         result = _convert_html(html)
         if result is None:
             return "[ReaderLM] 解析失败。请稍后重试。"
+
+        if save_path:
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+                with open(save_path, "w", encoding="utf-8") as f:
+                    f.write(result)
+                return f"[ReaderLM] Markdown 已保存到 {save_path}\n\n{result[:2000]}"
+            except Exception as e:
+                return f"[ReaderLM] 保存文件失败: {e}\n\n{result}"
+
         return result
 
     def get_openai_schema(self) -> dict:
@@ -243,11 +265,19 @@ class ReaderLMTool(BaseTool):
                     "properties": {
                         "html": {
                             "type": "string",
-                            "description": "要转换的 HTML 源码（可选，html 和 file_path 二选一）"
+                            "description": "要转换的 HTML 源码（可选，html/file_path/url 三选一）"
                         },
                         "file_path": {
                             "type": "string",
-                            "description": "包含 HTML 的文件路径（可选，html 和 file_path 二选一）"
+                            "description": "包含 HTML 的文件路径（可选，html/file_path/url 三选一）"
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": "目标网页 URL，自动抓取 HTML 后解析（可选，html/file_path/url 三选一）"
+                        },
+                        "save_path": {
+                            "type": "string",
+                            "description": "可选，指定 Markdown 输出文件的保存路径，如 /workspace/article.md"
                         }
                     }
                 }
