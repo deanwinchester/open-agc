@@ -892,8 +892,8 @@ def get_task_context(task_id: int) -> list:
     if row and row[0]:
         try:
             ctx = json.loads(row[0])
-            conn.close()
             if ctx:  # valid non-empty snapshot
+                conn.close()
                 return ctx
         except Exception:
             pass
