@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import json
 import asyncio
@@ -43,7 +43,7 @@ from core.llamacpp_manager import get_llamacpp_manager
 from tools.shell import interrupt_shell
 from core.plugin_manager import discover_plugins, list_plugins, list_all_plugins, unload_plugin, toggle_plugin, install_from_git, fetch_marketplace
 
-# 鈹€鈹€ Route modules 鈹€鈹€
+# ── Route modules ──
 from api.routes.benchmark import router as benchmark_router, init_benchmark_routes
 from api.routes.downloads import router as downloads_router, init_download_routes
 from api.routes.uploads import router as uploads_router
@@ -57,7 +57,7 @@ import litellm
 # Fix for PyInstaller bundling issue with tiktoken
 litellm.num_tokens_logging = False 
 litellm.supports_token_counter = False
-# LiteLLM debug logging 鈥?uncomment to debug model/pricing issues
+# LiteLLM debug logging — uncomment to debug model/pricing issues
 # litellm._turn_on_debug()
 # litellm.set_verbose = True
 
@@ -94,7 +94,7 @@ def _plugin_broadcast(data):
     if f:
         f(data)
 
-# 鈹€鈹€ Plugin Discovery 鈹€鈹€
+# ── Plugin Discovery ──
 _plugins_dir = os.path.abspath(os.path.join(os.path.dirname(DB_PATH), "..", "plugins"))
 _plugins = discover_plugins(plugins_dir=_plugins_dir, broadcast_fn=_plugin_broadcast, server_config=load_config() if "load_config" in dir() else {})
 
@@ -270,7 +270,7 @@ def init_db():
     # Ensure at least one default session exists
     cursor.execute("SELECT COUNT(*) FROM sessions")
     if cursor.fetchone()[0] == 0:
-        cursor.execute("INSERT INTO sessions (name) VALUES (?)", ("榛樿浼氳瘽",))
+        cursor.execute("INSERT INTO sessions (name) VALUES (?)", ("默认会话",))
 
     # Migrate: add new columns if they don't exist yet
     try:
@@ -407,7 +407,7 @@ def init_db():
 
 init_db()
 
-# 鈹€鈹€ Create indexes for query performance 鈹€鈹€
+# ── Create indexes for query performance ──
 def create_indexes():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -488,7 +488,7 @@ def reconcile_downloads():
                 '''INSERT INTO downloads (type, label, filename, target_path, partial_path,
                    downloaded_bytes, progress, status, source)
                    VALUES ('model', ?, ?, ?, ?, ?, 0.0, 'paused', 'huggingface')''',
-                (f"{label} (寰呮仮澶?", label, target_path, partial_path, file_size)
+                (f"{label} (待恢复)", label, target_path, partial_path, file_size)
             )
             cursor.execute(
                 "UPDATE downloads SET progress="
@@ -578,12 +578,12 @@ def reconcile_backgrounded_after_restart():
             ctx = get_task_context(tid)
             if ctx:
                 ctx.append({"role": "user", "content": (
-                    "銆愮郴缁熼€氱煡銆戞湇鍔″櫒閲嶅惎锛屽悗鍙颁笅杞戒换鍔″凡瀹屾垚锛屾枃浠跺凡灏辩华銆?
-                    "璇风户缁墽琛屼箣鍓嶆湭瀹屾垚鐨勪换鍔°€?
+                    "【系统通知】服务器重启，后台下载任务已完成，文件已就绪。"
+                    "请继续执行之前未完成的任务。"
                 )})
                 increment_task_resume(tid)
                 update_task_status(tid, "interrupted",
-                    "鏈嶅姟鍣ㄩ噸鍚紝鍚庡彴浠诲姟宸插畬鎴?, interruption_reason="background_complete")
+                    "服务器重启，后台任务已完成", interruption_reason="background_complete")
                 save_task_context(tid, ctx)
                 conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?",
                              (p["dl_id"],))
@@ -600,15 +600,15 @@ def reconcile_backgrounded_after_restart():
         ).fetchall()
         for p in failed_pairs:
             label = p["label"] or p["filename"] or f"download #{p['dl_id']}"
-            err = p["error_message"] or "鏈煡閿欒"
+            err = p["error_message"] or "未知错误"
             session_id = p["session_id"] or 1
             save_message("system",
-                f"鉂?涓嬭浇澶辫触: {label}\n閿欒淇℃伅: {err}",
+                f"❌ 下载失败: {label}\n错误信息: {err}",
                 session_id)
             conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?",
                          (p["dl_id"],))
             conn.commit()
-            print(f"[Startup] Recovered failed download #{p['dl_id']} (task {p['task_id']}) 鈥?message saved to session {session_id}")
+            print(f"[Startup] Recovered failed download #{p['dl_id']} (task {p['task_id']}) — message saved to session {session_id}")
 
         # Reconcile backgrounded tasks whose shell process info was lost (in-memory dict)
         lost_tasks = conn.execute(
@@ -622,12 +622,12 @@ def reconcile_backgrounded_after_restart():
                 ctx = get_task_context(tid)
                 if ctx:
                     ctx.append({"role": "user", "content": (
-                        "銆愮郴缁熼€氱煡銆戞湇鍔″櫒閲嶅惎锛屽悗鍙板懡浠ょ殑杩涚▼淇℃伅宸蹭涪澶便€?
-                        "璇锋鏌ヤ箣鍓嶇殑宸ヤ綔鐘舵€侊紝濡傛湁闇€瑕佽閲嶆柊鎵ц銆?
+                        "【系统通知】服务器重启，后台命令的进程信息已丢失。"
+                        "请检查之前的工作状态，如有需要请重新执行。"
                     )})
                     save_task_context(tid, ctx)
                 update_task_status(tid, "background_failed",
-                    "鏈嶅姟鍣ㄩ噸鍚紝鍚庡彴杩涚▼淇℃伅涓㈠け", interruption_reason="process_lost")
+                    "服务器重启，后台进程信息丢失", interruption_reason="process_lost")
                 print(f"[Startup] Task {tid}: marked background_failed (process info lost on restart)")
 
         conn.close()
@@ -689,10 +689,10 @@ def update_task_type(task_id: int, task_type: str):
 
 _CONTINUATION_PREFIXES = frozenset({
     # Chinese
-    '缁х画', '鍐?, '杩?, '鐒跺悗', '鏄殑', '瀵圭殑', '瀵?, '濂?, '琛?, '鍡?,
-    '杩欎釜', '閭ｄ釜', '浠?, '濂?, '瀹?, '浠栦滑', '濂逛滑', '瀹冧滑',
-    '閲嶈瘯', '閲嶆柊', '鍐嶆潵', '涓嬩竴姝?, '涓嬩竴鏉?, '涓婁竴涓?,
-    '鏄?, '涓?, '涓嶈', '绠椾簡', '鎹?, '鎹竴涓?, '鎹竴鎵?,
+    '继续', '再', '还', '然后', '是的', '对的', '对', '好', '行', '嗯',
+    '这个', '那个', '他', '她', '它', '他们', '她们', '它们',
+    '重试', '重新', '再来', '下一步', '下一条', '上一个',
+    '是', '不', '不要', '算了', '换', '换一个', '换一批',
     # English
     'yes', 'no', 'ok', 'okay', 'sure', 'go on', 'continue',
     'retry', 'again', 'next', 'previous', 'that', 'this', 'it',
@@ -707,10 +707,10 @@ def _resolve_todo_for_query(query: str) -> int:
     """
     # Quick keyword check (no LLM)
     q = query.strip().lower()
-    for kw in ["缁х画", "缁х画鎼?, "缁х画鍋?, "缁х画涓嬭浇", "鎺ョ潃", "retry", "continue",
-               "鍐嶆潵", "鍐嶈瘯", "閲嶆柊", "鍞ら啋", "鎭㈠", "resume", "next", "yes", "缁х画鍋?]:
+    for kw in ["继续", "继续搞", "继续做", "继续下载", "接着", "retry", "continue",
+               "再来", "再试", "重新", "唤醒", "恢复", "resume", "next", "yes", "继续做"]:
         if kw and (q.startswith(kw) or q == kw):
-            # Continuation of any active todo 鈥?return first active
+            # Continuation of any active todo — return first active
             try:
                 from tools.task_plan import load_todos
                 for item in load_todos().get("items", []):
@@ -720,7 +720,7 @@ def _resolve_todo_for_query(query: str) -> int:
                 pass
             return 0
 
-    # Load todos 鈥?if none active, no need for LLM
+    # Load todos — if none active, no need for LLM
     try:
         from tools.task_plan import load_todos
         todos = load_todos()
@@ -729,7 +729,7 @@ def _resolve_todo_for_query(query: str) -> int:
         active = []
 
     if not active:
-        return 0  # No active todos 鈫?definitely new task
+        return 0  # No active todos → definitely new task
 
     # Use LLM to determine association (only when todos exist and query is ambiguous)
     try:
@@ -738,9 +738,9 @@ def _resolve_todo_for_query(query: str) -> int:
 
         todo_lines = "\n".join(f"{i['id']}. {i['desc']} ({i['status']})" for i in active)
         prompt = (
-            f"褰撳墠寰呭姙锛歕n{todo_lines}\n\n"
-            f"鐢ㄦ埛鏂拌緭鍏ワ細銆寋query[:200]}銆峔n\n"
-            f"鍥炵瓟锛氬鏋滄槸缁帴鏌愪釜寰呭姙锛屼粎鍥炲鏁板瓧 id锛涘鏋滄棤鍏虫垨鍏ㄦ柊浠诲姟锛屼粎鍥炲 0銆?
+            f"当前待办：\n{todo_lines}\n\n"
+            f"用户新输入：「{query[:200]}」\n\n"
+            f"回答：如果是续接某个待办，仅回复数字 id；如果无关或全新任务，仅回复 0。"
         )
         llm = LLMClient(default_model=_model)
         resp, _ = llm.chat([{"role": "user", "content": prompt}])
@@ -879,7 +879,7 @@ def get_task_context(task_id: int) -> list:
                 "role": "tool",
                 "tool_call_id": tc_id,
                 "name": tool_name,
-                "content": result[:5000] if result else "(鏃犺緭鍑?"
+                "content": result[:5000] if result else "(无输出)"
             })
 
         print(f"[Task] Reconstructed context for task {task_id} from {len(steps)} step(s)")
@@ -954,9 +954,9 @@ def update_download_progress(download_id: int, progress: float,
 
     # Log event for important status transitions
     if status == 'completed':
-        log_download_event(download_id, "completed", "涓嬭浇瀹屾垚", "")
+        log_download_event(download_id, "completed", "下载完成", "")
     elif status == 'failed':
-        log_download_event(download_id, "failed", "涓嬭浇澶辫触", error_message or "鏈煡閿欒")
+        log_download_event(download_id, "failed", "下载失败", error_message or "未知错误")
 
     # Notify the linked task (both success and failure)
     if status in ('completed', 'failed'):
@@ -975,14 +975,14 @@ def update_download_progress(download_id: int, progress: float,
 
                     if status == 'completed':
                         save_message("system",
-                            f"鉁?涓嬭浇瀹屾垚: {label}", session_id)
+                            f"✅ 下载完成: {label}", session_id)
                         try:
                             cursor.execute("SELECT MAX(step_number) FROM task_steps WHERE task_id=?", (task_id,))
                             max_step = cursor.fetchone()[0] or 0
                             add_task_step(task_id, max_step + 1, "queue_download",
-                                tool_label=f"鉁?涓嬭浇瀹屾垚: {label}",
+                                tool_label=f"✅ 下载完成: {label}",
                                 args_preview=f"filename={label}",
-                                result_preview="涓嬭浇瀹屾垚",
+                                result_preview="下载完成",
                                 full_result="",
                                 success=True, session_id=session_id)
                         except Exception as step_err:
@@ -998,13 +998,13 @@ def update_download_progress(download_id: int, progress: float,
                                 ctx = get_task_context(task_id)
                                 if ctx:
                                     ctx.append({"role": "user", "content": (
-                                        "銆愮郴缁熼€氱煡銆戝悗鍙颁笅杞戒换鍔″凡瀹屾垚锛屾枃浠跺凡灏辩华銆?
-                                        "璇风户缁墽琛屼箣鍓嶆湭瀹屾垚鐨勪换鍔★紝涓嶈閲嶅涓嬭浇宸叉湁鏂囦欢銆?
+                                        "【系统通知】后台下载任务已完成，文件已就绪。"
+                                        "请继续执行之前未完成的任务，不要重复下载已有文件。"
                                     )})
                                     save_task_context(task_id, ctx)
-                                    # Direct resume 鈥?wake task immediately instead of waiting for poll
+                                    # Direct resume — wake task immediately instead of waiting for poll
                                     user_query = task_row[1] or ""
-                                    print(f"[Download] Download #{download_id} complete 鈥?directly resuming task {task_id}")
+                                    print(f"[Download] Download #{download_id} complete — directly resuming task {task_id}")
                                     _direct_resume_background_task(task_id, user_query, ctx, download_id=download_id)
                         except Exception as e:
                             print(f"[Download] Failed to resume task {task_id} after download complete: {e}")
@@ -1017,21 +1017,21 @@ def update_download_progress(download_id: int, progress: float,
                             "label": label
                         })
                     else:  # failed
-                        err = error_message or "鏈煡閿欒"
+                        err = error_message or "未知错误"
                         save_message("system",
-                            f"鉂?涓嬭浇澶辫触: {label}\n閿欒淇℃伅: {err}",
+                            f"❌ 下载失败: {label}\n错误信息: {err}",
                             session_id)
                         try:
                             cursor.execute("SELECT MAX(step_number) FROM task_steps WHERE task_id=?", (task_id,))
                             max_step = cursor.fetchone()[0] or 0
                             add_task_step(task_id, max_step + 1, "queue_download",
-                                tool_label=f"鉂?涓嬭浇澶辫触: {label}",
+                                tool_label=f"❌ 下载失败: {label}",
                                 args_preview=f"filename={label}",
-                                result_preview=f"閿欒: {err}",
-                                full_result=f"涓嬭浇澶辫触: {label}\n閿欒淇℃伅: {err}",
+                                result_preview=f"错误: {err}",
+                                full_result=f"下载失败: {label}\n错误信息: {err}",
                                 success=False, session_id=session_id)
 
-                            # Don't mark as background_failed 鈥?keep backgrounded for retry analysis
+                            # Don't mark as background_failed — keep backgrounded for retry analysis
                             cursor.execute(
                                 "SELECT status, user_query FROM tasks WHERE id=?",
                                 (task_id,))
@@ -1040,14 +1040,14 @@ def update_download_progress(download_id: int, progress: float,
                                 ctx = get_task_context(task_id)
                                 if ctx:
                                     ctx.append({"role": "user", "content": (
-                                        f"銆愮郴缁熼€氱煡銆戜笅杞戒换鍔″け璐ヤ簡銆俓n鏂囦欢: {label}\n閿欒淇℃伅: {err}\n"
-                                        "璇峰垎鏋愬け璐ュ師鍥狅紝灏濊瘯鍏朵粬鏂瑰紡閲嶆柊涓嬭浇锛堝鎹㈡簮銆佹崲鏂囦欢鍚嶏級锛?
-                                        "濡傛灉纭疄鏃犳硶涓嬭浇鍒欑粨鏉熶换鍔°€?
+                                        f"【系统通知】下载任务失败了。\n文件: {label}\n错误信息: {err}\n"
+                                        "请分析失败原因，尝试其他方式重新下载（如换源、换文件名），"
+                                        "如果确实无法下载则结束任务。"
                                     )})
                                     save_task_context(task_id, ctx)
                                     # Wake the task so agent can analyze and retry
                                     user_query = task_row[1] or ""
-                                    print(f"[Download] Download #{download_id} failed 鈥?directly resuming task {task_id} for retry analysis")
+                                    print(f"[Download] Download #{download_id} failed — directly resuming task {task_id} for retry analysis")
                                     _direct_resume_background_task(task_id, user_query, ctx, download_id=download_id)
                         except Exception as step_err:
                             print(f"[Download] Failed to update task {task_id}: {step_err}")
@@ -1087,7 +1087,7 @@ def _direct_resume_background_task(task_id: int, user_query: str, context: list,
                 except Exception:
                     pass
             update_task_status(task_id, "interrupted",
-                "鍚庡彴涓嬭浇瑙﹀彂鎭㈠", interruption_reason="background_complete")
+                "后台下载触发恢复", interruption_reason="background_complete")
             _run_background_task(task_id, user_query, context, True)
         threading.Thread(target=_do_resume, daemon=True).start()
     except Exception as e:
@@ -1162,12 +1162,12 @@ def delete_download_record(download_id: int):
 # ==========================================
 connected_websockets: list = []  # List of active WebSocket connections
 
-_sandbox_waits: dict = {}  # {session_id: {"event": threading.Event, "result": dict}} 鈥?sandbox auth waits
+_sandbox_waits: dict = {}  # {session_id: {"event": threading.Event, "result": dict}} — sandbox auth waits
 
-_active_agents: dict = {}  # {session_id: {task_id: OpenAGCAgent}} 鈥?multi-task concurrent support
-_background_agents: dict = {}  # {task_id: OpenAGCAgent} 鈥?background tasks for interrupt
+_active_agents: dict = {}  # {session_id: {task_id: OpenAGCAgent}} — multi-task concurrent support
+_background_agents: dict = {}  # {task_id: OpenAGCAgent} — background tasks for interrupt
 
-_session_enabled_tools: dict = {}  # {session_id: set(tool_names)} 鈥?progressive tool persistence
+_session_enabled_tools: dict = {}  # {session_id: set(tool_names)} — progressive tool persistence
 
 _guardian_resume_lock = threading.Lock()  # Prevents concurrent Phase 2 executions
 
@@ -1509,7 +1509,7 @@ async def get_provider_models(provider: str):
             'kimi': ['moonshot/kimi-k2.5', 'moonshot/kimi-latest', 'moonshot/moonshot-v1-8k', 'moonshot/moonshot-v1-32k', 'moonshot/moonshot-v1-128k'],
             'glm': ['zai/glm-4.7', 'zai/glm-4.5', 'zai/glm-4.5-flash', 'zai/glm-4.5-air'],
             'minimax': ['minimax/MiniMax-M2.1'],
-            'llamacpp': ['llamacpp/local-model (闇€鍏堜笅杞?GGUF 妯″瀷)'],
+            'llamacpp': ['llamacpp/local-model (需先下载 GGUF 模型)'],
         }
         models = defaults.get(provider, [])
         
@@ -1527,7 +1527,7 @@ async def get_token_usage_stats(provider: str, days: int = 30):
 
 @app.post("/api/sandbox/approve")
 async def approve_sandbox_request(body: dict):
-    """Approve a pending sandbox path access request 鈥?adds path to allowed_paths."""
+    """Approve a pending sandbox path access request — adds path to allowed_paths."""
     path = (body.get("path") or "").strip()
     if not path:
         raise HTTPException(status_code=400, detail="path is required")
@@ -1644,12 +1644,12 @@ async def setup_llamacpp():
     global _llamacpp_download_state
 
     if _llamacpp_download_state["active"]:
-        raise HTTPException(status_code=409, detail="涓嬭浇浠诲姟姝ｅ湪杩涜涓?)
+        raise HTTPException(status_code=409, detail="下载任务正在进行中")
 
     _llamacpp_download_state = {
         "active": True,
         "type": "binary",
-        "label": "姝ｅ湪涓嬭浇 llama.cpp 浜岃繘鍒舵枃浠?..",
+        "label": "正在下载 llama.cpp 二进制文件...",
         "progress": 0.0,
         "stage": "downloading",
         "error": "",
@@ -1660,7 +1660,7 @@ async def setup_llamacpp():
     bin_path = manager.exe_path
     db_download_id = create_download_record(
         type_="binary",
-        label="llama.cpp 浜岃繘鍒舵枃浠?,
+        label="llama.cpp 二进制文件",
         source="binary",
         url="https://api.github.com/repos/ggerganov/llama.cpp/releases/latest",
         target_path=bin_path
@@ -1675,13 +1675,13 @@ async def setup_llamacpp():
                 if _llamacpp_download_state.get("cancelled"):
                     return
                 _llamacpp_download_state["progress"] = ratio
-                _llamacpp_download_state["label"] = "姝ｅ湪涓嬭浇 llama.cpp 浜岃繘鍒舵枃浠?.."
+                _llamacpp_download_state["label"] = "正在下载 llama.cpp 二进制文件..."
                 _llamacpp_download_state["stage"] = "downloading"
                 update_download_progress(dl_id, ratio)
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": "binary",
-                    "label": "姝ｅ湪涓嬭浇 llama.cpp 浜岃繘鍒舵枃浠?..",
+                    "label": "正在下载 llama.cpp 二进制文件...",
                     "progress": ratio,
                     "stage": "downloading"
                 })
@@ -1690,11 +1690,11 @@ async def setup_llamacpp():
             if _llamacpp_download_state.get("cancelled"):
                 return
             _llamacpp_download_state["stage"] = "extracting"
-            _llamacpp_download_state["label"] = "姝ｅ湪瑙ｅ帇..."
+            _llamacpp_download_state["label"] = "正在解压..."
             _broadcast_to_websockets({
                 "type": "llamacpp_download",
                 "task": "binary",
-                "label": "姝ｅ湪瑙ｅ帇 llama.cpp...",
+                "label": "正在解压 llama.cpp...",
                 "progress": 1.0,
                 "stage": "extracting"
             })
@@ -1706,20 +1706,20 @@ async def setup_llamacpp():
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": "binary",
-                    "label": "llama.cpp 瀹夎瀹屾垚",
+                    "label": "llama.cpp 安装完成",
                     "progress": 1.0,
                     "stage": "complete"
                 })
             else:
-                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "涓嬭浇澶辫触"}
-                update_download_progress(dl_id, 0.0, status="failed", error_message="涓嬭浇澶辫触")
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载失败"}
+                update_download_progress(dl_id, 0.0, status="failed", error_message="下载失败")
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": "binary",
-                    "label": "瀹夎澶辫触",
+                    "label": "安装失败",
                     "progress": 0.0,
                     "stage": "error",
-                    "error": "涓嬭浇澶辫触"
+                    "error": "下载失败"
                 })
         except Exception as e:
             _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
@@ -1727,7 +1727,7 @@ async def setup_llamacpp():
             _broadcast_to_websockets({
                 "type": "llamacpp_download",
                 "task": "binary",
-                "label": f"瀹夎澶辫触: {e}",
+                "label": f"安装失败: {e}",
                 "progress": 0.0,
                 "stage": "error",
                 "error": str(e)
@@ -1735,7 +1735,7 @@ async def setup_llamacpp():
 
     thread = threading.Thread(target=run_download, daemon=True)
     thread.start()
-    return {"status": "started", "message": "寮€濮嬩笅杞藉畨瑁?llama.cpp"}
+    return {"status": "started", "message": "开始下载安装 llama.cpp"}
 
 class ModelDownloadRequest(BaseModel):
     url: str
@@ -1793,7 +1793,7 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
     global _llamacpp_download_state
 
     if _llamacpp_download_state["active"]:
-        raise HTTPException(status_code=409, detail="涓嬭浇浠诲姟姝ｅ湪杩涜涓?)
+        raise HTTPException(status_code=409, detail="下载任务正在进行中")
 
     short_name = req.filename.split("/")[-1]
     source_label = "ModelScope" if req.source == "modelscope" else "HuggingFace"
@@ -1805,9 +1805,9 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
     resume_offset = 0
     if os.path.exists(partial_path):
         resume_offset = os.path.getsize(partial_path)
-        initial_label = f"缁紶 {short_name} (宸蹭笅杞?{resume_offset / 1024**2:.0f} MB)..."
+        initial_label = f"续传 {short_name} (已下载 {resume_offset / 1024**2:.0f} MB)..."
     else:
-        initial_label = f"姝ｅ湪浠?{source_label} 涓嬭浇 {short_name}..."
+        initial_label = f"正在从 {source_label} 下载 {short_name}..."
 
     # Try to get total size via HEAD request before starting thread
     total_size = 0
@@ -1856,13 +1856,13 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
                 if _llamacpp_download_state.get("cancelled"):
                     return
                 _llamacpp_download_state["progress"] = ratio
-                _llamacpp_download_state["label"] = f"姝ｅ湪涓嬭浇 {short_name}..."
+                _llamacpp_download_state["label"] = f"正在下载 {short_name}..."
                 _llamacpp_download_state["stage"] = "downloading"
                 update_download_progress(dl_id, ratio)
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": "model",
-                    "label": f"姝ｅ湪涓嬭浇 {short_name}...",
+                    "label": f"正在下载 {short_name}...",
                     "progress": ratio,
                     "stage": "downloading"
                 })
@@ -1881,20 +1881,20 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": "model",
-                    "label": f"{short_name} 涓嬭浇瀹屾垚",
+                    "label": f"{short_name} 下载完成",
                     "progress": 1.0,
                     "stage": "complete"
                 })
             else:
-                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "涓嬭浇涓柇锛屽彲閲嶆柊涓嬭浇鑷姩缁紶"}
-                update_download_progress(dl_id, 0.0, status="failed", error_message="涓嬭浇涓柇锛屽彲閲嶆柊涓嬭浇鑷姩缁紶")
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载中断，可重新下载自动续传"}
+                update_download_progress(dl_id, 0.0, status="failed", error_message="下载中断，可重新下载自动续传")
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": "model",
-                    "label": f"{short_name} 涓嬭浇涓柇 (宸蹭繚瀛樿繘搴︼紝鍙噸鏂颁笅杞界画浼?",
+                    "label": f"{short_name} 下载中断 (已保存进度，可重新下载续传)",
                     "progress": 0.0,
                     "stage": "error",
-                    "error": "涓嬭浇涓柇锛屽彲閲嶆柊涓嬭浇鑷姩缁紶"
+                    "error": "下载中断，可重新下载自动续传"
                 })
         except Exception as e:
             _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
@@ -1902,7 +1902,7 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
             _broadcast_to_websockets({
                 "type": "llamacpp_download",
                 "task": "model",
-                "label": f"涓嬭浇澶辫触: {e}",
+                "label": f"下载失败: {e}",
                 "progress": 0.0,
                 "stage": "error",
                 "error": str(e)
@@ -1910,7 +1910,7 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
 
     thread = threading.Thread(target=run_download, daemon=True)
     thread.start()
-    return {"status": "started", "message": f"寮€濮嬩粠 {source_label} 涓嬭浇 {short_name}", "resume_offset": resume_offset}
+    return {"status": "started", "message": f"开始从 {source_label} 下载 {short_name}", "resume_offset": resume_offset}
 
 # ==========================================
 # Download History API
@@ -1945,7 +1945,7 @@ async def resume_download(download_id: int):
     global _llamacpp_download_state
 
     if _llamacpp_download_state["active"]:
-        raise HTTPException(status_code=409, detail="涓嬭浇浠诲姟姝ｅ湪杩涜涓?)
+        raise HTTPException(status_code=409, detail="下载任务正在进行中")
 
     record = get_download_record(download_id)
     if not record:
@@ -1960,7 +1960,7 @@ async def resume_download(download_id: int):
     _llamacpp_download_state = {
         "active": True,
         "type": record["type"],
-        "label": f"缁紶 {short_name}",
+        "label": f"续传 {short_name}",
         "progress": record["progress"] or 0.0,
         "stage": "downloading",
         "error": "",
@@ -1980,19 +1980,19 @@ async def resume_download(download_id: int):
         global _llamacpp_download_state
         dl_id = download_id
         try:
-            log_download_event(dl_id, "resumed", f"缁紶: {short_name}",
+            log_download_event(dl_id, "resumed", f"续传: {short_name}",
                                f"resume_offset={resume_offset}")
             def progress_cb(ratio):
                 if _llamacpp_download_state.get("cancelled"):
                     return
                 _llamacpp_download_state["progress"] = ratio
-                _llamacpp_download_state["label"] = f"缁紶 {short_name}..."
+                _llamacpp_download_state["label"] = f"续传 {short_name}..."
                 _llamacpp_download_state["stage"] = "downloading"
                 update_download_progress(dl_id, ratio)
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": record["type"],
-                    "label": f"缁紶 {short_name}...",
+                    "label": f"续传 {short_name}...",
                     "progress": ratio,
                     "stage": "downloading"
                 })
@@ -2024,20 +2024,20 @@ async def resume_download(download_id: int):
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": record["type"],
-                    "label": f"{short_name} 涓嬭浇瀹屾垚",
+                    "label": f"{short_name} 下载完成",
                     "progress": 1.0,
                     "stage": "complete"
                 })
             else:
-                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "涓嬭浇澶辫触"}
-                update_download_progress(dl_id, 0.0, status="failed", error_message="涓嬭浇澶辫触")
+                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载失败"}
+                update_download_progress(dl_id, 0.0, status="failed", error_message="下载失败")
                 _broadcast_to_websockets({
                     "type": "llamacpp_download",
                     "task": record["type"],
-                    "label": f"{short_name} 涓嬭浇澶辫触",
+                    "label": f"{short_name} 下载失败",
                     "progress": 0.0,
                     "stage": "error",
-                    "error": "涓嬭浇澶辫触"
+                    "error": "下载失败"
                 })
         except Exception as e:
             _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
@@ -2045,7 +2045,7 @@ async def resume_download(download_id: int):
             _broadcast_to_websockets({
                 "type": "llamacpp_download",
                 "task": record["type"],
-                "label": f"缁紶澶辫触: {e}",
+                "label": f"续传失败: {e}",
                 "progress": 0.0,
                 "stage": "error",
                 "error": str(e)
@@ -2075,7 +2075,7 @@ async def delete_download(download_id: int):
 
 
 
-# 鈹€鈹€ Plugin Management Endpoints 鈹€鈹€
+# ── Plugin Management Endpoints ──
 @app.get("/api/plugins")
 async def get_plugins():
     return {"plugins": list_all_plugins(_plugins_dir), "plugins_dir": os.path.abspath(_plugins_dir)}
@@ -2287,7 +2287,7 @@ async def create_session(body: dict = {}):
     if not name:
         cursor.execute("SELECT COUNT(*) FROM sessions")
         count = cursor.fetchone()[0] + 1
-        name = f"浼氳瘽 {count}"
+        name = f"会话 {count}"
     # Build INSERT with optional email fields
     fields = ["name"]
     values = [name]
@@ -2340,7 +2340,7 @@ def _cascade_cleanup_session(session_id: int):
 async def delete_session(session_id: int):
     """Delete a session and all associated data. Default session (id=1) cannot be deleted."""
     if session_id == 1:
-        raise HTTPException(status_code=403, detail="榛樿浼氳瘽涓嶅彲鍒犻櫎锛屽彧鑳藉己鍒舵竻绌烘暟鎹€傝浣跨敤 clear 绔偣銆?)
+        raise HTTPException(status_code=403, detail="默认会话不可删除，只能强制清空数据。请使用 clear 端点。")
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -2817,10 +2817,10 @@ async def interrupt_task(task_id: int):
         _broadcast_to_websockets({
             "type": "llamacpp_download",
             "task": _llamacpp_download_state.get("type", ""),
-            "label": "涓嬭浇宸插彇娑?,
+            "label": "下载已取消",
             "progress": 0.0,
             "stage": "error",
-            "error": "鐢ㄦ埛涓柇"
+            "error": "用户中断"
         })
 
     update_task_status(task_id, "interrupted", interruption_reason="user")
@@ -2927,7 +2927,7 @@ async def update_schedule(task_id: int, req: ScheduleTaskRequest):
     return {"status": "success"}
 
 
-# 鈹€鈹€ Process Management (Background/Server Processes) 鈹€鈹€
+# ── Process Management (Background/Server Processes) ──
 
 @app.get("/api/processes")
 async def list_processes():
@@ -3047,7 +3047,7 @@ async def kill_task_process(task_id: int):
     command = pinfo.get("command", "")[:200]
     cleanup_background_process(str(task_id))
     update_task_status(task_id, "interrupted",
-                       f"杩涚▼ (PID {pid}) 宸茶鐢ㄦ埛鎵嬪姩缁堟銆?,
+                       f"进程 (PID {pid}) 已被用户手动终止。",
                        interruption_reason="user")
 
     # Notify the agent to resume if the task was backgrounded (waiting on this process)
@@ -3062,12 +3062,12 @@ async def kill_task_process(task_id: int):
             ctx = get_task_context(task_id)
             if ctx:
                 ctx.append({"role": "user", "content": (
-                    f"銆愮郴缁熼€氱煡銆戜綘鎵嬪姩缁堟浜嗗悗鍙拌繘绋?(PID {pid})銆俓n"
-                    f"鍛戒护: {command}\n"
-                    f"璇ヨ繘绋嬪凡琚粓姝紝璇锋牴鎹綋鍓嶆儏鍐电户缁换鍔°€?
+                    f"【系统通知】你手动终止了后台进程 (PID {pid})。\n"
+                    f"命令: {command}\n"
+                    f"该进程已被终止，请根据当前情况继续任务。"
                 )})
                 save_task_context(task_id, ctx)
-                print(f"[Process] Task {task_id} process (PID {pid}) killed by user 鈥?resuming agent")
+                print(f"[Process] Task {task_id} process (PID {pid}) killed by user — resuming agent")
                 # Resume via background task directly (not _direct_resume_background_task
                 # which overwrites the status message for download-specific flow)
                 threading.Thread(
@@ -3081,7 +3081,7 @@ async def kill_task_process(task_id: int):
     return {"status": "success", "message": result}
 
 
-# 鈹€鈹€ SearXNG Management 鈹€鈹€
+# ── SearXNG Management ──
 
 class SearXNGControlRequest(BaseModel):
     action: str  # "install", "start", "stop"
@@ -3134,7 +3134,7 @@ async def control_searxng(req: SearXNGControlRequest):
         raise HTTPException(status_code=400, detail="Invalid action")
 
 
-# 鈹€鈹€ Version & Upgrade 鈹€鈹€
+# ── Version & Upgrade ──
 
 @app.get("/api/version")
 async def get_version_info():
@@ -3169,21 +3169,21 @@ async def trigger_upgrade(req: UpgradeRequest = None):
         from core.auto_upgrade import AutoUpgrader
         upgrader = AutoUpgrader()
         if not upgrader.fetch_latest_release():
-            raise HTTPException(status_code=502, detail="鏃犳硶杩炴帴鍒?GitHub锛岃妫€鏌ョ綉缁?)
+            raise HTTPException(status_code=502, detail="无法连接到 GitHub，请检查网络")
         if not upgrader.is_upgrade_available():
-            return {"status": "up_to_date", "message": f"宸叉槸鏈€鏂扮増鏈?v{upgrader.current_version}"}
+            return {"status": "up_to_date", "message": f"已是最新版本 v{upgrader.current_version}"}
         success = upgrader.perform_upgrade()
         if success:
-            return {"status": "upgraded", "message": f"宸插崌绾у埌 v{upgrader.latest_version}锛屾棤闇€閲嶅惎"}
+            return {"status": "upgraded", "message": f"已升级到 v{upgrader.latest_version}，无需重启"}
         else:
-            raise HTTPException(status_code=500, detail="鍗囩骇澶辫触锛岃鏌ョ湅鏃ュ織")
+            raise HTTPException(status_code=500, detail="升级失败，请查看日志")
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"鍗囩骇寮傚父: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"升级异常: {str(e)}")
 
 
-# 鈹€鈹€ Log Viewer 鈹€鈹€
+# ── Log Viewer ──
 
 _AGENT_LOG_FILE = None
 
@@ -3223,7 +3223,7 @@ async def get_logs(lines: int = 200):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 鈹€鈹€ Model Call Logs 鈹€鈹€
+# ── Model Call Logs ──
 
 @app.get("/api/model-logs/status")
 async def get_model_log_status():
@@ -3345,7 +3345,7 @@ async def get_model_log_detail(log_id: int):
         conn.close()
 
 
-# 鈹€鈹€ SPA fallback (must be the LAST route; all API routes defined above) 鈹€鈹€
+# ── SPA fallback (must be the LAST route; all API routes defined above) ──
 
 @app.get("/{full_path:path}")
 async def spa_fallback(full_path: str):
@@ -3542,10 +3542,10 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "SELECT status, label, filename, error_message FROM downloads WHERE id=? AND status='failed'",
                                     (dl_id,)).fetchone()
                                 if already_failed:
-                                    err = already_failed[3] or "鏈煡閿欒"
+                                    err = already_failed[3] or "未知错误"
                                     label = already_failed[1] or already_failed[2] or f"download #{dl_id}"
                                     save_message("system",
-                                        f"鉂?涓嬭浇澶辫触: {label}\n閿欒淇℃伅: {err}",
+                                        f"❌ 下载失败: {label}\n错误信息: {err}",
                                         ws_session_id)
                                     _broadcast_to_websockets({
                                         "type": "download_failed",
@@ -3561,14 +3561,14 @@ async def websocket_endpoint(websocket: WebSocket):
                                         agent_ref = next(iter(_aa_dict.values())) if _aa_dict else None
                                         if agent_ref:
                                             agent_ref.pending_messages.append(
-                                                f"銆愮郴缁熼€氱煡銆戜笅杞藉け璐ヤ簡銆俓n鏂囦欢: {label}\n閿欒: {err}\n"
+                                                f"【系统通知】下载失败了。\n文件: {label}\n错误: {err}\n"
                                                 f"download_id: {dl_id}\n"
-                                                f"璇峰皾璇曞叾浠栨柟寮忛噸鏂颁笅杞斤紙濡傛崲婧愶級锛屽鏋滅‘瀹炴棤娉曚笅杞藉垯缁撴潫浠诲姟銆?
+                                                f"请尝试其他方式重新下载（如换源），如果确实无法下载则结束任务。"
                                             )
                                             print(f"[Task] Injected download failure into agent for session {ws_session_id}")
                                     except Exception as inject_err:
                                         print(f"[Task] Failed to inject failure into agent: {inject_err}")
-                                    print(f"[Task] tool_done: download #{dl_id} already failed 鈥?notified session {ws_session_id}")
+                                    print(f"[Task] tool_done: download #{dl_id} already failed — notified session {ws_session_id}")
                                 # Also check if download already completed before linking
                                 already_done = dl_conn.execute(
                                     "SELECT status, label, filename FROM downloads WHERE id=? AND status='completed'",
@@ -3580,8 +3580,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                         agent_ref = next(iter(_aa_dict.values())) if _aa_dict else None
                                         if agent_ref:
                                             agent_ref.pending_messages.append(
-                                                f"銆愮郴缁熼€氱煡銆戝悗鍙颁笅杞藉凡瀹屾垚銆俓n鏂囦欢: {label}\n"
-                                                f"璇风户缁墽琛屼箣鍓嶇殑浠诲姟銆?
+                                                f"【系统通知】后台下载已完成。\n文件: {label}\n"
+                                                f"请继续执行之前的任务。"
                                             )
                                             print(f"[Task] Injected download completion into agent for session {ws_session_id}")
                                     except Exception as inject_err:
@@ -3643,7 +3643,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     model_filename = current_model.replace("llamacpp/", "")
                     await _safe_send({
                         "type": "status",
-                        "message": f"姝ｅ湪鍚姩 llama-server 骞跺姞杞?{model_filename}..."
+                        "message": f"正在启动 llama-server 并加载 {model_filename}..."
                     })
                     lm.start(model_filename)
                     for i in range(120):
@@ -3651,24 +3651,24 @@ async def websocket_endpoint(websocket: WebSocket):
                         if lm.is_running():
                             await _safe_send({
                                 "type": "status",
-                                "message": "llama-server 灏辩华锛屽紑濮嬪鐞?.."
+                                "message": "llama-server 就绪，开始处理..."
                             })
                             break
                     else:
                         _broadcast_to_websockets({
                             "type": "llamacpp_download",
                             "task": "binary",
-                            "label": "llama-server 鍚姩澶辫触",
+                            "label": "llama-server 启动失败",
                             "progress": 0.0,
                             "stage": "error",
-                            "error": "妯″瀷鏂囦欢鍙兘涓嶅吋瀹规垨鎹熷潖锛岃灏濊瘯涓嬭浇鍏朵粬 GGUF 妯″瀷"
+                            "error": "模型文件可能不兼容或损坏，请尝试下载其他 GGUF 模型"
                         })
                         await _safe_send({
                             "type": "system_message",
-                            "message": "鉂?**llama-server 鍚姩澶辫触**\n\n妯″瀷鏂囦欢鍙兘涓嶅吋瀹规垨鎹熷潖锛岃灏濊瘯涓嬭浇鍏朵粬 GGUF 妯″瀷銆俓n鍙湪銆岃缃?鈫?妯″瀷绠＄悊銆嶄腑鏇存崲妯″瀷銆?
+                            "message": "❌ **llama-server 启动失败**\n\n模型文件可能不兼容或损坏，请尝试下载其他 GGUF 模型。\n可在「设置 → 模型管理」中更换模型。"
                         })
                         save_message("system",
-                            "鉂?llama-server 鍚姩澶辫触锛屾ā鍨嬫枃浠跺彲鑳戒笉鍏煎鎴栨崯鍧忥紝璇峰湪璁剧疆涓洿鎹㈡ā鍨嬨€?,
+                            "❌ llama-server 启动失败，模型文件可能不兼容或损坏，请在设置中更换模型。",
                             ws_session_id)
                         agent_is_running = False
                         return
@@ -3691,7 +3691,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     profiles = json.loads(profiles_raw) if isinstance(profiles_raw, str) else profiles_raw
                     for p in profiles:
                         if isinstance(p, dict) and p.get("name") == agent_profile_name and p.get("prompt"):
-                            agent.system_prompt_base = f"銆愯鑹茶瀹? {p['name']}銆慭n{p['prompt']}\n\n---\n" + agent.system_prompt_base
+                            agent.system_prompt_base = f"【角色设定: {p['name']}】\n{p['prompt']}\n\n---\n" + agent.system_prompt_base
                             if p.get("model"):
                                 agent.llm.default_model = p["model"]
                             break
@@ -3741,10 +3741,10 @@ async def websocket_endpoint(websocket: WebSocket):
                                 _broadcast_to_websockets({
                                     "type": "llamacpp_download",
                                     "task": _llamacpp_download_state.get("type", ""),
-                                    "label": "涓嬭浇宸插彇娑?,
+                                    "label": "下载已取消",
                                     "progress": 0.0,
                                     "stage": "error",
-                                    "error": "鐢ㄦ埛涓柇"
+                                    "error": "用户中断"
                                 })
                         elif user_msg.get("type") == "tool_reply":
                             agent.user_input_queue.put(user_msg.get("answer"))
@@ -3773,7 +3773,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                         _interject_data = {
                                             "step": -1,
                                             "tool": "user_interjection",
-                                            "tool_label": "鐢ㄦ埛鎻掑叆",
+                                            "tool_label": "用户插入",
                                             "args_preview": q[:200],
                                             "success": True,
                                             "output": ""
@@ -3785,7 +3785,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                             "event": "tool_start",
                                             "step": -1,
                                             "tool": "user_interjection",
-                                            "tool_label": "鐢ㄦ埛鎻掑叆",
+                                            "tool_label": "用户插入",
                                             "args_preview": q[:200],
                                             "task_id": ws_task_id,
                                             "session_id": ws_session_id,
@@ -3796,7 +3796,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                             "event": "tool_done",
                                             "step": -1,
                                             "tool": "user_interjection",
-                                            "tool_label": "鐢ㄦ埛鎻掑叆",
+                                            "tool_label": "用户插入",
                                             "result_preview": q[:200],
                                             "success": True,
                                             "task_id": ws_task_id,
@@ -3811,7 +3811,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             connected_websockets.remove(websocket)
                         _active_agents.pop(ws_session_id, None)
                         receive_task = None
-                        # Don't raise 鈥?ws_alive=False will let outer loop break
+                        # Don't raise — ws_alive=False will let outer loop break
                     except Exception:
                         receive_task = None
 
@@ -3848,16 +3848,16 @@ async def websocket_endpoint(websocket: WebSocket):
             is_backgrounded = response and response.startswith("[TASK_BACKGROUNDED]")
 
             if ws_task_id and is_backgrounded:
-                # Agent voluntarily paused 鈥?save context, mark backgrounded
+                # Agent voluntarily paused — save context, mark backgrounded
                 save_task_context(ws_task_id, agent.messages[1:])
                 update_task_status(ws_task_id, "backgrounded",
-                    response[len("[TASK_BACKGROUNDED] "):].strip() or "浠诲姟杩涘叆鍚庡彴",
+                    response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台",
                     interruption_reason="backgrounded")
                 # Send notification to frontend
                 await _safe_send({
                     "type": "task_backgrounded",
                     "task_id": ws_task_id,
-                    "message": "浠诲姟宸茶繘鍏ュ悗鍙帮紝瀹屾垚鍚庤嚜鍔ㄦ仮澶?,
+                    "message": "任务已进入后台，完成后自动恢复",
                     "session_id": ws_session_id
                 })
                 agent_is_running = False
@@ -3994,10 +3994,10 @@ async def websocket_endpoint(websocket: WebSocket):
                             if ctx:
                                 session_history = ctx
                             original_goal = (task_row["user_query"] if task_row else "")
-                            query = "銆愮郴缁熸彁绀恒€戜换鍔″凡鎭㈠锛岃鏍规嵁鍘嗗彶涓婁笅鏂囷紝浠庝笂娆′腑鏂殑鍦版柟缁х画鎵ц浠诲姟銆?
+                            query = "【系统提示】任务已恢复，请根据历史上下文，从上次中断的地方继续执行任务。"
                         except Exception as e:
                             print(f"[WS] Resume error: {e}")
-                            query = "缁х画鎵ц鏈畬鎴愮殑浠诲姟銆?
+                            query = "继续执行未完成的任务。"
                         retry_model = None
                         agent_profile_name = None
                         ws_images = None
@@ -4029,7 +4029,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             _ct_todos = _ct_load()
                             for _ct_item in _ct_todos.get("items", []):
                                 if _ct_item["id"] == _resolved_todo:
-                                    query += f"\n\n[鍏宠仈寰呭姙 #{_resolved_todo}] {_ct_item['desc']}"
+                                    query += f"\n\n[关联待办 #{_resolved_todo}] {_ct_item['desc']}"
                                     break
                         except Exception:
                             pass
@@ -4080,21 +4080,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 if isinstance(_ws_err, WebSocketDisconnect) or "disconnect" in str(_ws_err).lower():
                     print("[WS] Client disconnected")
                     break
-                # Not a disconnect 鈥?re-raise
+                # Not a disconnect — re-raise
                 raise
             except Exception as e:
                 import traceback
                 traceback.print_exc()
                 err_str = str(e).lower()
-                # Log error to stderr only 鈥?don't pollute the chat session
+                # Log error to stderr only — don't pollute the chat session
                 log_agent_error(str(e))
                 print(f"[Agent Error] {e}")
                 # Only show API key hint in chat (actionable by user); hide internal errors
                 if "api_key" in err_str or "authentication" in err_str or "not found" in err_str or "key" in err_str:
                     hint = (
-                        "---\n**馃挕 鎻愮ず锛氭偍浼间箮灏氭湭閰嶇疆姝ゆā鍨嬬殑 API Key锛?*\n\n"
-                        "浠?Kimi 涓轰緥锛岃鍓嶅線 [Moonshot 寮€鏀惧钩鍙癩(https://platform.moonshot.cn/console/api-keys) "
-                        "鍏嶈垂鐢宠涓€涓?API Key锛岀劧鍚庡湪宸︿晶杈规爮鐨勩€岃缃?- 妯″瀷閰嶇疆銆嶄腑濉叆骞朵繚瀛樺嵆鍙紑濮嬪璇濓紒"
+                        "---\n**💡 提示：您似乎尚未配置此模型的 API Key！**\n\n"
+                        "以 Kimi 为例，请前往 [Moonshot 开放平台](https://platform.moonshot.cn/console/api-keys) "
+                        "免费申请一个 API Key，然后在左侧边栏的「设置 - 模型配置」中填入并保存即可开始对话！"
                     )
                     save_message("system", hint, ws_session_id)
                     await _safe_send({
@@ -4156,7 +4156,7 @@ def start_email_listener():
                         for e in emails:
                             print(f"[Email Listener] Session {sess_id}: new command from {owner}: {e['subject']}")
                             save_message("system",
-                                f"馃摟 宸叉敹鍒版潵鑷富浜?({owner}) 鐨勬柊閭欢鎸囦护:\n涓婚: {e['subject']}",
+                                f"📧 已收到来自主人 ({owner}) 的新邮件指令:\n主题: {e['subject']}",
                                 session_id=sess_id)
 
                             agent = OpenAGCAgent(
@@ -4180,11 +4180,11 @@ def start_email_listener():
                             )
                             if success:
                                 save_message("system",
-                                    f"馃摟 宸插皢鎵ц缁撴灉鍥炰紶鑷充富浜洪偖绠? {owner}",
+                                    f"📧 已将执行结果回传至主人邮箱: {owner}",
                                     session_id=sess_id)
                             else:
                                 save_message("system",
-                                    f"鈿狅笍 閭欢鍥炲鍙戦€佸け璐ワ紝璇锋鏌?SMTP 閰嶇疆銆?,
+                                    f"⚠️ 邮件回复发送失败，请检查 SMTP 配置。",
                                     session_id=sess_id)
                     except Exception as e:
                         print(f"[Email Listener] Session {sess_id} error: {e}")
@@ -4318,7 +4318,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         except Exception:
             pass
 
-    # Detect heartbeat tasks 鈥?suppress all progress broadcasts and chat messages
+    # Detect heartbeat tasks — suppress all progress broadcasts and chat messages
     _is_heartbeat = False
     try:
         _hb_conn = sqlite3.connect(DB_PATH)
@@ -4378,9 +4378,9 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
 
     query = user_query
     if is_resume and not _is_heartbeat:
-        query = (f"銆愮郴缁熸寚浠?- 鑷姩鎭㈠銆戜綘涔嬪墠鍥犱负鎵ц姝ラ杩囧琚郴缁熻嚜鍔ㄤ腑鏂簡銆?
-                 f"璇锋牴鎹箣鍓嶇殑涓婁笅鏂囩户缁畬鎴愭湭瀹屾垚鐨勪换鍔°€?
-                 f"鍘熷浠诲姟: {user_query}")
+        query = (f"【系统指令 - 自动恢复】你之前因为执行步骤过多被系统自动中断了。"
+                 f"请根据之前的上下文继续完成未完成的任务。"
+                 f"原始任务: {user_query}")
 
         # Broadcast reconstructed history steps so they appear in the session
         _broadcast_task_history(task_id, bg_session_id, "running")
@@ -4406,17 +4406,17 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
             try:
                 _sc = _get_task_step_count(task_id)
                 if _sc:
-                    step_count_str = f"锛屽叡 {_sc} 涓巻鍙叉楠?
+                    step_count_str = f"，共 {_sc} 个历史步骤"
             except Exception:
                 pass
 
         resume_msg = (
-            f"馃攧 **浠诲姟鑷姩鎭㈠**\n\n"
-            f"浠诲姟 **#{task_id}** 宸茶嚜鍔ㄦ仮澶嶆墽琛寋step_count_str}锛屾鍦ㄧ户缁箣鍓嶆湭瀹屾垚鐨勫伐浣溿€俓n\n"
-            f"[馃搵 鏌ョ湅浠诲姟璇︽儏](task://{task_id}) 路 [馃敆 浠诲姟涓績](switch:view/tasks)"
+            f"🔄 **任务自动恢复**\n\n"
+            f"任务 **#{task_id}** 已自动恢复执行{step_count_str}，正在继续之前未完成的工作。\n\n"
+            f"[📋 查看任务详情](task://{task_id}) · [🔗 任务中心](switch:view/tasks)"
         ) if is_resume else (
-            f"鈴?**瀹氭椂浠诲姟鎵ц**\n\n"
-            f"浠诲姟 **#{task_id}**: {user_query[:80]}"
+            f"⏰ **定时任务执行**\n\n"
+            f"任务 **#{task_id}**: {user_query[:80]}"
         )
         _broadcast_to_websockets({
             "type": "message",
@@ -4445,15 +4445,15 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
 
         summary = response[:200] if response else ""
         if is_backgrounded:
-            # Agent auto-backgrounded (shell timeout) 鈥?save context for resume
+            # Agent auto-backgrounded (shell timeout) — save context for resume
             save_task_context(task_id, agent.messages[msg_count_before:])
             update_task_status(task_id, "backgrounded",
-                response[len("[TASK_BACKGROUNDED] "):].strip() or "浠诲姟杩涘叆鍚庡彴",
+                response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台",
                 interruption_reason="backgrounded")
             _broadcast_to_websockets({
                 "type": "task_backgrounded",
                 "task_id": task_id,
-                "message": "鍚庡彴鍛戒护鎵ц涓紝瀹屾垚鍚庤嚜鍔ㄦ仮澶?,
+                "message": "后台命令执行中，完成后自动恢复",
                 "session_id": bg_session_id,
             })
             return response
@@ -4481,7 +4481,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                 "role": "agent",
                 "background": True,
                 "session_id": bg_session_id,
-                "content": f"**{'馃攧 鑷姩鎭㈠' if is_resume else '鈴?瀹氭椂'}浠诲姟瀹屾垚**: {user_query[:40]}...\n\n{response[:500]}"
+                "content": f"**{'🔄 自动恢复' if is_resume else '⏰ 定时'}任务完成**: {user_query[:40]}...\n\n{response[:500]}"
             })
 
         return response
@@ -4490,7 +4490,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         _broadcast_to_websockets({
             "type": "error",
             "session_id": bg_session_id,
-            "content": f"鍚庡彴浠诲姟澶辫触: {str(e)[:100]}"
+            "content": f"后台任务失败: {str(e)[:100]}"
         })
         return None
     finally:
@@ -4550,7 +4550,7 @@ def start_task_scheduler():
 
 
 
-# 鈹€鈹€ Backoff resume helpers 鈹€鈹€
+# ── Backoff resume helpers ──
 
 _BACKOFF_SCHEDULE = [30, 30, 120, 120, 300, 300]
 _MAX_RESUME_WITH_PROGRESS = 50
@@ -4597,7 +4597,7 @@ def _is_backoff_elapsed(updated_at_str: str, resume_count: int) -> bool:
 _SERVER_START_TIME = datetime.now(timezone.utc)  # Used by BgMonitor to detect restart-induced process loss
 
 def start_background_monitor():
-    """Monitor backgrounded tasks 鈥?check download/process completion and auto-resume."""
+    """Monitor backgrounded tasks — check download/process completion and auto-resume."""
     def monitor_loop():
         import time as _t
         import os as _os
@@ -4620,19 +4620,19 @@ def start_background_monitor():
                         "AND background_resumed=0 ORDER BY id DESC LIMIT 1",
                         (tid,)).fetchone()
                     if dl:
-                        print(f"[BgMonitor] Task {tid}: download {dl['id']} done 鈥?resuming")
+                        print(f"[BgMonitor] Task {tid}: download {dl['id']} done — resuming")
                         conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?",
                                      (dl["id"],))
                         conn.commit()
                         ctx = get_task_context(tid)
                         if ctx:
                             ctx.append({"role": "user", "content": (
-                                "銆愮郴缁熼€氱煡銆戝悗鍙颁笅杞戒换鍔″凡瀹屾垚锛屾枃浠跺凡灏辩华銆?
-                                "璇风户缁墽琛屼箣鍓嶆湭瀹屾垚鐨勪换鍔★紝涓嶈閲嶅涓嬭浇宸叉湁鏂囦欢銆?
+                                "【系统通知】后台下载任务已完成，文件已就绪。"
+                                "请继续执行之前未完成的任务，不要重复下载已有文件。"
                             )})
                             increment_task_resume(tid)
                             update_task_status(tid, "interrupted",
-                                "鍚庡彴浠诲姟宸插畬鎴?, interruption_reason="background_complete")
+                                "后台任务已完成", interruption_reason="background_complete")
                             save_task_context(tid, ctx)
                         continue
                     dl_fail = conn.execute(
@@ -4644,17 +4644,17 @@ def start_background_monitor():
                         conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?",
                                      (dl_fail["id"],))
                         conn.commit()
-                        err = dl_fail["error_message"] or "鏈煡閿欒"
+                        err = dl_fail["error_message"] or "未知错误"
                         update_task_status(tid, "background_failed",
-                            f"涓嬭浇澶辫触: {err}", interruption_reason="download_failed")
+                            f"下载失败: {err}", interruption_reason="download_failed")
                         ctx = get_task_context(tid)
                         if ctx:
                             ctx.append({"role": "user", "content": (
-                                f"銆愮郴缁熼€氱煡銆戝悗鍙颁笅杞戒换鍔″け璐ヤ簡銆傞敊璇俊鎭? {err}\n"
-                                "璇锋鏌ヤ笅杞界鐞嗗櫒涓殑璇︾粏閿欒锛屽皾璇曚慨澶嶅悗閲嶆柊涓嬭浇銆?
+                                f"【系统通知】后台下载任务失败了。错误信息: {err}\n"
+                                "请检查下载管理器中的详细错误，尝试修复后重新下载。"
                             )})
                             save_task_context(tid, ctx)
-                        print(f"[BgMonitor] Task {tid}: download failed 鈥?notifying agent")
+                        print(f"[BgMonitor] Task {tid}: download failed — notifying agent")
                         continue
 
                     # 2. Check shell background processes
@@ -4695,22 +4695,22 @@ def start_background_monitor():
                                     # Only fail if task was backgrounded BEFORE this server started
                                     # (process info was lost during restart)
                                     if updated_dt < _SERVER_START_TIME:
-                                        # Give 2h grace period 鈥?the shell process might still be running
+                                        # Give 2h grace period — the shell process might still be running
                                         if age > timedelta(hours=2):
-                                            print(f"[BgMonitor] Task {tid}: bg'd before server restart, no process info for {age.total_seconds()/60:.0f}min 鈥?marking failed")
+                                            print(f"[BgMonitor] Task {tid}: bg'd before server restart, no process info for {age.total_seconds()/60:.0f}min — marking failed")
                                             update_task_status(tid, "background_failed",
-                                                "鍚庡彴杩涚▼淇℃伅鍥犳湇鍔￠噸鍚涪澶憋紝鏃犳硶鎭㈠",
+                                                "后台进程信息因服务重启丢失，无法恢复",
                                                 interruption_reason="process_lost")
                                             ctx = get_task_context(tid)
                                             if ctx:
                                                 ctx.append({"role": "user", "content": (
-                                                    "銆愮郴缁熼€氱煡銆戝悗鍙板懡浠ょ殑杩涚▼淇℃伅宸蹭涪澶憋紙鍙兘鍥犳湇鍔￠噸鍚級銆?
-                                                    "璇烽噸鏂板紑濮嬩换鍔★紝鎴栨鏌ユ槸鍚︽湁娈嬬暀杩涚▼闇€瑕佹墜鍔ㄥ鐞嗐€?
+                                                    "【系统通知】后台命令的进程信息已丢失（可能因服务重启）。"
+                                                    "请重新开始任务，或检查是否有残留进程需要手动处理。"
                                                 )})
                                                 save_task_context(tid, ctx)
                                             continue
                                     else:
-                                        # Task bg'd after startup 鈥?process info should exist, don't fail.
+                                        # Task bg'd after startup — process info should exist, don't fail.
                                         # Log periodically to aid debugging.
                                         mins = age.total_seconds() / 60
                                         if mins > 60 and int(mins) % 10 == 0:
@@ -4728,49 +4728,49 @@ def start_background_monitor():
                             should_resume = False
                             try:
                                 os.kill(pid, 0)  # No signal, just check existence
-                                # Process still running 鈥?check if output file stopped growing
+                                # Process still running — check if output file stopped growing
                                 if out_file and _os.path.exists(out_file):
                                     cur_size = _os.path.getsize(out_file)
                                     prev = _output_staleness.get(str(tid), {})
                                     prev_size = prev.get("size", -1)
                                     if cur_size == prev_size and cur_size > 0:
-                                        # File not growing 鈥?increment staleness counter
+                                        # File not growing — increment staleness counter
                                         new_count = prev.get("count", 0) + 1
                                         _output_staleness[str(tid)] = {"size": cur_size, "count": new_count}
                                         if is_long_running:
-                                            # Long-running server: 15-min output freeze 鈫?detach
+                                            # Long-running server: 15-min output freeze → detach
                                             if new_count >= 90:  # 90 * 10s = 15min
-                                                print(f"[BgMonitor] Task {tid}: long-running ({uptime/60:.0f}min), output frozen 15min 鈥?detaching")
+                                                print(f"[BgMonitor] Task {tid}: long-running ({uptime/60:.0f}min), output frozen 15min — detaching")
                                                 cleanup_background_process(str(tid))
                                                 _output_staleness.pop(str(tid), None)
                                                 update_task_status(tid, "detached",
-                                                    f"鍚庡彴杩涚▼鎸佺画杩愯 {uptime/60:.0f} 鍒嗛挓锛屽凡琚瘑鍒负甯搁┗鏈嶅姟锛岀郴缁熷凡瑙ｉ櫎鐩戞帶銆?)
+                                                    f"后台进程持续运行 {uptime/60:.0f} 分钟，已被识别为常驻服务，系统已解除监控。")
                                                 ctx = get_task_context(tid)
                                                 if ctx:
                                                     ctx.append({"role": "user", "content": (
-                                                        f"銆愮郴缁熼€氱煡銆戝悗鍙拌繘绋嬶紙PID {pid}锛夊凡鎸佺画杩愯 {uptime/60:.0f} 鍒嗛挓锛?
-                                                        f"琚瘑鍒负甯搁┗鏈嶅姟杩涚▼銆傜郴缁熷凡瑙ｉ櫎鐩戞帶锛岃繘绋嬩粛鍦ㄥ悗鍙拌繍琛屻€?
-                                                        f"濡傞渶鎵嬪姩鍋滄锛岃鍦ㄤ换鍔＄鐞嗕腑缁堟璇ヨ繘绋嬨€?
+                                                        f"【系统通知】后台进程（PID {pid}）已持续运行 {uptime/60:.0f} 分钟，"
+                                                        f"被识别为常驻服务进程。系统已解除监控，进程仍在后台运行。"
+                                                        f"如需手动停止，请在任务管理中终止该进程。"
                                                     )})
                                                     save_task_context(tid, ctx)
                                                 continue
                                         else:
-                                            # Normal process: 30s output freeze 鈫?resume
+                                            # Normal process: 30s output freeze → resume
                                             if new_count >= 3:
                                                 should_resume = True
-                                                print(f"[BgMonitor] Task {tid}: output stale 30s 鈥?treating as done")
+                                                print(f"[BgMonitor] Task {tid}: output stale 30s — treating as done")
                                     else:
-                                        # File still growing 鈥?reset staleness
+                                        # File still growing — reset staleness
                                         _output_staleness[str(tid)] = {"size": cur_size, "count": 0}
                             except OSError:
-                                # Process has terminated 鈥?resume task
+                                # Process has terminated — resume task
                                 should_resume = True
                                 cleanup_background_process(str(tid))
 
                             if not should_resume:
                                 continue  # Process still active, skip this check
 
-                            # 鈹€鈹€ Common resume path (process dead OR output stalled) 鈹€鈹€
+                            # ── Common resume path (process dead OR output stalled) ──
                             _output_staleness.pop(str(tid), None)
                             cleanup_background_process(str(tid))
                             full_out = ""
@@ -4787,10 +4787,10 @@ def start_background_monitor():
                             ctx = get_task_context(tid)
                             if ctx:
                                 ctx.append({"role": "user", "content": (
-                                    f"銆愮郴缁熼€氱煡銆戝悗鍙板懡浠ゅ凡鎵ц瀹屾瘯銆俓n"
-                                    f"鍛戒护: `{command[:100]}`\n"
-                                    f"杈撳嚭:\n```\n{full_out[:2000]}\n```\n"
-                                    f"璇锋牴鎹緭鍑虹粨鏋滅户缁墽琛屼箣鍓嶆湭瀹屾垚鐨勪换鍔°€?
+                                    f"【系统通知】后台命令已执行完毕。\n"
+                                    f"命令: `{command[:100]}`\n"
+                                    f"输出:\n```\n{full_out[:2000]}\n```\n"
+                                    f"请根据输出结果继续执行之前未完成的任务。"
                                 )})
                                 save_task_context(tid, ctx)
                             increment_task_resume(tid)
@@ -4798,11 +4798,11 @@ def start_background_monitor():
                                 "SELECT user_query FROM tasks WHERE id=?", (tid,)
                             ).fetchone()
                             user_query = task_row["user_query"] if task_row else ""
-                            print(f"[BgMonitor] Task {tid}: shell process done 鈥?resuming")
+                            print(f"[BgMonitor] Task {tid}: shell process done — resuming")
                             threading.Thread(
                                 target=lambda _tid=tid, _uq=user_query, _ctx=ctx: (
                                     update_task_status(_tid, "interrupted",
-                                        "鍚庡彴鍛戒护瀹屾垚", interruption_reason="background_complete"),
+                                        "后台命令完成", interruption_reason="background_complete"),
                                     _run_background_task(_tid, _uq, _ctx, True)
                                 ),
                                 daemon=True
@@ -4821,16 +4821,16 @@ def _heartbeat_plan_context(plan: dict) -> str:
     total = len(plan.get("steps", []))
     done = sum(1 for s in plan["steps"] if s["status"] == "done")
     doing = [s for s in plan["steps"] if s["status"] == "doing"]
-    lines = [f"鐩爣: {plan.get('goal', '')}", f"姝ラ杩涘害: {done}/{total}"]
+    lines = [f"目标: {plan.get('goal', '')}", f"步骤进度: {done}/{total}"]
     for s in doing:
-        lines.append(f"褰撳墠鎵ц涓? {s.get('desc', '')}")
+        lines.append(f"当前执行中: {s.get('desc', '')}")
         if s.get("result"):
-            lines.append(f"  宸叉湁缁撴灉: {s['result'][:200]}")
+            lines.append(f"  已有结果: {s['result'][:200]}")
     return "\n".join(lines)
 
 
 def start_guardian_loop():
-    """Background guardian (闀块┗鐪嬪畧) 鈥?Phase 1: lightweight LLC check / Phase 2: full agent resume."""
+    """Background guardian (长驻看守) — Phase 1: lightweight LLC check / Phase 2: full agent resume."""
     def _guardian_loop():
         while True:
             try:
@@ -4843,10 +4843,10 @@ def start_guardian_loop():
 
                 bg_session_id = 1
 
-                # 鈹€鈹€ Phase 1: Lightweight heartbeat 鈹€鈹€
+                # ── Phase 1: Lightweight heartbeat ──
                 # Build minimal context: identity + time + todos + plan summaries
-                hb_context = "浣犳槸 Open-AGC 鐨勫贰妫€鍔╂墜銆?
-                hb_context += f"\n褰撳墠鏃堕棿锛歿_time.strftime('%Y-%m-%d %H:%M')}\n"
+                hb_context = "你是 Open-AGC 的巡检助手。"
+                hb_context += f"\n当前时间：{_time.strftime('%Y-%m-%d %H:%M')}\n"
 
                 # Load todos
                 try:
@@ -4869,14 +4869,14 @@ def start_guardian_loop():
                                 pid = fn.replace("plan_", "").replace(".json", "")
                                 _p = _hb_load_plan(plan_id=pid)
                                 if _p:
-                                    hb_context += f"\n## 鍏宠仈浠诲姟璁″垝\n{_heartbeat_plan_context(_p)}\n"
+                                    hb_context += f"\n## 关联任务计划\n{_heartbeat_plan_context(_p)}\n"
                 except Exception:
                     pass
 
                 hb_context += (
-                    "\n璇峰垽鏂細濡傛灉涓€鍒囨甯告棤闇€鎿嶄綔锛屼粎鍥炲 HEARTBEAT_OK銆俓n"
-                    "濡傛灉寰呭姙椤归渶瑕佹仮澶嶆墽琛岋紝鍥炲 RESUME:{id}銆俓n"
-                    "濡傛灉鏌愰」鍙嶅澶辫触闇€瑕佹爣璁板彈闃伙紝鍥炲 STUCK:{id}銆俓n"
+                    "\n请判断：如果一切正常无需操作，仅回复 HEARTBEAT_OK。\n"
+                    "如果待办项需要恢复执行，回复 RESUME:{id}。\n"
+                    "如果某项反复失败需要标记受阻，回复 STUCK:{id}。\n"
                 )
 
                 # Call LLM directly (no tools, no chat history, no full system prompt)
@@ -4887,13 +4887,13 @@ def start_guardian_loop():
                 )
                 _hb_reply = _hb_response.choices[0].message.content or ""
 
-                # 鈹€鈹€ Parse heartbeat response 鈹€鈹€
+                # ── Parse heartbeat response ──
                 if "HEARTBEAT_OK" in _hb_reply:
                     # All good, nothing to do
                     pass
 
                 elif _hb_reply.strip().startswith("RESUME:"):
-                    # 鈹€鈹€ Layer 0: Lock 鈹€鈹€
+                    # ── Layer 0: Lock ──
                     if not _guardian_resume_lock.acquire(blocking=False):
                         print("[Guardian] Phase 2: lock held, skipping")
                         _time.sleep(max(interval, 10))
@@ -4902,7 +4902,7 @@ def start_guardian_loop():
                     try:
                         resume_id = int(_hb_reply.strip().split(":")[1].split()[0])
 
-                        # 鈹€鈹€ Layer 1: Re-read todos, confirm stale 鈹€鈹€
+                        # ── Layer 1: Re-read todos, confirm stale ──
                         from tools.task_plan import load_todos as _hb_reload_todos
                         _hb_current_todos = _hb_reload_todos()
                         _hb_target = None
@@ -4930,7 +4930,7 @@ def start_guardian_loop():
                                 _time.sleep(max(interval, 10))
                                 continue  # doing but no timestamp, skip
 
-                        # 鈹€鈹€ Layer 2: Check active agents 鈹€鈹€
+                        # ── Layer 2: Check active agents ──
                         if _active_agents.get(bg_session_id):
                             print(f"[Guardian] Phase 2: active agent in session {bg_session_id}, skipping")
                             _time.sleep(max(interval, 10))
@@ -4957,7 +4957,7 @@ def start_guardian_loop():
                                 _time.sleep(max(interval, 10))
                                 continue
 
-                        # 鈹€鈹€ Phase 2: Execute 鈹€鈹€
+                        # ── Phase 2: Execute ──
                         # Check resume_count threshold
                         _hb_rc = _hb_target.get("resume_count", 0)
                         if _hb_rc >= 6:
@@ -4993,7 +4993,7 @@ def start_guardian_loop():
                             _hb_cur = _hb_tc.execute(
                                 "INSERT INTO tasks (title, user_query, status, task_type) "
                                 "VALUES (?, ?, 'running', 'todo_resume')",
-                                (f"馃攧 鎭㈠: {_hb_target['desc'][:50]}", _hb_target['desc'])
+                                (f"🔄 恢复: {_hb_target['desc'][:50]}", _hb_target['desc'])
                             )
                             _hb_tc.commit()
                             _hb_task_id = _hb_cur.lastrowid
@@ -5031,7 +5031,7 @@ def start_guardian_loop():
 
                         # Inject plan + todo into system prompt
                         try:
-                            _hb_extra = "\n\n## 鍏宠仈浠诲姟璁″垝\n"
+                            _hb_extra = "\n\n## 关联任务计划\n"
                             for pid in _hb_plan_ids:
                                 _p = _hb_load_plan(plan_id=pid)
                                 if _p:
@@ -5042,14 +5042,14 @@ def start_guardian_loop():
                         except Exception:
                             pass
 
-                        _hb_query = f"璇风户缁墽琛屽緟鍔炰簨椤?#{resume_id}锛歿_hb_target['desc']}"
+                        _hb_query = f"请继续执行待办事项 #{resume_id}：{_hb_target['desc']}"
                         # Load full plan detail
                         try:
                             for pid in _hb_plan_ids:
                                 _p = _hb_load_plan(plan_id=pid)
                                 if _p:
                                     from tools.task_plan import format_plan_for_prompt as _hb_fmt_plan
-                                    _hb_query += f"\n\n## 鍏宠仈浠诲姟璁″垝璇︽儏\n{_hb_fmt_plan(_p)}"
+                                    _hb_query += f"\n\n## 关联任务计划详情\n{_hb_fmt_plan(_p)}"
                         except Exception:
                             pass
 
@@ -5065,7 +5065,7 @@ def start_guardian_loop():
                         finally:
                             _background_agents.pop(_hb_task_id, None)
 
-                        # Increment resume_count (not todo status 鈥?Agent manages that)
+                        # Increment resume_count (not todo status — Agent manages that)
                         if _hb_target:
                             _hb_target["resume_count"] = _hb_target.get("resume_count", 0) + 1
                             _hb_target["updated"] = _time.strftime("%Y-%m-%d %H:%M")
@@ -5105,4 +5105,3 @@ start_background_monitor()
 start_email_listener()
 start_task_scheduler()
 start_guardian_loop()
-
