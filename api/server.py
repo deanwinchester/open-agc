@@ -4986,7 +4986,7 @@ def start_guardian_loop():
 
                 conn = sqlite3.connect(DB_PATH)
                 row = conn.execute(
-                    "SELECT id FROM tasks WHERE status='interrupted' AND resume_count < max_resume_count ORDER BY updated_at DESC LIMIT 1"
+                    "SELECT id FROM tasks WHERE status='interrupted' AND resume_count < max_resume_count AND (interruption_reason IS NULL OR interruption_reason != 'user') ORDER BY updated_at DESC LIMIT 1"
                 ).fetchone()
                 conn.close()
 
