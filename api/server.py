@@ -1574,7 +1574,7 @@ async def get_provider_models(provider: str):
             'anthropic': ['claude-3-5-sonnet-20240620', 'claude-3-opus-20240229', 'claude-3-haiku-20240307'],
             'deepseek': ['deepseek/deepseek-chat', 'deepseek/deepseek-reasoner'],
             'gemini': ['gemini/gemini-1.5-pro', 'gemini/gemini-2.5-pro-preview-05-06'],
-            'kimi': ['moonshot/kimi-k2.5', 'moonshot/kimi-latest', 'moonshot/moonshot-v1-8k', 'moonshot/moonshot-v1-32k', 'moonshot/moonshot-v1-128k'],
+            'kimi': ['moonshot/kimi-k2.6', 'moonshot/kimi-k2.5', 'moonshot/kimi-latest', 'moonshot/moonshot-v1-8k', 'moonshot/moonshot-v1-32k', 'moonshot/moonshot-v1-128k'],
             'glm': ['zai/glm-4.7', 'zai/glm-4.5', 'zai/glm-4.5-flash', 'zai/glm-4.5-air'],
             'minimax': ['minimax/MiniMax-M2.1'],
             'llamacpp': ['llamacpp/local-model (需先下载 GGUF 模型)'],
