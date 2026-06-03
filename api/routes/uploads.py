@@ -67,14 +67,26 @@ async def upload_file(file: UploadFile = File(...)):
                 total += len(chunk)
                 if total > limit:
                     f.close()
-                    os.remove(target)
+                    try:
+                        os.remove(target)
+                    except PermissionError:
+                        pass
                     raise HTTPException(status_code=413, detail=f"File exceeds {MAX_UPLOAD_MB} MB limit")
                 f.write(chunk)
     except HTTPException:
         raise
     except Exception as e:
         if os.path.exists(target):
-            os.remove(target)
+            try:
+                os.remove(target)
+            except PermissionError:
+                # File may be locked by another process (e.g. virus scanner), schedule for later cleanup
+                import time as _t
+                _t.sleep(0.5)  # brief wait, then retry once
+                try:
+                    os.remove(target)
+                except PermissionError:
+                    print(f"[Upload] Could not delete partial file: {target}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
     return {
