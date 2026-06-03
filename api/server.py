@@ -630,7 +630,7 @@ def reconcile_backgrounded_after_restart():
                         "请检查之前的工作状态，如有需要请重新执行。"
                     )})
                     save_task_context(tid, ctx)
-                update_task_status(tid, "background_failed",
+                update_task_status(tid, "interrupted",
                     "服务器重启，后台进程信息丢失", interruption_reason="process_lost")
                 print(f"[Startup] Task {tid}: marked background_failed (process info lost on restart)")
 
