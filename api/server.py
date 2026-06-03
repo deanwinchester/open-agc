@@ -622,23 +622,26 @@ def reconcile_backgrounded_after_restart():
         if lost_tasks:
             print(f"[Startup] Found {len(lost_tasks)} backgrounded task(s) with lost process info (server restart)")
             for t in lost_tasks:
-                tid = t["id"]
-                ctx = get_task_context(tid)
-                if ctx:
-                    ctx.append({"role": "user", "content": (
-                        "【系统通知】服务器重启，后台命令的进程信息已丢失。"
-                        "请检查之前的工作状态，如有需要请重新执行。"
-                    )})
-                    save_task_context(tid, ctx)
-                update_task_status(tid, "interrupted",
-                    "服务器重启，后台进程信息丢失", interruption_reason="process_lost")
-                print(f"[Startup] Task {tid}: marked background_failed (process info lost on restart)")
+                try:
+                    tid = t["id"]
+                    ctx = get_task_context(tid)
+                    if ctx:
+                        ctx.append({"role": "user", "content": (
+                            "【系统通知】服务器重启，后台命令的进程信息已丢失。"
+                            "请检查之前的工作状态，如有需要请重新执行。"
+                        )})
+                        save_task_context(tid, ctx)
+                    update_task_status(tid, "interrupted",
+                        "服务器重启，后台进程信息丢失", interruption_reason="process_lost")
+                    print(f"[Startup] Task {tid}: marked interrupted (process info lost on restart)")
+                except Exception as e:
+                    print(f"[Startup] Task {tid}: recovery error: {e}")
 
         conn.close()
     except Exception as e:
         print(f"[Startup] Background recovery error: {e}")
 
-reconcile_backgrounded_after_restart()
+# Note: reconcile_backgrounded_after_restart() is called later after all helper functions are defined
 
 # Initialize StatsManager singleton with correct database
 from core.stats_manager import get_stats_manager
@@ -951,6 +954,9 @@ def increment_task_resume(task_id: int):
     cursor.execute("UPDATE tasks SET resume_count = resume_count + 1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
     conn.commit()
     conn.close()
+
+# Run backgrounded task reconciliation now that all helper functions are loaded
+reconcile_backgrounded_after_restart()
 
 def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: str = None,
                   args_preview: str = None, result_preview: str = None, full_result: str = None,
@@ -4982,6 +4988,10 @@ def start_guardian_loop():
                     continue
 
                 conn = sqlite3.connect(DB_PATH)
+                if conn.execute("SELECT 1 FROM tasks WHERE status='running' LIMIT 1").fetchone():
+                    conn.close()
+                    _time.sleep(max(interval, 10))
+                    continue
                 row = conn.execute(
                     "SELECT id FROM tasks WHERE status='interrupted' AND resume_count < max_resume_count AND (interruption_reason IS NULL OR interruption_reason != 'user') ORDER BY updated_at DESC LIMIT 1"
                 ).fetchone()
