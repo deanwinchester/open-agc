@@ -2902,11 +2902,16 @@ async def interrupt_task(task_id: int):
 @app.delete("/api/tasks/{task_id}")
 async def delete_task(task_id: int):
     """Delete a task and its steps, cleaning up runtime state."""
-    # Interrupt running agent/process if active
+    # Interrupt running agent (both background and active WebSocket sessions) and processes
     bg_agent = _background_agents.pop(str(task_id), None)
     if bg_agent:
         try: bg_agent.set_interrupt_flag()
         except Exception: pass
+    for _sid, _agents in list(_active_agents.items()):
+        _agent = _agents.pop(str(task_id), None)
+        if _agent:
+            try: _agent.set_interrupt_flag()
+            except Exception: pass
     from tools.shell import cleanup_background_process as _cleanup
     _cleanup(str(task_id))
     conn = sqlite3.connect(DB_PATH)
