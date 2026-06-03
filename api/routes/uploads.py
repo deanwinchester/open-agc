@@ -3,6 +3,7 @@ File upload management — upload/download/delete user files within sandbox.
 """
 import os
 import json
+import hashlib
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
@@ -56,16 +57,18 @@ async def upload_file(file: UploadFile = File(...)):
     if os.path.commonpath([uploads, os.path.abspath(target)]) != uploads:
         raise HTTPException(status_code=403, detail="Forbidden filename")
 
-    # Upload to a temp file first, then atomically replace target
+    # Upload to a temp file first, computing MD5 for dedup
     tmp = target + ".tmp"
     total = 0
     limit = MAX_UPLOAD_MB * 1024 * 1024
+    md5 = hashlib.md5()
     try:
         with open(tmp, "wb") as f:
             while True:
                 chunk = await file.read(8 * 1024 * 1024)  # 8 MB chunks
                 if not chunk:
                     break
+                md5.update(chunk)
                 total += len(chunk)
                 if total > limit:
                     raise HTTPException(status_code=413, detail=f"File exceeds {MAX_UPLOAD_MB} MB limit")
@@ -79,20 +82,44 @@ async def upload_file(file: UploadFile = File(...)):
             os.remove(tmp)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-    # Atomically replace target with new file
-    try:
-        os.replace(tmp, target)
-    except OSError:
-        # Fallback: if target is locked, use numbered suffix
-        base, ext = os.path.splitext(target)
-        for i in range(1, 999):
-            alt = f"{base} ({i}){ext}"
-            if not os.path.exists(alt):
-                os.rename(tmp, alt)
-                safe_name = os.path.basename(alt)
-                break
-        else:
-            raise HTTPException(status_code=500, detail="Could not save uploaded file (all names taken)")
+    # MD5 dedup: if same file already exists, use it instead
+    file_hash = md5.hexdigest()
+    for existing in os.listdir(uploads):
+        existing_path = os.path.join(uploads, existing)
+        if existing == os.path.basename(tmp) or not os.path.isfile(existing_path):
+            continue
+        try:
+            with open(existing_path, "rb") as ef:
+                ef_hash = hashlib.md5()
+                while True:
+                    chunk = ef.read(8192)
+                    if not chunk:
+                        break
+                    ef_hash.update(chunk)
+                if ef_hash.hexdigest() == file_hash:
+                    # Same content — no need to save
+                    os.remove(tmp)
+                    safe_name = existing
+                    total = os.path.getsize(existing_path)
+                    break
+        except Exception:
+            continue
+
+    # Only save if no dedup match was found
+    if os.path.exists(tmp):
+        try:
+            os.replace(tmp, target)
+        except OSError:
+            # Fallback: if target is locked, use numbered suffix
+            base, ext = os.path.splitext(target)
+            for i in range(1, 999):
+                alt = f"{base} ({i}){ext}"
+                if not os.path.exists(alt):
+                    os.rename(tmp, alt)
+                    safe_name = os.path.basename(alt)
+                    break
+            else:
+                raise HTTPException(status_code=500, detail="Could not save uploaded file (all names taken)")
 
     return {
         "status": "success",
