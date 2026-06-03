@@ -66,10 +66,17 @@ export async function switchSession(sessionId) {
   if (!window._sessionPageState) window._sessionPageState = {};
   window._sessionPageState[sessionId] = { oldestId: 0, hasMore: true, loading: false };
 
+  chatContainer.innerHTML = '';
   await loadHistoryPage(sessionId, true);
 
+  // Remove the previous scroll handler before adding a new one
+  if (window._sessionScrollHandler) {
+    chatContainer.removeEventListener('scroll', window._sessionScrollHandler);
+  }
   // Wire up scroll-to-top to load older messages
   const onScroll = async () => {
+    // Guard: only load history for the currently active session
+    if (state.currentSessionId !== sessionId) return;
     const st = window._sessionPageState[sessionId];
     if (!st || st.loading || !st.hasMore) return;
     if (chatContainer.scrollTop < 100) {
@@ -83,7 +90,7 @@ export async function switchSession(sessionId) {
       st.loading = false;
     }
   };
-  chatContainer.removeEventListener('scroll', onScroll);
+  window._sessionScrollHandler = onScroll;
   chatContainer.addEventListener('scroll', onScroll);
   // Reconnect WebSocket to the new session so history_steps are replayed
   if (prevId !== sessionId && window.connectWebSocket) {
@@ -114,6 +121,7 @@ async function loadHistoryPage(sessionId, scrollToBottom, beforeId) {
     const st = window._sessionPageState?.[sessionId];
     if (st) { st.oldestId = data.oldest_id; st.hasMore = data.has_more; }
     if (data.history && data.history.length > 0) {
+      window._loadingHistory = true;
       if (beforeId) {
         // Render and move each message to top (reverse to preserve order)
         const msgs = data.history;
@@ -127,12 +135,25 @@ async function loadHistoryPage(sessionId, scrollToBottom, beforeId) {
         data.history.forEach(msg => {
           window.appendMessage?.(msg.content, msg.role);
         });
-        if (scrollToBottom) {
-          setTimeout(() => chatContainer.lastChild?.scrollIntoView?.({behavior: 'smooth'}), 50);
-        }
+      }
+      window._loadingHistory = false;
+
+      if (!beforeId && scrollToBottom) {
+        // Use instant scroll and multiple timeouts to ensure it scrolls to the bottom after layout rendering
+        window.scrollToBottom?.(true, false);
+        setTimeout(() => {
+          window.scrollToBottom?.(true, false);
+        }, 50);
+        setTimeout(() => {
+          window.scrollToBottom?.(true, false);
+        }, 150);
+        setTimeout(() => {
+          window.scrollToBottom?.(true, false);
+        }, 300);
       }
     } else if (!beforeId) {
-      window.appendMessage?.('*控制台*', 'system');
+      chatContainer.innerHTML = '';
+      window.appendMessage?.('你好！我是熊猫，你的专属电脑控制智能体。我可以帮你执行命令行、管理文件或运行代码。今天需要我做什么？', 'system');
     }
   } catch (e) {
     console.error('Failed to load history:', e);

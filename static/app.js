@@ -291,6 +291,8 @@ function initApp() {
     }
 
     if (data.type === 'history_steps') {
+      // Only render history_steps for the current session
+      if (!isForCurrentSession) return;
       renderHistorySteps(data);
       return;
     }
@@ -305,10 +307,12 @@ function initApp() {
       // Skip individual tool_step messages — they are rendered inside the
       // history_steps summary card and during live execution via progress events.
       if (data.role === 'tool_step') return;
-      if (isForCurrentSession) { hideThinkingStatus(); hideProgressContainer(); }
-      appendMessage(data.content, data.role || 'agent');
-      if (!isBackground && isForCurrentSession && state.wasVoiceQuery) { speakText(data.content); state.wasVoiceQuery = false; }
-      if (isForCurrentSession) { state.isAgentThinking = false; state.currentTaskId = null; updateInputState(); }
+      if (isForCurrentSession) {
+        hideThinkingStatus(); hideProgressContainer();
+        appendMessage(data.content, data.role || 'agent');
+        if (!isBackground && state.wasVoiceQuery) { speakText(data.content); state.wasVoiceQuery = false; }
+        state.isAgentThinking = false; state.currentTaskId = null; updateInputState();
+      }
       updateTaskBadge();
     } else if (data.type === 'error') {
       if (!isBackground) {
@@ -1213,7 +1217,9 @@ function initApp() {
       });
     }
     messageDiv.querySelectorAll('pre code').forEach((block) => { hljs.highlightElement(block); });
-    scrollToBottom();
+    if (!window._loadingHistory) {
+      scrollToBottom();
+    }
   }
 
   // Click delegation for task:// and switch:view/ links in chat messages
@@ -1238,6 +1244,7 @@ function initApp() {
   });
 
   window.appendMessage = appendMessage;
+  window.scrollToBottom = scrollToBottom;
 
   let currentStatusBubble = null;
 
@@ -1277,12 +1284,12 @@ function initApp() {
     if (currentStatusBubble) { currentStatusBubble.remove(); currentStatusBubble = null; }
   }
 
-  function scrollToBottom(force) {
+  function scrollToBottom(force, smooth = true) {
     // Only auto-scroll if user is near the bottom (within 200px) or forced
     const threshold = 200;
     const atBottom = chatContainer.scrollTop + chatContainer.clientHeight >= chatContainer.scrollHeight - threshold;
     if (force || atBottom || chatContainer.scrollHeight <= chatContainer.clientHeight) {
-      chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' });
+      chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
       hideScrollHint();
     } else {
       showScrollHint();
@@ -1752,11 +1759,19 @@ function initApp() {
           if (st) { st.oldestId = hData.oldest_id; st.hasMore = hData.has_more; }
           if (hData.history && hData.history.length > 0) {
             chatContainer.innerHTML = '';
+            window._loadingHistory = true;
             hData.history.forEach(msg => {
               try { appendMessage(msg.content, msg.role); }
               catch (e) { console.error('[History] Failed to render message:', e, msg); }
             });
-            setTimeout(() => scrollToBottom(true), 50);
+            window._loadingHistory = false;
+            scrollToBottom(true, false);
+            setTimeout(() => scrollToBottom(true, false), 50);
+            setTimeout(() => scrollToBottom(true, false), 150);
+            setTimeout(() => scrollToBottom(true, false), 300);
+          } else {
+            chatContainer.innerHTML = '';
+            appendMessage('你好！我是熊猫，你的专属电脑控制智能体。我可以帮你执行命令行、管理文件或运行代码。今天需要我做什么？', 'system');
           }
         }
       }
