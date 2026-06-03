@@ -190,7 +190,18 @@ class ShellTool(BaseTool):
                 if sys.platform == "win32":
                     popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 proc = subprocess.Popen(command, **popen_kwargs)
-                return f"[Background] Command started with PID {proc.pid}."
+                # Register the background process for monitoring
+                task_id = kwargs.get("_task_id") or kwargs.get("task_id", 0)
+                if task_id and task_id != 0:
+                    with _background_process_lock:
+                        _background_process_info[str(task_id)] = {
+                            "pid": proc.pid,
+                            "output_file": "",
+                            "command": command[:200],
+                            "started_at": _t0,
+                            "timeout": 0,
+                        }
+                return f"[Background] Command started with PID {proc.pid}." 
             else:
                 # ── File-based streaming output ──
                 import uuid
