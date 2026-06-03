@@ -515,6 +515,15 @@ export async function openTaskDetail(taskId) {
           }
           if (prependHtml) {
             container.insertAdjacentHTML('afterbegin', prependHtml);
+            // Wire click handlers for auto-refreshed steps
+            container.querySelectorAll('.task-step-card').forEach(function(c) {
+              if (c.dataset.stepClickWired) return;
+              c.dataset.stepClickWired = '1';
+              c.addEventListener('click', function() {
+                var idx = parseInt(c.dataset.stepIndex);
+                if (idx >= 0 && idx < steps.length) showTaskStepDetail(steps[idx]);
+              });
+            });
             // Update step count
             var total = d.total || 0;
             if (total > _stepTotal) {
