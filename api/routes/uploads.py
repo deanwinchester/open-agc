@@ -83,12 +83,16 @@ async def upload_file(file: UploadFile = File(...)):
     try:
         os.replace(tmp, target)
     except OSError:
-        # Fallback: try remove + rename (Windows sometimes locks files)
-        try:
-            os.remove(target)
-        except OSError:
-            pass  # Keep old file, serve from temp instead
-        os.rename(tmp, target)
+        # Fallback: if target is locked, use numbered suffix
+        base, ext = os.path.splitext(target)
+        for i in range(1, 999):
+            alt = f"{base} ({i}){ext}"
+            if not os.path.exists(alt):
+                os.rename(tmp, alt)
+                safe_name = os.path.basename(alt)
+                break
+        else:
+            raise HTTPException(status_code=500, detail="Could not save uploaded file (all names taken)")
 
     return {
         "status": "success",
