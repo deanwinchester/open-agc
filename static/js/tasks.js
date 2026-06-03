@@ -279,9 +279,9 @@ export async function loadTasks(resetPage = false) {
   }
 }
 
-async function openTaskDetail(taskId) {
-  // Use global switchView to switch views
-  window.switchView?.('task-detail');
+export async function openTaskDetail(taskId) {
+  // Use global switchView to switch views, include task ID in URL
+  window.switchView?.('task-detail', '/' + taskId);
 
   const content = document.getElementById('task-detail-content');
   const title = document.getElementById('task-detail-title');
@@ -357,7 +357,11 @@ async function openTaskDetail(taskId) {
         <div class="detail-content-block">${escapeHtml(task.user_query)}</div>
       </div>
       ${scheduleSection}
-      ${task.status === 'interrupted' || task.status === 'failed' || task.status === 'background_failed' ? `
+      ${task.status === 'completed' ? `
+      <div class="detail-section" style="display:flex;align-items:center;gap:1rem">
+        <button class="btn-resume-task-detail" data-task-id="${task.id}">▶ 继续执行</button>
+        <span style="font-size:0.8rem;color:var(--text-secondary)">已完成的任务也可点继续执行</span>
+      </div>` : task.status === 'interrupted' || task.status === 'failed' || task.status === 'background_failed' ? `
       <div class="detail-section" style="display:flex;align-items:center;gap:1rem">
         <button class="btn-resume-task-detail" data-task-id="${task.id}">▶ 继续执行</button>
         <span style="font-size:0.8rem;color:var(--text-secondary)">${task.status === 'failed' ? '❌ 错误: ' : '中断原因: '}${task.interruption_reason === 'server_restart' ? '🔌 服务器重启' : task.interruption_reason === 'user' ? '🛑 用户中断' : task.interruption_reason === 'max_iterations' ? '⚠️ 循环上限' : task.interruption_reason === 'error' ? '⚠️ 执行出错' : task.interruption_reason === 'process_lost' ? '🔌 进程丢失（服务重启）' : task.interruption_reason || '未知'}</span>

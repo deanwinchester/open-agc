@@ -8,7 +8,7 @@ import { switchView, initNavigation, toggleSidebar, closeSidebar } from './js/na
 import { loadPlugins, loadPluginManager, loadMarketplace } from './js/plugins.js';
 import { loadSessions, createSession, switchSession, deleteSession, renameSession } from './js/sessions.js';
 import { initSettingsListeners, loadSkillsConfig, loadAgents, openAIDesignModal, closeAIDesignModal, initAIDesignListeners } from './js/settings.js';
-import { initTaskFilters, initScheduleModal, loadTasks, updateTaskBadge } from './js/tasks.js';
+import { initTaskFilters, initScheduleModal, loadTasks, updateTaskBadge, openTaskDetail } from './js/tasks.js';
 import { refreshLlamaStatus, loadDownloadHistory, initLlamaListeners, renderSearchResults } from './js/llama.js';
 import { refreshSearXNGStatus, initSearXNGListeners } from './js/searxng.js';
 
@@ -2090,6 +2090,11 @@ function initApp() {
     window._perf.connected = performance.now();
     console.log('[PERF] connectWebSocket', (performance.now() - window._perf.start).toFixed(1), 'ms');
     connectWebSocket();
+    // If navigated directly to /task-detail/{id}, open the detail view
+    if (window._pendingTaskDetail && typeof openTaskDetail === 'function') {
+      openTaskDetail(window._pendingTaskDetail);
+      window._pendingTaskDetail = null;
+    }
   });
   console.log('[PERF] initApp done', (performance.now() - window._perf.start).toFixed(1), 'ms');
 }
