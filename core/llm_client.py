@@ -586,6 +586,9 @@ class LLMClient:
                 # General sanitization for API models — remove orphaned tool_calls
                 kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
 
+            # Double-check: strip any remaining orphaned tool_calls (strict providers like Moonshot reject them)
+            kwargs["messages"] = self._remove_orphaned_tool_calls(kwargs.get("messages", messages))
+
             try:
                 t0 = time.time()
                 try:
