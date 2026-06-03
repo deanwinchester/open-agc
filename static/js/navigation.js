@@ -40,11 +40,11 @@ function _activateView(viewId) {
 }
 
 // Public: switch to a view, updating browser history
-export function switchView(viewId) {
-  // Update URL without reload
-  const url = '/' + viewId;
+// Optionally pass extra URL path segments, e.g. switchView('task-detail', '/178')
+export function switchView(viewId, extraPath) {
+  const url = '/' + viewId + (extraPath || '');
   if (window.location.pathname !== url) {
-    history.pushState({view: viewId}, '', url);
+    history.pushState({view: viewId, extraPath: extraPath}, '', url);
   }
   _activateView(viewId);
 }
@@ -54,8 +54,18 @@ function _viewFromPath() {
   const path = window.location.pathname;
   const viewId = path.replace(/^\//, '').split('/')[0]; // first segment only
   // Map known views; fallback to chat for root or unknown paths
-  const known = ['chat', 'tasks', 'settings-models', 'settings-skills', 'settings-mcp',
+  const known = ['chat', 'tasks', 'task-detail', 'settings-models', 'settings-skills', 'settings-mcp',
                  'downloads', 'settings-plugins', 'logs'];
+  // If view is task-detail, check for extra path segment (task ID)
+  if (viewId === 'task-detail') {
+    const segments = path.replace(/^\//, '').split('/');
+    if (segments.length > 1) {
+      const taskId = parseInt(segments[1]);
+      if (taskId > 0) {
+        window._pendingTaskDetail = taskId;
+      }
+    }
+  }
   return known.includes(viewId) ? viewId : 'chat';
 }
 
