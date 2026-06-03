@@ -405,6 +405,10 @@ def init_db():
         cursor.execute("ALTER TABLE tasks ADD COLUMN plan_id TEXT DEFAULT ''")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE task_steps ADD COLUMN generated_files TEXT DEFAULT ''")
+    except Exception:
+        pass
 
     conn.commit()
     conn.close()
@@ -961,15 +965,18 @@ reconcile_backgrounded_after_restart()
 def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: str = None,
                   args_preview: str = None, result_preview: str = None, full_result: str = None,
                   success: bool = True, thinking_content: str = None, session_id: int = None,
-                  tool_call_id: str = None, full_args: str = None):
+                  tool_call_id: str = None, full_args: str = None,
+                  generated_files: str = None):
+    """Record a task step. generated_files is a JSON array of {path, type} objects,
+    where type is 'temp' (will be cleaned up) or 'final' (kept after task completes)."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO task_steps (task_id, step_number, tool_name, tool_label, args_preview, "
-        "result_preview, full_result, success, thinking_content, session_id, tool_call_id, full_args) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "result_preview, full_result, success, thinking_content, session_id, tool_call_id, full_args, generated_files) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (task_id, step_number, tool_name, tool_label, args_preview, result_preview, full_result,
-         1 if success else 0, thinking_content, session_id, tool_call_id, full_args)
+         1 if success else 0, thinking_content, session_id, tool_call_id, full_args, generated_files or "")
     )
     conn.commit()
     conn.close()
@@ -2920,6 +2927,32 @@ async def delete_task(task_id: int):
             except Exception: pass
     from tools.shell import cleanup_background_process as _cleanup
     _cleanup(str(task_id))
+    # Collect and clean up temp files before deleting steps
+    _temp_files = []
+    try:
+        _conn2 = sqlite3.connect(DB_PATH)
+        _conn2.row_factory = sqlite3.Row
+        for _row in _conn2.execute("SELECT generated_files FROM task_steps WHERE task_id=?", (task_id,)).fetchall():
+            _gf = _row[0] or ""
+            if _gf.startswith("["):
+                try:
+                    _files = json.loads(_gf)
+                    for _f in _files:
+                        if isinstance(_f, dict) and _f.get("type") == "temp" and _f.get("path"):
+                            _temp_files.append(_f["path"])
+                except Exception:
+                    pass
+        _conn2.close()
+        for _fp in _temp_files:
+            try:
+                if os.path.exists(_fp):
+                    os.remove(_fp)
+                    print(f"[Task] Cleaned up temp file: {_fp}")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM task_steps WHERE task_id = ?", (task_id,))
