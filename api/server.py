@@ -5052,6 +5052,12 @@ def _guardian_resume_task(task_id: int) -> None:
             update_task_status(task_id, "interrupted", _resp_str, interruption_reason="user")
         elif "MAX_ITERATIONS_REACHED" in _resp_str:
             update_task_status(task_id, "interrupted", _resp_str, interruption_reason="max_iterations")
+        elif _resp_str.startswith("[TASK_BACKGROUNDED]"):
+            try:
+                save_task_context(task_id, agent.messages[1:])
+            except Exception:
+                pass
+            update_task_status(task_id, "backgrounded", _resp_str, interruption_reason="backgrounded")
         elif hasattr(agent, '_consecutive_failures') and agent._consecutive_failures >= 3:
             update_task_status(task_id, "interrupted", _resp_str, interruption_reason="error")
         else:
