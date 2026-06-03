@@ -3054,7 +3054,7 @@ async def get_task_process(task_id: int):
     from tools.shell import get_background_processes
     pinfo = get_background_processes().get(str(task_id))
     if not pinfo:
-        raise HTTPException(status_code=404, detail="No process found for this task")
+        return {"alive": False, "pid": None, "command": "", "uptime": 0}
     result = dict(pinfo)
     pid = result.get("pid")
     result["alive"] = _is_pid_alive(pid) if pid else False
@@ -4951,21 +4951,61 @@ def _guardian_resume_task(task_id: int) -> None:
         try:
             ctx = get_task_context(task_id)
             if ctx:
+                # Trim context to avoid 138K token first call: keep first 2 + last 15 msgs
+                if len(ctx) > 20:
+                    total_chars = sum(len(m.get("content", "") or "") for m in ctx)
+                    if total_chars > 20000:
+                        ctx = ctx[:2] + ctx[-15:]
                 agent.messages.extend(ctx)
         except Exception:
             pass
         update_task_status(task_id, "running")
+        # Look up session_id for WebSocket broadcasting
+        _hb_session = 1
+        try:
+            _hb_c = sqlite3.connect(DB_PATH)
+            _hb_r = _hb_c.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if _hb_r: _hb_session = _hb_r[0]
+            _hb_c.close()
+        except Exception:
+            pass
+
+        def _hb_cb(e):
+            if e.get("event") == "tool_start":
+                add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", ""), session_id=_hb_session)
+            _broadcast_to_websockets({"type": "progress", "session_id": _hb_session, "task_id": task_id, **e})
+
         _background_agents[task_id] = agent
         try:
-            agent.run_turn(
+            resp = agent.run_turn(
                 "【系统恢复】之前执行中断，请继续完成原任务目标。",
                 verbose=False,
-                progress_callback=lambda e: add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", "")) if e.get("event") == "tool_start" else None,
+                progress_callback=_hb_cb,
                 skip_rag=True,
                 task_id=task_id,
             )
         finally:
             _background_agents.pop(task_id, None)
+
+        # Increment resume_count so it eventually stops retrying
+        try:
+            _hb_c2 = sqlite3.connect(DB_PATH)
+            _hb_c2.execute("UPDATE tasks SET resume_count = resume_count + 1 WHERE id=?", (task_id,))
+            _hb_c2.commit()
+            _hb_c2.close()
+        except Exception:
+            pass
+
+        # Update task status after run_turn completes
+        _resp_str = str(resp or "")[:200]
+        if agent.is_interrupted:
+            update_task_status(task_id, "interrupted", _resp_str, interruption_reason="user")
+        elif "MAX_ITERATIONS_REACHED" in _resp_str:
+            update_task_status(task_id, "interrupted", _resp_str, interruption_reason="max_iterations")
+        elif hasattr(agent, '_consecutive_failures') and agent._consecutive_failures >= 3:
+            update_task_status(task_id, "interrupted", _resp_str, interruption_reason="error")
+        else:
+            update_task_status(task_id, "completed", _resp_str)
     except Exception as e:
         print(f"[Guardian] Resume #{task_id} error: {e}")
     finally:
