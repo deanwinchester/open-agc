@@ -783,8 +783,9 @@ function showProcessLogModal(outFile) {
   modal.querySelector('#log-modal-close').addEventListener('click', () => modal.remove());
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
 
-  // Fetch full log
-  fetch(outFile).then(r => r.text()).then(text => {
+  // Fetch full log via file API
+  var logUrl = outFile.startsWith('/') || outFile.startsWith('http') ? outFile : '/api/files/' + encodeURIComponent(outFile);
+  fetch(logUrl).then(r => r.text()).then(text => {
     modal.querySelector('#log-modal-content').textContent = text || '(空)';
   }).catch(() => {
     modal.querySelector('#log-modal-content').textContent = '(无法读取日志文件)';
