@@ -56,38 +56,39 @@ async def upload_file(file: UploadFile = File(...)):
     if os.path.commonpath([uploads, os.path.abspath(target)]) != uploads:
         raise HTTPException(status_code=403, detail="Forbidden filename")
 
+    # Upload to a temp file first, then atomically replace target
+    tmp = target + ".tmp"
     total = 0
     limit = MAX_UPLOAD_MB * 1024 * 1024
     try:
-        with open(target, "wb") as f:
+        with open(tmp, "wb") as f:
             while True:
                 chunk = await file.read(8 * 1024 * 1024)  # 8 MB chunks
                 if not chunk:
                     break
                 total += len(chunk)
                 if total > limit:
-                    f.close()
-                    try:
-                        os.remove(target)
-                    except PermissionError:
-                        pass
                     raise HTTPException(status_code=413, detail=f"File exceeds {MAX_UPLOAD_MB} MB limit")
                 f.write(chunk)
     except HTTPException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
         raise
     except Exception as e:
-        if os.path.exists(target):
-            try:
-                os.remove(target)
-            except PermissionError:
-                # File may be locked by another process (e.g. virus scanner), schedule for later cleanup
-                import time as _t
-                _t.sleep(0.5)  # brief wait, then retry once
-                try:
-                    os.remove(target)
-                except PermissionError:
-                    print(f"[Upload] Could not delete partial file: {target}")
+        if os.path.exists(tmp):
+            os.remove(tmp)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+    # Atomically replace target with new file
+    try:
+        os.replace(tmp, target)
+    except OSError:
+        # Fallback: try remove + rename (Windows sometimes locks files)
+        try:
+            os.remove(target)
+        except OSError:
+            pass  # Keep old file, serve from temp instead
+        os.rename(tmp, target)
 
     return {
         "status": "success",
