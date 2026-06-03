@@ -66,14 +66,7 @@ export async function switchSession(sessionId) {
   if (!window._sessionPageState) window._sessionPageState = {};
   window._sessionPageState[sessionId] = { oldestId: 0, hasMore: true, loading: false };
 
-  // Restore from cache or load from server
-  if (window._sessionChatCache[sessionId]) {
-    chatContainer.innerHTML = window._sessionChatCache[sessionId];
-    if (chatContainer.lastChild) chatContainer.lastChild.scrollIntoView?.({behavior: 'smooth'});
-  } else {
-    chatContainer.innerHTML = '';
-    await loadHistoryPage(sessionId, true);
-  }
+  await loadHistoryPage(sessionId, true);
 
   // Wire up scroll-to-top to load older messages
   const onScroll = async () => {
