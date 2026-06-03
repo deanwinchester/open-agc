@@ -881,7 +881,7 @@ function initApp() {
           <span class="progress-current-step" style="margin-left: 8px; color: var(--text-secondary); opacity: 0.8; font-size: 0.8rem;"></span>
         </div>
         <div class="progress-inline-right">
-          ${['interrupted', 'backgrounded', 'background_failed'].includes(data.task_status)
+          ${['interrupted', 'backgrounded', 'background_failed', 'completed'].includes(data.task_status)
             ? `<button class="btn-resume-task" data-task-id="${data.task_id}" title="继续执行">▶ 继续</button>`
             : ''}
           <span class="progress-toggle-icon collapsed">▸</span>
