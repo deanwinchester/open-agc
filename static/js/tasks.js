@@ -357,10 +357,10 @@ export async function openTaskDetail(taskId) {
         <div class="detail-content-block">${escapeHtml(task.user_query)}</div>
       </div>
       ${scheduleSection}
-      ${task.status === 'completed' ? `
+      ${task.status === 'backgrounded' || task.status === 'completed' ? `
       <div class="detail-section" style="display:flex;align-items:center;gap:1rem">
         <button class="btn-resume-task-detail" data-task-id="${task.id}">▶ 继续执行</button>
-        <span style="font-size:0.8rem;color:var(--text-secondary)">已完成的任务也可点继续执行</span>
+        <span style="font-size:0.8rem;color:var(--text-secondary)">${task.status === 'backgrounded' ? '后台等待中，可点继续' : '已完成的任务也可点继续执行'}</span>
       </div>` : task.status === 'interrupted' || task.status === 'failed' || task.status === 'background_failed' ? `
       <div class="detail-section" style="display:flex;align-items:center;gap:1rem">
         <button class="btn-resume-task-detail" data-task-id="${task.id}">▶ 继续执行</button>
