@@ -3636,17 +3636,22 @@ async def websocket_endpoint(websocket: WebSocket):
             progress_queue = thread_queue.Queue()
             has_taken_action = False
             agent = None
+            _bg_pid = None
 
             # Accumulate shell output per step for tool_step message persistence
             _step_outputs: dict = {}
             def progress_callback(event: dict):
-                nonlocal has_taken_action, ws_task_id
+                nonlocal has_taken_action, ws_task_id, _bg_pid
                 """Thread-safe: push progress events from thread pool into queue."""
                 # Record task steps (offset on resume to continue numbering)
                 adjusted_step = event.get("step", 0) + step_offset
                 event["step"] = adjusted_step
 
                 # Accumulate shell output per step for tool_step persistence
+                # Capture PID from pause_and_wait for BgMonitor tracking
+                if event.get("event") == "task_backgrounded":
+                    _bg_pid = event.get("pid")
+
                 if event.get("event") == "shell_output":
                     text = event.get("text", "")
                     if text:
@@ -3997,6 +4002,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 update_task_status(ws_task_id, "backgrounded",
                     response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台",
                     interruption_reason="backgrounded")
+                # Register PID for BgMonitor tracking if available
+                if _bg_pid:
+                    try:
+                        from tools.shell import get_background_processes
+                        _bg_procs = get_background_processes()
+                        if str(ws_task_id) not in _bg_procs:
+                            from tools.shell import _background_process_info, _background_process_lock
+                            with _background_process_lock:
+                                _background_process_info[str(ws_task_id)] = {"pid": _bg_pid, "command": "", "started_at": _time.time()}
+                            print(f"[Task] Registered PID {_bg_pid} for BgMonitor tracking (task {ws_task_id})")
+                    except Exception:
+                        pass
                 # Send notification to frontend
                 await _safe_send({
                     "type": "task_backgrounded",
