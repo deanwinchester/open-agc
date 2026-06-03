@@ -501,7 +501,7 @@ export async function openTaskDetail(taskId) {
           for (var si = steps.length - 1; si >= 0; si--) {
             if (si > maxShown) {
               var st = steps[si];
-              var displayNum = _stepTotal - (_stepPage - 1) * 50 - si;
+              var displayNum = totalSteps - (_stepPage - 1) * 50 - si;
               prependHtml += '<div class="task-step-card ' + (st.success ? 'success' : st.success === false ? 'failed' : 'running') + '" data-step-index="' + si + '">'
                 + '<div class="task-step-header">'
                 + '<span>' + (st.success ? '✅' : st.success === false ? '❌' : '⏳') + '</span>'
