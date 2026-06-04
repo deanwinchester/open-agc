@@ -38,7 +38,8 @@ from tools.auto_tool import (DynamicTool, load_all_dynamic_tools,
 from agent.sub_agent import SubAgent, TOOL_SETS
 from tools.discovery import ToolDiscoveryTool
 from tools.mcp_tool import get_mcp_manager
-from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused, SearchHistoryTool, PauseAndWaitTool, TaskPaused
+from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused, SearchHistoryTool
+from tools.shell_interact import ShellSendTool, PauseAndWaitTool, TaskPaused
 from tools.sandbox import EnterWorktreeTool, ExitWorktreeTool
 from tools.self_review import SelfReviewTool
 from tools.task_plan import TaskPlanTool, format_plan_for_prompt, load_plan
@@ -270,6 +271,12 @@ class OpenAGCAgent:
             f"当执行耗时操作（下载模型/安装依赖/训练等），shell 返回 [Still Running] 时，"
             f"应立即调用 pause_and_wait 工具暂停自己。系统会保存上下文，后台任务完成后自动恢复执行。"
             f"不要让用户干等着，也不要反复重试。\n"
+            f"\n## 交互式命令\n"
+            f"如果 shell 返回 [Interactive] PID xxx，说明该命令已进入交互模式（如 python、mysql 等）。"
+            f"此时进程并未超时，而是等待你的输入。你可以：\n"
+            f"1. 使用 shell_send(pid=xxx, input=\"...\") 向进程发送输入并读取响应\n"
+            f"2. 发送 exit 或 quit 退出交互模式\n"
+            f"3. 或调用 pause_and_wait 保持进程运行\n"
             f"\n{{system_env}}\n"
             f"\n# 项目创建规范\n"
             f"当需要创建新项目或实现多文件功能时，请遵循以下流程：\n"
@@ -383,6 +390,7 @@ class OpenAGCAgent:
             "self_review": SelfReviewTool(),
             "configure_system": ConfigureSystemTool(),
             "develop_plugin": DevelopPluginTool(),
+            "shell_send": ShellSendTool(),
             "manage_task_plan": TaskPlanTool(),
             "parse_html": ReaderLMTool(),
         }
@@ -416,6 +424,7 @@ class OpenAGCAgent:
             "self_review": "自我审查任务进度",
             "configure_system": "系统配置管理",
             "develop_plugin": "插件开发",
+            "shell_send": "交互命令输入",
             "manage_task_plan": "管理任务计划",
             "parse_html": "HTML 转 Markdown",
         }
@@ -453,7 +462,7 @@ class OpenAGCAgent:
                            "search_file_content", "find_files", "search_available_tools",
                            "ask_user_question", "search_history", "queue_download", "pause_and_wait",
                            "execute_python", "search_web", "self_review", "configure_system",
-                           "manage_task_plan", "parse_html"}
+                           "manage_task_plan", "parse_html", "shell_send"}
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
 
         # Adaptive resident: auto-load frequently used non-core tools
