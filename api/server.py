@@ -4056,6 +4056,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     save_task_context(ws_task_id, agent.messages[1:])
                     update_task_status(ws_task_id, "interrupted", summary, interruption_reason="user")
                 else:
+                    save_task_context(ws_task_id, agent.messages[1:])
                     update_task_status(ws_task_id, "completed", summary)
                 
                 # Update total tokens in tasks table from stats
@@ -4626,8 +4627,8 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
             save_task_context(task_id, agent.messages[msg_count_before:])
             update_task_status(task_id, "interrupted", summary, interruption_reason="max_iterations")
         else:
+            save_task_context(task_id, agent.messages[msg_count_before:] if agent else [])
             update_task_status(task_id, "completed", summary)
-            save_task_context(task_id, [])  # Clear context on success
         if response and not is_max_iter and not is_backgrounded:
             title = _extract_task_title(response)
             if title:
@@ -5061,6 +5062,7 @@ def _guardian_resume_task(task_id: int) -> None:
         elif hasattr(agent, '_consecutive_failures') and agent._consecutive_failures >= 3:
             update_task_status(task_id, "interrupted", _resp_str, interruption_reason="error")
         else:
+            save_task_context(task_id, agent.messages[1:])
             update_task_status(task_id, "completed", _resp_str)
     except Exception as e:
         print(f"[Guardian] Resume #{task_id} error: {e}")
