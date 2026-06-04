@@ -2110,6 +2110,11 @@ function initApp() {
       openTaskDetail(window._pendingTaskDetail);
       window._pendingTaskDetail = null;
     }
+    // If navigated directly to /chat/{id}, switch to that session
+    if (window._pendingSessionId && typeof switchSession === 'function') {
+      switchSession(window._pendingSessionId);
+      window._pendingSessionId = null;
+    }
   });
   console.log('[PERF] initApp done', (performance.now() - window._perf.start).toFixed(1), 'ms');
 }
