@@ -5,6 +5,8 @@ from typing import Any, Dict, Optional
 
 from tools.base import BaseTool
 
+# Track per-PID read positions so we don't re-read old output
+_interact_positions: Dict[int, int] = {}
 
 def _is_pid_alive(pid: int) -> bool:
     try:
@@ -85,20 +87,40 @@ class ShellSendTool(BaseTool):
                 _interactive_procs.pop(pid, None)
             return f"[shell_send] 写入失败: {e}"
 
-        # Read new output from the process's output file
-        info = None
+        # Read new output since last read position
+        out_file = ""
         for tid, p in get_background_processes().items():
             if p.get("pid") == pid:
-                info = p; break
-        out_file = info.get("output_file", "") if info else ""
+                out_file = p.get("output_file", "")
+                break
 
         if out_file and os.path.exists(out_file):
-            # Wait briefly for output to appear
-            time.sleep(0.5)
-            try:
-                with open(out_file, "r", encoding="utf-8", errors="replace") as f:
-                    return f"[shell_send] 进程输出:\n{f.read()[-3000:]}"
-            except Exception:
-                pass
+            last_pos = _interact_positions.get(pid, 0)
+            # Poll for new output (up to timeout seconds)
+            deadline = time.time() + timeout
+            new_output = ""
+            while time.time() < deadline:
+                try:
+                    cur_size = os.path.getsize(out_file)
+                    if cur_size > last_pos:
+                        with open(out_file, "rb") as f:
+                            f.seek(last_pos)
+                            raw = f.read(cur_size - last_pos)
+                        _interact_positions[pid] = cur_size
+                        try:
+                            new_output = raw.decode("utf-8")
+                        except UnicodeDecodeError:
+                            new_output = raw.decode("utf-8", errors="replace")
+                        break
+                except OSError:
+                    break
+                if not _is_pid_alive(pid):
+                    break
+                time.sleep(0.2)
 
-        return f"[shell_send] 输入已发送（PID {pid}）。"
+            if new_output:
+                return f"[shell_send] 进程输出:\n{new_output}"
+            return f"[shell_send] 输入已发送（PID {pid}），暂未收到新输出。"
+
+        return f"[shell_send] 输入已发送（PID {pid}）。注意：由于进程输出未重定向到文件，" \
+               f"请用 execute_shell 重新运行命令查看结果。"
