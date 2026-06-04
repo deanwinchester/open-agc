@@ -42,28 +42,39 @@ function _activateView(viewId) {
 // Public: switch to a view, updating browser history
 // Optionally pass extra URL path segments, e.g. switchView('task-detail', '/178')
 export function switchView(viewId, extraPath) {
-  const url = '/' + viewId + (extraPath || '');
+  // For chat view, include session_id in URL
+  let pathExtra = extraPath;
+  if (viewId === 'chat' && !extraPath && state?.currentSessionId) {
+    pathExtra = '/' + state.currentSessionId;
+  }
+  const url = '/' + viewId + (pathExtra || '');
   if (window.location.pathname !== url) {
-    history.pushState({view: viewId, extraPath: extraPath}, '', url);
+    history.pushState({view: viewId, extraPath: pathExtra}, '', url);
   }
   _activateView(viewId);
 }
 
-// Read view from current URL path
+// Read view and parameters from current URL path
 function _viewFromPath() {
   const path = window.location.pathname;
-  const viewId = path.replace(/^\//, '').split('/')[0]; // first segment only
+  const segments = path.replace(/^\//, '').split('/');
+  const viewId = segments[0];
+  const param = segments[1] || '';
   // Map known views; fallback to chat for root or unknown paths
   const known = ['chat', 'tasks', 'task-detail', 'settings-models', 'settings-skills', 'settings-mcp',
                  'downloads', 'settings-plugins', 'logs'];
   // If view is task-detail, check for extra path segment (task ID)
-  if (viewId === 'task-detail') {
-    const segments = path.replace(/^\//, '').split('/');
-    if (segments.length > 1) {
-      const taskId = parseInt(segments[1]);
-      if (taskId > 0) {
-        window._pendingTaskDetail = taskId;
-      }
+  if (viewId === 'task-detail' && param) {
+    const taskId = parseInt(param);
+    if (taskId > 0) {
+      window._pendingTaskDetail = taskId;
+    }
+  }
+  // If view is chat, check for session ID in URL
+  if (viewId === 'chat' && param) {
+    const sessionId = parseInt(param);
+    if (sessionId > 0 && sessionId !== state.currentSessionId) {
+      window._pendingSessionId = sessionId;
     }
   }
   return known.includes(viewId) ? viewId : 'chat';
