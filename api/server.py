@@ -4176,9 +4176,16 @@ async def websocket_endpoint(websocket: WebSocket):
                                 session_history = ctx
                             original_goal = (task_row["user_query"] if task_row else "")
                             query = "【系统提示】任务已恢复，请根据历史上下文，从上次中断的地方继续执行任务。"
+                            # Append extra instruction if provided by user
+                            extra = user_msg.get("extra_instruction", "").strip()
+                            if extra:
+                                query += f"\n\n用户附加指令：{extra}"
                         except Exception as e:
                             print(f"[WS] Resume error: {e}")
                             query = "继续执行未完成的任务。"
+                            extra = user_msg.get("extra_instruction", "").strip()
+                            if extra:
+                                query += f"\n\n用户附加指令：{extra}"
                         retry_model = None
                         agent_profile_name = None
                         ws_images = None

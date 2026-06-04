@@ -559,14 +559,16 @@ export async function openTaskDetail(taskId) {
     // Wire up resume button
     content.querySelector('.btn-resume-task-detail')?.addEventListener('click', function() {
       const tid = parseInt(this.dataset.taskId);
-      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-        state.ws.send(JSON.stringify({ type: 'resume', task_id: tid }));
-        this.textContent = '⏳ 已发送恢复请求...';
-        this.disabled = true;
-        window.switchView?.('chat');
-      } else {
+      if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
         alert('WebSocket 未连接，请刷新页面后重试');
+        return;
       }
+      const extra = prompt('可选：输入附加指令，留空直接恢复执行');
+      if (extra === null) return;
+      state.ws.send(JSON.stringify({ type: 'resume', task_id: tid, extra_instruction: extra || '' }));
+      this.textContent = '⏳ 已发送恢复请求...';
+      this.disabled = true;
+      window.switchView?.('chat');
     });
 
     // Auto-refresh status only (respects checkbox, partial update, no flash)
