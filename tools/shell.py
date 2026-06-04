@@ -22,6 +22,10 @@ _orphan_process_info: dict = {}
 _orphan_process_lock = threading.Lock()
 _orphan_counter = 0
 
+# Interactive process stdin pipes for shell_send tool
+_interactive_procs: dict = {}  # {pid: stdin_writeable}
+_interactive_procs_lock = threading.Lock()
+
 # Output directory for streaming shell logs
 SHELL_OUTPUT_DIR = None
 
@@ -213,6 +217,7 @@ class ShellTool(BaseTool):
                 popen_kwargs: Dict = {
                     "shell": True,
                     "cwd": cwd,
+                    "stdin": subprocess.PIPE,
                     "stdout": out_file,
                     "stderr": subprocess.STDOUT,
                 }
@@ -345,6 +350,39 @@ class ShellTool(BaseTool):
                                 "\n⚠️ 这看起来像是一个下载/安装任务。建议使用 queue_download 工具下载大文件，"
                                 "支持断点续传且不会阻塞。命令仍在后台运行中。\n"
                             )
+                        # ── Interactive prompt detection ──
+                        # Check the last 200 bytes of output for common interactive prompts
+                        _interactive_prompts = [
+                            b'mysql> ', b'sqlite> ', b'psql> ',
+                            b'>>> ', b'In [',
+                            b'ress: ',
+                            b' :',  # pager (colon alone can match many things, check carefully)
+                        ]
+                        try:
+                            with open(out_path, "rb") as _rf:
+                                _rf.seek(max(0, output_size - 200))
+                                _tail_bytes = _rf.read(200)
+                            # Check specific prompts first, then >  (llama.cpp/Ollama CLI)
+                            _is_interactive = any(p in _tail_bytes for p in _interactive_prompts)
+                            if not _is_interactive and b'\n> ' in _tail_bytes:
+                                _is_interactive = True
+                            # Also check if last non-empty line is a single >
+                            if not _is_interactive:
+                                _last_lines = tail.strip().split('\n')
+                                _last_nonempty = next((l.strip() for l in reversed(_last_lines) if l.strip()), '')
+                                if _last_nonempty == '>':
+                                    _is_interactive = True
+                            if _is_interactive:
+                                if proc.stdin:
+                                    with _interactive_procs_lock:
+                                        _interactive_procs[proc.pid] = proc.stdin
+                                return (
+                                    f"[Interactive] PID {proc.pid}\n"
+                                    f"命令 {command[:100]} 可能已进入交互模式。\n"
+                                    f"最新输出:\n{tail}\n"
+                                )
+                        except Exception:
+                            pass
                         return (
                             f"[Still Running] 命令仍在执行中（已耗时 {round(time.time() - _t0, 1)}s）。\n"
                             f"当前输出 ({_read_file_size(out_path)} bytes):\n"
