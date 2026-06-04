@@ -3756,6 +3756,21 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception as e:
                         print(f"[Task] Failed to update step: {e}")
 
+                # Update task_steps with tool result (result_preview only set on tool_done)
+                if ws_task_id and event.get("event") == "tool_done":
+                    try:
+                        _rpreview = event.get("result_preview", "")
+                        _success = 1 if event.get("success") else 0
+                        _conn_step = sqlite3.connect(DB_PATH)
+                        _conn_step.execute(
+                            "UPDATE task_steps SET result_preview=?, success=? WHERE task_id=? AND step_number=?",
+                            (_rpreview, _success, ws_task_id, adjusted_step)
+                        )
+                        _conn_step.commit()
+                        _conn_step.close()
+                    except Exception:
+                        pass
+
                 # Save tool_step as a message in the chat flow (skip for heartbeats)
                 if ws_session_id and event.get("event") == "tool_done":
                     try:

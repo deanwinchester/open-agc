@@ -296,6 +296,8 @@ class TaskPlanTool(BaseTool):
                 return "[TaskPlan] 创建计划需要 steps 参数（执行步骤列表）。"
 
             plan_id = f"task_{task_id}" if task_id else _goal_hash(goal)
+            # Also save under goal_hash for cross-task lookup
+            alt_plan_id = _goal_hash(goal) if task_id else None
             existing = load_plan(plan_id=plan_id)
             if existing:
                 existing["current_task_id"] = task_id
@@ -449,6 +451,19 @@ class TaskPlanTool(BaseTool):
                                 return p
                         except Exception:
                             continue
+            # Fallback: check if this task has a plan_id in DB (cross-task consistency)
+            try:
+                import sqlite3 as _sq3
+                from core.paths import get_data_path as _gdp
+                _c = _sq3.connect(_gdp("chat_history.db"))
+                _r = _c.execute("SELECT plan_id FROM tasks WHERE id=?", (task_id,)).fetchone()
+                _c.close()
+                if _r and _r[0]:
+                    p = load_plan(plan_id=_r[0])
+                    if p:
+                        return p
+            except Exception:
+                pass
         return None
 
     def get_openai_schema(self) -> dict:
