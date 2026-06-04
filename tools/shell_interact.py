@@ -1,8 +1,6 @@
 """Tool for sending input to interactive shell processes (shell_send)."""
 import os
-import sys
 import time
-import subprocess
 from typing import Any, Dict, Optional
 
 from tools.base import BaseTool
@@ -60,62 +58,47 @@ class ShellSendTool(BaseTool):
             return "[shell_send] 需要 pid 参数。"
         timeout = max(5, min(timeout, 120))
 
-        # Verify process is alive
-        if not _is_pid_alive(pid):
-            return f"[shell_send] PID {pid} 已结束。"
-
-        # Write input to the process stdin via the registered pipe
-        from tools.shell import _interactive_procs, _interactive_procs_lock, get_background_processes, get_orphan_processes
+        # ══ Security: only allow PIDs registered via [Interactive] ══
+        from tools.shell import _interactive_procs, _interactive_procs_lock, get_background_processes
         stdin_pipe = None
         with _interactive_procs_lock:
             stdin_pipe = _interactive_procs.get(pid)
 
-        if stdin_pipe is None or stdin_pipe.closed:
-            # Fallback: look up output file for reading response
-            info = None
-            for tid, p in get_background_processes().items():
-                if p.get("pid") == pid:
-                    info = p; break
-            if not info:
-                for oid, p in get_orphan_processes().items():
-                    if p.get("pid") == pid:
-                        info = p; break
-            out_file = info.get("output_file", "") if info else ""
+        if stdin_pipe is None:
+            return f"[shell_send] PID {pid} 不是有效的交互进程。"
 
-            # Try writing via platform-specific methods
-            try:
-                if sys.platform == "win32":
-                    # Use PowerShell to send keystrokes to the window
-                    safe = input.replace("'", "''")
-                    subprocess.run(
-                        ["powershell", "-Command",
-                         f"Add-Type -AssemblyName System.Windows.Forms; "
-                         f"[System.Windows.Forms.SendKeys]::SendWait('{safe}~')"],
-                        capture_output=True, timeout=5
-                    )
-                else:
-                    # Try /proc/pid/fd/0
-                    with open(f"/proc/{pid}/fd/0", "w") as f:
-                        f.write(input + "\n")
-            except Exception as e:
-                return f"[shell_send] 发送输入失败（stdin 管道不可用）: {e}"
+        # Verify process is alive
+        if not _is_pid_alive(pid):
+            with _interactive_procs_lock:
+                _interactive_procs.pop(pid, None)
+            return f"[shell_send] PID {pid} 已结束。"
 
-            # Wait for output and read it
-            if out_file and os.path.exists(out_file):
-                time.sleep(1)
-                try:
-                    with open(out_file, "r", encoding="utf-8", errors="replace") as f:
-                        return f"[shell_send] 进程输出:\n{f.read()[-3000:]}"
-                except Exception:
-                    pass
-            return f"[shell_send] 输入已发送（PID {pid}），暂无法读取输出。"
+        if stdin_pipe.closed:
+            return f"[shell_send] PID {pid} 的 stdin 管道已关闭，进程可能已退出。"
 
-        # We have a stdin pipe — write and read response
+        # Write input to the process stdin via the pipe
         try:
             stdin_pipe.write((input + "\n").encode("utf-8"))
             stdin_pipe.flush()
-            msg = "[shell_send] 输入已发送（PID {}）。注意：由于进程输出重定向到文件，".format(pid)
-            msg += "请稍候使用 execute_shell 的新调用来获取最新输出。"
-            return msg
         except Exception as e:
+            with _interactive_procs_lock:
+                _interactive_procs.pop(pid, None)
             return f"[shell_send] 写入失败: {e}"
+
+        # Read new output from the process's output file
+        info = None
+        for tid, p in get_background_processes().items():
+            if p.get("pid") == pid:
+                info = p; break
+        out_file = info.get("output_file", "") if info else ""
+
+        if out_file and os.path.exists(out_file):
+            # Wait briefly for output to appear
+            time.sleep(0.5)
+            try:
+                with open(out_file, "r", encoding="utf-8", errors="replace") as f:
+                    return f"[shell_send] 进程输出:\n{f.read()[-3000:]}"
+            except Exception:
+                pass
+
+        return f"[shell_send] 输入已发送（PID {pid}）。"
