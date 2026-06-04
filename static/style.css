@@ -750,6 +750,7 @@ body {
 .message.user .content h1, .message.user .content h2, .message.user .content p { color: inherit; }
 .content pre {
     background: rgba(0, 0, 0, 0.85);
+    color: #e0e0e0;
     padding: 1rem;
     border-radius: var(--radius-sm);
     overflow-x: auto;
