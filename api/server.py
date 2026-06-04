@@ -4079,7 +4079,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         save_task_context(ws_task_id, agent.messages[1:])
                     except Exception:
                         pass
-                update_task_status(ws_task_id, "interrupted", str(e)[:200], interruption_reason="error")
+                update_task_status(ws_task_id, "failed", str(e)[:200], interruption_reason="error")
             raise
         finally:
             agent_is_running = False
