@@ -626,7 +626,7 @@ class LLMClient:
                             # Record tool_calls if no text content
                             tc = getattr(msg, "tool_calls", None)
                             if tc:
-                                resp_text = json.dumps([{"function": t.function.name if hasattr(t, 'function') and hasattr(t.function, 'name') else str(t)} for t in tc], ensure_ascii=False)[:50000]
+                                resp_text = json.dumps([{"function": {"name": t.function.name, "arguments": t.function.arguments} if hasattr(t, 'function') and hasattr(t.function, 'name') else str(t)} for t in tc], ensure_ascii=False)[:50000]
                     _log_model_call(
                         provider=_infer_provider(attempt_model),
                         model=attempt_model,
@@ -737,7 +737,7 @@ class LLMClient:
                         delta = chunk.choices[0].delta
                         tc = getattr(delta, "tool_calls", None)
                         if tc:
-                            _stream_content += json.dumps([{"function": {"name": t.function.name}} for t in tc if hasattr(t, 'function') and hasattr(t.function, 'name')], ensure_ascii=False) + " "
+                            _stream_content += json.dumps([{"function": {"name": t.function.name, "arguments": getattr(t.function, 'arguments', '')}} for t in tc if hasattr(t, 'function') and hasattr(t.function, 'name')], ensure_ascii=False) + " "
                     except Exception:
                         pass
 
