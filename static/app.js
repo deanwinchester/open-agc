@@ -851,6 +851,10 @@ function initApp() {
       if (st) st.insertAdjacentElement('afterend', shellBox);
     }
     var text = data.text || '';
+    // Filter progress bar / spinner lines
+    if (/^[\s\-\\|/█▒▓]+(\s*\d+[\.\d]*\s*(KB|MB|GB|%)|[\s\-\\|/█▒▓]+$)/.test(text) && text.length < 80) {
+      return;
+    }
     var lineEl = document.createElement('div');
     lineEl.className = 'shell-output-line';
     lineEl.textContent = text;
