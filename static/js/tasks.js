@@ -714,7 +714,7 @@ async function loadProcessList() {
                 <rect x="6" y="6" width="12" height="12"></rect>
               </svg>
             </button>
-            ${outFile ? `<button class="view-log-btn" data-outfile="${escapeHtml(outFile)}" title="查看日志" style="background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:1rem;">📋</button>` : ''}
+            ${outFile ? `<button class="view-log-btn" data-outfile="${escapeHtml(outFile)}" data-task-id="${escapeHtml(id)}" title="查看日志" style="background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:1rem;">📋</button>` : ''}
           </div>
         </div>`;
     }).join('');
@@ -749,7 +749,8 @@ async function loadProcessList() {
     container.querySelectorAll('.view-log-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const outFile = btn.dataset.outfile;
-        showProcessLogModal(outFile);
+        const taskId = btn.dataset.taskId;
+        showProcessLogModal(outFile, taskId);
       });
     });
 
@@ -776,8 +777,7 @@ async function fetchLogPreview(id, outFile) {
   }
 }
 
-function showProcessLogModal(outFile) {
-  // Use a simple modal to display full logs
+function showProcessLogModal(outFile, taskId) {
   const modal = document.createElement('div');
   modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);';
   modal.innerHTML = `
@@ -792,13 +792,21 @@ function showProcessLogModal(outFile) {
   modal.querySelector('#log-modal-close').addEventListener('click', () => modal.remove());
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
 
-  // Fetch full log via file API
-  var logUrl = outFile.startsWith('/') || outFile.startsWith('http') ? outFile : '/api/files/' + encodeURIComponent(outFile);
-  fetch(logUrl).then(r => r.text()).then(text => {
-    modal.querySelector('#log-modal-content').textContent = text || '(空)';
-  }).catch(() => {
-    modal.querySelector('#log-modal-content').textContent = '(无法读取日志文件)';
-  });
+  // Fetch full log via task logs API (more reliable than /api/files/)
+  if (taskId) {
+    fetch(`/api/tasks/${taskId}/logs?lines=9999`).then(r => r.json()).then(data => {
+      modal.querySelector('#log-modal-content').textContent = (data.lines || []).join('\n') || '(空)';
+    }).catch(() => {
+      modal.querySelector('#log-modal-content').textContent = '(无法读取日志文件)';
+    });
+  } else {
+    var logUrl = outFile && (outFile.startsWith('/') || outFile.startsWith('http')) ? outFile : '/api/files/' + encodeURIComponent(outFile);
+    fetch(logUrl).then(r => r.text()).then(text => {
+      modal.querySelector('#log-modal-content').textContent = text || '(空)';
+    }).catch(() => {
+      modal.querySelector('#log-modal-content').textContent = '(无法读取日志文件)';
+    });
+  }
 }
 
 // ── Process Management (Task Detail) ──
