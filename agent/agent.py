@@ -39,7 +39,7 @@ from agent.sub_agent import SubAgent, TOOL_SETS
 from tools.discovery import ToolDiscoveryTool
 from tools.mcp_tool import get_mcp_manager
 from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused, SearchHistoryTool
-from tools.shell_interact import ShellSendTool, PauseAndWaitTool, TaskPaused
+from tools.shell_interact import ShellSendTool
 from tools.sandbox import EnterWorktreeTool, ExitWorktreeTool
 from tools.self_review import SelfReviewTool
 from tools.task_plan import TaskPlanTool, format_plan_for_prompt, load_plan
