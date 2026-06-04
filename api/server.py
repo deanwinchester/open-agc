@@ -4921,7 +4921,7 @@ def start_background_monitor():
                                     cur_size = _os.path.getsize(out_file)
                                     prev = _output_staleness.get(str(tid), {})
                                     prev_size = prev.get("size", -1)
-                                    if cur_size == prev_size and cur_size > 0:
+                                    if cur_size == prev_size and cur_size >= 0:
                                         # File not growing — increment staleness counter
                                         new_count = prev.get("count", 0) + 1
                                         _output_staleness[str(tid)] = {"size": cur_size, "count": new_count}
