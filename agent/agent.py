@@ -314,16 +314,29 @@ class OpenAGCAgent:
             f"优先使用 browser_automation（虚拟浏览器）工具的 upload 动作将文件填入网页。"
             f"如果遇到必须通过操作系统原生文件选择框处理的情况，"
             f"可临时使用 computer_control（键鼠控制工具）来操作系统的上传弹窗。\n"
-            f"\n## 任务计划管理\n"
-            f"对于涉及多个步骤的复杂任务（如爬虫、批量下载、多文件处理），应使用 manage_task_plan 工具管理任务进度：\n"
-            f"1. 分析需求后，调用 manage_task_plan(create) 制定步骤和目标\n"
-            f"2. 每完成一个重要步骤，调用 manage_task_plan(update) 标记完成、记录关键结果\n"
-            f"3. 发现重要中间数据（URL、API 响应、文件路径等），记入 key_findings\n"
-            f"4. 创建文件/文件夹时，注明用途以便后续理解\n"
-            f"5. 任务中断恢复时，先调用 manage_task_plan(show) 了解当前进展\n"
-            f"6. 认为自己完成任务时，必须先调用 manage_task_plan(check) 确认没有遗漏步骤\n"
-            f"7. 只有 check 通过后才能结束任务——禁止擅自结束未完成的任务\n"
-            f"注意：简单的一次性任务（单条命令、查询信息等）不需要创建计划。\n"
+            f"\n## 任务计划与待办管理\n"
+            f"对于多步骤的复杂任务，使用 manage_task_plan 工具管理：\n"
+            f"\n"
+            f"### Plan（执行计划）\n"
+            f"- plan.create(goal, steps) → 创建任务执行计划，steps 是细分步骤\n"
+            f"- plan.update(step_id, step_status, step_result) → 标记步骤完成\n"
+            f"- plan.show() → 查看当前进度\n"
+            f"- plan.check() → 确认是否所有步骤都已完成\n"
+            f"- 一个 task 只有一个 plan，多次 create 会复用同一个\n"
+            f"- 中断恢复后先 plan.show() 了解进度\n"
+            f"\n"
+            f"### Todo（大目标）\n"
+            f"- todo_add(desc) → 只添加大的目标（如\"完成翻译模型集成\"）\n"
+            f"- 不要将细分步骤加到 todo 中——细分步骤放在 plan 的 steps 里\n"
+            f"- todo_start(id) / todo_done(id) 标记大目标进展\n"
+            f"- 完成一个大目标关联的所有 plan 步骤后再标记 todo_done\n"
+            f"\n"
+            f"### 规则\n"
+            f"- 先 plan.create 规划步骤，再按步骤执行\n"
+            f"- 每完成一个重要步骤调用 plan.update 记录\n"
+            f"- 认为自己完成时先 plan.check()，通过后才能结束\n"
+            f"- 禁止擅自结束未完成的任务\n"
+            f"- 简单的一次性任务不需要创建计划\n"
             f"\n# 记忆与技能系统\n"
             f"\n## 记忆系统\n"
             f"你拥有智能记忆系统。每次对话开始时，系统会自动检索并展示过去交互中的相关记忆。"
@@ -1565,6 +1578,30 @@ class OpenAGCAgent:
                 except Exception:
                     pass
             self.messages[0]["content"] = system_content
+
+        # Always inject task plan, even with skip_rag=True (for resume scenarios)
+        if self.messages and self.messages[0]["role"] == "system" and self.task_id:
+            try:
+                from tools.task_plan import load_plan as _load_plan, format_plan_for_prompt as _fmt_plan
+                _plan = None
+                try:
+                    import sqlite3 as _sq3
+                    from core.paths import get_data_path as _gdp
+                    _conn = _sq3.connect(_gdp("chat_history.db"))
+                    _row = _conn.execute("SELECT plan_id FROM tasks WHERE id=?", (self.task_id,)).fetchone()
+                    _conn.close()
+                    if _row and _row[0]:
+                        _plan = _load_plan(plan_id=_row[0])
+                except Exception:
+                    pass
+                if not _plan:
+                    _plan = _load_plan(plan_id=None, task_id=self.task_id)
+                if _plan:
+                    _plan_text = "\n\n## 当前计划进度\n" + _fmt_plan(_plan)
+                    if _plan_text not in self.messages[0]["content"]:
+                        self.messages[0]["content"] += _plan_text
+            except Exception:
+                pass
 
         # Sub-agent delegation for complex tasks
         if self._should_delegate(user_input):

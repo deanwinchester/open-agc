@@ -295,7 +295,7 @@ class TaskPlanTool(BaseTool):
             if not steps:
                 return "[TaskPlan] 创建计划需要 steps 参数（执行步骤列表）。"
 
-            plan_id = _goal_hash(goal)
+            plan_id = f"task_{task_id}" if task_id else _goal_hash(goal)
             existing = load_plan(plan_id=plan_id)
             if existing:
                 existing["current_task_id"] = task_id
@@ -397,7 +397,37 @@ class TaskPlanTool(BaseTool):
                     f"请继续执行这些步骤，或调用 manage_task_plan 标记确认跳过。"
                 )
 
-        return f"[TaskPlan] 未知操作: {action}。支持的操作: create, update, show, check"
+        if action == "cleanup":
+            import sqlite3 as _sq3
+            from core.paths import get_data_path as _gdp
+            _conn = _sq3.connect(_gdp("chat_history.db"))
+            _removed = 0
+            _plans_dir = _get_plans_dir()
+            if os.path.isdir(_plans_dir):
+                for fn in os.listdir(_plans_dir):
+                    if not fn.startswith("plan_") or not fn.endswith(".json"):
+                        continue
+                    try:
+                        with open(os.path.join(_plans_dir, fn), "r") as _f:
+                            _p = json.load(_f)
+                        _tids = _p.get("task_ids", [])
+                        if _tids:
+                            _placeholders = ",".join("?" for _ in _tids)
+                            _exists = _conn.execute(f"SELECT COUNT(*) FROM tasks WHERE id IN ({_placeholders})", _tids).fetchone()[0]
+                            if _exists == 0:
+                                os.remove(os.path.join(_plans_dir, fn))
+                                _removed += 1
+                        else:
+                            _mtime = os.path.getmtime(os.path.join(_plans_dir, fn))
+                            if time.time() - _mtime > 604800:
+                                os.remove(os.path.join(_plans_dir, fn))
+                                _removed += 1
+                    except Exception:
+                        pass
+            _conn.close()
+            return f"[TaskPlan] 🧹 清理完成，已删除 {_removed} 个无关联计划。"
+
+        return f"[TaskPlan] 未知操作: {action}。支持的操作: create, update, show, check, cleanup"
 
     def _find_plan(self, goal: str = None, task_id: int = None) -> Optional[dict]:
         # Try by goal first
@@ -432,7 +462,7 @@ class TaskPlanTool(BaseTool):
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["create", "update", "show", "check",
+                            "enum": ["create", "update", "show", "check", "cleanup",
                                      "todo_add", "todo_start", "todo_done",
                                      "todo_stuck", "todo_reset", "todo_list"],
                             "description": "操作类型"
