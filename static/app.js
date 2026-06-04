@@ -851,9 +851,18 @@ function initApp() {
       if (st) st.insertAdjacentElement('afterend', shellBox);
     }
     var text = data.text || '';
-    // Filter progress bar / spinner lines
-    if (/^[\s\-\\|/█▒▓]+(\s*\d+[\.\d]*\s*(KB|MB|GB|%)|[\s\-\\|/█▒▓]+$)/.test(text) && text.length < 80) {
-      return;
+    // Handle carriage returns (\r): split, take last segment, replace last line
+    if (text.includes('\r')) {
+      var parts = text.split('\r');
+      text = parts[parts.length - 1];  // Last update
+      if (!text) return;
+      // Replace the last line instead of appending (like a real terminal)
+      var lastLine = shellBox.lastElementChild;
+      if (lastLine && lastLine.classList.contains('shell-output-line')) {
+        lastLine.textContent = text;
+        shellBox.scrollTop = shellBox.scrollHeight;
+        return;
+      }
     }
     var lineEl = document.createElement('div');
     lineEl.className = 'shell-output-line';
