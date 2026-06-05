@@ -249,6 +249,38 @@ class ShellTool(BaseTool):
                         except Exception:
                             return raw.decode("utf-8", errors="replace")
 
+                def _clean_cr(text: str) -> str:
+                    """Process carriage returns: keep only final content after \r overwrites.
+
+                    Handles:
+                      - \r (standalone): clear current line (progress bar overwrite)
+                      - \r\n (CRLF): newline, keep line content
+                    """
+                    lines = []
+                    cur = []
+                    i = 0
+                    while i < len(text):
+                        ch = text[i]
+                        if ch == '\r':
+                            if i + 1 < len(text) and text[i + 1] == '\n':
+                                lines.append(''.join(cur) + '\n')
+                                cur = []
+                                i += 2
+                            else:
+                                cur = []
+                                i += 1
+                        elif ch == '\n':
+                            cur.append(ch)
+                            lines.append(''.join(cur))
+                            cur = []
+                            i += 1
+                        else:
+                            cur.append(ch)
+                            i += 1
+                    if cur:
+                        lines.append(''.join(cur))
+                    return ''.join(lines)
+
                 def _poll_output():
                     nonlocal last_pos
                     while not poll_stop.is_set():
@@ -259,6 +291,9 @@ class ShellTool(BaseTool):
                                 new_text = _decode_shell_output(out_path, last_pos, fsize)
                                 last_pos = fsize
                                 if new_text and progress_cb:
+                                    new_text = _clean_cr(new_text)
+                                    if not new_text:
+                                        continue
                                     elapsed = time.time() - _t0
                                     # Truncate to last 2000 chars for progress
                                     preview = (new_text[-2000:] if len(new_text) > 2000
@@ -574,6 +609,7 @@ def _read_tail(path: str, max_chars: int) -> str:
                 text = raw.decode(locale.getpreferredencoding(), errors="replace")
             except Exception:
                 text = raw.decode("utf-8", errors="replace")
+        text = _clean_cr(text)
         if len(text) <= max_chars:
             return text
         return text[-max_chars:]

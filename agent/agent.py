@@ -1998,8 +1998,20 @@ class OpenAGCAgent:
                                         result = f"Sandbox blocked: {sb.path} (max retries exceeded)"
                                         tool_success = False
                                         break
-                                    result = self._handle_sandbox_blocked(
-                                        sb, function_name, function_args, progress_callback)
+                                    try:
+                                        result = self._handle_sandbox_blocked(
+                                            sb, function_name, function_args, progress_callback)
+                                    except TaskPaused as _sb_tp:
+                                        # TaskPaused raised from inside except SandboxBlocked handler
+                                        # is NOT caught by the outer except TaskPaused (sibling handler).
+                                        # Catch it here and convert to [TASK_BACKGROUNDED] properly.
+                                        if progress_callback:
+                                            progress_callback({
+                                                "event": "task_backgrounded",
+                                                "reason": str(_sb_tp),
+                                            })
+                                        del self.messages[_tool_call_insertion_idx:]
+                                        return f"[TASK_BACKGROUNDED] {_sb_tp}"
                                     if result is not None:
                                         # User denied or timeout — return error
                                         tool_success = False

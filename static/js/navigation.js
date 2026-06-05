@@ -2,6 +2,12 @@
 import { state } from './state.js';
 import { switchSession, renameSession, deleteSession, clearSession } from './sessions.js';
 
+// View change listeners — subscribe instead of monkey-patching window.switchView
+const _viewListeners = [];
+export function onViewChange(fn) {
+  _viewListeners.push(fn);
+}
+
 // Internal: DOM switch only (no history.pushState)
 function _activateView(viewId) {
   // Clean up auto-refresh intervals and modals when leaving any view
@@ -37,6 +43,11 @@ function _activateView(viewId) {
   if (viewId === 'tasks') w.loadTasks?.();
   if (viewId === 'downloads') w.loadDownloadHistory?.();
   if (viewId === 'logs') w.loadLogs?.();
+
+  // Notify view change listeners (subscribed via onViewChange instead of monkey-patching)
+  for (var i = 0; i < _viewListeners.length; i++) {
+    try { _viewListeners[i](viewId); } catch (e) { console.error('view listener error:', e); }
+  }
 }
 
 // Public: switch to a view, updating browser history
@@ -84,6 +95,17 @@ function _viewFromPath() {
 window.addEventListener('popstate', (e) => {
   const viewId = e.state?.view || _viewFromPath();
   _activateView(viewId);
+  // For task-detail, reload the detail data from the URL
+  if (viewId === 'task-detail') {
+    const path = window.location.pathname;
+    const match = path.match(/\/task-detail\/(\d+)/);
+    if (match) {
+      const taskId = parseInt(match[1]);
+      if (typeof window.openTaskDetail === 'function') {
+        window.openTaskDetail(taskId);
+      }
+    }
+  }
 });
 
 export function initNavigation() {
