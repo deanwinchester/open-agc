@@ -4281,7 +4281,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if "api_key" in err_str or "authentication" in err_str or "not found" in err_str or "key" in err_str:
                     hint = (
                         "---\n**💡 提示：您似乎尚未配置此模型的 API Key！**\n\n"
-                        "以 Kimi 为例，请前往 [Moonshot 开放平台](https://platform.moonshot.cn/console/api-keys) "
+                        "以 DeepSeek 为例，请前往 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) "
                         "免费申请一个 API Key，然后在左侧边栏的「设置 - 模型配置」中填入并保存即可开始对话！"
                     )
                     save_message("system", hint, ws_session_id)
