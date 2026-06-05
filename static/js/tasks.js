@@ -84,7 +84,7 @@ export function initTaskFilters() {
     state.taskRefreshInterval = setTimeout(() => loadTasks(true), 300);
   });
   document.getElementById('task-detail-back')?.addEventListener('click', () => {
-    switchView('tasks');
+    window.switchView?.('tasks');
   });
 
   // ── Sub-tab switching: Task list vs Process management ──
@@ -357,7 +357,7 @@ export async function openTaskDetail(taskId) {
         <div class="detail-content-block">${escapeHtml(task.user_query)}</div>
       </div>
       ${scheduleSection}
-      ${task.status === 'backgrounded' || task.status === 'completed' ? `
+      ${task.status === 'backgrounded' || task.status === 'detached' || task.status === 'completed' ? `
       <div class="detail-section" style="display:flex;align-items:center;gap:1rem">
         <button class="btn-resume-task-detail" data-task-id="${task.id}">▶ 继续执行</button>
         <span style="font-size:0.8rem;color:var(--text-secondary)">${task.status === 'backgrounded' ? '后台等待中，可点继续' : '已完成的任务也可点继续执行'}</span>
@@ -908,3 +908,4 @@ async function fetchLogs(taskId, viewerEl) {
 // Expose to window for legacy navigation
 window.loadTasks = loadTasks;
 window.updateTaskBadge = updateTaskBadge;
+window.openTaskDetail = openTaskDetail;

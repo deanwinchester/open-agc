@@ -1238,6 +1238,20 @@ def delete_download_record(download_id: int):
 connected_websockets: list = []  # List of active WebSocket connections
 
 _sandbox_waits: dict = {}  # {session_id: {"event": threading.Event, "result": dict}} — sandbox auth waits
+_pending_sandbox_approvals: dict = {}  # {session_id: [paths]} — late approvals applied on task resume
+
+
+def _apply_pending_sandbox_approvals(agent, session_id):
+    """Load pending sandbox approvals into agent's session whitelist."""
+    paths = _pending_sandbox_approvals.pop(session_id, [])
+    for p in paths:
+        action = p.get("action", "approve_once")
+        path = p.get("path", "")
+        if action in ("approve_once", "approve_dir", "approve_always", "approve_session") and path:
+            import os as _ap_os
+            agent._session_sandbox_whitelist.add(path)
+            agent._session_sandbox_whitelist.add(_ap_os.path.dirname(_ap_os.path.abspath(path)))
+            print(f"[Sandbox] Loaded pending approval: {path}")
 
 _active_agents: dict = {}  # {session_id: {task_id: OpenAGCAgent}} — multi-task concurrent support
 _background_agents: dict = {}  # {task_id: OpenAGCAgent} — background tasks for interrupt
@@ -3845,6 +3859,7 @@ async def websocket_endpoint(websocket: WebSocket):
             agent = OpenAGCAgent(model=current_model, session_id=ws_session_id,
                                  logger=session_logger,
                                  pre_enabled_tools=_session_enabled_tools.get(ws_session_id))
+            _apply_pending_sandbox_approvals(agent, ws_session_id)
             _active_agents.setdefault(ws_session_id, {})[ws_task_id or 0] = agent
             
             # Inject custom agent profile prompt if specified
@@ -3921,6 +3936,15 @@ async def websocket_endpoint(websocket: WebSocket):
                                 wait["result"]["path"] = user_msg.get("path", "")
                                 wait["event"].set()
                                 print(f"[WS] Sandbox response: {action} for {sid}")
+                            elif action in ("approve_once", "approve_dir", "approve_always", "approve_session"):
+                                # Late approval: apply to running agent's whitelist directly
+                                _path = user_msg.get("path", "")
+                                if _path and hasattr(agent, '_session_sandbox_whitelist'):
+                                    import os as _ws_os
+                                    _ws_dir = _ws_os.path.dirname(_ws_os.path.abspath(_path))
+                                    agent._session_sandbox_whitelist.add(_ws_dir)
+                                    agent._session_sandbox_whitelist.add(_path)
+                                    print(f"[WS] Late sandbox approval applied to running agent: {_path}")
                         else:
                             # Non-blocking input: queue message to agent
                             q = user_msg.get("query", user_msg.get("text", ""))
@@ -4146,6 +4170,42 @@ async def websocket_endpoint(websocket: WebSocket):
                         wait["result"]["path"] = user_msg.get("path", "")
                         wait["event"].set()
                         print(f"[WS] Sandbox response: {action} for session {sid}")
+                    elif action in ("approve_once", "approve_dir", "approve_always", "approve_session"):
+                        # Late approval after wait timed out — save and resume task
+                        _path = user_msg.get("path", "")
+                        if _path:
+                            print(f"[WS] Late sandbox approval: {action} for {_path}")
+                            _pending_sandbox_approvals.setdefault(sid, []).append({
+                                "action": action, "path": _path
+                            })
+                            # Find backgrounded/interrupted task for this session and resume
+                            try:
+                                _late = sqlite3.connect(DB_PATH)
+                                _late_t = _late.execute(
+                                    "SELECT id, user_query FROM tasks WHERE session_id=? AND status IN ('backgrounded','interrupted') ORDER BY id DESC LIMIT 1",
+                                    (sid,)).fetchone()
+                                _late.close()
+                                if _late_t:
+                                    _tid2 = _late_t[0]
+                                    _uq2 = _late_t[1] or ""
+                                    _ctx2 = get_task_context(_tid2)
+                                    if _ctx2 is None:
+                                        _ctx2 = []
+                                    _ctx2.append({"role": "user", "content":
+                                        f"【系统通知】你之前因沙箱权限等待超时而中断。路径 {_path} 已获得用户授权，"
+                                        f"请重新尝试之前被阻止的操作。"})
+                                    save_task_context(_tid2, _ctx2)
+                                    update_task_status(_tid2, "interrupted",
+                                        "延迟授权触发恢复", interruption_reason="background_complete")
+                                    print(f"[WS] Resuming task #{_tid2} after late sandbox approval")
+                                    import threading as _thr
+                                    _thr.Thread(
+                                        target=_run_background_task,
+                                        args=(_tid2, _uq2, _ctx2, True),
+                                        daemon=True
+                                    ).start()
+                            except Exception as _late_err:
+                                print(f"[WS] Late sandbox resume error: {_late_err}")
                     continue
 
                 if msg_type == "resume":
@@ -4479,9 +4539,9 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
 
     config = load_config()
     model = config.get("default_model", "moonshot/kimi-latest")
-    agent = OpenAGCAgent(model=model)
 
-    # Look up session_id so progress events are routed to the correct session
+    # Look up session_id BEFORE creating agent, so agent has correct session_id
+    # for sandbox auth (_sandbox_waits key must match frontend's session_id)
     bg_session_id = 1
     try:
         bg_conn = sqlite3.connect(DB_PATH)
@@ -4491,6 +4551,9 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         bg_conn.close()
     except Exception:
         pass
+
+    agent = OpenAGCAgent(model=model, session_id=bg_session_id)
+    _apply_pending_sandbox_approvals(agent, bg_session_id)
 
     step_counter = 0
     step_offset = 0
@@ -4926,19 +4989,18 @@ def start_background_monitor():
                                         new_count = prev.get("count", 0) + 1
                                         _output_staleness[str(tid)] = {"size": cur_size, "count": new_count}
                                         if is_long_running:
-                                            # Long-running server: 15-min output freeze → detach
+                                            # Long-running server: 15-min output freeze
+                                            # Clean up process tracking so BgMonitor stops checking it.
+                                            # The task stays backgrounded — user can resume via UI if needed.
                                             if new_count >= 90:  # 90 * 10s = 15min
-                                                print(f"[BgMonitor] Task {tid}: long-running ({uptime/60:.0f}min), output frozen 15min — detaching")
+                                                print(f"[BgMonitor] Task {tid}: long-running ({uptime/60:.0f}min), output frozen 15min — removing process tracking")
                                                 cleanup_background_process(str(tid))
                                                 _output_staleness.pop(str(tid), None)
-                                                update_task_status(tid, "detached",
-                                                    f"后台进程持续运行 {uptime/60:.0f} 分钟，已被识别为常驻服务，系统已解除监控。")
                                                 ctx = get_task_context(tid)
                                                 if ctx:
                                                     ctx.append({"role": "user", "content": (
-                                                        f"【系统通知】后台进程（PID {pid}）已持续运行 {uptime/60:.0f} 分钟，"
-                                                        f"被识别为常驻服务进程。系统已解除监控，进程仍在后台运行。"
-                                                        f"如需手动停止，请在任务管理中终止该进程。"
+                                                        f"【系统通知】后台进程（PID {pid}）已持续运行 {uptime/60:.0f} 分钟无输出，"
+                                                        f"已解除进程追踪。进程可能仍在后台运行，也可手动在任务管理中终止。"
                                                     )})
                                                     save_task_context(tid, ctx)
                                                 continue
@@ -5020,7 +5082,20 @@ def _guardian_resume_task(task_id: int) -> None:
         cfg = load_config()
         model = cfg.get("default_model", "moonshot/kimi-latest")
         from agent.agent import OpenAGCAgent
-        agent = OpenAGCAgent(model=model)
+
+        # Look up session_id BEFORE creating agent, so sandbox auth (_sandbox_waits)
+        # uses the correct key that matches the frontend's session_id
+        _hb_session = 1
+        try:
+            _hb_c = sqlite3.connect(DB_PATH)
+            _hb_r = _hb_c.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if _hb_r: _hb_session = _hb_r[0]
+            _hb_c.close()
+        except Exception:
+            pass
+
+        agent = OpenAGCAgent(model=model, session_id=_hb_session)
+        _apply_pending_sandbox_approvals(agent, _hb_session)
         try:
             ctx = get_task_context(task_id)
             if ctx:
@@ -5033,15 +5108,6 @@ def _guardian_resume_task(task_id: int) -> None:
         except Exception:
             pass
         update_task_status(task_id, "running")
-        # Look up session_id for WebSocket broadcasting
-        _hb_session = 1
-        try:
-            _hb_c = sqlite3.connect(DB_PATH)
-            _hb_r = _hb_c.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()
-            if _hb_r: _hb_session = _hb_r[0]
-            _hb_c.close()
-        except Exception:
-            pass
 
         def _hb_cb(e):
             if e.get("event") == "tool_start":
@@ -5088,6 +5154,12 @@ def _guardian_resume_task(task_id: int) -> None:
             update_task_status(task_id, "completed", _resp_str)
     except Exception as e:
         print(f"[Guardian] Resume #{task_id} error: {e}")
+        try:
+            update_task_status(task_id, "background_failed",
+                f"自动恢复失败: {str(e)[:100]}",
+                interruption_reason="error")
+        except Exception:
+            pass
     finally:
         _guardian_resume_lock.release()
 
@@ -5103,9 +5175,6 @@ def start_guardian_loop():
                     continue
 
                 interval = cfg.get("heartbeat_interval", 180)
-                if connected_websockets:
-                    _time.sleep(max(interval, 10))
-                    continue
 
                 conn = sqlite3.connect(DB_PATH)
                 if conn.execute("SELECT 1 FROM tasks WHERE status='running' LIMIT 1").fetchone():
@@ -5131,4 +5200,8 @@ def start_guardian_loop():
     print("[Guardian] Started (code-based polling)")
 
 
+# Start background listeners
+start_background_monitor()
+start_email_listener()
+start_task_scheduler()
 start_guardian_loop()
