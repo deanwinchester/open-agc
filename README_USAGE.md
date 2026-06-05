@@ -22,12 +22,12 @@ start.bat
 
 **注意：** 您无需在 `.env` 文件中手动配置。Open-AGC 提供了直观的网页端配置界面。
 
-### 配置步骤 (以 Kimi 为例)：
-1. **获取 Key**: 前往 [Moonshot 开放平台](https://platform.moonshot.cn/console/api-keys) 申请 API Key。
+### 配置步骤 (以 DeepSeek 为例)：
+1. **获取 Key**: 前往 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) 申请 API Key。
 2. **打开设置**: 程序启动后，在左侧边栏点击 **「设置 (Settings)」** 图标。
 3. **系统配置**: 在设置页面的 **「系统配置」** 标签页中找到 **「模型配置」**。
 4. **填入并保存**: 
-   - 选择模型（如 `moonshot/kimi-k2.5`）。
+   - 选择模型（如 `deepseek/deepseek-v4-flash`）。
    - 在对应的 API Key 输入框中粘贴您的 Key。
    - 点击下方的 **「保存配置」**。
 5. **开始对话**: 配置完成后，即可回到主界面开始对话。
@@ -79,12 +79,12 @@ start.bat
 
 **Note:** You don't need to edit `.env` files manually. API keys are managed through the Web UI.
 
-### Steps (Example: Kimi/Moonshot):
-1. **Get Key**: Obtain an API Key from [Moonshot Platform](https://platform.moonshot.cn/console/api-keys).
+### Steps (Example: DeepSeek):
+1. **Get Key**: Obtain an API Key from [DeepSeek Platform](https://platform.deepseek.com/api_keys).
 2. **Settings**: Click the **"Settings"** icon in the left sidebar.
 3. **Configuration**: Go to **"System Config"** -> **"Model Config"**.
 4. **Save**:
-   - Select your model (e.g., `moonshot/kimi-k2.5`).
+   - Select your model (e.g., `deepseek/deepseek-v4-flash`).
    - Paste the API Key.
    - Click **"Save Settings"**.
 5. **Chat**: You're all set to start chatting!
