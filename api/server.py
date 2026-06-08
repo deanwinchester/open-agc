@@ -409,6 +409,10 @@ def init_db():
         cursor.execute("ALTER TABLE task_steps ADD COLUMN generated_files TEXT DEFAULT ''")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN task_goal TEXT DEFAULT ''")
+    except Exception:
+        pass
 
     conn.commit()
     conn.close()
@@ -671,7 +675,107 @@ def create_task(title: str, user_query: str, task_type: str = 'oneshot',
     task_id = cursor.lastrowid
     conn.commit()
     conn.close()
+    # Kick off background goal generation
+    threading.Thread(target=_generate_task_goal_background, args=(task_id, user_query, session_id), daemon=True).start()
     return task_id
+
+def _generate_task_goal_background(task_id: int, query: str, session_id: int = 1):
+    """Use LLM to generate a proper task goal asynchronously."""
+    try:
+        from core.llm_client import LLMClient
+        cfg = load_config()
+        llm = LLMClient(default_model=cfg.get("default_model", "moonshot/kimi-latest"))
+        resp, _ = llm.chat([{"role": "user", "content": (
+            "根据用户的问题，用一句话概括任务目标（简洁、明确、直接）。\n"
+            "要求：概括任务要做什么，而不是复述问题本身。\n\n"
+            f"用户问题：{query[:300]}\n\n"
+            "任务目标："
+        )}])
+        goal = (resp.choices[0].message.content or "").strip().strip("\"'「」")
+        if goal and len(goal) > 10:
+            _conn = sqlite3.connect(DB_PATH)
+            _conn.execute("UPDATE tasks SET task_goal=? WHERE id=?", (goal[:500], task_id))
+            _conn.commit()
+            _conn.close()
+    except Exception as e:
+        print(f"[Task] Goal generation error for task {task_id}: {e}")
+
+def _record_task_deliverables(task_id: int):
+    """Extract deliverables from task_steps and update task's result_summary and output_files."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        # Collect generated files from steps
+        steps = conn.execute(
+            "SELECT tool_name, args_preview, result_preview, full_args, generated_files "
+            "FROM task_steps WHERE task_id=? ORDER BY step_number", (task_id,)
+        ).fetchall()
+
+        output_files = []
+        summaries = []
+
+        for s in steps:
+            tool = s["tool_name"] or ""
+            args = s["full_args"] or s["args_preview"] or ""
+            result = s["result_preview"] or ""
+            gen_files = s["generated_files"] or ""
+
+            # Collect written files
+            if tool in ("write_file", "edit_file"):
+                try:
+                    import json as _jj
+                    parsed = _jj.loads(args) if isinstance(args, str) else args
+                    if isinstance(parsed, dict) and parsed.get("path"):
+                        output_files.append(parsed["path"])
+                except Exception:
+                    pass
+
+            # Collect generated files from steps
+            if gen_files:
+                try:
+                    import json as _jj
+                    gf = _jj.loads(gen_files) if isinstance(gen_files, str) else gen_files
+                    if isinstance(gf, list):
+                        output_files.extend(gf)
+                except Exception:
+                    pass
+
+            # Collect execution summaries
+            if tool == "execute_shell" and result and "Exit Code: 0" in result:
+                lines = [l.strip() for l in result.split('\n') if l.strip() and not l.startswith('[')]
+                if lines:
+                    summaries.append(lines[-1][:200])
+
+            if tool == "queue_download":
+                if "下载完成" in result or "Download" in result:
+                    summaries.append(result[:200])
+
+        # Deduplicate files
+        unique_files = []
+        for f in output_files:
+            if f and f not in unique_files:
+                unique_files.append(f)
+
+        summary_text = "; ".join(summaries[-5:]) if summaries else ""
+
+        update_kwargs = {}
+        if summary_text:
+            update_kwargs["result_summary"] = summary_text[:1000]
+        if unique_files:
+            import json as _jj
+            update_kwargs["output_files"] = _jj.dumps(unique_files, ensure_ascii=False)
+
+        if update_kwargs:
+            fields = [f"{k}=?" for k in update_kwargs]
+            values = list(update_kwargs.values()) + [task_id]
+            conn.execute(
+                f"UPDATE tasks SET {', '.join(fields)}, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                values,
+            )
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[Task] Deliverable extraction error: {e}")
 
 def update_task_status(task_id: int, status: str, result_summary: str = None,
                        interruption_reason: str = None):
@@ -3657,6 +3761,18 @@ async def websocket_endpoint(websocket: WebSocket):
             def progress_callback(event: dict):
                 nonlocal has_taken_action, ws_task_id, _bg_pid
                 """Thread-safe: push progress events from thread pool into queue."""
+                # Handle sandbox_approved: persist to pending approvals so it
+                # survives agent recreation on task resume
+                if event.get("event") == "sandbox_approved":
+                    _path = event.get("path", "")
+                    _sid = event.get("session_id") or ws_session_id
+                    if _path:
+                        _pending_sandbox_approvals.setdefault(_sid, []).append({
+                            "action": "approve_once", "path": _path
+                        })
+                        print(f"[Sandbox] Persisted approval: {_path} for session {_sid}")
+                    return  # Don't queue this event to frontend
+
                 # Record task steps (offset on resume to continue numbering)
                 adjusted_step = event.get("step", 0) + step_offset
                 event["step"] = adjusted_step
@@ -4096,6 +4212,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     update_task_status(ws_task_id, "interrupted", summary, interruption_reason="user")
                 else:
                     save_task_context(ws_task_id, agent.messages[1:])
+                    _record_task_deliverables(ws_task_id)
                     update_task_status(ws_task_id, "completed", summary)
                 
                 # Update total tokens in tasks table from stats
@@ -4582,6 +4699,15 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
 
     def progress_cb(event: dict):
         nonlocal step_counter
+        # Persist sandbox approvals so they survive agent recreation on task resume
+        if event.get("event") == "sandbox_approved":
+            _path = event.get("path", "")
+            _sid = event.get("session_id") or bg_session_id
+            if _path:
+                _pending_sandbox_approvals.setdefault(_sid, []).append({
+                    "action": "approve_once", "path": _path
+                })
+            return
         # Suppress all progress broadcasts for heartbeat tasks
         if _is_heartbeat:
             return
@@ -4713,6 +4839,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
             update_task_status(task_id, "interrupted", summary, interruption_reason="max_iterations")
         else:
             save_task_context(task_id, agent.messages[msg_count_before:] if agent else [])
+            _record_task_deliverables(task_id)
             update_task_status(task_id, "completed", summary)
         if response and not is_max_iter and not is_backgrounded:
             title = _extract_task_title(response)
@@ -4859,7 +4986,7 @@ def start_background_monitor():
                 conn.row_factory = sqlite3.Row
                 bg_tasks = conn.execute(
                     "SELECT id, user_query, resume_count, max_resume_count, created_at, updated_at FROM tasks "
-                    "WHERE status='backgrounded' AND resume_count < max_resume_count"
+                    "WHERE status='backgrounded'"
                 ).fetchall()
                 if bg_tasks:
                     print(f"[BgMonitor] Found {len(bg_tasks)} backgrounded task(s) to check")
@@ -5112,6 +5239,14 @@ def _guardian_resume_task(task_id: int) -> None:
         def _hb_cb(e):
             if e.get("event") == "tool_start":
                 add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", ""), session_id=_hb_session)
+            # Persist sandbox approvals so they survive agent recreation
+            if e.get("event") == "sandbox_approved":
+                _path = e.get("path", "")
+                if _path:
+                    _pending_sandbox_approvals.setdefault(_hb_session, []).append({
+                        "action": "approve_once", "path": _path
+                    })
+                return
             _broadcast_to_websockets({"type": "progress", "session_id": _hb_session, "task_id": task_id, **e})
 
         _background_agents[task_id] = agent
@@ -5126,20 +5261,20 @@ def _guardian_resume_task(task_id: int) -> None:
         finally:
             _background_agents.pop(task_id, None)
 
-        # Increment resume_count so it eventually stops retrying
-        try:
-            _hb_c2 = sqlite3.connect(DB_PATH)
-            _hb_c2.execute("UPDATE tasks SET resume_count = resume_count + 1 WHERE id=?", (task_id,))
-            _hb_c2.commit()
-            _hb_c2.close()
-        except Exception:
-            pass
-
         # Update task status after run_turn completes
         _resp_str = str(resp or "")[:200]
         if agent.is_interrupted:
             update_task_status(task_id, "interrupted", _resp_str, interruption_reason="user")
         elif "MAX_ITERATIONS_REACHED" in _resp_str:
+            # Only increment resume_count for max_iterations — server restart,
+            # sandbox timeout, etc. should not count toward the limit.
+            try:
+                _hb_c2 = sqlite3.connect(DB_PATH)
+                _hb_c2.execute("UPDATE tasks SET resume_count = resume_count + 1 WHERE id=?", (task_id,))
+                _hb_c2.commit()
+                _hb_c2.close()
+            except Exception:
+                pass
             update_task_status(task_id, "interrupted", _resp_str, interruption_reason="max_iterations")
         elif _resp_str.startswith("[TASK_BACKGROUNDED]"):
             try:
@@ -5151,6 +5286,7 @@ def _guardian_resume_task(task_id: int) -> None:
             update_task_status(task_id, "interrupted", _resp_str, interruption_reason="error")
         else:
             save_task_context(task_id, agent.messages[1:])
+            _record_task_deliverables(task_id)
             update_task_status(task_id, "completed", _resp_str)
     except Exception as e:
         print(f"[Guardian] Resume #{task_id} error: {e}")

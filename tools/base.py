@@ -50,11 +50,14 @@ class BaseTool(BaseModel):
         if sandbox_dir is None:
             sandbox_dir = config.get("sandbox_dir",
                 os.path.abspath(os.path.join(os.getcwd(), "workspace")))
-        abs_path = os.path.abspath(path)
+        # Normalize case for cross-platform path comparison (critical on Windows:
+        # "D:\\AndroidSDK" and "d:\\androidsdk" should match)
+        abs_path = os.path.normcase(os.path.abspath(path))
+        norm_sandbox = os.path.normcase(sandbox_dir)
 
         # Allow paths directly under sandbox_dir
         try:
-            if os.path.commonpath([sandbox_dir, abs_path]) == sandbox_dir:
+            if os.path.commonpath([norm_sandbox, abs_path]) == norm_sandbox:
                 return
         except ValueError:
             pass
@@ -69,7 +72,7 @@ class BaseTool(BaseModel):
         for dp in denied_paths:
             if not dp:
                 continue
-            denied_abs = os.path.abspath(os.path.expandvars(dp))
+            denied_abs = os.path.normcase(os.path.abspath(os.path.expandvars(dp)))
             try:
                 if os.path.commonpath([denied_abs, abs_path]) == denied_abs:
                     raise SandboxBlocked(path, sandbox_dir, tool_name)
@@ -88,7 +91,7 @@ class BaseTool(BaseModel):
         for ap in allowed_paths:
             if not ap:
                 continue
-            allowed_abs = os.path.abspath(os.path.expandvars(ap))
+            allowed_abs = os.path.normcase(os.path.abspath(os.path.expandvars(ap)))
             try:
                 if os.path.commonpath([allowed_abs, abs_path]) == allowed_abs:
                     return
@@ -100,7 +103,7 @@ class BaseTool(BaseModel):
         # Allow paths in the session whitelist (one-time approvals)
         if session_whitelist:
             for wp in session_whitelist:
-                wp_abs = os.path.abspath(os.path.expandvars(wp))
+                wp_abs = os.path.normcase(os.path.abspath(os.path.expandvars(wp)))
                 try:
                     if os.path.commonpath([wp_abs, abs_path]) == wp_abs:
                         return

@@ -333,8 +333,17 @@ export async function openTaskDetail(taskId) {
       <div class="detail-section">
         <div class="detail-section-title">长期任务状态</div>
         <div class="detail-content-block">
-          <div><strong>已恢复:</strong> ${task.resume_count || 0} / ${task.max_resume_count || 10} 次</div>
           <div><strong>中断原因:</strong> ${task.interruption_reason === 'max_iterations' ? '⚠️ 循环上限' : task.interruption_reason === 'user' ? '🛑 用户中断' : task.interruption_reason || '—'}</div>
+        </div>
+      </div>`;
+    }
+    // Show resume count for ALL task types
+    if (task.resume_count > 0) {
+      scheduleSection += `
+      <div class="detail-section">
+        <div class="detail-section-title">恢复统计</div>
+        <div class="detail-content-block">
+          <div><strong>已自动恢复:</strong> ${task.resume_count} / ${task.max_resume_count || 10} 次</div>
         </div>
       </div>`;
     }
