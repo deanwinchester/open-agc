@@ -5324,7 +5324,7 @@ def start_guardian_loop():
                 interval = cfg.get("heartbeat_interval", 180)
 
                 conn = sqlite3.connect(DB_PATH)
-                if conn.execute("SELECT 1 FROM tasks WHERE status='running' LIMIT 1").fetchone():
+                if conn.execute("SELECT 1 FROM tasks WHERE status='running' AND task_type NOT IN ('heartbeat', 'todo_resume') LIMIT 1").fetchone():
                     conn.close()
                     _time.sleep(max(interval, 10))
                     continue
