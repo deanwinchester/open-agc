@@ -43,6 +43,7 @@ from tools.shell_interact import ShellSendTool
 from tools.sandbox import EnterWorktreeTool, ExitWorktreeTool
 from tools.self_review import SelfReviewTool
 from tools.task_plan import TaskPlanTool, format_plan_for_prompt, load_plan
+from tools.task_manager import TaskManagerTool
 from tools.system_config import ConfigureSystemTool
 from tools.plugin_dev import DevelopPluginTool
 from tools.reader_lm import ReaderLMTool
@@ -314,6 +315,12 @@ class OpenAGCAgent:
             f"优先使用 browser_automation（虚拟浏览器）工具的 upload 动作将文件填入网页。"
             f"如果遇到必须通过操作系统原生文件选择框处理的情况，"
             f"可临时使用 computer_control（键鼠控制工具）来操作系统的上传弹窗。\n"
+            f"\n## 任务管理\n"
+            f"使用 manage_task 工具查看现有任务、搜索历史任务、查看详情和交付物:\n"
+            f"- list → 列出最近任务（可按状态筛选）\n"
+            f"- search → 按关键词搜索历史任务\n"
+            f"- get → 查看任务详情、步骤和交付物\n"
+            f"- record_deliverable → 记录任务交付物\n"
             f"\n## 任务计划与待办管理\n"
             f"对于多步骤的复杂任务，使用 manage_task_plan 工具管理：\n"
             f"\n"
@@ -405,6 +412,7 @@ class OpenAGCAgent:
             "develop_plugin": DevelopPluginTool(),
             "shell_send": ShellSendTool(),
             "manage_task_plan": TaskPlanTool(),
+            "manage_task": TaskManagerTool(),
             "parse_html": ReaderLMTool(),
         }
 
@@ -439,6 +447,7 @@ class OpenAGCAgent:
             "develop_plugin": "插件开发",
             "shell_send": "交互命令输入",
             "manage_task_plan": "管理任务计划",
+            "manage_task": "查看和管理任务",
             "parse_html": "HTML 转 Markdown",
         }
 
@@ -2016,6 +2025,14 @@ class OpenAGCAgent:
                                         # User denied or timeout — return error
                                         tool_success = False
                                         break
+                                    # User approved — notify server to persist this approval
+                                    # so it survives agent recreation on task resume
+                                    if progress_callback:
+                                        progress_callback({
+                                            "event": "sandbox_approved",
+                                            "path": sb.path,
+                                            "session_id": self.session_id,
+                                        })
                                     # User approved — retry the tool call
                                     continue
                                 except Exception as e:
