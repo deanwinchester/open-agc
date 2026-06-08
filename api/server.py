@@ -5219,6 +5219,7 @@ def _guardian_resume_task(task_id: int) -> None:
 
         cfg = load_config()
         model = cfg.get("default_model", "moonshot/kimi-latest")
+        print(f"[Guardian] Resume #{task_id}: model={model}")
         from agent.agent import OpenAGCAgent
 
         # Look up session_id BEFORE creating agent, so sandbox auth (_sandbox_waits)
@@ -5231,21 +5232,27 @@ def _guardian_resume_task(task_id: int) -> None:
             _hb_c.close()
         except Exception:
             pass
+        print(f"[Guardian] Resume #{task_id}: session={_hb_session}")
 
         agent = OpenAGCAgent(model=model, session_id=_hb_session)
         _apply_pending_sandbox_approvals(agent, _hb_session)
         try:
             ctx = get_task_context(task_id)
             if ctx:
+                print(f"[Guardian] Resume #{task_id}: loaded context ({len(ctx)} msgs)")
                 # Trim context to avoid 138K token first call: keep first 2 + last 15 msgs
                 if len(ctx) > 20:
                     total_chars = sum(len(m.get("content", "") or "") for m in ctx)
                     if total_chars > 20000:
                         ctx = ctx[:2] + ctx[-15:]
+                        print(f"[Guardian] Resume #{task_id}: trimmed to {len(ctx)} msgs ({total_chars} chars)")
                 agent.messages.extend(ctx)
-        except Exception:
-            pass
+            else:
+                print(f"[Guardian] Resume #{task_id}: no context found")
+        except Exception as e:
+            print(f"[Guardian] Resume #{task_id}: context error: {e}")
         update_task_status(task_id, "running")
+        print(f"[Guardian] Resume #{task_id}: status set to running, starting run_turn...")
 
         def _hb_cb(e):
             if e.get("event") == "tool_start":
@@ -5262,6 +5269,7 @@ def _guardian_resume_task(task_id: int) -> None:
 
         _background_agents[task_id] = agent
         try:
+            print(f"[Guardian] Resume #{task_id}: calling agent.run_turn()...")
             resp = agent.run_turn(
                 "【系统恢复】之前执行中断，请继续完成原任务目标。",
                 verbose=False,
@@ -5269,16 +5277,20 @@ def _guardian_resume_task(task_id: int) -> None:
                 skip_rag=True,
                 task_id=task_id,
             )
+            print(f"[Guardian] Resume #{task_id}: run_turn returned ({len(str(resp or ''))} chars)")
+        except Exception as _rt_err:
+            print(f"[Guardian] Resume #{task_id}: run_turn crashed: {_rt_err}")
+            resp = None
         finally:
             _background_agents.pop(task_id, None)
 
         # Update task status after run_turn completes
         _resp_str = str(resp or "")[:200]
+        print(f"[Guardian] Resume #{task_id}: response prefix: {_resp_str[:100]}")
         if agent.is_interrupted:
             update_task_status(task_id, "interrupted", _resp_str, interruption_reason="user")
         elif "MAX_ITERATIONS_REACHED" in _resp_str:
-            # Only increment resume_count for max_iterations — server restart,
-            # sandbox timeout, etc. should not count toward the limit.
+            print(f"[Guardian] Resume #{task_id}: hit max_iterations again")
             try:
                 _hb_c2 = sqlite3.connect(DB_PATH)
                 _hb_c2.execute("UPDATE tasks SET resume_count = resume_count + 1 WHERE id=?", (task_id,))
@@ -5324,19 +5336,25 @@ def start_guardian_loop():
                 interval = cfg.get("heartbeat_interval", 180)
 
                 conn = sqlite3.connect(DB_PATH)
-                if conn.execute("SELECT 1 FROM tasks WHERE status='running' AND task_type NOT IN ('heartbeat', 'todo_resume') LIMIT 1").fetchone():
+                _running_count = conn.execute("SELECT COUNT(*) FROM tasks WHERE status='running' AND task_type NOT IN ('heartbeat', 'todo_resume')").fetchone()[0]
+                if _running_count > 0:
+                    print(f"[Guardian] {_running_count} real task(s) running, skipping")
                     conn.close()
                     _time.sleep(max(interval, 10))
                     continue
                 row = conn.execute(
-                    "SELECT id FROM tasks WHERE status='interrupted' AND resume_count < max_resume_count AND (interruption_reason IS NULL OR interruption_reason != 'user') ORDER BY updated_at DESC LIMIT 1"
+                    "SELECT id, status, interruption_reason, resume_count, max_resume_count, updated_at FROM tasks WHERE status='interrupted' AND resume_count < max_resume_count AND (interruption_reason IS NULL OR interruption_reason != 'user') ORDER BY updated_at DESC LIMIT 1"
                 ).fetchone()
-                conn.close()
+                if not row:
+                    print(f"[Guardian] No interrupted task to resume")
+                    conn.close()
+                    _time.sleep(max(interval, 10))
+                    continue
 
-                if row:
-                    tid = row[0]
-                    print(f"[Guardian] Found interrupted task #{tid}, resuming...")
-                    _guardian_resume_task(tid)
+                tid, t_status, t_reason, t_rc, t_max_rc, t_updated = row
+                print(f"[Guardian] Found task #{tid}: status={t_status} reason={t_reason} resume_count={t_rc}/{t_max_rc} updated={t_updated}")
+                conn.close()
+                _guardian_resume_task(tid)
 
                 _time.sleep(max(interval, 10))
             except Exception as e:
