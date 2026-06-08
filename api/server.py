@@ -3292,8 +3292,19 @@ async def kill_task_process(task_id: int):
     pid = pinfo.get("pid")
     if not pid:
         raise HTTPException(status_code=404, detail="No PID found")
-    result = _kill_process_on_platform(pid)
     command = pinfo.get("command", "")[:200]
+    out_file = pinfo.get("output_file", "")
+
+    # Read the output file first — pass results to the agent before killing
+    full_out = ""
+    if out_file and os.path.exists(out_file):
+        try:
+            with open(out_file, "r", encoding="utf-8", errors="replace") as _rf:
+                full_out = _rf.read()[-5000:]
+        except Exception:
+            pass
+
+    result = _kill_process_on_platform(pid)
     cleanup_background_process(str(task_id))
     update_task_status(task_id, "interrupted",
                        f"进程 (PID {pid}) 已被用户手动终止。",
@@ -3310,11 +3321,11 @@ async def kill_task_process(task_id: int):
         if task_row and task_row["status"] in ("backgrounded", "running"):
             ctx = get_task_context(task_id)
             if ctx:
-                ctx.append({"role": "user", "content": (
-                    f"【系统通知】你手动终止了后台进程 (PID {pid})。\n"
-                    f"命令: {command}\n"
-                    f"该进程已被终止，请根据当前情况继续任务。"
-                )})
+                msg = f"【系统通知】你手动终止了后台进程 (PID {pid})。\n命令: {command}\n"
+                if full_out:
+                    msg += f"进程的已有输出:\n```\n{full_out[:2000]}\n```\n"
+                msg += "该进程已被终止，请根据已有结果继续执行任务。"
+                ctx.append({"role": "user", "content": msg})
                 save_task_context(task_id, ctx)
                 print(f"[Process] Task {task_id} process (PID {pid}) killed by user — resuming agent")
                 # Resume via background task directly (not _direct_resume_background_task
