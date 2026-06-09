@@ -47,6 +47,7 @@ from tools.task_manager import TaskManagerTool
 from tools.system_config import ConfigureSystemTool
 from tools.plugin_dev import DevelopPluginTool
 from tools.reader_lm import ReaderLMTool
+from tools.compact_context import CompactContextTool
 
 
 def _detect_system_env() -> str:
@@ -159,6 +160,7 @@ class OpenAGCAgent:
                  logger: Optional[SessionLogger] = None,
                  pre_enabled_tools: Optional[set] = None):
         self.session_id = session_id
+        self.failed_attempts = []
         self._consecutive_failures = 0
         self._correction_attempts = 0
         self._max_correction_attempts = 5
@@ -414,6 +416,7 @@ class OpenAGCAgent:
             "manage_task_plan": TaskPlanTool(),
             "manage_task": TaskManagerTool(),
             "parse_html": ReaderLMTool() if ReaderLMTool.is_available() else None,
+            "compact_context": CompactContextTool(),
         }
 
         # Add to core tool names so it's always available
@@ -437,6 +440,7 @@ class OpenAGCAgent:
             "send_email": "发送邮件",
             "queue_download": "下载文件",
             "search_available_tools": "检索扩展工具",
+            "compact_context": "清理上下文历史",
             "ask_user_question": "向用户提问",
             "search_history": "检索会话历史",
             "pause_and_wait": "暂停并等待后台完成",
@@ -536,7 +540,7 @@ class OpenAGCAgent:
                        "search_file_content", "find_files", "execute_python",
                        "search_web", "manage_memory", "ask_user_question",
                        "search_history", "queue_download", "pause_and_wait",
-                       "self_review", "search_available_tools", "configure_system"}
+                       "self_review", "search_available_tools", "configure_system", "compact_context"}
         core_items = []
         ext_items = []
         for name, tool in sorted(self.full_available_tools.items()):
@@ -1307,7 +1311,7 @@ class OpenAGCAgent:
         def _line_score(line: str) -> int:
             low = line.lower()
             score = 0
-            if any(kw in low for kw in ("error", "exception", "traceback", "fail", "trace ")):
+            if any(kw in low for kw in ("error", "exception", "traceback", "fail", "trace ", "fatal", "warning", "cannot", "not found", "denied", "unexpected", "syntaxerror", "command not found")):
                 score += 5
             if any(kw in low for kw in ("exit code", "returncode", "status", "result")):
                 score += 3
@@ -1388,7 +1392,7 @@ class OpenAGCAgent:
             return self._compress_file_content(result)
         return self._compress_shell_output(result, tool_name)
 
-    def _fold_tool_calls(self, messages: List[Dict]) -> List[Dict]:
+    def _fold_tool_calls(self, messages: List[Dict], force: bool = False) -> List[Dict]:
         """Fold consecutive tool-call rounds exceeding the threshold into a summary.
 
         Long chains of tool_call → tool_result → tool_call → tool_result consume
@@ -1412,7 +1416,10 @@ class OpenAGCAgent:
             else:
                 i += 1
 
-        if len(bounds) <= FOLD_AFTER_N:
+        if len(bounds) <= FOLD_AFTER_N and not force:
+            return messages
+            
+        if force and len(bounds) <= KEEP_LAST_N:
             return messages
 
         fold_bounds = bounds[:-KEEP_LAST_N]   # rounds to summarise
@@ -1432,15 +1439,17 @@ class OpenAGCAgent:
                 except Exception:
                     args = {}
                 preview = ", ".join(
-                    f"{k}={str(v)[:40]}" for k, v in list(args.items())[:2]
+                    f"{k}={str(v)[:80]}" for k, v in list(args.items())[:2]
                 )
                 summary_lines.append(f"  {idx}. {name}({preview})")
             # Check tool results in this round for errors
             for j in range(start + 1, end):
                 content = str(messages[j].get("content", ""))
-                if content.startswith("Error") or "traceback" in content.lower()[:300]:
+                low_content = content.lower()
+                if content.startswith("Error") or "traceback" in low_content[:300] or "system guard" in low_content[:50]:
                     if summary_lines:
-                        summary_lines[-1] += " ⚠️"
+                        error_snippet = content.split('\n')[0][:100].strip()
+                        summary_lines[-1] += f" ⚠️ [Failed: {error_snippet}]"
 
         cut_idx = fold_bounds[0][0]          # first message of the oldest folded round
         keep_idx = keep_bounds[0][0]          # first message of the first kept round
@@ -1540,6 +1549,11 @@ class OpenAGCAgent:
                 experience_context=experience_context,
                 kg_context=kg_context,
             )
+            
+            if hasattr(self, 'failed_attempts') and self.failed_attempts:
+                attempts_str = "\n".join([f"- {attempt}" for attempt in self.failed_attempts])
+                system_content += f"\n\n## 历史失败尝试记录 (避坑指南)\n你过去曾尝试过以下操作但失败了，**请仔细分析原因，绝对不要原样重复**：\n{attempts_str}\n"
+
             # Inject task plan if task_id is set
             if self.task_id:
                 try:
@@ -1929,7 +1943,9 @@ class OpenAGCAgent:
                     tool_instance = self.available_tools.get(function_name)
                     
                     # Tool Loop Detection Check
-                    call_signature = f"{function_name}:{function_args}"
+                    import re as _re
+                    normalized_args = _re.sub(r'\s+', ' ', str(function_args)).strip()
+                    call_signature = f"{function_name}:{normalized_args}"
                     call_hash = hashlib.md5(call_signature.encode('utf-8')).hexdigest()
                     self._recent_tool_calls.append(call_hash)
 
@@ -2143,15 +2159,23 @@ class OpenAGCAgent:
                     is_failure = not tool_success or result_str.startswith("Error") or result_str.startswith("System Guard") or result_str.startswith("Sandbox")
                     if is_failure:
                         self._consecutive_failures += 1
+                        
+                        if not hasattr(self, 'failed_attempts'):
+                            self.failed_attempts = []
+                        attempt_desc = f"`{function_name}`({args_preview}) => {result_str.split(chr(10))[0][:150]}"
+                        if not self.failed_attempts or self.failed_attempts[-1] != attempt_desc:
+                            self.failed_attempts.append(attempt_desc)
+                            if len(self.failed_attempts) > 15:
+                                self.failed_attempts.pop(0)
                     else:
                         self._consecutive_failures = 0
 
                     if self._consecutive_failures == 3 and current_iter < max_iterations:
                         reminder = (
-                            f"[系统提醒] 你已连续 {self._consecutive_failures} 次工具调用失败。"
-                            f"请暂停当前操作，回顾原始用户需求：「{user_input}」。"
+                            f"[系统提醒] 你已连续 {self._consecutive_failures} 次工具调用失败。\n"
+                            f"请暂停当前操作，回顾原始用户需求：「{user_input}」。\n"
+                            f"**在执行下一个工具动作之前，你必须先输出一段文字，反思为什么之前的尝试会失败，并说明接下来的新策略与之前的有何不同。**\n"
                             f"如果当前方法不可行，请尝试完全不同的策略，或向用户报告当前进展并询问下一步指令。"
-                            f"不要无意义地重复搜索或浏览——如果目标网站无法访问，直接告知用户。"
                         )
                         self.messages.append({"role": "user", "content": reminder})
                         if verbose:
@@ -2172,29 +2196,32 @@ class OpenAGCAgent:
                         ]
                     })
 
-                # Context budget: prune messages if approaching token limit
+                # Autocompact: Trigger compression only when nearing token limits to protect Warm Cache
                 try:
-                    pruned = self.token_budget.prune_messages(self.messages)
-                    if len(pruned) < len(self.messages):
-                        pruned_count = len(self.messages) - len(pruned)
+                    from core.token_budget import estimate_messages_tokens
+                    current_tokens = estimate_messages_tokens(self.messages)
+                    # Trigger autocompact at 90% of max budget
+                    budget_threshold = self.token_budget.max_tokens * 0.9
+
+                    if current_tokens > budget_threshold:
                         if verbose:
-                            print(f"[Agent] Budget pruned {pruned_count} messages")
+                            print(f"[Agent] Token warning ({current_tokens}/{self.token_budget.max_tokens}), triggering autocompact...")
+                        
+                        # 1. Micro-compression via token_budget (replaces verbose tool results)
+                        pruned = self.token_budget.prune_messages(self.messages)
+                        
+                        # 2. Heavy compression via fold_tool_calls if still over 80% limit after micro-compression
+                        if estimate_messages_tokens(pruned) > self.token_budget.max_tokens * 0.8:
+                            folded = self._fold_tool_calls(pruned, force=True)
+                            if len(folded) < len(pruned):
+                                if verbose:
+                                    print(f"[Agent] Forced tool-call folding to save tokens")
+                                pruned = folded
+                        
                         self.messages = pruned
                 except Exception as e:
                     if verbose:
-                        print(f"[Agent] Budget pruning error: {e}")
-
-                # Fold excessive tool call rounds into a summary
-                try:
-                    folded = self._fold_tool_calls(self.messages)
-                    if len(folded) < len(self.messages):
-                        folded_count = len(self.messages) - len(folded)
-                        if verbose:
-                            print(f"[Agent] Folded {folded_count} tool-call messages")
-                        self.messages = folded
-                except Exception as e:
-                    if verbose:
-                        print(f"[Agent] Tool folding error: {e}")
+                        print(f"[Agent] Autocompact error: {e}")
 
                 # After appending all tool results, the loop continues to send them back to LLM
                 continue
