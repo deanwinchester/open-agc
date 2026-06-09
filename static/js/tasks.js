@@ -343,7 +343,10 @@ export async function openTaskDetail(taskId) {
       <div class="detail-section">
         <div class="detail-section-title">恢复统计</div>
         <div class="detail-content-block">
-          <div><strong>已自动恢复:</strong> ${task.resume_count} / ${task.max_resume_count || 10} 次</div>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <span><strong>已自动恢复:</strong> ${task.resume_count} / ${task.max_resume_count || 10} 次</span>
+            <button class="btn-reset-resume" data-task-id="${task.id}" style="font-size:0.75rem;padding:0.2rem 0.6rem;background:var(--accent-color);color:white;border:none;border-radius:4px;cursor:pointer;">重置重试次数</button>
+          </div>
         </div>
       </div>`;
     }
@@ -564,6 +567,20 @@ export async function openTaskDetail(taskId) {
     if (task.status === 'running' || task.status === 'detached') {
       loadProcessInfo(taskId, content);
     }
+
+    // Wire up reset-resume button
+    content.querySelector('.btn-reset-resume')?.addEventListener('click', async function() {
+      const tid = parseInt(this.dataset.taskId);
+      if (!confirm('确定重置此任务的自动重试次数？')) return;
+      try {
+        const resp = await fetch('/api/tasks/' + tid + '/reset-resume', { method: 'POST' });
+        const data = await resp.json();
+        alert(data.message || '已重置');
+        openTaskDetail(tid);  // Refresh
+      } catch (e) {
+        alert('重置失败: ' + e.message);
+      }
+    });
 
     // Wire up resume button
     content.querySelector('.btn-resume-task-detail')?.addEventListener('click', function() {

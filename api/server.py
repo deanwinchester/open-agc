@@ -3092,6 +3092,20 @@ async def delete_task(task_id: int):
         pass
     return {"status": "success", "message": "Task deleted"}
 
+
+@app.post("/api/tasks/{task_id}/reset-resume")
+async def reset_task_resume(task_id: int):
+    """Reset the auto-resume counter for a task."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE tasks SET resume_count=0, updated_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
+        conn.commit()
+        conn.close()
+        return {"status": "success", "message": f"任务 #{task_id} 的自动重试次数已重置"}
+    except Exception as e:
+        return {"status": "error", "message": f"重置失败: {e}"}
+
+
 # ==========================================
 # Scheduled Task API
 # ==========================================

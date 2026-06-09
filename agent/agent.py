@@ -413,7 +413,7 @@ class OpenAGCAgent:
             "shell_send": ShellSendTool(),
             "manage_task_plan": TaskPlanTool(),
             "manage_task": TaskManagerTool(),
-            "parse_html": ReaderLMTool(),
+            "parse_html": ReaderLMTool() if ReaderLMTool.is_available() else None,
         }
 
         # Add to core tool names so it's always available
@@ -462,7 +462,7 @@ class OpenAGCAgent:
         for tool_name, tool_instance in loaded.items():
             if tool_name not in self.full_available_tools:
                 self.full_available_tools[tool_name] = tool_instance
-                self.tool_display_names[tool_name] = tool_instance.description[:20]
+                self.tool_display_names[tool_name] = (tool_instance.description or self.name)[:20]
 
         # Load MCP tools
         try:
@@ -509,7 +509,7 @@ class OpenAGCAgent:
                     self.available_tools[name] = self.full_available_tools[name]
                     added = True
             if added:
-                self.tool_schemas = [tool.get_openai_schema() for tool in self.available_tools.values()]
+                self.tool_schemas = [tool.get_openai_schema() for tool in self.available_tools.values() if tool is not None]
                 
         self.full_available_tools["search_available_tools"] = ToolDiscoveryTool(
             full_tools=self.full_available_tools, 
@@ -519,7 +519,7 @@ class OpenAGCAgent:
         self.available_tools = {name: self.full_available_tools[name] for name in self.active_tool_names if name in self.full_available_tools}
 
         # Prepare OpenAI format tool schema
-        self.tool_schemas = [tool.get_openai_schema() for tool in self.available_tools.values()]
+        self.tool_schemas = [tool.get_openai_schema() for tool in self.available_tools.values() if tool is not None]
 
         # Refresh system prompt with full tool list now that full_available_tools is ready
         self.messages[0]["content"] = self._build_system_prompt()
@@ -1066,7 +1066,7 @@ class OpenAGCAgent:
             return False
         self.available_tools[tool_name] = tool_instance
         self.tool_display_names[tool_name] = tool_instance.description[:20]
-        self.tool_schemas = [t.get_openai_schema() for t in self.available_tools.values()]
+        self.tool_schemas = [t.get_openai_schema() for t in self.available_tools.values() if t is not None]
         return True
 
     def _auto_generate_tool(self, task_input: str, trajectory, llm_client) -> Optional[str]:
@@ -1704,9 +1704,9 @@ class OpenAGCAgent:
         # Tool loop detection state
         self._recent_tool_calls: list = []
         MAX_REPEATED_TOOL_CALLS = 3
-        effective_max = max_iterations + (self._max_correction_attempts if self._max_correction_attempts > 0 else 0)
+        effective_max = max_iterations  # self-review has separate budget via _correction_attempts
 
-        while current_iter < effective_max:
+        while current_iter < max_iterations or (self._in_self_review and self._correction_attempts < self._max_correction_attempts):
             if self.is_interrupted:
                 self._record_skill_feedback(success=False, task_input=user_input,
                                             duration=_time.time() - _task_start)
@@ -1721,9 +1721,11 @@ class OpenAGCAgent:
                 if verbose:
                     print(f"[Agent] Injected pending message: {injected[:80]}")
 
-            current_iter += 1
+            if not self._in_self_review:
+                current_iter += 1
             if verbose:
-                print(f"[Agent Loop Iteration {current_iter}/{max_iterations}] Calling LLM...")
+                label = f"{current_iter}/{max_iterations}" if not self._in_self_review else f"自纠{self._correction_attempts}/{self._max_correction_attempts}"
+                print(f"[Agent Loop Iteration {label}] Calling LLM...")
 
             # Check if self-review decided to stop — inject final answer request (before review prompt)
             if self._should_stop and not self._in_self_review:
@@ -1737,7 +1739,7 @@ class OpenAGCAgent:
                 self._should_stop = False
 
             # Max iterations reached — inject self-review prompt
-            if current_iter > max_iterations and self._max_correction_attempts > 0 and not self._in_self_review:
+            if current_iter >= max_iterations and self._max_correction_attempts > 0 and not self._in_self_review:
                 remaining = self._max_correction_attempts - self._correction_attempts
                 if remaining > 0:
                     self._in_self_review = True
@@ -2262,10 +2264,10 @@ class OpenAGCAgent:
                 for h in self._self_review_history[-3:]
             )
             return (
-                f"[MAX_ITERATIONS_REACHED] Agent stopped after {self._correction_attempts} correction attempts. "
+                f"[MAX_ITERATIONS_REACHED] Agent stopped after {current_iter} iterations and {self._correction_attempts} correction attempts. "
                 f"Review history: {summaries}"
             )
-        return "[MAX_ITERATIONS_REACHED] Agent stopped: Reached maximum iterations without a final answer. The task may be incomplete."
+        return f"[MAX_ITERATIONS_REACHED] Agent stopped: Reached maximum iterations ({current_iter}) without a final answer ({self._correction_attempts}/{self._max_correction_attempts} corrections used). The task may be incomplete."
 
     def _classify_task_category(self, user_input: str) -> str:
         """Return the category name for a user input (for stats tracking)."""
