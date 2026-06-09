@@ -8,6 +8,83 @@ import requests
 from typing import Any, Dict, Optional
 from tools.base import BaseTool
 
+
+def _check_hardware() -> tuple:
+    """Check if hardware meets Reader-lm requirements.
+    Returns (ok: bool, reason: str)."""
+    # 1. Available disk space in models directory
+    try:
+        from core.paths import get_data_dir
+        models_dir = os.path.join(get_data_dir(), "models")
+        os.makedirs(models_dir, exist_ok=True)
+        if sys.platform == "win32":
+            free_bytes = 0
+            try:
+                import ctypes
+                free_bytes = ctypes.c_ulonglong(0)
+                ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+                    ctypes.c_wchar_p(models_dir), None, None, ctypes.pointer(free_bytes)
+                )
+                free_bytes = free_bytes.value
+            except Exception:
+                free_bytes = 0
+            if free_bytes > 0 and free_bytes < 1_000_000_000:  # 1GB minimum
+                return False, f"磁盘空间不足（{free_bytes // (1024**3)}GB 可用），Reader-lm 需要至少 1GB 空闲空间"
+        else:
+            stat = os.statvfs(models_dir)
+            free_bytes = stat.f_frsize * stat.f_bavail
+            if free_bytes < 1_000_000_000:
+                return False, f"磁盘空间不足（{free_bytes // (1024**3)}GB 可用），Reader-lm 需要至少 1GB 空闲空间"
+    except Exception:
+        pass  # Skip disk check if we can't determine
+
+    # 2. Memory check (using psutil if available)
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        if mem.total < 2_000_000_000:  # 2GB minimum total RAM
+            return False, f"内存不足（{mem.total // (1024**3)}GB），Reader-lm 需要至少 2GB 内存"
+        if mem.available < 500_000_000:  # 500MB minimum available
+            return False, f"可用内存不足（{mem.available // (1024**2)}MB），Reader-lm 需要至少 500MB 可用内存"
+    except ImportError:
+        pass  # psutil not installed, skip memory check
+
+    # 3. CPU check -- at least 2 cores
+    try:
+        cpu_count = os.cpu_count() or 0
+        if cpu_count < 2:
+            return False, f"CPU 核心数不足（{cpu_count}核），Reader-lm 需要至少 2 核 CPU"
+    except Exception:
+        pass
+
+    # 4. Architecture check -- must be 64-bit
+    is_64bit = sys.maxsize > 2**32
+    if not is_64bit:
+        return False, "Reader-lm 需要 64 位操作系统"
+
+    # 5. GPU check (optional -- Reader-lm 默认 CPU 运行)
+    try:
+        import subprocess as _sp
+        _r = _sp.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+                     capture_output=True, text=True, timeout=5)
+        if _r.returncode == 0 and _r.stdout.strip():
+            for _l in _r.stdout.strip().split("\n"):
+                _p = _l.split(",")
+                if len(_p) >= 2:
+                    try:
+                        _mn = int(_p[1].replace("MiB", "").strip())
+                        if _mn < 1024:
+                            return False, f"GPU 显存不足（{_p[0].strip()} {_p[1].strip()}），Reader-lm 需要至少 1GB 显存"
+                    except Exception:
+                        pass
+    except Exception:
+        pass  # nvidia-smi not available, GPU check skipped
+
+    return True, ""
+
+# Pre-compute hardware capability at module load time
+_HARDWARE_OK, _HARDWARE_REASON = _check_hardware()
+
 _READER_LM_MODEL = "reader-lm-0.5b.Q8_0.gguf"
 _READER_LM_PORT = 8082
 _READER_LM_SERVER: Optional[subprocess.Popen] = None
@@ -202,6 +279,10 @@ class ReaderLMTool(BaseTool):
         "注意：首次调用会自动下载模型（约 500MB），会提示等待。"
     )
 
+    @staticmethod
+    def is_available() -> bool:
+        return _HARDWARE_OK
+
     def execute(self, html: str = "", file_path: str = "", url: str = "", save_path: str = "", **kwargs) -> str:
         agent_ctx = kwargs.get("_agent_context")
 
@@ -261,6 +342,8 @@ class ReaderLMTool(BaseTool):
         return result
 
     def get_openai_schema(self) -> dict:
+        if not _HARDWARE_OK:
+            return None
         return {
             "type": "function",
             "function": {
