@@ -4058,6 +4058,7 @@ async def websocket_endpoint(websocket: WebSocket):
             
             # Inject previous session history
             if session_history:
+                session_history = [{k:v for k,v in m.items() if k != '_timestamp'} for m in session_history]
                 agent.messages.extend(session_history)
             
             loop = asyncio.get_event_loop()
@@ -4814,6 +4815,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     
     # Inject saved context if resuming
     if context_messages:
+        context_messages = [{k:v for k,v in m.items() if k != '_timestamp'} for m in context_messages]
         agent.messages.extend(context_messages)
 
     query = user_query
@@ -5298,6 +5300,7 @@ def _guardian_resume_task(task_id: int) -> None:
                     if total_chars > 20000:
                         ctx = ctx[:2] + ctx[-15:]
                         print(f"[Guardian] Resume #{task_id}: trimmed to {len(ctx)} msgs ({total_chars} chars)")
+                ctx = [{k:v for k,v in m.items() if k != '_timestamp'} for m in ctx]
                 agent.messages.extend(ctx)
             else:
                 print(f"[Guardian] Resume #{task_id}: no context found")
