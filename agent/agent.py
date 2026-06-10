@@ -1405,8 +1405,8 @@ class OpenAGCAgent:
         context window without adding decision value.  Older rounds are replaced
         by a concise execution log.
         """
-        FOLD_AFTER_N = 8       # total rounds before folding kicks in
-        KEEP_LAST_N = 4        # always keep this many most-recent rounds intact
+        FOLD_AFTER_N = 30       # total rounds before folding kicks in
+        KEEP_LAST_N = 20        # always keep this many most-recent rounds intact
 
         # Identify tool-call round boundaries [(start, end), ...]
         bounds: List[tuple] = []
