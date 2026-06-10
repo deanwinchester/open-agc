@@ -1422,6 +1422,8 @@ class OpenAGCAgent:
             else:
                 i += 1
 
+        import sys as _dbg2
+        print(f"[DBG] _fold_tool_calls: {len(bounds)} bounds, force={force}, FOLD_AFTER_N={FOLD_AFTER_N}, KEEP_LAST_N={KEEP_LAST_N}", file=_dbg2.stderr, flush=True)
         if len(bounds) <= FOLD_AFTER_N and not force:
             return messages
             
@@ -1496,7 +1498,10 @@ class OpenAGCAgent:
                         rounds.append((start, i))
                 else:
                     i += 1
+            import sys as _dbg3
+            print(f"[DBG] _llm_summarize: {len(rounds)} rounds, max_rounds={max_rounds_to_summarize}", file=_dbg3.stderr, flush=True)
             if len(rounds) <= 3:
+                print(f"[DBG] _llm_summarize: only {len(rounds)} rounds, skipping", file=_dbg3.stderr, flush=True)
                 return messages, False
             keep = 2
             n = min(max_rounds_to_summarize, len(rounds) - keep)
@@ -2300,6 +2305,9 @@ class OpenAGCAgent:
                                 print(f"[Agent] Time-based microcompact (ttl={_ttl}s)")
 
                     # --- Token Budget Compression ---
+                    import sys as _dbg_sys
+                    if current_tokens > budget_threshold * 0.7:  # log at 70% too
+                        print(f"[DBG] Budget: {current_tokens}/{self.token_budget.max_tokens} ({current_tokens/self.token_budget.max_tokens*100:.0f}%) threshold={budget_threshold}", file=_dbg_sys.stderr, flush=True)
                     if current_tokens > budget_threshold:
                         if verbose:
                             print(f"[Agent] Token warning ({current_tokens}/{self.token_budget.max_tokens}), triggering autocompact...")
@@ -2309,12 +2317,16 @@ class OpenAGCAgent:
                         if estimate_messages_tokens(pruned) > self.token_budget.max_tokens * 0.8:
                             llm_pruned, did = self._llm_summarize_old_rounds(pruned)
                             if did and len(llm_pruned) < len(pruned):
+                                import sys as _dbg5
+                                print(f"[DBG] LLM summary SUCCESS: {len(pruned)} -> {len(llm_pruned)} msgs", file=_dbg5.stderr, flush=True)
                                 if verbose:
                                     print(f"[Agent] LLM partial compact: {len(pruned)} -> {len(llm_pruned)} msgs")
                                 pruned = llm_pruned
                             else:
                                 folded = self._fold_tool_calls(pruned, force=True)
                                 if len(folded) < len(pruned):
+                                    import sys as _dbg4
+                                    print(f"[DBG] Fallback fold: {len(pruned)} -> {len(folded)} msgs", file=_dbg4.stderr, flush=True)
                                     pruned = folded
 
                         self.messages = pruned
