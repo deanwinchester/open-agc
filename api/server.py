@@ -1491,6 +1491,7 @@ class ConfigUpdate(BaseModel):
     max_correction_attempts: int = 5
     cold_cache_ttl: int = 3600
     max_resume_count: int = 10
+    max_total_tokens: int = 128000
 
 @app.get("/api/settings")
 async def get_settings(session_id: int = None):
@@ -1548,6 +1549,9 @@ async def get_settings(session_id: int = None):
         "searxng_url": config.get("searxng_url", ""),
         "searxng_port": config.get("searxng_port", 8888),
         "max_correction_attempts": config.get("max_correction_attempts", 5),
+        "cold_cache_ttl": config.get("cold_cache_ttl", 3600),
+        "max_resume_count": config.get("max_resume_count", 10),
+        "context_budget": config.get("context_budget", {"max_total_tokens": 128000}),
     }
 
 @app.post("/api/settings")
@@ -1620,6 +1624,11 @@ async def update_settings(config_update: ConfigUpdate):
         config["max_correction_attempts"] = config_update.max_correction_attempts
         config["cold_cache_ttl"] = config_update.cold_cache_ttl
         config["max_resume_count"] = config_update.max_resume_count
+        _budget = config.get("context_budget", {})
+        if not isinstance(_budget, dict):
+            _budget = {}
+        _budget["max_total_tokens"] = config_update.max_total_tokens
+        config["context_budget"] = _budget
         os.environ["SEARXNG_URL"] = config_update.searxng_url
 
         # Save per-session email config when session_id is provided

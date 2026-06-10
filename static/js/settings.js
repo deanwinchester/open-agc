@@ -43,6 +43,8 @@ export async function loadSettingsConfig() {
     if (coldCacheEl) coldCacheEl.value = data.cold_cache_ttl ?? 3600;
     const maxResumeEl = document.getElementById('max-resume-count-input');
     if (maxResumeEl) maxResumeEl.value = data.max_resume_count ?? 10;
+    const maxTokensEl = document.getElementById('max-total-tokens');
+    if (maxTokensEl) maxTokensEl.value = (data.context_budget?.max_total_tokens) ?? 128000;
     document.getElementById('http-proxy-input').value = data.http_proxy || '';
     document.getElementById('heartbeat-toggle').checked = data.heartbeat_enabled ?? false;
     const hbInterval = document.getElementById('heartbeat-interval');
@@ -318,7 +320,8 @@ async function saveSettings() {
     searxng_port: 8888,
     max_correction_attempts: parseInt(document.getElementById('max-correction-attempts')?.value) || 5,
     cold_cache_ttl: parseInt(document.getElementById('cold-cache-ttl')?.value) || 3600,
-    max_resume_count: parseInt(document.getElementById('max-resume-count-input')?.value) || 10
+    max_resume_count: parseInt(document.getElementById('max-resume-count-input')?.value) || 10,
+    max_total_tokens: parseInt(document.getElementById('max-total-tokens')?.value) || 128000
   };
 
   // Include current tool_permissions in save
