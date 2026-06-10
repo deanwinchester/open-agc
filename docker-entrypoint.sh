@@ -23,12 +23,12 @@ if [ -n "$LATEST_VER" ] && [ "$LATEST_VER" != "$CURRENT_VER" ]; then
         if [ -n "$EXTRACTED" ]; then
             echo "[Entrypoint] Applying v$LATEST_VER..."
             # Copy code files (merge, not replace)
-            for dir in core tools agent api plugins; do
+            for dir in core tools agent api plugins static skills; do
                 if [ -d "$EXTRACTED/$dir" ]; then
                     cp -r "$EXTRACTED/$dir/" "/app/$dir/" 2>/dev/null || true
                 fi
             done
-            for file in main.py launcher.py gui_app.py requirements.txt docker-entrypoint.sh; do
+            for file in main.py launcher.py gui_app.py package.json vite.config.mjs requirements.txt docker-entrypoint.sh; do
                 if [ -f "$EXTRACTED/$file" ]; then
                     cp "$EXTRACTED/$file" "/app/$file" 2>/dev/null || true
                 fi
@@ -39,6 +39,15 @@ if [ -n "$LATEST_VER" ] && [ "$LATEST_VER" != "$CURRENT_VER" ]; then
             if [ -f "$EXTRACTED/requirements.txt" ]; then
                 echo "[Entrypoint] Updating Python dependencies..."
                 pip install --no-cache-dir -r "$EXTRACTED/requirements.txt" 2>&1 || true
+            fi
+
+            # Rebuild frontend (npm run build)
+            if command -v npm >/dev/null 2>&1 && [ -f "/app/package.json" ]; then
+                echo "[Entrypoint] Rebuilding frontend..."
+                cd /app && npm install --no-audit --no-fund 2>&1 && npm run build 2>&1 || \
+                    echo "[Entrypoint] ⚠️ Frontend build failed (npm may be outdated)"
+            else
+                echo "[Entrypoint] npm not available, frontend may be stale"
             fi
 
             echo "[Entrypoint] ✅ Upgrade to v$LATEST_VER applied successfully"

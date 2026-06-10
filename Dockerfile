@@ -54,6 +54,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2t64 \
     x11-utils \
     tk \
+    nodejs \
+    npm \
     docker.io \
     && rm -rf /var/lib/apt/lists/*
 

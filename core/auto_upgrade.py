@@ -29,12 +29,12 @@ GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 GITHUB_API_TIMEOUT = 15
 
 # Files/dirs to copy from the release tarball
-# Upgrade backend code only. Frontend (static/) requires Vite build — it lives
-# in the Docker image and is updated by rebuilding the image, not by code upgrade.
 UPGRADE_SOURCES = [
     "core", "tools", "agent", "api", "plugins",
+    "static", "skills",
     "main.py", "launcher.py", "gui_app.py",
     "requirements.txt", "docker-entrypoint.sh", "VERSION",
+    "package.json", "vite.config.mjs",
 ]
 
 
@@ -190,16 +190,26 @@ class AutoUpgrader:
 
             set_version(self.latest_version)
 
-            # Remove old Vite-built bundle so frontend falls back to raw ES modules.
-            # Docker images bundle frontend during build; after in-place upgrade the
-            # raw .js files in static/ are updated but the bundled min.js is stale.
-            dist_dir = os.path.join(self.app_root, "static", "dist")
-            if os.path.exists(dist_dir):
-                try:
-                    shutil.rmtree(dist_dir)
-                    logger.info("Removed stale Vite bundle (static/dist/)")
-                except OSError as e:
-                    logger.warning("Could not remove stale Vite bundle: %s", e)
+            # Rebuild the frontend Vite bundle so updated static/ source files
+            # produce a matching dist/ bundle.
+            try:
+                npm_dir = self.app_root
+                package_json = os.path.join(npm_dir, "package.json")
+                if os.path.exists(package_json):
+                    if subprocess.run(["npm", "--version"], capture_output=True, timeout=10).returncode == 0:
+                        logger.info("Rebuilding frontend (npm run build)...")
+                        subprocess.run(["npm", "install", "--no-audit", "--no-fund"],
+                                       cwd=npm_dir, capture_output=True, timeout=120)
+                        build = subprocess.run(["npm", "run", "build"],
+                                                cwd=npm_dir, capture_output=True, text=True, timeout=120)
+                        if build.returncode == 0:
+                            logger.info("Frontend rebuilt successfully")
+                        else:
+                            logger.warning("Frontend build failed: %s", build.stderr[-500:])
+                    else:
+                        logger.warning("npm not available, frontend may be stale")
+            except Exception as _fe:
+                logger.warning("Frontend rebuild skipped: %s", _fe)
 
             if not self.install_deps():
                 logger.warning("Dependency update may need manual fix")
