@@ -76,6 +76,57 @@ class TokenBudget:
             "tool_budget": self.tool_budget,
         }
 
+    def time_based_microcompact(self, messages: List[Dict], ttl: int = 3600) -> List[Dict]:
+        """Compress old tool results in the cold cache region.
+
+        Detects the cold region automatically by checking each message's
+        ``_timestamp``. Messages older than *ttl* seconds are considered
+        cold (server-side cache expired) and their oversized tool results
+        can be safely replaced with placeholders.
+
+        Also fills in ``_timestamp`` on any messages that lack it.
+
+        Args:
+            messages: conversation history
+            ttl: seconds after which cache is considered cold (default 3600 = 1h).
+                 Can be overridden via config ``cold_cache_ttl``.
+        """
+        import copy
+        import time as _t
+        now = _t.time()
+        msgs = copy.deepcopy(messages)
+        count = 0
+
+        # --- 1. Find cold region boundary ---
+        cold_cut = None
+        for i in range(len(msgs) - 1, -1, -1):
+            ts = msgs[i].get("_timestamp", 0)
+            if ts > 0 and (now - ts) > ttl:
+                cold_cut = i
+                break
+
+        # --- 2. Compress oversized tool results in the cold region ---
+        if cold_cut is not None and cold_cut > 1:
+            for i in range(min(cold_cut + 1, len(msgs))):
+                msg = msgs[i]
+                if msg.get("role") == "tool":
+                    content = str(msg.get("content", ""))
+                    if len(content) > 2000:
+                        msg = dict(msg)
+                        msg["content"] = "[Old tool result content cleared — cache cold, tokens saved]"
+                        msgs[i] = msg
+                        count += 1
+
+        # --- 3. Ensure every message has a timestamp ---
+        for i in range(len(msgs)):
+            if "_timestamp" not in msgs[i]:
+                msgs[i] = dict(msgs[i])
+                msgs[i]["_timestamp"] = now
+
+        if count > 0:
+            print(f"[TokenBudget] Cleared {count} old tool result(s) (cold boundary at index {cold_cut}).")
+        return msgs
+
     def prune_messages(self, messages: List[Dict]) -> List[Dict]:
         """Prune messages to fit within the token budget.
 

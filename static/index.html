@@ -562,6 +562,22 @@
                                 <span class="field-hint" style="margin:0;">到达迭代上限后允许 AI 自我审查纠偏的次数，0=禁用</span>
                             </div>
                         </div>
+                        <div class="field-row">
+                            <div class="field-label">冷缓存超时 (cold_cache_ttl)</div>
+                            <div class="model-row" style="gap:0.5rem;">
+                                <input type="number" id="cold-cache-ttl" class="input-styled" value="3600" min="60"
+                                    max="86400" step="60" style="width:120px;">
+                                <span class="field-hint" style="margin:0;">秒，默认 3600（1小时）。超过此时间未活动的消息区视为冷缓存可压缩</span>
+                            </div>
+                        </div>
+                        <div class="field-row">
+                            <div class="field-label">任务最大自动恢复次数</div>
+                            <div class="model-row" style="gap:0.5rem;">
+                                <input type="number" id="max-resume-count-input" class="input-styled" value="10" min="0"
+                                    max="100" style="width:100px;">
+                                <span class="field-hint" style="margin:0;">中断任务自动恢复的最大尝试次数，0=禁用自动恢复</span>
+                            </div>
+                        </div>
                     </section>
 
                     <!-- Sandbox -->

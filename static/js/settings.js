@@ -39,6 +39,10 @@ export async function loadSettingsConfig() {
     document.getElementById('llamacpp-ctx-size').value = data.llamacpp_ctx_size || 32768;
     const maxCorrectionEl = document.getElementById('max-correction-attempts');
     if (maxCorrectionEl) maxCorrectionEl.value = data.max_correction_attempts ?? 5;
+    const coldCacheEl = document.getElementById('cold-cache-ttl');
+    if (coldCacheEl) coldCacheEl.value = data.cold_cache_ttl ?? 3600;
+    const maxResumeEl = document.getElementById('max-resume-count-input');
+    if (maxResumeEl) maxResumeEl.value = data.max_resume_count ?? 10;
     document.getElementById('http-proxy-input').value = data.http_proxy || '';
     document.getElementById('heartbeat-toggle').checked = data.heartbeat_enabled ?? false;
     const hbInterval = document.getElementById('heartbeat-interval');
@@ -312,7 +316,9 @@ async function saveSettings() {
     tool_permissions: null,
     searxng_url: document.getElementById('searxng-url-input')?.value?.trim() || '',
     searxng_port: 8888,
-    max_correction_attempts: parseInt(document.getElementById('max-correction-attempts')?.value) || 5
+    max_correction_attempts: parseInt(document.getElementById('max-correction-attempts')?.value) || 5,
+    cold_cache_ttl: parseInt(document.getElementById('cold-cache-ttl')?.value) || 3600,
+    max_resume_count: parseInt(document.getElementById('max-resume-count-input')?.value) || 10
   };
 
   // Include current tool_permissions in save

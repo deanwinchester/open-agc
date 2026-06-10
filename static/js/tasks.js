@@ -378,6 +378,11 @@ export async function openTaskDetail(taskId) {
         <button class="btn-resume-task-detail" data-task-id="${task.id}">▶ 继续执行</button>
         <span style="font-size:0.8rem;color:var(--text-secondary)">${task.status === 'failed' ? '❌ 错误: ' : '中断原因: '}${task.interruption_reason === 'server_restart' ? '🔌 服务器重启' : task.interruption_reason === 'user' ? '🛑 用户中断' : task.interruption_reason === 'max_iterations' ? '⚠️ 循环上限' : task.interruption_reason === 'error' ? '⚠️ 执行出错' : task.interruption_reason === 'process_lost' ? '🔌 进程丢失（服务重启）' : task.interruption_reason || '未知'}</span>
       </div>` : ''}
+      ${task.status !== 'completed' ? `
+      <div class="detail-section" style="display:flex;align-items:center;gap:1rem">
+        <button class="btn-complete-task" data-task-id="${task.id}" style="padding:0.3rem 0.8rem;background:var(--success-color,#22c55e);color:white;border:none;border-radius:4px;cursor:pointer;font-size:0.82rem;">✅ 标记为已完成</button>
+        <span style="font-size:0.8rem;color:var(--text-secondary)">手动将任务设为已完成状态</span>
+      </div>` : ''}
       ${task.result_summary ? `
       <div class="detail-section">
         <div class="detail-section-title">执行结果</div>
@@ -567,6 +572,20 @@ export async function openTaskDetail(taskId) {
     if (task.status === 'running' || task.status === 'detached') {
       loadProcessInfo(taskId, content);
     }
+
+    // Wire up complete-task button
+    content.querySelector('.btn-complete-task')?.addEventListener('click', async function() {
+      const tid = parseInt(this.dataset.taskId);
+      if (!confirm('确定将此任务标记为已完成？')) return;
+      try {
+        const resp = await fetch('/api/tasks/' + tid + '/complete', { method: 'POST' });
+        const data = await resp.json();
+        alert(data.message || '已完成');
+        openTaskDetail(tid);
+      } catch (e) {
+        alert('操作失败: ' + e.message);
+      }
+    });
 
     // Wire up reset-resume button
     content.querySelector('.btn-reset-resume')?.addEventListener('click', async function() {

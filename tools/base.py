@@ -113,4 +113,8 @@ class BaseTool(BaseModel):
                     return
 
         # Not in sandbox, not in allowed_paths, not in whitelist → block
+        import sys as _sys
+        print(f"[Sandbox] BLOCKED: path={repr(path)} whitelist={repr(list(session_whitelist or []))} "
+              f"allowed_paths={repr(config.get('allowed_paths', []) if config else [])}",
+              file=_sys.stderr, flush=True)
         raise SandboxBlocked(path, sandbox_dir, tool_name)
