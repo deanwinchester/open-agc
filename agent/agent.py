@@ -871,8 +871,14 @@ class OpenAGCAgent:
             return f"Operation denied by user: {desc}"
 
         if action == "approve_dir":
-            dirpath = os.path.dirname(os.path.abspath(sb.path))
+            abs_path_sb = os.path.abspath(sb.path)
+            # Use the path itself if it's a directory; otherwise use its parent
+            if os.path.isdir(abs_path_sb):
+                dirpath = abs_path_sb
+            else:
+                dirpath = os.path.dirname(abs_path_sb)
             self._session_sandbox_whitelist.add(dirpath)
+            self._session_sandbox_whitelist.add(abs_path_sb)
             # Persist the directory to config
             try:
                 config_path = get_data_path("config.json")
@@ -888,7 +894,7 @@ class OpenAGCAgent:
                 config["allowed_paths"] = allowed
                 with open(config_path, "w", encoding="utf-8") as f:
                     _json.dump(config, f, ensure_ascii=False, indent=2)
-                print(f"[Agent] Sandbox approved (dir): {dirpath}")
+                print(f"[Agent] Sandbox approved (dir): {dirpath}, whitelist now: {list(self._session_sandbox_whitelist)}")
             except Exception as e:
                 print(f"[Agent] Failed to persist allowed_path: {e}")
             return None  # Signal to retry
@@ -897,7 +903,7 @@ class OpenAGCAgent:
             dirpath = os.path.dirname(os.path.abspath(sb.path))
             self._session_sandbox_whitelist.add(dirpath)
             self._session_sandbox_whitelist.add(sb.path)
-            print(f"[Agent] Sandbox approved (once): {sb.path} (dir: {dirpath})")
+            print(f"[Agent] Sandbox approved (once): {sb.path} (dir: {dirpath}), whitelist now: {list(self._session_sandbox_whitelist)}")
             return None  # Signal to retry
         elif action == "approve_always":
             # Store the directory for permanent multi-file access
@@ -1463,6 +1469,78 @@ class OpenAGCAgent:
         pruned.append({"role": "assistant", "content": summary_text})
         pruned.extend(messages[keep_idx:])
         return pruned
+
+    def _llm_summarize_old_rounds(self, messages, max_rounds_to_summarize=10):
+        """Use LLM to summarize oldest rounds when context budget is critical.
+        Replaces heuristic folding with actual LLM understanding.
+        Returns (pruned_messages, did_summarize)."""
+        try:
+            # Identify user-assistant round boundaries
+            rounds = []
+            i = 1
+            while i < len(messages):
+                m = messages[i]
+                if m.get("role") == "user":
+                    start = i
+                    i += 1
+                    while i < len(messages):
+                        sub = messages[i]
+                        if sub.get("role") == "user":
+                            break
+                        if sub.get("role") == "assistant" and not sub.get("tool_calls"):
+                            i += 1
+                            rounds.append((start, i))
+                            break
+                        i += 1
+                    else:
+                        rounds.append((start, i))
+                else:
+                    i += 1
+            if len(rounds) <= 3:
+                return messages, False
+            keep = 2
+            n = min(max_rounds_to_summarize, len(rounds) - keep)
+            if n <= 0:
+                return messages, False
+            old = rounds[:n]
+            rest = rounds[n:]
+            parts = []
+            for s, e in old:
+                for rm in messages[s:e]:
+                    role = rm.get("role", "")
+                    content = str(rm.get("content", ""))[:300]
+                    tc = rm.get("tool_calls")
+                    if tc:
+                        for t in tc:
+                            fn = t.get("function", {})
+                            parts.append(f"[工具:{fn.get('name','')} {str(fn.get('arguments',''))[:100]}]")
+                    elif content:
+                        parts.append(f"[{role}]: {content}")
+            text = "\n".join(parts)
+            if not text.strip():
+                return self._fold_tool_calls(messages, force=True), True
+            prompt = (
+                "以下是AI助手与用户之间多轮对话的历史记录。\n"
+                "请用简洁的中文总结已完成的工作、关键发现和决定。\n"
+                "只总结事实，不要添加新信息。\n\n"
+                f"对话记录：\n{text[:6000]}\n\n总结："
+            )
+            resp, _ = self.llm.chat(messages=[{"role": "user", "content": prompt}])
+            reply = (resp.choices[0].message.content or "").strip()
+            if not reply:
+                return self._fold_tool_calls(messages, force=True), True
+            pruned = messages[:1]
+            pruned.append({
+                "role": "user",
+                "content": f"[摘要 - 前{n}轮对话]\n{reply}\n[/摘要]"
+            })
+            for s, e in rest:
+                pruned.extend(messages[s:e])
+            print(f"[Agent] LLM-compressed {n} rounds: {len(messages)} -> {len(pruned)} msgs")
+            return pruned, True
+        except Exception as e:
+            print(f"[Agent] LLM summarize error: {e}")
+            return self._fold_tool_calls(messages, force=True), True
 
     def run_turn(self, user_input: str, verbose: bool = False,
                  progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -2196,33 +2274,53 @@ class OpenAGCAgent:
                         ]
                     })
 
-                # Autocompact: Trigger compression only when nearing token limits to protect Warm Cache
+                # Autocompact: Context window management
                 try:
                     from core.token_budget import estimate_messages_tokens
+                    import time as _ctime
                     current_tokens = estimate_messages_tokens(self.messages)
-                    # Trigger autocompact at 90% of max budget
                     budget_threshold = self.token_budget.max_tokens * 0.9
+                    now = _ctime.time()
 
+                    # --- Time-Based Microcompact ---
+                    try:
+                        _cfg_path = get_data_path("config.json")
+                        _ttl = 3600
+                        if os.path.exists(_cfg_path):
+                            with open(_cfg_path, encoding="utf-8") as _f:
+                                _cfg = json.load(_f)
+                            _ttl = int(_cfg.get("cold_cache_ttl", 3600))
+                    except Exception:
+                        _ttl = 3600
+                    compacted = self.token_budget.time_based_microcompact(self.messages, ttl=_ttl)
+                    if compacted is not None and compacted is not self.messages:
+                        if any("[Old tool result" in (m.get("content") or "") for m in compacted):
+                            self.messages = compacted
+                            if verbose:
+                                print(f"[Agent] Time-based microcompact (ttl={_ttl}s)")
+
+                    # --- Token Budget Compression ---
                     if current_tokens > budget_threshold:
                         if verbose:
                             print(f"[Agent] Token warning ({current_tokens}/{self.token_budget.max_tokens}), triggering autocompact...")
-                        
-                        # 1. Micro-compression via token_budget (replaces verbose tool results)
+
                         pruned = self.token_budget.prune_messages(self.messages)
-                        
-                        # 2. Heavy compression via fold_tool_calls if still over 80% limit after micro-compression
+
                         if estimate_messages_tokens(pruned) > self.token_budget.max_tokens * 0.8:
-                            folded = self._fold_tool_calls(pruned, force=True)
-                            if len(folded) < len(pruned):
+                            llm_pruned, did = self._llm_summarize_old_rounds(pruned)
+                            if did and len(llm_pruned) < len(pruned):
                                 if verbose:
-                                    print(f"[Agent] Forced tool-call folding to save tokens")
-                                pruned = folded
-                        
+                                    print(f"[Agent] LLM partial compact: {len(pruned)} -> {len(llm_pruned)} msgs")
+                                pruned = llm_pruned
+                            else:
+                                folded = self._fold_tool_calls(pruned, force=True)
+                                if len(folded) < len(pruned):
+                                    pruned = folded
+
                         self.messages = pruned
                 except Exception as e:
                     if verbose:
                         print(f"[Agent] Autocompact error: {e}")
-
                 # After appending all tool results, the loop continues to send them back to LLM
                 continue
                 

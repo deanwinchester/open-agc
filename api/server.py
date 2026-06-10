@@ -668,9 +668,11 @@ def create_task(title: str, user_query: str, task_type: str = 'oneshot',
             next_run = croniter(schedule_cron, datetime.now(timezone.utc)).get_next(datetime).strftime('%Y-%m-%d %H:%M:%S')
         except Exception:
             pass
+    # Read max_resume_count from config
+    _mrc = load_config().get("max_resume_count", 10)
     cursor.execute(
-        "INSERT INTO tasks (title, user_query, task_type, schedule_cron, schedule_enabled, next_run_at, session_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (title, user_query, task_type, schedule_cron, 1 if schedule_enabled else 0, next_run, session_id)
+        "INSERT INTO tasks (title, user_query, task_type, schedule_cron, schedule_enabled, next_run_at, session_id, max_resume_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (title, user_query, task_type, schedule_cron, 1 if schedule_enabled else 0, next_run, session_id, _mrc)
     )
     task_id = cursor.lastrowid
     conn.commit()
@@ -1349,13 +1351,17 @@ def _apply_pending_sandbox_approvals(agent, session_id):
     """Load pending sandbox approvals into agent's session whitelist."""
     paths = _pending_sandbox_approvals.pop(session_id, [])
     for p in paths:
-        action = p.get("action", "approve_once")
         path = p.get("path", "")
-        if action in ("approve_once", "approve_dir", "approve_always", "approve_session") and path:
-            import os as _ap_os
-            agent._session_sandbox_whitelist.add(path)
-            agent._session_sandbox_whitelist.add(_ap_os.path.dirname(_ap_os.path.abspath(path)))
-            print(f"[Sandbox] Loaded pending approval: {path}")
+        if not path:
+            continue
+        import os as _ap_os
+        # Always add both the exact path and its parent directory
+        abs_p = _ap_os.path.abspath(path)
+        agent._session_sandbox_whitelist.add(abs_p)
+        parent = _ap_os.path.dirname(abs_p)
+        if parent != abs_p:
+            agent._session_sandbox_whitelist.add(parent)
+        print(f"[Sandbox] Loaded pending approval: {path} (whitelist: {list(agent._session_sandbox_whitelist)[-3:]})")
 
 _active_agents: dict = {}  # {session_id: {task_id: OpenAGCAgent}} — multi-task concurrent support
 _background_agents: dict = {}  # {task_id: OpenAGCAgent} — background tasks for interrupt
@@ -1483,6 +1489,8 @@ class ConfigUpdate(BaseModel):
     searxng_url: str = ""
     searxng_port: int = 8888
     max_correction_attempts: int = 5
+    cold_cache_ttl: int = 3600
+    max_resume_count: int = 10
 
 @app.get("/api/settings")
 async def get_settings(session_id: int = None):
@@ -1610,6 +1618,8 @@ async def update_settings(config_update: ConfigUpdate):
         config["searxng_port"] = config_update.searxng_port
         set_key(env_file, "SEARXNG_URL", config_update.searxng_url)
         config["max_correction_attempts"] = config_update.max_correction_attempts
+        config["cold_cache_ttl"] = config_update.cold_cache_ttl
+        config["max_resume_count"] = config_update.max_resume_count
         os.environ["SEARXNG_URL"] = config_update.searxng_url
 
         # Save per-session email config when session_id is provided
@@ -3106,6 +3116,25 @@ async def reset_task_resume(task_id: int):
         return {"status": "error", "message": f"重置失败: {e}"}
 
 
+@app.post("/api/tasks/{task_id}/complete")
+async def complete_task(task_id: int):
+    """Manually mark a task as completed."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not row:
+            conn.close()
+            return {"status": "error", "message": f"任务 #{task_id} 不存在"}
+        conn.execute(
+            "UPDATE tasks SET status='completed', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (task_id,))
+        conn.commit()
+        conn.close()
+        return {"status": "success", "message": f"任务 #{task_id} 已标记为已完成"}
+    except Exception as e:
+        return {"status": "error", "message": f"操作失败: {e}"}
+
+
 # ==========================================
 # Scheduled Task API
 # ==========================================
@@ -3793,7 +3822,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     _sid = event.get("session_id") or ws_session_id
                     if _path:
                         _pending_sandbox_approvals.setdefault(_sid, []).append({
-                            "action": "approve_once", "path": _path
+                            "action": "approve_dir", "path": _path
                         })
                         print(f"[Sandbox] Persisted approval: {_path} for session {_sid}")
                     return  # Don't queue this event to frontend
@@ -4730,7 +4759,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
             _sid = event.get("session_id") or bg_session_id
             if _path:
                 _pending_sandbox_approvals.setdefault(_sid, []).append({
-                    "action": "approve_once", "path": _path
+                    "action": "approve_dir", "path": _path
                 })
             return
         # Suppress all progress broadcasts for heartbeat tasks
@@ -5276,7 +5305,7 @@ def _guardian_resume_task(task_id: int) -> None:
                 _path = e.get("path", "")
                 if _path:
                     _pending_sandbox_approvals.setdefault(_hb_session, []).append({
-                        "action": "approve_once", "path": _path
+                        "action": "approve_dir", "path": _path
                     })
                 return
             _broadcast_to_websockets({"type": "progress", "session_id": _hb_session, "task_id": task_id, **e})

@@ -82,7 +82,8 @@
       "PowerShell(docker save *)",
       "Bash(Get-ChildItem D:\\\\GitHub\\\\open-agc\\\\api\\\\server.py)",
       "Bash(Select-String -Pattern \"start_background_monitor|start_task_scheduler|start_email_listener\" -SimpleMatch)",
-      "Bash(Select-Object -First 20)"
+      "Bash(Select-Object -First 20)",
+      "PowerShell(python3 D:\\\\GitHub\\\\open-agc\\\\_fix_compact.py)"
     ]
   }
 }
