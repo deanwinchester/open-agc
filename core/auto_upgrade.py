@@ -29,8 +29,10 @@ GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 GITHUB_API_TIMEOUT = 15
 
 # Files/dirs to copy from the release tarball
+# Upgrade backend code only. Frontend (static/) requires Vite build — it lives
+# in the Docker image and is updated by rebuilding the image, not by code upgrade.
 UPGRADE_SOURCES = [
-    "core", "tools", "agent", "api", "skills", "plugins", "static",
+    "core", "tools", "agent", "api", "plugins",
     "main.py", "launcher.py", "gui_app.py",
     "requirements.txt", "docker-entrypoint.sh", "VERSION",
 ]

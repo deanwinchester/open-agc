@@ -23,7 +23,7 @@ if [ -n "$LATEST_VER" ] && [ "$LATEST_VER" != "$CURRENT_VER" ]; then
         if [ -n "$EXTRACTED" ]; then
             echo "[Entrypoint] Applying v$LATEST_VER..."
             # Copy code files (merge, not replace)
-            for dir in core tools agent api skills plugins static; do
+            for dir in core tools agent api plugins; do
                 if [ -d "$EXTRACTED/$dir" ]; then
                     cp -r "$EXTRACTED/$dir/" "/app/$dir/" 2>/dev/null || true
                 fi
