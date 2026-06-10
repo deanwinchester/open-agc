@@ -571,6 +571,14 @@
                             </div>
                         </div>
                         <div class="field-row">
+                            <div class="field-label">上下文预算 (max_total_tokens)</div>
+                            <div class="model-row" style="gap:0.5rem;">
+                                <input type="number" id="max-total-tokens" class="input-styled" value="128000" min="16000"
+                                    max="1048576" step="16000" style="width:140px;">
+                                <span class="field-hint" style="margin:0;">token 数，默认 128000。超 90% 时触发上下文压缩</span>
+                            </div>
+                        </div>
+                        <div class="field-row">
                             <div class="field-label">任务最大自动恢复次数</div>
                             <div class="model-row" style="gap:0.5rem;">
                                 <input type="number" id="max-resume-count-input" class="input-styled" value="10" min="0"
