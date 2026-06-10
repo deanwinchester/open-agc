@@ -188,6 +188,17 @@ class AutoUpgrader:
 
             set_version(self.latest_version)
 
+            # Remove old Vite-built bundle so frontend falls back to raw ES modules.
+            # Docker images bundle frontend during build; after in-place upgrade the
+            # raw .js files in static/ are updated but the bundled min.js is stale.
+            dist_dir = os.path.join(self.app_root, "static", "dist")
+            if os.path.exists(dist_dir):
+                try:
+                    shutil.rmtree(dist_dir)
+                    logger.info("Removed stale Vite bundle (static/dist/)")
+                except OSError as e:
+                    logger.warning("Could not remove stale Vite bundle: %s", e)
+
             if not self.install_deps():
                 logger.warning("Dependency update may need manual fix")
         finally:
