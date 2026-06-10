@@ -3393,6 +3393,20 @@ async def kill_task_process(task_id: int):
     return {"status": "success", "message": result}
 
 
+@app.post("/api/tasks/{task_id}/reset-resume-count")
+async def reset_task_resume_count(task_id: int):
+    """Reset a task's resume_count to 0 so the guardian loop can retry recovery."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE tasks SET resume_count=0, updated_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
+        conn.commit()
+        conn.close()
+        log_agent_error(f"Task #{task_id}: resume_count manually reset to 0")
+        return {"status": "success", "message": "恢复次数已重置"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── SearXNG Management ──
 
 class SearXNGControlRequest(BaseModel):
@@ -5398,15 +5412,32 @@ def start_guardian_loop():
                     _time.sleep(max(interval, 10))
                     continue
                 row = conn.execute(
-                    "SELECT id, status, interruption_reason, resume_count, max_resume_count, updated_at FROM tasks WHERE status='interrupted' AND resume_count < max_resume_count AND (interruption_reason IS NULL OR interruption_reason != 'user') ORDER BY updated_at DESC LIMIT 1"
-                ).fetchone()
+                    "SELECT id, status, interruption_reason, resume_count, max_resume_count, updated_at FROM tasks WHERE status='interrupted' AND (interruption_reason IS NULL OR interruption_reason != 'user') ORDER BY updated_at DESC LIMIT 5"
+                ).fetchall()
                 if not row:
                     print(f"[Guardian] No interrupted task to resume")
                     conn.close()
                     _time.sleep(max(interval, 10))
                     continue
 
-                tid, t_status, t_reason, t_rc, t_max_rc, t_updated = row
+                # Sync max_resume_count from config and pick the first eligible task
+                _cfg_mrc = load_config().get("max_resume_count", 10)
+                _chosen = None
+                for r in row:
+                    _tid, _status, _reason, _rc, _mrc, _updated = r
+                    if _mrc != _cfg_mrc:
+                        conn.execute("UPDATE tasks SET max_resume_count=? WHERE id=?", (_cfg_mrc, _tid))
+                        _mrc = _cfg_mrc
+                    if _rc < _mrc:
+                        _chosen = (_tid, _status, _reason, _rc, _mrc, _updated)
+                        break
+                if not _chosen:
+                    print(f"[Guardian] All interrupted tasks have exhausted resume count")
+                    conn.close()
+                    _time.sleep(max(interval, 10))
+                    continue
+
+                tid, t_status, t_reason, t_rc, t_max_rc, t_updated = _chosen
                 print(f"[Guardian] Found task #{tid}: status={t_status} reason={t_reason} resume_count={t_rc}/{t_max_rc} updated={t_updated}")
                 conn.close()
                 _guardian_resume_task(tid)

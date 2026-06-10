@@ -592,7 +592,7 @@ export async function openTaskDetail(taskId) {
       const tid = parseInt(this.dataset.taskId);
       if (!confirm('确定重置此任务的自动重试次数？')) return;
       try {
-        const resp = await fetch('/api/tasks/' + tid + '/reset-resume', { method: 'POST' });
+        const resp = await fetch('/api/tasks/' + tid + '/reset-resume-count', { method: 'POST' });
         const data = await resp.json();
         alert(data.message || '已重置');
         openTaskDetail(tid);  // Refresh
