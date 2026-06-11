@@ -3054,12 +3054,22 @@ input:checked + .slider::before { transform: translateX(16px); }
 
     /* ── Chat header ── */
     .chat-header {
-        gap: 0.4rem;
-        flex-wrap: wrap;
+        gap: 0.6rem;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overflow-y: hidden;
         padding-left: 2.8rem;
     }
+    .chat-header::-webkit-scrollbar {
+        display: none;
+    }
     .chat-header h1 {
-        font-size: 1rem;
+        font-size: 1.1rem;
+        white-space: nowrap;
+        flex-shrink: 0;
+    }
+    .chat-header > div {
+        flex-shrink: 0;
     }
     #agent-selector {
         max-width: 100px;
@@ -3093,11 +3103,30 @@ input:checked + .slider::before { transform: translateX(16px); }
 
     /* ── Input area ── */
     .input-container {
-        padding: 0.3rem 0.5rem;
+        padding: 0.5rem;
+    }
+    .input-box {
+        padding-left: 0.2rem;
+    }
+    .input-box .plus-btn {
+        display: flex !important;
+        margin-right: 0.2rem;
+        flex-shrink: 0;
+    }
+    .input-box:not(.show-actions) .image-btn,
+    .input-box:not(.show-actions) .attach-btn,
+    .input-box:not(.show-actions) .mic-btn,
+    .input-box .send-btn {
+        display: none !important;
     }
     .input-box textarea {
         font-size: 0.82rem;
         max-height: 120px;
+    }
+    .footer-text {
+        font-size: 0.65rem;
+        margin-top: 0.4rem;
+        padding: 0 0.5rem;
     }
 
     /* ── Detail panel (mobile: stack, not split) ── */

@@ -96,6 +96,13 @@ function initApp() {
   const imageBtn = document.getElementById('image-btn');
   const imagePreviewBar = document.getElementById('image-preview-bar');
   const sendBtn = document.getElementById('send-btn');
+  const plusBtn = document.getElementById('plus-btn');
+  if (plusBtn) {
+    plusBtn.addEventListener('click', () => {
+      const inputBox = document.querySelector('.input-box');
+      if (inputBox) inputBox.classList.toggle('show-actions');
+    });
+  }
   const stopBtn = document.getElementById('stop-btn');
   const themeToggle = document.getElementById('theme-toggle');
   const htmlElement = document.documentElement;
@@ -1129,20 +1136,7 @@ function initApp() {
     if (role === 'user') {
       avatarSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>`;
     } else {
-      avatarSvg = `<svg width="20" height="20" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <ellipse cx="25" cy="22" rx="15" ry="16" fill="#1a1a1a"/>
-        <ellipse cx="75" cy="22" rx="15" ry="16" fill="#1a1a1a"/>
-        <ellipse cx="50" cy="55" rx="42" ry="40" fill="#f5f5f0"/>
-        <ellipse cx="35" cy="50" rx="14" ry="12" fill="#1a1a1a" transform="rotate(-6 35 50)"/>
-        <ellipse cx="65" cy="50" rx="14" ry="12" fill="#1a1a1a" transform="rotate(6 65 50)"/>
-        <circle cx="37" cy="47" r="5.5" fill="#fff"/>
-        <circle cx="63" cy="47" r="5.5" fill="#fff"/>
-        <circle cx="39" cy="46" r="2.2" fill="#1a1a1a"/>
-        <circle cx="61" cy="46" r="2.2" fill="#1a1a1a"/>
-        <circle cx="40" cy="45" r="0.8" fill="#fff"/>
-        <circle cx="62" cy="45" r="0.8" fill="#fff"/>
-        <ellipse cx="50" cy="60" rx="4" ry="3" fill="#1a1a1a"/>
-        <path d="M46 65 C 49 68, 51 68, 54 65" stroke="#1a1a1a" stroke-width="2.5" stroke-linecap="round" fill="none"/></svg>`;
+      avatarSvg = `<img src="/static/icon_rounded.png" width="20" height="20" alt="Panda" style="border-radius:50%;">`;
     }
 
     let formattedContent = content;
@@ -1270,21 +1264,7 @@ function initApp() {
       const animClass = Math.random() < 0.5 ? 'panda-eat' : 'panda-roll';
       currentStatusBubble.innerHTML = `
         <div class="panda-thinking-icon ${animClass}">
-          <svg width="32" height="32" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <ellipse cx="25" cy="22" rx="15" ry="16" fill="#1a1a1a"/>
-            <ellipse cx="75" cy="22" rx="15" ry="16" fill="#1a1a1a"/>
-            <ellipse cx="50" cy="55" rx="42" ry="40" fill="#f5f5f0"/>
-            <ellipse cx="35" cy="50" rx="14" ry="12" fill="#1a1a1a" transform="rotate(-6 35 50)"/>
-            <ellipse cx="65" cy="50" rx="14" ry="12" fill="#1a1a1a" transform="rotate(6 65 50)"/>
-            <circle cx="37" cy="47" r="5.5" fill="#fff"/>
-            <circle cx="63" cy="47" r="5.5" fill="#fff"/>
-            <circle cx="39" cy="46" r="2.2" fill="#1a1a1a"/>
-            <circle cx="61" cy="46" r="2.2" fill="#1a1a1a"/>
-            <circle cx="40" cy="45" r="0.8" fill="#fff"/>
-            <circle cx="62" cy="45" r="0.8" fill="#fff"/>
-            <ellipse cx="50" cy="60" rx="4" ry="3" fill="#1a1a1a"/>
-            <path d="M46 65 C 49 68, 51 68, 54 65" stroke="#1a1a1a" stroke-width="2.5" stroke-linecap="round" fill="none"/>
-          </svg>
+          <img src="/static/icon_rounded.png" width="32" height="32" alt="Panda" style="border-radius:50%;">
         </div>
         <span>${text}</span>`;
       chatContainer.appendChild(currentStatusBubble);

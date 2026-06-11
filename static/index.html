@@ -52,21 +52,7 @@
         <aside class="sidebar glass-panel" id="sidebar">
             <div class="sidebar-header">
                 <div class="logo">
-                    <svg class="logo-svg" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <ellipse cx="25" cy="22" rx="15" ry="16" fill="#1a1a1a"/>
-                        <ellipse cx="75" cy="22" rx="15" ry="16" fill="#1a1a1a"/>
-                        <ellipse cx="50" cy="55" rx="42" ry="40" fill="#f5f5f0"/>
-                        <ellipse cx="35" cy="50" rx="14" ry="12" fill="#1a1a1a" transform="rotate(-6 35 50)"/>
-                        <ellipse cx="65" cy="50" rx="14" ry="12" fill="#1a1a1a" transform="rotate(6 65 50)"/>
-                        <circle cx="37" cy="47" r="5.5" fill="#fff"/>
-                        <circle cx="63" cy="47" r="5.5" fill="#fff"/>
-                        <circle cx="39" cy="46" r="2.2" fill="#1a1a1a"/>
-                        <circle cx="61" cy="46" r="2.2" fill="#1a1a1a"/>
-                        <circle cx="40" cy="45" r="0.8" fill="#fff"/>
-                        <circle cx="62" cy="45" r="0.8" fill="#fff"/>
-                        <ellipse cx="50" cy="60" rx="4" ry="3" fill="#1a1a1a"/>
-                        <path d="M46 65 C 49 68, 51 68, 54 65" stroke="#1a1a1a" stroke-width="2.5" stroke-linecap="round" fill="none"/>
-                    </svg>
+                    <img class="logo-svg" src="/static/icon_rounded.png" alt="Open-AGC Logo">
                     <span>Open-AGC</span>
                 </div>
                 <div class="header-actions">
@@ -218,19 +204,7 @@
                     <div class="chat-history" id="chat-container">
                         <div class="message system">
                             <div class="avatar">
-                                <svg width="20" height="20" viewBox="0 0 100 100" fill="none"
-                                    xmlns="http://www.w3.org/2000/svg">
-                                    <circle cx="50" cy="50" r="45" fill="#f4f6f5" stroke="#1a1c1e" stroke-width="6" />
-                                    <circle cx="25" cy="25" r="14" fill="#1a1c1e" />
-                                    <circle cx="75" cy="25" r="14" fill="#1a1c1e" />
-                                    <circle cx="35" cy="45" r="10" fill="#1a1c1e" />
-                                    <circle cx="65" cy="45" r="10" fill="#1a1c1e" />
-                                    <circle cx="35" cy="43" r="3.5" fill="#fff" />
-                                    <circle cx="65" cy="43" r="3.5" fill="#fff" />
-                                    <ellipse cx="50" cy="62" rx="5" ry="3.5" fill="#1a1c1e" />
-                                    <path d="M44 68 C 50 73, 50 73, 56 68" stroke="#1a1c1e" stroke-width="3"
-                                        stroke-linecap="round" />
-                                </svg>
+                                <img src="/static/icon_rounded.png" width="20" height="20" alt="Panda">
                             </div>
                             <div class="content" id="welcome-msg">
                                 你好！我是熊猫，你的专属电脑控制智能体。我可以帮你执行命令行、管理文件或运行代码。今天需要我做什么？
@@ -270,8 +244,14 @@
                         style="display:none; padding:0.4rem 0.5rem; gap:0.4rem; flex-wrap:wrap; align-items:flex-start;">
                     </div>
                     <div class="input-box glass-panel-inner">
+                        <button class="action-btn plus-btn" id="plus-btn" title="更多" style="display: none;">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                <line x1="12" y1="5" x2="12" y2="19"></line>
+                                <line x1="5" y1="12" x2="19" y2="12"></line>
+                            </svg>
+                        </button>
                         <textarea id="message-input" placeholder="告诉熊猫，你想在电脑上做什么... 也可以粘贴或上传图片" rows="1"
-                            autofocus></textarea>
+                            autofocus enterkeyhint="send"></textarea>
                         <div class="input-actions">
                             <input type="file" id="image-file-input" accept="image/*" multiple style="display:none;">
                             <input type="file" id="file-upload-input" multiple style="display:none;">
