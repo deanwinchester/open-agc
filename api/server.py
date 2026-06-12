@@ -140,7 +140,7 @@ def init_db():
         )
     ''')
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS tasks (
+         IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
             user_query TEXT NOT NULL,
@@ -593,7 +593,6 @@ def reconcile_backgrounded_after_restart():
                     "【系统通知】服务器重启，后台下载任务已完成，文件已就绪。"
                     "请继续执行之前未完成的任务。"
                 )})
-                increment_task_resume(tid)
                 update_task_status(tid, "interrupted",
                     "服务器重启，后台任务已完成", interruption_reason="background_complete")
                 save_task_context(tid, ctx)
@@ -5087,7 +5086,6 @@ def start_background_monitor():
                                 "【系统通知】后台下载任务已完成，文件已就绪。"
                                 "请继续执行之前未完成的任务，不要重复下载已有文件。"
                             )})
-                            increment_task_resume(tid)
                             update_task_status(tid, "interrupted",
                                 "后台任务已完成", interruption_reason="background_complete")
                             save_task_context(tid, ctx)
@@ -5249,7 +5247,6 @@ def start_background_monitor():
                                     f"请根据输出结果继续执行之前未完成的任务。"
                                 )})
                                 save_task_context(tid, ctx)
-                            increment_task_resume(tid)
                             task_row = conn.execute(
                                 "SELECT user_query FROM tasks WHERE id=?", (tid,)
                             ).fetchone()
@@ -5308,6 +5305,12 @@ def _guardian_resume_task(task_id: int) -> None:
             ctx = get_task_context(task_id)
             if ctx:
                 print(f"[Guardian] Resume #{task_id}: loaded context ({len(ctx)} msgs)")
+                # Trim context to avoid 138K token first call: keep first 2 + last 15 msgs
+                if len(ctx) > 20:
+                    total_chars = sum(len(m.get("content", "") or "") for m in ctx)
+                    if total_chars > 20000:
+                        ctx = ctx[:2] + ctx[-15:]
+                        print(f"[Guardian] Resume #{task_id}: trimmed to {len(ctx)} msgs ({total_chars} chars)")
                 # Strip timestamp metadata that may have been serialized
                 ctx = [{k:v for k,v in m.items() if k != '_timestamp'} for m in ctx]
                 agent.messages.extend(ctx)
