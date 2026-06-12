@@ -166,6 +166,8 @@ class OpenAGCAgent:
         self._max_correction_attempts = 5
         self._in_self_review = False
         self._should_stop = False
+        self._pending_final_answer = False
+        self._final_answer_requested = False
         self._self_review_history: list = []
         self.logger = logger
         self.llm = LLMClient(default_model=model)
@@ -1796,6 +1798,8 @@ class OpenAGCAgent:
         step_counter = 0
         self._correction_attempts = 0
         self._should_stop = False
+        self._pending_final_answer = False
+        self._final_answer_requested = False
         self._self_review_history = []
 
         # Tool loop detection state
@@ -1803,7 +1807,9 @@ class OpenAGCAgent:
         MAX_REPEATED_TOOL_CALLS = 3
         effective_max = max_iterations  # self-review has separate budget via _correction_attempts
 
-        while current_iter < max_iterations or (self._in_self_review and self._correction_attempts < self._max_correction_attempts):
+        while (current_iter < max_iterations or
+               self._pending_final_answer or
+               self._correction_attempts < self._max_correction_attempts):
             if self.is_interrupted:
                 self._record_skill_feedback(success=False, task_input=user_input,
                                             duration=_time.time() - _task_start)
@@ -1824,19 +1830,23 @@ class OpenAGCAgent:
                 label = f"{current_iter}/{max_iterations}" if not self._in_self_review else f"自纠{self._correction_attempts}/{self._max_correction_attempts}"
                 print(f"[Agent Loop Iteration {label}] Calling LLM...")
 
-            # Check if self-review decided to stop — inject final answer request (before review prompt)
-            if self._should_stop and not self._in_self_review:
+            # Check if self-review decided to stop — inject final answer request
+            if self._pending_final_answer:
+                self._pending_final_answer = False
+                self._final_answer_requested = True
                 if verbose:
                     print("[Agent] Self-review recommended stop, requesting final answer.")
                 self.messages.append({
                     "role": "user",
                     "content": "根据你的自我审查结果，请立即给出最终答复告知用户当前进展。"
                 })
-                # Only do this once; reset flag so we don't re-inject
-                self._should_stop = False
+                # NOTE: deliberately NOT resetting _in_self_review here.
+                # It should have been reset in the tool handler, so the
+                # elif below won't re-inject the self-review prompt.
 
             # Max iterations reached — inject self-review prompt
-            if current_iter >= max_iterations and self._max_correction_attempts > 0 and not self._in_self_review:
+            # (only when we're NOT in a final-answer-requested cycle)
+            elif current_iter >= max_iterations and self._max_correction_attempts > 0 and not self._in_self_review and not self._final_answer_requested:
                 remaining = self._max_correction_attempts - self._correction_attempts
                 if remaining > 0:
                     self._in_self_review = True
@@ -2231,8 +2241,9 @@ class OpenAGCAgent:
                                 review_data = json.loads(json_match.group(1))
                                 if not review_data.get("continue_processing", True):
                                     self._should_stop = True
+                                    self._pending_final_answer = True
                                     if verbose:
-                                        print("[Agent] Self-review recommended stop, will exit after this iteration.")
+                                        print("[Agent] Self-review recommended stop, will request final answer.")
                         except Exception:
                             pass
                         # Reset consecutive failures counter after self-review
@@ -2339,12 +2350,13 @@ class OpenAGCAgent:
             # 2. Check if model provided a text response (final answer)
             if message.content:
                 # If self-review prompt was injected but LLM skipped the tool call,
-                # reset and retry — don't exit the loop prematurely
+                # accept the text as the final answer (the self-review prompt explicitly
+                # says "如果确实已无进展，请回复最终答案告知用户").
                 if self._in_self_review:
                     self._in_self_review = False
                     if verbose:
-                        print("[Agent] LLM skipped self_review tool call, retrying review cycle")
-                    continue
+                        print("[Agent] LLM skipped self_review tool, accepting text as final answer.")
+                    # Fall through to normal final answer handling below
 
                 # Check for pending user messages that arrived during the LLM call.
                 # If any exist, inject them and continue the loop instead of exiting.

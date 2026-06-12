@@ -5308,12 +5308,7 @@ def _guardian_resume_task(task_id: int) -> None:
             ctx = get_task_context(task_id)
             if ctx:
                 print(f"[Guardian] Resume #{task_id}: loaded context ({len(ctx)} msgs)")
-                # Trim context to avoid 138K token first call: keep first 2 + last 15 msgs
-                if len(ctx) > 20:
-                    total_chars = sum(len(m.get("content", "") or "") for m in ctx)
-                    if total_chars > 20000:
-                        ctx = ctx[:2] + ctx[-15:]
-                        print(f"[Guardian] Resume #{task_id}: trimmed to {len(ctx)} msgs ({total_chars} chars)")
+                # Strip timestamp metadata that may have been serialized
                 ctx = [{k:v for k,v in m.items() if k != '_timestamp'} for m in ctx]
                 agent.messages.extend(ctx)
             else:
@@ -5357,9 +5352,17 @@ def _guardian_resume_task(task_id: int) -> None:
         _resp_str = str(resp or "")[:200]
         print(f"[Guardian] Resume #{task_id}: response prefix: {_resp_str[:100]}")
         if agent.is_interrupted:
+            try:
+                save_task_context(task_id, agent.messages[1:])
+            except Exception:
+                pass
             update_task_status(task_id, "interrupted", _resp_str, interruption_reason="user")
         elif "MAX_ITERATIONS_REACHED" in _resp_str:
             print(f"[Guardian] Resume #{task_id}: hit max_iterations again")
+            try:
+                save_task_context(task_id, agent.messages[1:])
+            except Exception:
+                pass
             try:
                 _hb_c2 = sqlite3.connect(DB_PATH)
                 _hb_c2.execute("UPDATE tasks SET resume_count = resume_count + 1 WHERE id=?", (task_id,))
@@ -5375,6 +5378,10 @@ def _guardian_resume_task(task_id: int) -> None:
                 pass
             update_task_status(task_id, "backgrounded", _resp_str, interruption_reason="backgrounded")
         elif hasattr(agent, '_consecutive_failures') and agent._consecutive_failures >= 3:
+            try:
+                save_task_context(task_id, agent.messages[1:])
+            except Exception:
+                pass
             update_task_status(task_id, "interrupted", _resp_str, interruption_reason="error")
         else:
             save_task_context(task_id, agent.messages[1:])
