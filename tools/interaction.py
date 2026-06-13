@@ -352,6 +352,33 @@ class SearchHistoryTool(BaseTool):
         except Exception as e:
             print(f"[SearchHistory] Messages table search error: {e}")
 
+        # 4. Also search the memory store (FTS5) — catches memories saved via
+        #    manage_memory that contain the actual content the agent needs.
+        try:
+            _mem_store = getattr(agent_ctx, 'memory_store', None)
+            if _mem_store and hasattr(_mem_store, 'search_memories') and q_lower:
+                _mem_results = _mem_store.search_memories(q_lower, top_k=5)
+                if _mem_results:
+                    for _mem in _mem_results:
+                        _content = str(_mem.get('content', ''))
+                        _cat = str(_mem.get('category', 'general'))
+                        _type = str(_mem.get('memory_type', 'episode'))
+                        if _content:
+                            _ts = _mem.get('_timestamp', 0) or _mem.get('created_at', 0)
+                            if isinstance(_ts, str):
+                                try:
+                                    from datetime import datetime as _dt3
+                                    _ts3_val = _dt3.strptime(_ts, '%Y-%m-%d %H:%M:%S').timestamp()
+                                except Exception:
+                                    _ts3_val = 0
+                            else:
+                                _ts3_val = float(_ts) if _ts else 0
+                            _preview = _content[:500]
+                            _s = f"[记忆存储 ({_cat}/{_type})] {_preview}"
+                            scored.append((4, _ts3_val, _s))
+        except Exception as e:
+            print(f"[SearchHistory] Memory store search error: {e}")
+
         # Take top N by relevance score, then sort by time (most recent first)
         scored.sort(key=lambda x: -x[0])
         top = scored[:max_results]
