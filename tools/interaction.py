@@ -134,18 +134,79 @@ class SearchHistoryTool(BaseTool):
         "这是你的\"记忆回溯\"入口——不记得时就搜索。"
     )
 
+    def _expand_item(self, expand_id: str, agent_ctx) -> str:
+        """Look up full content of an item by its result ID (e.g. 'step:204:39', 'mem:42')."""
+        parts = expand_id.split(":", 2)
+        source = parts[0]
+        try:
+            if source == "step" and len(parts) >= 3:
+                tid, step = int(parts[1]), int(parts[2])
+                from core.paths import get_data_path
+                _db = sqlite3.connect(get_data_path("chat_history.db"))
+                _db.row_factory = sqlite3.Row
+                _row = _db.execute(
+                    "SELECT tool_name, full_args, full_result, args_preview, result_preview, created_at "
+                    "FROM task_steps WHERE task_id=? AND step_number=?", (tid, step)
+                ).fetchone()
+                _db.close()
+                if _row:
+                    _args = _row["full_args"] or _row["args_preview"] or ""
+                    _result = _row["full_result"] or _row["result_preview"] or ""
+                    _time = _row["created_at"] or ""
+                    return (
+                        f"=== 步骤详情 #{tid}:{step} ===\n"
+                        f"工具: {_row['tool_name']}\n时间: {_time}\n\n"
+                        f"--- 参数 ---\n{_args[:3000]}\n\n"
+                        f"--- 结果 ---\n{_result[:5000]}"
+                    )
+                return f"未找到步骤 {expand_id}"
+            elif source == "mem" and len(parts) >= 2:
+                mem_id = int(parts[1])
+                _mem_store = getattr(agent_ctx, 'memory_store', None)
+                if _mem_store and hasattr(_mem_store, 'get_memory'):
+                    _mem = _mem_store.get_memory(mem_id)
+                    if _mem:
+                        return (
+                            f"=== 记忆详情 #{mem_id} ===\n"
+                            f"类型: {_mem.get('memory_type', '?')} / {_mem.get('category', '?')}\n\n"
+                            f"{_mem.get('content', '(空)')}"
+                        )
+                return f"未找到记忆 {expand_id}"
+            elif source == "msg" and len(parts) >= 2:
+                msg_id = int(parts[1])
+                from core.paths import get_data_path
+                _db = sqlite3.connect(get_data_path("chat_history.db"))
+                _row = _db.execute(
+                    "SELECT role, content, created_at FROM messages WHERE id=?", (msg_id,)
+                ).fetchone()
+                _db.close()
+                if _row:
+                    return (
+                        f"=== 消息详情 #{msg_id} ===\n"
+                        f"角色: {_row['role']}\n时间: {_row['created_at'] or ''}\n\n"
+                        f"{_row['content'] or '(空)'}"
+                    )
+                return f"未找到消息 {expand_id}"
+        except Exception as e:
+            return f"展开 {expand_id} 时出错: {e}"
+        return f"未知的展开目标: {expand_id}"
+
     def execute(self, query: str = "", search_type: str = "all",
-                max_results: int = 8, **kwargs) -> str:
+                max_results: int = 8, expand_id: str = "", **kwargs) -> str:
         agent_ctx = kwargs.get("_agent_context")
         if not agent_ctx:
             return "Error: Cannot search history without agent context."
+
+        # Expand mode: load full content for a specific result
+        if expand_id:
+            return self._expand_item(expand_id.strip(), agent_ctx)
 
         messages = getattr(agent_ctx, 'messages', [])
 
         results = []
         q_lower = query.lower() if query else ""
         q_words = set(q_lower.split()) if q_lower else set()
-        scored = []  # (score, time_key, text)
+        scored = []  # (score, time_key, ref_id, text)
         import time as _search_time
         _search_now = _search_time.time()
 
@@ -374,7 +435,9 @@ class SearchHistoryTool(BaseTool):
                             else:
                                 _ts3_val = float(_ts) if _ts else 0
                             _preview = _content[:500]
-                            _s = f"[记忆存储 ({_cat}/{_type})] {_preview}"
+                            _mem_id = _mem.get('id', '')
+                            _id_tag = f" mem:{_mem_id}" if _mem_id else ""
+                            _s = f"[记忆存储 ({_cat}/{_type}){_id_tag}] {_preview}"
                             scored.append((4, _ts3_val, _s))
         except Exception as e:
             print(f"[SearchHistory] Memory store search error: {e}")
@@ -392,8 +455,9 @@ class SearchHistoryTool(BaseTool):
         # Sort by time_key descending (most recent first)
         top.sort(key=lambda x: -x[1])
         lines = [f"会话记忆检索结果 ({len(top)} 条，时间最近→最远，关键词: '{query or '全部'}'):"]
-        for _, ts, text in top:
-            lines.append(f"  {text}")
+        lines.append("提示：使用 expand_id 参数可查看某条结果的完整内容（如 expand_id='step:204:39'）。")
+        for _idx, (_score, _ts, _text) in enumerate(top, 1):
+            lines.append(f"  #{_idx} {_text}")
 
         return "\n".join(lines)
 
@@ -406,7 +470,10 @@ class SearchHistoryTool(BaseTool):
                     "Search your own conversation memory. Use this whenever you feel context is fuzzy — "
                     "to recall what the user asked, what files you read, what commands you ran, "
                     "what errors occurred, what URLs you found, or what decisions were made earlier. "
-                    "This is your memory recall tool. If you don't remember, search."
+                    "This is your memory recall tool. If you don't remember, search.\n\n"
+                    "Progressive drill-down: after a search, you can get full content of a specific "
+                    "result by calling search_history with expand_id set to the result's ID "
+                    "(e.g. 'step:204:39', 'mem:42', 'msg:100'). The ID is shown in brackets in each result."
                 ),
                 "parameters": {
                     "type": "object",
@@ -423,9 +490,15 @@ class SearchHistoryTool(BaseTool):
                         "max_results": {
                             "type": "integer",
                             "description": "Max results to return (default 8)."
+                        },
+                        "expand_id": {
+                            "type": "string",
+                            "description": "Progressive drill-down: set to a result ID from a previous search "
+                                           "(e.g. 'step:204:39', 'mem:42', 'msg:100') to get the FULL content "
+                                           "of that specific item. Leave empty for normal search."
                         }
                     },
-                    "required": ["query"]
+                    "required": []
                 }
             }
         }
