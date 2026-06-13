@@ -312,6 +312,46 @@ class SearchHistoryTool(BaseTool):
         except Exception as e:
             print(f"[SearchHistory] DB search error: {e}")
 
+        # 3. Also search the messages table (user queries + agent responses)
+        #    This catches things like "第三个吧" that are in messages but not in task_steps.
+        try:
+            db_msg = sqlite3.connect(get_data_path("chat_history.db"))
+            db_msg.row_factory = sqlite3.Row
+            _sess_id = getattr(agent_ctx, 'session_id', None)
+            if _sess_id:
+                _msg_rows = db_msg.execute(
+                    "SELECT role, content, created_at FROM messages WHERE session_id=? "
+                    "ORDER BY id ASC", (_sess_id,)
+                ).fetchall()
+                db_msg.close()
+                for _mr in _msg_rows:
+                    _role = _mr["role"]
+                    _content = str(_mr["content"] or "")
+                    _created = str(_mr["created_at"] or "")
+                    if not _content:
+                        continue
+                    # Only search user messages (agent responses are captured elsewhere)
+                    if _role != "user":
+                        continue
+                    _content_lower = _content.lower()
+                    if q_lower:
+                        _match_count = sum(1 for _w in q_words if _w in _content_lower)
+                        if _match_count == 0:
+                            continue
+                    else:
+                        _match_count = 1
+                    _preview = _content[:300]
+                    _tag = f" ({_created})" if _created else ""
+                    _s = f"[会话消息{_tag}] {_preview}"
+                    try:
+                        from datetime import datetime as _dt2
+                        _ts2 = _dt2.strptime(_created, '%Y-%m-%d %H:%M:%S').timestamp() if _created else 0
+                    except Exception:
+                        _ts2 = 0
+                    scored.append((2 + _match_count, _ts2, _s))
+        except Exception as e:
+            print(f"[SearchHistory] Messages table search error: {e}")
+
         # Take top N by relevance score, then sort by time (most recent first)
         scored.sort(key=lambda x: -x[0])
         top = scored[:max_results]
