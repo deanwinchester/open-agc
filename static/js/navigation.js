@@ -75,6 +75,8 @@ function _viewFromPath() {
   // Map known views; fallback to chat for root or unknown paths
   const known = ['chat', 'tasks', 'task-detail', 'settings-models', 'settings-skills', 'settings-mcp',
                  'downloads', 'settings-plugins', 'logs', 'debug'];
+  // Redirect old /logs to /debug
+  if (viewId === 'logs') return 'debug';
   // If view is task-detail, check for extra path segment (task ID)
   if (viewId === 'task-detail' && param) {
     const taskId = parseInt(param);
