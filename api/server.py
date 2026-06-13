@@ -3686,6 +3686,64 @@ async def get_model_logs(
         conn.close()
 
 
+@app.get("/api/tools/stats")
+async def get_tool_stats():
+    """Return tool usage statistics from tool_frequency.json."""
+    from core.paths import get_data_path as _gdp
+    _freq_path = os.path.join(os.path.dirname(_gdp("config.json")), "tool_frequency.json")
+    if not os.path.exists(_freq_path):
+        return {"tools": {}, "summary": {"total_calls": 0, "total_tools": 0}}
+    try:
+        with open(_freq_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {"tools": {}, "summary": {"total_calls": 0, "total_tools": 0}}
+    tools = []
+    total_calls = 0
+    for name, info in sorted(data.items(), key=lambda x: -x[1].get("calls", 0)):
+        info["name"] = name
+        total_calls += info.get("calls", 0)
+        tools.append(info)
+    return {"tools": tools, "summary": {"total_calls": total_calls, "total_tools": len(tools)}}
+
+
+@app.get("/api/tools/auto-tools")
+async def get_auto_tools_info():
+    """Return auto-generated tools list with usage info."""
+    from core.paths import get_data_path as _gdp
+    _auto_dir = _gdp("auto_tools")
+    if not os.path.exists(_auto_dir):
+        return {"tools": []}
+    # Also load frequency data for matching
+    _freq_path = os.path.join(os.path.dirname(_gdp("config.json")), "tool_frequency.json")
+    freq_data = {}
+    if os.path.exists(_freq_path):
+        try:
+            with open(_freq_path, "r", encoding="utf-8") as f:
+                freq_data = json.load(f)
+        except Exception:
+            pass
+    tools = []
+    for sess_dir in sorted(os.listdir(_auto_dir)):
+        sess_path = os.path.join(_auto_dir, sess_dir)
+        if not os.path.isdir(sess_path) or sess_dir == "__pycache__":
+            continue
+        for fn in os.listdir(sess_path):
+            if fn.endswith(".py"):
+                tool_name = fn[:-3]
+                stats = freq_data.get(tool_name, {})
+                tools.append({
+                    "name": tool_name,
+                    "session": sess_dir,
+                    "file": fn,
+                    "calls": stats.get("calls", 0),
+                    "sessions": stats.get("sessions", 0),
+                    "last_used": stats.get("last_used", ""),
+                    "type": stats.get("type", "auto_tool"),
+                })
+    return {"tools": sorted(tools, key=lambda x: -x["calls"])}
+
+
 @app.get("/api/model-logs/{log_id}")
 async def get_model_log_detail(log_id: int):
     """Return full detail for a single model call log."""

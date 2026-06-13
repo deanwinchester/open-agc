@@ -43,6 +43,7 @@ function _activateView(viewId) {
   if (viewId === 'tasks') w.loadTasks?.();
   if (viewId === 'downloads') w.loadDownloadHistory?.();
   if (viewId === 'logs') w.loadLogs?.();
+  if (viewId === 'debug') w.loadLogs?.();
 
   // Notify view change listeners (subscribed via onViewChange instead of monkey-patching)
   for (var i = 0; i < _viewListeners.length; i++) {
@@ -73,7 +74,7 @@ function _viewFromPath() {
   const param = segments[1] || '';
   // Map known views; fallback to chat for root or unknown paths
   const known = ['chat', 'tasks', 'task-detail', 'settings-models', 'settings-skills', 'settings-mcp',
-                 'downloads', 'settings-plugins', 'logs'];
+                 'downloads', 'settings-plugins', 'logs', 'debug'];
   // If view is task-detail, check for extra path segment (task ID)
   if (viewId === 'task-detail' && param) {
     const taskId = parseInt(param);
