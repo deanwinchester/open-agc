@@ -249,38 +249,6 @@ class ShellTool(BaseTool):
                         except Exception:
                             return raw.decode("utf-8", errors="replace")
 
-                def _clean_cr(text: str) -> str:
-                    """Process carriage returns: keep only final content after \r overwrites.
-
-                    Handles:
-                      - \r (standalone): clear current line (progress bar overwrite)
-                      - \r\n (CRLF): newline, keep line content
-                    """
-                    lines = []
-                    cur = []
-                    i = 0
-                    while i < len(text):
-                        ch = text[i]
-                        if ch == '\r':
-                            if i + 1 < len(text) and text[i + 1] == '\n':
-                                lines.append(''.join(cur) + '\n')
-                                cur = []
-                                i += 2
-                            else:
-                                cur = []
-                                i += 1
-                        elif ch == '\n':
-                            cur.append(ch)
-                            lines.append(''.join(cur))
-                            cur = []
-                            i += 1
-                        else:
-                            cur.append(ch)
-                            i += 1
-                    if cur:
-                        lines.append(''.join(cur))
-                    return ''.join(lines)
-
                 def _poll_output():
                     nonlocal last_pos
                     while not poll_stop.is_set():
@@ -616,6 +584,39 @@ def _detect_background_launcher(command: str) -> bool:
     if re.search(r'\b(nohup|setsid|disown)\b', cmd_lower):
         return True
     return False
+
+
+def _clean_cr(text: str) -> str:
+    """Process carriage returns: keep only final content after \\r overwrites.
+
+    Handles:
+      - \\r (standalone): clear current line (progress bar overwrite)
+      - \\r\\n (CRLF): newline, keep line content
+    """
+    lines = []
+    cur = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == '\r':
+            if i + 1 < len(text) and text[i + 1] == '\n':
+                lines.append(''.join(cur) + '\n')
+                cur = []
+                i += 2
+            else:
+                cur = []
+                i += 1
+        elif ch == '\n':
+            cur.append(ch)
+            lines.append(''.join(cur))
+            cur = []
+            i += 1
+        else:
+            cur.append(ch)
+            i += 1
+    if cur:
+        lines.append(''.join(cur))
+    return ''.join(lines)
 
 
 def _read_tail(path: str, max_chars: int) -> str:
