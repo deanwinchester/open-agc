@@ -883,6 +883,9 @@ def update_task_status(task_id: int, status: str, result_summary: str = None,
     if interruption_reason is not None:
         fields.append("interruption_reason=?")
         params.append(interruption_reason)
+    # Clear wake_at when interrupting or completing (prevent stale timer wake-ups)
+    if status in ('interrupted', 'completed', 'background_failed'):
+        fields.append("wake_at=NULL")
     params.append(task_id)
     cursor.execute(f"UPDATE tasks SET {', '.join(fields)} WHERE id=?", params)
     conn.commit()
@@ -1101,6 +1104,8 @@ def save_task_context(task_id: int, messages: list):
         except Exception:
             pass  # existing snapshot is broken, overwrite it
     snapshot = json.dumps(messages, ensure_ascii=False)
+    first_role = messages[0].get("role", "?") if messages else "?"
+    print(f"[Task] save_task_context({task_id}): {len(messages)} msgs, first_role={first_role}")
     cursor.execute("UPDATE tasks SET context_snapshot=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                    (snapshot, task_id))
     conn.commit()
@@ -4409,6 +4414,8 @@ async def websocket_endpoint(websocket: WebSocket):
             # Detect max_iterations hit for longrun auto-resume
             is_max_iter = response and response.startswith("[MAX_ITERATIONS_REACHED]")
             is_backgrounded = response and response.startswith("[TASK_BACKGROUNDED]")
+            if response and not is_max_iter and not is_backgrounded:
+                print(f"[WS] run_agent response (first 80): {str(response)[:80]}")
 
             if ws_task_id and is_backgrounded:
                 # Agent voluntarily paused — save context, mark backgrounded
