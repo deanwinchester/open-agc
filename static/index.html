@@ -154,15 +154,12 @@
                     </svg>
                     <span>插件管理</span>
                 </nav>
-                <nav class="nav-item" data-view="logs" id="nav-logs">
+                <nav class="nav-item" data-view="debug" id="nav-debug">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                        <polyline points="14 2 14 8 20 8"></polyline>
-                        <line x1="16" y1="13" x2="8" y2="13"></line>
-                        <line x1="16" y1="17" x2="8" y2="17"></line>
-                        <polyline points="10 9 9 9 8 9"></polyline>
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
                     </svg>
-                    <span>日志管理</span>
+                    <span>调试</span>
                 </nav>
 
                 <div class="sidebar-divider"></div>
@@ -966,21 +963,23 @@
 
             <!-- Training views moved to plugins/open-agc-train/static/plugin.js -->
             <!-- ============ View: Downloads ============ -->
-            <!-- ============ View: Logs ============ -->
-            <div class="view" id="view-logs">
+            <!-- ============ View: Debug ============ -->
+            <div class="view" id="view-debug">
                 <header class="view-header" style="display:flex; align-items:center; justify-content:space-between;">
                     <div>
-                        <h1>📋 日志管理</h1>
-                        <p class="view-desc">系统日志与模型调用记录</p>
+                        <h1>🔧 调试面板</h1>
+                        <p class="view-desc">系统日志、模型调用、工具使用统计</p>
                     </div>
                 </header>
-                <div class="sub-tabs" style="display:flex;gap:0;margin:0 2rem 0.5rem;border-bottom:1px solid var(--border-color);">
-                    <button class="sub-tab-logs active" data-logsub="system" style="padding:0.4rem 1rem;cursor:pointer;border:none;background:none;color:var(--text-primary);border-bottom:2px solid var(--accent-color);font-size:0.85rem;">📋 系统日志</button>
-                    <button class="sub-tab-logs" data-logsub="model" style="padding:0.4rem 1rem;cursor:pointer;border:none;background:none;color:var(--text-secondary);border-bottom:2px solid transparent;font-size:0.85rem;">🤖 模型调用</button>
+                <div class="sub-tabs" id="debug-tabs" style="display:flex;gap:0;margin:0 2rem 0.5rem;border-bottom:1px solid var(--border-color);flex-wrap:wrap;">
+                    <button class="sub-tab-debug active" data-debugsub="system" style="padding:0.4rem 1rem;cursor:pointer;border:none;background:none;color:var(--text-primary);border-bottom:2px solid var(--accent-color);font-size:0.85rem;">📋 系统日志</button>
+                    <button class="sub-tab-debug" data-debugsub="model" style="padding:0.4rem 1rem;cursor:pointer;border:none;background:none;color:var(--text-secondary);border-bottom:2px solid transparent;font-size:0.85rem;">🤖 模型调用</button>
+                    <button class="sub-tab-debug" data-debugsub="tools" style="padding:0.4rem 1rem;cursor:pointer;border:none;background:none;color:var(--text-secondary);border-bottom:2px solid transparent;font-size:0.85rem;">🔧 工具统计</button>
+                    <button class="sub-tab-debug" data-debugsub="auto" style="padding:0.4rem 1rem;cursor:pointer;border:none;background:none;color:var(--text-secondary);border-bottom:2px solid transparent;font-size:0.85rem;">⚙️ 自动工具</button>
                 </div>
 
                 <!-- System Logs Sub-View -->
-                <div id="logs-system" style="flex:1; overflow:auto; padding:0 2rem 1rem 2rem; display:flex;flex-direction:column;">
+                <div id="debug-system" style="flex:1; overflow:auto; padding:0 2rem 1rem 2rem; display:flex;flex-direction:column;">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem;">
                         <span style="font-size:0.8rem;color:var(--text-secondary);">Agent 运行日志，最近 200 条</span>
                         <button class="btn btn-primary" id="log-refresh-btn" style="font-size:0.8rem; padding:0.3rem 0.8rem;">🔄 刷新</button>
@@ -989,8 +988,7 @@
                 </div>
 
                 <!-- Model Logs Sub-View -->
-                <div id="logs-model" style="flex:1; overflow:auto; padding:0 2rem 1rem 2rem; display:none;flex-direction:column;">
-                    <!-- Filter Bar -->
+                <div id="debug-model" style="flex:1; overflow:auto; padding:0 2rem 1rem 2rem; display:none;flex-direction:column;">
                     <div style="display:flex;align-items:center;gap:0.6rem;margin-bottom:0.75rem;flex-wrap:wrap;">
                         <select id="ml-filter-provider" style="padding:4px 8px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-inner);color:var(--text-primary);font-size:0.8rem;">
                             <option value="">全部厂商</option>
@@ -1014,8 +1012,6 @@
                         <button id="ml-clear-btn" class="btn-secondary" style="font-size:0.78rem;padding:3px 8px;color:#ef4444;">🗑️ 清空日志</button>
                         <span id="ml-summary" style="font-size:0.75rem;color:var(--text-secondary);margin-left:auto;"></span>
                     </div>
-
-                    <!-- Table -->
                     <div style="flex:1;overflow-y:auto;">
                         <table style="width:100%;border-collapse:collapse;font-size:0.78rem;">
                             <thead>
@@ -1034,12 +1030,59 @@
                             </tbody>
                         </table>
                     </div>
-
-                    <!-- Pagination -->
                     <div id="ml-pagination" style="display:flex;align-items:center;justify-content:center;gap:0.5rem;margin-top:0.75rem;font-size:0.8rem;">
                         <button id="ml-page-prev" class="btn-secondary" style="padding:4px 10px;font-size:0.8rem;">← 上一页</button>
                         <span id="ml-page-info">第 1 页</span>
                         <button id="ml-page-next" class="btn-secondary" style="padding:4px 10px;font-size:0.8rem;">下一页 →</button>
+                    </div>
+                </div>
+
+                <!-- Tool Stats Sub-View -->
+                <div id="debug-tools" style="flex:1; overflow:auto; padding:0 2rem 1rem 2rem; display:none;flex-direction:column;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem;">
+                        <span id="tool-stats-summary" style="font-size:0.8rem;color:var(--text-secondary);">加载中...</span>
+                        <button class="btn btn-primary" onclick="loadToolStats()" style="font-size:0.8rem; padding:0.3rem 0.8rem;">🔄 刷新</button>
+                    </div>
+                    <div style="flex:1;overflow-y:auto;">
+                        <table style="width:100%;border-collapse:collapse;font-size:0.78rem;">
+                            <thead>
+                                <tr style="background:var(--bg-inner);position:sticky;top:0;">
+                                    <th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">工具名</th>
+                                    <th style="padding:6px 8px;text-align:right;border-bottom:1px solid var(--border-color);">调用次数</th>
+                                    <th style="padding:6px 8px;text-align:right;border-bottom:1px solid var(--border-color);">会话数</th>
+                                    <th style="padding:6px 8px;text-align:center;border-bottom:1px solid var(--border-color);">类型</th>
+                                    <th style="padding:6px 8px;text-align:right;border-bottom:1px solid var(--border-color);">最后使用</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tool-stats-body">
+                                <tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--text-secondary);">加载中...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Auto Tools Sub-View -->
+                <div id="debug-auto" style="flex:1; overflow:auto; padding:0 2rem 1rem 2rem; display:none;flex-direction:column;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem;">
+                        <span id="auto-tools-summary" style="font-size:0.8rem;color:var(--text-secondary);">加载中...</span>
+                        <button class="btn btn-primary" onclick="loadAutoTools()" style="font-size:0.8rem; padding:0.3rem 0.8rem;">🔄 刷新</button>
+                    </div>
+                    <div style="flex:1;overflow-y:auto;">
+                        <table style="width:100%;border-collapse:collapse;font-size:0.78rem;">
+                            <thead>
+                                <tr style="background:var(--bg-inner);position:sticky;top:0;">
+                                    <th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">工具名</th>
+                                    <th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">会话</th>
+                                    <th style="padding:6px 8px;text-align:right;border-bottom:1px solid var(--border-color);">调用次数</th>
+                                    <th style="padding:6px 8px;text-align:right;border-bottom:1px solid var(--border-color);">会话数</th>
+                                    <th style="padding:6px 8px;text-align:right;border-bottom:1px solid var(--border-color);">最后使用</th>
+                                    <th style="padding:6px 8px;text-align:center;border-bottom:1px solid var(--border-color);">类型</th>
+                                </tr>
+                            </thead>
+                            <tbody id="auto-tools-body">
+                                <tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-secondary);">加载中...</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
