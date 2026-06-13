@@ -110,32 +110,52 @@ def format_plan_for_prompt(plan: dict) -> str:
     return "\n".join(lines)
 
 
-# ── Todo List ──
+# ── Goal List ──
 
-_MAX_TODOS = 10
-_MAX_TODO_DESC = 100
+_MAX_GOALS = 10
+_MAX_GOAL_DESC = 100
 
 
-def _get_todos_path():
+def _get_goals_path():
     from core.paths import get_data_dir
     d = get_data_dir()
     os.makedirs(d, exist_ok=True)
-    return os.path.join(d, "todos.json")
+    return os.path.join(d, "goals.json")
 
 
-def load_todos() -> dict:
-    path = _get_todos_path()
+def load_goals() -> dict:
+    path = _get_goals_path()
+    # Migration: rename old todos.json if it exists and goals.json doesn't
+    old_path = os.path.join(os.path.dirname(path), "todos.json")
+    if os.path.exists(old_path) and not os.path.exists(path):
+        try:
+            os.rename(old_path, path)
+        except Exception:
+            pass
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            # Migrate old status values: "todo" → "pending"
+            migrated = False
+            for item in data.get("items", []):
+                if item.get("status") == "todo":
+                    item["status"] = "pending"
+                    migrated = True
+            if migrated:
+                try:
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+            return data
         except Exception:
             pass
     return {"items": []}
 
 
-def save_todos(data: dict) -> bool:
-    path = _get_todos_path()
+def save_goals(data: dict) -> bool:
+    path = _get_goals_path()
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -144,22 +164,22 @@ def save_todos(data: dict) -> bool:
         return False
 
 
-def _new_todo_id(items: list) -> int:
+def _new_goal_id(items: list) -> int:
     return max((i.get("id", 0) for i in items), default=0) + 1
 
 
-def format_todo_list_for_prompt(todos: dict = None) -> str:
-    """Format todos as a compact section for system prompt injection."""
-    if todos is None:
-        todos = load_todos()
-    items = todos.get("items", [])
+def format_goal_list_for_prompt(goals: dict = None) -> str:
+    """Format goals as a compact section for system prompt injection."""
+    if goals is None:
+        goals = load_goals()
+    items = goals.get("items", [])
     if not items:
         return ""
-    lines = ["## 当前待办事项"]
-    icons = {"todo": "⬜", "doing": "🔄", "done": "✅", "stuck": "🔴"}
+    lines = ["## 当前大目标"]
+    icons = {"pending": "⬜", "doing": "🔄", "done": "✅", "stuck": "🔴"}
     for item in items:
-        icon = icons.get(item.get("status", "todo"), "⬜")
-        desc = item.get("desc", "")[:_MAX_TODO_DESC]
+        icon = icons.get(item.get("status", "pending"), "⬜")
+        desc = item.get("desc", "")[:_MAX_GOAL_DESC]
         updated = item.get("updated", "")
         extra = f"（{updated}）" if updated else ""
         lines.append(f"  {icon} [#{item['id']}] {desc} {extra}".strip())
@@ -182,7 +202,7 @@ def _heartbeat_plan_context(plan: dict) -> str:
 class TaskPlanTool(BaseTool):
     name: str = "manage_task_plan"
     description: str = (
-        "管理任务计划和待办事项。用于制定任务步骤、跟踪进度、记录关键结果。\n\n"
+        "管理任务计划和大目标。用于制定任务步骤、跟踪进度、记录关键结果。\n\n"
         "适用场景：\n"
         "- 涉及多步骤的复杂任务（爬虫、批量下载、多文件处理等）\n"
         "- 可能会被中断的长时间任务\n"
@@ -192,14 +212,14 @@ class TaskPlanTool(BaseTool):
         "- update：更新步骤状态(done/doing/todo)、添加关键发现、记录创建的文件\n"
         "- show：查看当前计划内容和进度\n"
         "- check：检查是否所有步骤已完成，未完成时禁止结束任务\n\n"
-        "待办事项操作：\n"
-        "- todo_add(desc=...)：添加一条待办事项（最多 10 项）\n"
-        "- todo_start(id=N)：标记待办为执行中\n"
-        "- todo_done(id=N)：标记待办为已完成\n"
-        "- todo_stuck(id=N, reason=...)：标记待办为受阻\n"
-        "- todo_reset(id=N)：将完成或受阻的待办重置为待执行\n"
-        "- todo_list()：查看当前所有待办事项\n"
-        "注意：创建 plan 时请同时添加对应的 todo 项。所有复杂任务都应该有 todo。"
+        "大目标操作：\n"
+        "- goal_add(desc=...)：添加一条大目标（最多 10 项）\n"
+        "- goal_start(id=N)：标记大目标为执行中\n"
+        "- goal_done(id=N)：标记大目标为已完成\n"
+        "- goal_stuck(id=N, reason=...)：标记大目标为受阻\n"
+        "- goal_reset(id=N)：将完成或受阻的大目标重置为待执行\n"
+        "- goal_list()：查看当前所有大目标\n"
+        "注意：创建 plan 时请同时添加对应的 goal 项。所有复杂任务都应该有 goal。"
     )
 
     def execute(self, action: str = "show", goal: str = "",
@@ -209,84 +229,84 @@ class TaskPlanTool(BaseTool):
                 created_files: list = None,
                 task_id: int = None,
                 desc: str = "", reason: str = "",
-                todo_id: int = None,
+                goal_id: int = None,
                 **kwargs) -> str:
         # Agent passes _task_id via extra_kwargs, not as named parameter
         if task_id is None and kwargs.get("_task_id"):
             task_id = kwargs["_task_id"]
         steps = steps or []
 
-        # ── Todo operations ──
-        if action == "todo_add":
+        # ── Goal operations ──
+        if action == "goal_add":
             if not desc:
-                return "[TaskPlan] todo_add 需要 desc 参数。"
-            todos = load_todos()
-            if len(todos["items"]) >= _MAX_TODOS:
-                return f"[TaskPlan] ⚠️ 待办事项已达上限 {_MAX_TODOS} 项，请先完成一些再添加。"
-            if len(desc) > _MAX_TODO_DESC:
-                desc = desc[:_MAX_TODO_DESC]
-            new_item = {
-                "id": _new_todo_id(todos["items"]),
+                return "[TaskPlan] goal_add 需要 desc 参数。"
+            goals = load_goals()
+            if len(goals["items"]) >= _MAX_GOALS:
+                return f"[TaskPlan] ⚠️ 大目标已达上限 {_MAX_GOALS} 项，请先完成一些再添加。"
+            if len(desc) > _MAX_GOAL_DESC:
+                desc = desc[:_MAX_GOAL_DESC]
+            new_goal = {
+                "id": _new_goal_id(goals["items"]),
                 "desc": desc,
-                "status": "todo",
+                "status": "pending",
                 "updated": time.strftime("%Y-%m-%d %H:%M"),
                 "task_id": task_id,
                 "resume_count": 0,
             }
-            todos["items"].append(new_item)
-            save_todos(todos)
-            return f"[TaskPlan] ✅ 已添加待办: {desc}\n\n{format_todo_list_for_prompt(todos)}"
+            goals["items"].append(new_goal)
+            save_goals(goals)
+            return f"[TaskPlan] ✅ 已添加大目标: {desc}\n\n{format_goal_list_for_prompt(goals)}"
 
-        if action == "todo_start":
-            todos = load_todos()
-            for item in todos["items"]:
-                if item["id"] == todo_id:
+        if action == "goal_start":
+            goals = load_goals()
+            for item in goals["items"]:
+                if item["id"] == goal_id:
                     item["status"] = "doing"
                     item["updated"] = time.strftime("%Y-%m-%d %H:%M")
                     if task_id:
                         item["task_id"] = task_id
-                    save_todos(todos)
-                    return f"[TaskPlan] 🔄 已开始: {item['desc']}\n\n{format_todo_list_for_prompt(todos)}"
-            return f"[TaskPlan] ⚠️ 未找到 id={todo_id} 的待办项。"
+                    save_goals(goals)
+                    return f"[TaskPlan] 🔄 已开始: {item['desc']}\n\n{format_goal_list_for_prompt(goals)}"
+            return f"[TaskPlan] ⚠️ 未找到 id={goal_id} 的大目标项。"
 
-        if action == "todo_done":
-            todos = load_todos()
-            for item in todos["items"]:
-                if item["id"] == todo_id:
+        if action == "goal_done":
+            goals = load_goals()
+            for item in goals["items"]:
+                if item["id"] == goal_id:
                     desc = item["desc"]
-                    todos["items"].remove(item)
-                    save_todos(todos)
-                    return f"[TaskPlan] ✅ 已完成: {item['desc']}\n\n{format_todo_list_for_prompt(todos)}"
-            return f"[TaskPlan] ⚠️ 未找到 id={todo_id} 的待办项。"
+                    goals["items"].remove(item)
+                    save_goals(goals)
+                    return f"[TaskPlan] ✅ 已完成: {item['desc']}\n\n{format_goal_list_for_prompt(goals)}"
+            return f"[TaskPlan] ⚠️ 未找到 id={goal_id} 的大目标项。"
 
-        if action == "todo_stuck":
-            todos = load_todos()
-            for item in todos["items"]:
-                if item["id"] == todo_id:
+        if action == "goal_stuck":
+            goals = load_goals()
+            for item in goals["items"]:
+                if item["id"] == goal_id:
                     item["status"] = "stuck"
                     item["updated"] = time.strftime("%Y-%m-%d %H:%M")
                     if reason:
-                        item["reason"] = reason[:_MAX_TODO_DESC]
-                    save_todos(todos)
-                    return f"[TaskPlan] 🔴 已标记受阻: {item['desc']}（{reason or '无原因'}）\n\n{format_todo_list_for_prompt(todos)}"
-            return f"[TaskPlan] ⚠️ 未找到 id={todo_id} 的待办项。"
+                        item["reason"] = reason[:_MAX_GOAL_DESC]
+                    save_goals(goals)
+                    return f"[TaskPlan] 🔴 已标记受阻: {item['desc']}（{reason or '无原因'}）\n\n{format_goal_list_for_prompt(goals)}"
+            return f"[TaskPlan] ⚠️ 未找到 id={goal_id} 的大目标项。"
 
-        if action == "todo_reset":
-            todos = load_todos()
-            for item in todos["items"]:
-                if item["id"] == todo_id:
-                    item["status"] = "todo"
+        if action == "goal_reset":
+            goals = load_goals()
+            for item in goals["items"]:
+                if item["id"] == goal_id:
+                    item["status"] = "pending"
                     item["updated"] = time.strftime("%Y-%m-%d %H:%M")
                     item.pop("reason", None)
-                    save_todos(todos)
-                    return f"[TaskPlan] ⬜ 已重置: {item['desc']}\n\n{format_todo_list_for_prompt(todos)}"
-            return f"[TaskPlan] ⚠️ 未找到 id={todo_id} 的待办项。"
+                    save_goals(goals)
+                    return f"[TaskPlan] ⬜ 已重置: {item['desc']}\n\n{format_goal_list_for_prompt(goals)}"
+            return f"[TaskPlan] ⚠️ 未找到 id={goal_id} 的大目标项。"
 
-        if action == "todo_list":
-            todos = load_todos()
-            if not todos["items"]:
-                return "[TaskPlan] 📋 当前无待办事项。"
-            return f"[TaskPlan] 📋 待办事项\n\n{format_todo_list_for_prompt(todos)}"
+        if action == "goal_list":
+            goals = load_goals()
+            if not goals["items"]:
+                return "[TaskPlan] 📋 当前无大目标。"
+            return f"[TaskPlan] 📋 大目标\n\n{format_goal_list_for_prompt(goals)}"
 
         # ── Plan operations ──
         if action == "create":
@@ -492,8 +512,8 @@ class TaskPlanTool(BaseTool):
                         "action": {
                             "type": "string",
                             "enum": ["create", "update", "show", "check", "cleanup",
-                                     "todo_add", "todo_start", "todo_done",
-                                     "todo_stuck", "todo_reset", "todo_list"],
+                                     "goal_add", "goal_start", "goal_done",
+                                     "goal_stuck", "goal_reset", "goal_list"],
                             "description": "操作类型"
                         },
                         "goal": {
@@ -534,17 +554,17 @@ class TaskPlanTool(BaseTool):
                             },
                             "description": "创建的文件/文件夹及其用途"
                         },
-                        "todo_id": {
+                        "goal_id": {
                             "type": "integer",
-                            "description": "待办事项 ID（todo_start/done/stuck/reset 时必填）"
+                            "description": "大目标 ID（goal_start/done/stuck/reset 时必填）"
                         },
                         "desc": {
                             "type": "string",
-                            "description": "待办事项描述（todo_add 时必填，最长 100 字）"
+                            "description": "大目标描述（goal_add 时必填，最长 100 字）"
                         },
                         "reason": {
                             "type": "string",
-                            "description": "受阻原因（todo_stuck 时必填）"
+                            "description": "受阻原因（goal_stuck 时必填）"
                         }
                     },
                     "required": ["action"]
