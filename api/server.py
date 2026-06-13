@@ -572,36 +572,38 @@ def reconcile_tasks():
                     continue
                 # Reconstruct from task_steps + messages table
                 _cid = cursor.execute(
-                    "SELECT session_id FROM tasks WHERE id=?", (tid,)).fetchone()
-                _sid = _cid[0] if _cid else None
+                    "SELECT session_id, user_query, created_at FROM tasks WHERE id=?",
+                    (tid,)).fetchone()
+                if not _cid:
+                    continue
+                _sid, _uq_text, _task_created = _cid
                 _rebuilt = []
-                # Get user query from the task record
-                _uq = cursor.execute(
-                    "SELECT user_query FROM tasks WHERE id=?", (tid,)).fetchone()
-                if _uq and _uq[0]:
-                    _rebuilt.append({"role": "user", "content": _uq[0]})
-                # Get tool steps
+                # Get tool steps with timestamps
                 _steps = cursor.execute(
                     "SELECT tool_name, full_result, tool_call_id, full_args, "
                     "created_at FROM task_steps WHERE task_id=? ORDER BY created_at ASC",
                     (tid,)).fetchall()
+                # Collect all entries with timestamps for interleaving
+                _entries = []  # (ts, type, data)
+                if _uq_text:
+                    _entries.append((_task_created or "", "user", {"role": "user", "content": _uq_text}))
                 for _s in _steps:
+                    _ts = _s[4] or ""
                     _tc_id = _s[2] or f"call_recon_{_s[0]}"
                     _args = _s[3] or "{}"
-                    _rebuilt.append({
+                    _entries.append((_ts, "assistant", {
                         "role": "assistant", "content": None,
                         "tool_calls": [{
                             "id": _tc_id, "type": "function",
                             "function": {"name": _s[0], "arguments": _args}
                         }]
-                    })
-                    _rebuilt.append({
+                    }))
+                    _entries.append((_ts, "tool", {
                         "role": "tool", "tool_call_id": _tc_id,
                         "name": _s[0],
                         "content": (_s[1] or "(无输出)")[:5000]
-                    })
-                # Interleave user + agent text messages from the messages table
-                # (catches "第三个吧", agent proposals, etc. that aren't in task_steps)
+                    }))
+                # Add user + agent text from messages table (any time — may precede task creation)
                 if _sid:
                     _msgs = cursor.execute(
                         "SELECT role, content, created_at FROM messages "
@@ -610,21 +612,26 @@ def reconcile_tasks():
                     for _m in _msgs:
                         _role = _m[0]
                         _content = str(_m[1] or "")
+                        _ts = str(_m[2] or "")
                         if not _content:
                             continue
                         if _role == "user":
-                            # Deduplicate against user_query in _rebuilt[0]
-                            _dup = any(
-                                m.get("role") == "user" and m.get("content") == _content
-                                for m in _rebuilt
-                            )
-                            if not _dup:
-                                _rebuilt.append({"role": "user", "content": _content})
+                            # Deduplicate: skip if same content already in entries
+                            if not any(
+                                e[2].get("role") == "user" and e[2].get("content") == _content
+                                for e in _entries
+                            ):
+                                _entries.append((_ts, "user", {"role": "user", "content": _content}))
                         elif _role == "agent":
-                            # Agent text responses (proposals, analysis, etc.)
-                            # Don't add system-level or meta messages
+                            # Agent text responses — skip system/meta messages
                             if not _content.startswith("[") and not _content.startswith("【"):
-                                _rebuilt.append({"role": "assistant", "content": _content})
+                                _entries.append((_ts, "assistant", {
+                                    "role": "assistant", "content": _content
+                                }))
+                # Sort all entries by timestamp, then type (user before tool for same ts)
+                _type_order = {"user": 0, "assistant": 1, "tool": 2}
+                _entries.sort(key=lambda x: (x[0], _type_order.get(x[1], 99)))
+                _rebuilt = [e[2] for e in _entries]
                 if len(_rebuilt) > len(_ctx or []):
                     save_task_context(tid, _rebuilt)
                     print(f"[Startup] Saved fallback snapshot for task {tid}: {len(_rebuilt)} msgs")
