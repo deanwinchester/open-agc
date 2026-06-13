@@ -553,11 +553,84 @@ def reconcile_tasks():
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        interrupted = cursor.execute(
+            "SELECT id FROM tasks WHERE status='running'").fetchall()
         cursor.execute(
             "UPDATE tasks SET status='interrupted', interruption_reason='server_restart', "
             "updated_at=CURRENT_TIMESTAMP WHERE status='running'")
         count = cursor.rowcount
         conn.commit()
+
+        # For each interrupted task, try to build a fallback snapshot
+        # from task_steps + messages table (since run_turn never completed
+        # and context_snapshot was never saved).
+        for (tid,) in interrupted:
+            try:
+                _ctx = get_task_context(tid)
+                if _ctx and len(_ctx) > 1:
+                    # A valid snapshot already exists — skip
+                    continue
+                # Reconstruct from task_steps + messages table
+                _cid = cursor.execute(
+                    "SELECT session_id FROM tasks WHERE id=?", (tid,)).fetchone()
+                _sid = _cid[0] if _cid else None
+                _rebuilt = []
+                # Get user query from the task record
+                _uq = cursor.execute(
+                    "SELECT user_query FROM tasks WHERE id=?", (tid,)).fetchone()
+                if _uq and _uq[0]:
+                    _rebuilt.append({"role": "user", "content": _uq[0]})
+                # Get tool steps
+                _steps = cursor.execute(
+                    "SELECT tool_name, full_result, tool_call_id, full_args, "
+                    "created_at FROM task_steps WHERE task_id=? ORDER BY created_at ASC",
+                    (tid,)).fetchall()
+                for _s in _steps:
+                    _tc_id = _s[2] or f"call_recon_{_s[0]}"
+                    _args = _s[3] or "{}"
+                    _rebuilt.append({
+                        "role": "assistant", "content": None,
+                        "tool_calls": [{
+                            "id": _tc_id, "type": "function",
+                            "function": {"name": _s[0], "arguments": _args}
+                        }]
+                    })
+                    _rebuilt.append({
+                        "role": "tool", "tool_call_id": _tc_id,
+                        "name": _s[0],
+                        "content": (_s[1] or "(无输出)")[:5000]
+                    })
+                # Interleave user + agent text messages from the messages table
+                # (catches "第三个吧", agent proposals, etc. that aren't in task_steps)
+                if _sid:
+                    _msgs = cursor.execute(
+                        "SELECT role, content, created_at FROM messages "
+                        "WHERE session_id=? ORDER BY id ASC", (_sid,)
+                    ).fetchall()
+                    for _m in _msgs:
+                        _role = _m[0]
+                        _content = str(_m[1] or "")
+                        if not _content:
+                            continue
+                        if _role == "user":
+                            # Deduplicate against user_query in _rebuilt[0]
+                            _dup = any(
+                                m.get("role") == "user" and m.get("content") == _content
+                                for m in _rebuilt
+                            )
+                            if not _dup:
+                                _rebuilt.append({"role": "user", "content": _content})
+                        elif _role == "agent":
+                            # Agent text responses (proposals, analysis, etc.)
+                            # Don't add system-level or meta messages
+                            if not _content.startswith("[") and not _content.startswith("【"):
+                                _rebuilt.append({"role": "assistant", "content": _content})
+                if len(_rebuilt) > len(_ctx or []):
+                    save_task_context(tid, _rebuilt)
+                    print(f"[Startup] Saved fallback snapshot for task {tid}: {len(_rebuilt)} msgs")
+            except Exception as _re_err:
+                print(f"[Startup] Fallback snapshot error for task {tid}: {_re_err}")
+
         conn.close()
         if count:
             print(f"[Startup] Marked {count} running task(s) as interrupted (server restart)")
@@ -4169,7 +4242,13 @@ async def websocket_endpoint(websocket: WebSocket):
             if session_history:
                 session_history = [{k:v for k,v in m.items() if k != '_timestamp'} for m in session_history]
                 agent.messages.extend(session_history)
-            
+
+            # Save the first user query so it survives crashes in the messages table
+            try:
+                save_message("user", query, ws_session_id)
+            except Exception:
+                pass
+
             loop = asyncio.get_event_loop()
             
             import concurrent.futures
