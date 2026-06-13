@@ -56,11 +56,14 @@ class AskUserQuestionTool(BaseTool):
 
 class TaskPaused(Exception):
     """Raised when the agent voluntarily pauses itself for background tasks."""
-    def __init__(self, reason: str = "", pid: int = None, output_file: str = ""):
+    def __init__(self, reason: str = "", pid: int = None, output_file: str = "",
+                 wake_in_minutes: int = None):
         self.reason = reason
         self.pid = pid
         self.output_file = output_file
-        super().__init__(f"Task paused: {reason}")
+        self.wake_in_minutes = wake_in_minutes
+        extra = f" (定时唤醒: {wake_in_minutes}min)" if wake_in_minutes else ""
+        super().__init__(f"Task paused: {reason}{extra}")
 
 
 class PauseAndWaitTool(BaseTool):
@@ -68,14 +71,17 @@ class PauseAndWaitTool(BaseTool):
     description: str = (
         "暂停当前任务并等待后台进程完成。用于长时间运行的命令（下载模型、安装依赖、训练模型等）。"
         "系统会保存当前上下文，在后台任务完成后自动恢复执行。"
+        "可设置定时唤醒作为兜底（即使后台进程检测失败，到时间也会自动恢复）。"
     )
 
     def execute(self, reason: str = "", pid: int = None,
-                output_file: str = "", description: str = "", **kwargs) -> str:
+                output_file: str = "", description: str = "",
+                wake_in_minutes: int = None, **kwargs) -> str:
         raise TaskPaused(
             reason=reason or description or "任务进入后台",
             pid=pid,
-            output_file=output_file
+            output_file=output_file,
+            wake_in_minutes=wake_in_minutes
         )
 
     def get_openai_schema(self) -> dict:
@@ -87,7 +93,9 @@ class PauseAndWaitTool(BaseTool):
                     "Pause the current task and yield to background execution. "
                     "Use this when a command returns [Still Running] (long downloads, "
                     "model training, package installation). The system will save context "
-                    "and automatically resume when the background task completes."
+                    "and automatically resume when the background task completes. "
+                    "You can also set a wake-up timer as a safety net — even if the "
+                    "background process detection fails, the task will be resumed on time."
                 ),
                 "parameters": {
                     "type": "object",
@@ -103,6 +111,12 @@ class PauseAndWaitTool(BaseTool):
                         "output_file": {
                             "type": "string",
                             "description": "Path to the output file for reading results on resume."
+                        },
+                        "wake_in_minutes": {
+                            "type": "integer",
+                            "description": "Optional: wake up after this many minutes as fallback. "
+                                           "Use when the process might not be tracked correctly "
+                                           "(e.g., orphan processes, restart scenarios)."
                         }
                     },
                     "required": ["reason"]
@@ -131,12 +145,30 @@ class SearchHistoryTool(BaseTool):
         results = []
         q_lower = query.lower() if query else ""
         q_words = set(q_lower.split()) if q_lower else set()
-        scored = []  # (score, index, text)
+        scored = []  # (score, time_key, text)
+        import time as _search_time
+        _search_now = _search_time.time()
+
+        def _fmt_ts(ts_val, msg_idx):
+            if ts_val and ts_val > 1000000000:
+                age = _search_now - ts_val
+                if age < 60: return f" ({int(age)}s)"
+                if age < 3600: return f" ({int(age//60)}m)"
+                if age < 86400: return f" ({int(age//3600)}h)"
+                return f" ({int(age//86400)}d)"
+            return ""
+
+        def _msg_ts(msg, idx):
+            ts = msg.get("_timestamp")
+            if ts: return ts
+            return idx * 0.001
 
         for i, msg in enumerate(messages):
             role = msg.get("role", "")
             content = str(msg.get("content", ""))
             score = 0
+            ts = _msg_ts(msg, i)
+            tag = _fmt_ts(ts, i)
 
             if search_type in ("all", "user_query") and role == "user":
                 if q_lower:
@@ -144,8 +176,8 @@ class SearchHistoryTool(BaseTool):
                 else:
                     score = 1
                 if score > 0:
-                    scored.append((score + 2, i,
-                        f"[用户查询] {content[:300]}"))
+                    scored.append((score + 2, ts,
+                        f"[用户查询{tag}] {content[:300]}"))
 
             if search_type in ("all", "tool_calls") and role == "assistant":
                 tcs = msg.get("tool_calls", [])
@@ -183,19 +215,19 @@ class SearchHistoryTool(BaseTool):
                         has_data = bool(url or fname or fpath)
                         data_score = 3 if has_data else 0
                         if match:
-                            s = f"[工具调用: {name}]"
+                            s = f"[工具调用:{name}{tag}]"
                             if url: s += f" url={url}"
                             if fname: s += f" filename={fname}"
                             if fpath: s += f" path={fpath}"
                             if cmd: s += f" cmd={cmd}"
                             if qtext: s += f" query={qtext[:80]}"
-                            scored.append((8 + data_score, i, s))
+                            scored.append((8 + data_score, ts, s))
                         elif not q_lower and has_data:
-                            s = f"[工具调用: {name}]"
+                            s = f"[工具调用:{name}{tag}]"
                             if url: s += f" url={url}"
                             if fname: s += f" filename={fname}"
                             if fpath: s += f" path={fpath}"
-                            scored.append((1 + data_score, i, s))
+                            scored.append((1 + data_score, ts, s))
 
             if search_type in ("all", "results") and role == "tool":
                 name = msg.get("name", "")
@@ -208,14 +240,14 @@ class SearchHistoryTool(BaseTool):
                 if match or not q_lower:
                     urls = re.findall(r'(?:https?|ftp)://[^\s\'"<>]{5,}', c)
                     preview = c[:400]
-                    s = f"[{name} 结果]"
+                    s = f"[{name} 结果{tag}]"
                     if urls: s += f" 链接={urls[0]}" + (f" (+{len(urls)-1})" if len(urls)>1 else "")
                     s += f" | {preview}"
-                    scored.append((4 if match else 0, i, s))
+                    scored.append((4 if match else 0, ts, s))
 
             if search_type in ("all", "agent_response") and role == "assistant" and not msg.get("tool_calls"):
                 if q_lower and q_lower in content.lower():
-                    scored.append((3, i, f"[Agent 回复] {content[:400]}"))
+                    scored.append((3, ts, f"[Agent 回复{tag}] {content[:400]}"))
 
         # Also search persisted task_steps in database (survives across run_turns)
         try:
@@ -234,7 +266,7 @@ class SearchHistoryTool(BaseTool):
                 # Fetch recent steps and filter in Python with word-level matching.
                 db_steps = db.execute(
                     "SELECT task_id, step_number, tool_name, tool_label, "
-                    "args_preview, result_preview, full_result, success "
+                    "args_preview, result_preview, full_result, success, created_at "
                     "FROM task_steps WHERE session_id=? "
                     "ORDER BY task_id DESC, step_number DESC LIMIT 200",
                     (sess_id,)
@@ -264,15 +296,23 @@ class SearchHistoryTool(BaseTool):
                     urls = re.findall(r'(?:https?|ftp)://[^\s\'"<>]{5,}', combined)
                     preview = (rp or ap or fr)[:300]
                     label = step["tool_label"] or step["tool_name"]
-                    s = f"[数据库步骤 #{step['task_id']}:{step['step_number']} {label}]"
+                    created = step["created_at"] or ""
+                    db_tag = f" ({created})" if created else ""
+                    s = f"[数据库步骤 #{step['task_id']}:{step['step_number']} {label}{db_tag}]"
                     if urls:
                         s += f" 链接={urls[0]}" + (f" (+{len(urls)-1})" if len(urls) > 1 else "")
                     s += f" | {preview[:200]}"
-                    scored.append((3 + word_score if urls else 1 + word_score, step["task_id"] * 1000 + step["step_number"], s))
+                    # Use created_at timestamp for sorting (convert to seconds for mix with msg _timestamp)
+                    try:
+                        from datetime import datetime as _dbdt
+                        _db_ts = _dbdt.strptime(created, '%Y-%m-%d %H:%M:%S').timestamp() if created else 0
+                    except Exception:
+                        _db_ts = 0
+                    scored.append((3 + word_score if urls else 1 + word_score, _db_ts, s))
         except Exception as e:
             print(f"[SearchHistory] DB search error: {e}")
 
-        # Sort by score descending, take top N
+        # Take top N by relevance score, then sort by time (most recent first)
         scored.sort(key=lambda x: -x[0])
         top = scored[:max_results]
 
@@ -282,8 +322,10 @@ class SearchHistoryTool(BaseTool):
                 f"建议：尝试更短的关键词，或先用 search_available_tools 查看可用工具。"
             )
 
-        lines = [f"会话记忆检索结果 ({len(top)} 条，关键词: '{query or '全部'}'):"]
-        for _, idx, text in sorted(top, key=lambda x: x[1]):  # Sort by message order
+        # Sort by time_key descending (most recent first)
+        top.sort(key=lambda x: -x[1])
+        lines = [f"会话记忆检索结果 ({len(top)} 条，时间最近→最远，关键词: '{query or '全部'}'):"]
+        for _, ts, text in top:
             lines.append(f"  {text}")
 
         return "\n".join(lines)

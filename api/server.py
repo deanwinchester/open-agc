@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 import asyncio
 import sqlite3
 import threading
@@ -414,6 +415,18 @@ def init_db():
     except Exception:
         pass
 
+    # Migrate old task_type values from 'todo_resume' to 'goal_resume'
+    try:
+        cursor.execute("UPDATE tasks SET task_type='goal_resume' WHERE task_type='todo_resume'")
+    except Exception:
+        pass
+
+    # Add wake_at column for scheduled wake-up timer
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN wake_at DATETIME")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -816,47 +829,47 @@ _CONTINUATION_PREFIXES = frozenset({
 })
 
 
-def _resolve_todo_for_query(query: str) -> int:
+def _resolve_goal_for_query(query: str) -> int:
     """
-    Determine which todo (if any) this query is continuing.
-    Returns todo_id, or 0 for new task.
+    Determine which goal (if any) this query is continuing.
+    Returns goal_id, or 0 for new task.
     """
     # Quick keyword check (no LLM)
     q = query.strip().lower()
     for kw in ["继续", "继续搞", "继续做", "继续下载", "接着", "retry", "continue",
                "再来", "再试", "重新", "唤醒", "恢复", "resume", "next", "yes", "继续做"]:
         if kw and (q.startswith(kw) or q == kw):
-            # Continuation of any active todo — return first active
+            # Continuation of any active goal — return first active
             try:
-                from tools.task_plan import load_todos
-                for item in load_todos().get("items", []):
-                    if item.get("status") in ("doing", "todo"):
+                from tools.task_plan import load_goals
+                for item in load_goals().get("items", []):
+                    if item.get("status") in ("doing", "pending"):
                         return item["id"]
             except Exception:
                 pass
             return 0
 
-    # Load todos — if none active, no need for LLM
+    # Load goals — if none active, no need for LLM
     try:
-        from tools.task_plan import load_todos
-        todos = load_todos()
-        active = [i for i in todos.get("items", []) if i.get("status") in ("doing", "todo")]
+        from tools.task_plan import load_goals
+        goals = load_goals()
+        active = [i for i in goals.get("items", []) if i.get("status") in ("doing", "pending")]
     except Exception:
         active = []
 
     if not active:
-        return 0  # No active todos → definitely new task
+        return 0  # No active goals → definitely new task
 
-    # Use LLM to determine association (only when todos exist and query is ambiguous)
+    # Use LLM to determine association (only when goals exist and query is ambiguous)
     try:
         from core.llm_client import LLMClient
         _model = load_config().get("default_model", "moonshot/kimi-latest")
 
-        todo_lines = "\n".join(f"{i['id']}. {i['desc']} ({i['status']})" for i in active)
+        goal_lines = "\n".join(f"{i['id']}. {i['desc']} ({i['status']})" for i in active)
         prompt = (
-            f"当前待办：\n{todo_lines}\n\n"
+            f"当前大目标：\n{goal_lines}\n\n"
             f"用户新输入：「{query[:200]}」\n\n"
-            f"回答：如果是续接某个待办，仅回复数字 id；如果无关或全新任务，仅回复 0。"
+            f"回答：如果是续接某个大目标，仅回复数字 id；如果无关或全新任务，仅回复 0。"
         )
         llm = LLMClient(default_model=_model)
         resp, _ = llm.chat([{"role": "user", "content": prompt}])
@@ -865,9 +878,9 @@ def _resolve_todo_for_query(query: str) -> int:
         import re
         nums = re.findall(r'\d+', text)
         if nums:
-            todo_id = int(nums[0])
-            if any(i["id"] == todo_id for i in active):
-                return todo_id
+            goal_id = int(nums[0])
+            if any(i["id"] == goal_id for i in active):
+                return goal_id
     except Exception:
         pass
 
@@ -956,7 +969,7 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
                 except Exception:
                     is_recent = False
 
-                if is_recent and len(query.strip()) > 15 and _resolve_todo_for_query(query) > 0:
+                if is_recent and len(query.strip()) > 15 and _resolve_goal_for_query(query) > 0:
                     print(f"[Task] Continuing task {tid} for session {session_id} (continuation: {query[:50]})")
                     update_task_status(tid, "running")
                     return tid
@@ -985,10 +998,28 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
 
 
 def save_task_context(task_id: int, messages: list):
-    """Save agent conversation messages as a JSON snapshot for resume."""
+    """Save agent conversation messages as a JSON snapshot for resume.
+
+    Safety: does NOT overwrite if the new snapshot has fewer than 10 messages
+    AND is less than half the size of the existing one. This catches interrupt-
+    mid-turn corruption (messages=[user_query] → overwriting 80 msgs) without
+    blocking legitimate context compression (100→40 via _fold_tool_calls).
+    """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # Save full context, relying on token_budget.py for pruning instead of hard limits
+    # Check existing snapshot length before overwriting
+    existing = cursor.execute("SELECT context_snapshot FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if existing and existing[0] and len(messages) < 10:
+        try:
+            existing_parsed = json.loads(existing[0])
+            if existing_parsed and len(existing_parsed) >= len(messages) * 2:
+                print(f"[Task] save_task_context({task_id}): skipping save — "
+                      f"existing ({len(existing_parsed)} msgs) >= 2x new ({len(messages)} msgs) "
+                      f"and new < 10, likely interrupt corruption")
+                conn.close()
+                return
+        except Exception:
+            pass  # existing snapshot is broken, overwrite it
     snapshot = json.dumps(messages, ensure_ascii=False)
     cursor.execute("UPDATE tasks SET context_snapshot=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                    (snapshot, task_id))
@@ -1006,9 +1037,12 @@ def get_task_context(task_id: int) -> list:
             ctx = json.loads(row[0])
             if ctx:  # valid non-empty snapshot
                 conn.close()
+                print(f"[Task] Snapshot hit for task {task_id}: {len(ctx)} msgs")
                 return ctx
-        except Exception:
-            pass
+            else:
+                print(f"[Task] Snapshot for task {task_id} is empty array, falling back")
+        except Exception as e:
+            print(f"[Task] Snapshot parse error for task {task_id}: {e}, falling back to reconstruction")
 
     # Fallback: reconstruct context from user_query + task_steps
     # Uses saved tool_call_id and full_args to build API-compatible tool_call/tool pairs
@@ -1053,7 +1087,9 @@ def get_task_context(task_id: int) -> list:
                 "content": result[:5000] if result else "(无输出)"
             })
 
-        print(f"[Task] Reconstructed context for task {task_id} from {len(steps)} step(s)")
+        print(f"[Task] Reconstructed context for task {task_id} from {len(steps)} step(s) -> {len(reconstructed)} msgs (FALLBACK)")
+    else:
+        print(f"[Task] Reconstruction for task {task_id}: no task_steps found (FALLBACK)")
 
     return reconstructed
 
@@ -3095,17 +3131,17 @@ async def delete_task(task_id: int):
     cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
     conn.commit()
     conn.close()
-    # Clean up associated todo items
+    # Clean up associated goal items
     try:
-        from tools.task_plan import load_todos as _lt, save_todos as _st
-        _todos = _lt()
+        from tools.task_plan import load_goals as _lg, save_goals as _sg
+        _goals = _lg()
         _changed = False
-        for item in list(_todos.get("items", [])):
+        for item in list(_goals.get("items", [])):
             if item.get("task_id") == task_id:
-                _todos["items"].remove(item)
+                _goals["items"].remove(item)
                 _changed = True
         if _changed:
-            _st(_todos)
+            _sg(_goals)
     except Exception:
         pass
     return {"status": "success", "message": "Task deleted"}
@@ -3831,6 +3867,7 @@ async def websocket_endpoint(websocket: WebSocket):
             has_taken_action = False
             agent = None
             _bg_pid = None
+            _bg_wake = None
 
             # Accumulate shell output per step for tool_step message persistence
             _step_outputs: dict = {}
@@ -3857,6 +3894,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Capture PID from pause_and_wait for BgMonitor tracking
                 if event.get("event") == "task_backgrounded":
                     _bg_pid = event.get("pid")
+                    _bg_wake = event.get("wake_in_minutes")
 
                 if event.get("event") == "shell_output":
                     text = event.get("text", "")
@@ -4231,9 +4269,22 @@ async def websocket_endpoint(websocket: WebSocket):
             if ws_task_id and is_backgrounded:
                 # Agent voluntarily paused — save context, mark backgrounded
                 save_task_context(ws_task_id, agent.messages[1:])
+                # Check for WAKE_IN=N in response as fallback timer
+                _resp_body = response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台"
+                _wake_match = re.search(r'WAKE_IN=(\d+)', response)
+                _wake_min = int(_wake_match.group(1)) if _wake_match else _bg_wake
+                if _wake_min:
+                    _wake_dt = (datetime.utcnow() + timedelta(minutes=_wake_min)).strftime('%Y-%m-%d %H:%M:%S')
+                    try:
+                        _wake_conn = sqlite3.connect(DB_PATH)
+                        _wake_conn.execute("UPDATE tasks SET wake_at=? WHERE id=?", (_wake_dt, ws_task_id))
+                        _wake_conn.commit()
+                        _wake_conn.close()
+                        print(f"[Task] Set wake_at={_wake_dt} for task {ws_task_id} (after {_wake_min}min)")
+                    except Exception as _wake_err:
+                        print(f"[Task] Failed to set wake_at: {_wake_err}")
                 update_task_status(ws_task_id, "backgrounded",
-                    response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台",
-                    interruption_reason="backgrounded")
+                    _resp_body, interruption_reason="backgrounded")
                 # Register PID for BgMonitor tracking if available
                 if _bg_pid:
                     try:
@@ -4285,7 +4336,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception:
                         pass
                 elif response and ("interrupted by user" in response.lower() or "interrupted" in response.lower()):
-                    save_task_context(ws_task_id, agent.messages[1:])
+                    # Don't save context on user interrupt — the current agent.messages
+                    # reflects only the interrupted turn (1-2 messages) which would
+                    # overwrite the full snapshot from previous successful turns.
+                    # Keep the last good snapshot intact for resume.
+                    print(f"[Task] User interrupt for task {ws_task_id}: keeping previous snapshot")
                     update_task_status(ws_task_id, "interrupted", summary, interruption_reason="user")
                 else:
                     save_task_context(ws_task_id, agent.messages[1:])
@@ -4304,6 +4359,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 except Exception:
                     pass
             
+            # Persist final answer so it survives page refresh
+            try:
+                save_message("agent", response, ws_session_id)
+            except Exception:
+                pass
+
             return response
         except Exception as e:
             if ws_task_id:
@@ -4464,14 +4525,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     save_message("user", query, ws_session_id)
 
                     # Auto-reconstruct context for continuation queries
-                    _resolved_todo = _resolve_todo_for_query(query)
-                    if _resolved_todo > 0:
+                    _resolved_goal = _resolve_goal_for_query(query)
+                    if _resolved_goal > 0:
                         try:
-                            from tools.task_plan import load_todos as _ct_load
-                            _ct_todos = _ct_load()
-                            for _ct_item in _ct_todos.get("items", []):
-                                if _ct_item["id"] == _resolved_todo:
-                                    query += f"\n\n[关联待办 #{_resolved_todo}] {_ct_item['desc']}"
+                            from tools.task_plan import load_goals as _ct_load
+                            _ct_goals = _ct_load()
+                            for _ct_item in _ct_goals.get("items", []):
+                                if _ct_item["id"] == _resolved_goal:
+                                    query += f"\n\n[关联大目标 #{_resolved_goal}] {_ct_item['desc']}"
                                     break
                         except Exception:
                             pass
@@ -5063,13 +5124,36 @@ def start_background_monitor():
                 conn = sqlite3.connect(DB_PATH)
                 conn.row_factory = sqlite3.Row
                 bg_tasks = conn.execute(
-                    "SELECT id, user_query, resume_count, max_resume_count, created_at, updated_at FROM tasks "
+                    "SELECT id, user_query, resume_count, max_resume_count, created_at, updated_at, wake_at FROM tasks "
                     "WHERE status='backgrounded'"
                 ).fetchall()
                 if bg_tasks:
                     print(f"[BgMonitor] Found {len(bg_tasks)} backgrounded task(s) to check")
                 for task in bg_tasks:
                     tid = task["id"]
+
+                    # 0. Wake-up timer check — if wake_at is set and time has passed, resume
+                    _wake_at = task["wake_at"]
+                    if _wake_at:
+                        try:
+                            _wake_dt = datetime.strptime(_wake_at, '%Y-%m-%d %H:%M:%S')
+                            _wake_dt = _wake_dt.replace(tzinfo=timezone.utc)
+                            if datetime.now(timezone.utc) >= _wake_dt:
+                                print(f"[BgMonitor] Task {tid}: wake timer expired ({_wake_at}), resuming")
+                                conn.execute("UPDATE tasks SET wake_at=NULL WHERE id=?", (tid,))
+                                conn.commit()
+                                ctx = get_task_context(tid)
+                                if ctx:
+                                    ctx.append({"role": "user", "content": (
+                                        "【系统通知】定时唤醒时间已到，请继续执行之前未完成的任务。"
+                                    )})
+                                    save_task_context(tid, ctx)
+                                update_task_status(tid, "interrupted",
+                                    "定时唤醒", interruption_reason="background_complete")
+                                continue
+                        except Exception as _wake_err:
+                            print(f"[BgMonitor] Task {tid}: wake_at parse error: {_wake_err}")
+
                     # 1. Check downloads linked to this task
                     dl = conn.execute(
                         "SELECT id, status FROM downloads WHERE task_id=? AND status='completed' "
@@ -5305,12 +5389,6 @@ def _guardian_resume_task(task_id: int) -> None:
             ctx = get_task_context(task_id)
             if ctx:
                 print(f"[Guardian] Resume #{task_id}: loaded context ({len(ctx)} msgs)")
-                # Trim context to avoid 138K token first call: keep first 2 + last 15 msgs
-                if len(ctx) > 20:
-                    total_chars = sum(len(m.get("content", "") or "") for m in ctx)
-                    if total_chars > 20000:
-                        ctx = ctx[:2] + ctx[-15:]
-                        print(f"[Guardian] Resume #{task_id}: trimmed to {len(ctx)} msgs ({total_chars} chars)")
                 # Strip timestamp metadata that may have been serialized
                 ctx = [{k:v for k,v in m.items() if k != '_timestamp'} for m in ctx]
                 agent.messages.extend(ctx)
@@ -5379,6 +5457,19 @@ def _guardian_resume_task(task_id: int) -> None:
                 save_task_context(task_id, agent.messages[1:])
             except Exception:
                 pass
+            # Parse WAKE_IN=N for wake-up timer
+            try:
+                _wake_match = re.search(r'WAKE_IN=(\d+)', _resp_str)
+                if _wake_match:
+                    _wake_min = int(_wake_match.group(1))
+                    _wake_dt = (datetime.utcnow() + timedelta(minutes=_wake_min)).strftime('%Y-%m-%d %H:%M:%S')
+                    _wk_conn = sqlite3.connect(DB_PATH)
+                    _wk_conn.execute("UPDATE tasks SET wake_at=? WHERE id=?", (_wake_dt, task_id))
+                    _wk_conn.commit()
+                    _wk_conn.close()
+                    print(f"[Guardian] Set wake_at={_wake_dt} for task {task_id}")
+            except Exception as _wke:
+                print(f"[Guardian] Failed to set wake_at: {_wke}")
             update_task_status(task_id, "backgrounded", _resp_str, interruption_reason="backgrounded")
         elif hasattr(agent, '_consecutive_failures') and agent._consecutive_failures >= 3:
             try:
@@ -5415,7 +5506,7 @@ def start_guardian_loop():
                 interval = cfg.get("heartbeat_interval", 180)
 
                 conn = sqlite3.connect(DB_PATH)
-                _running_count = conn.execute("SELECT COUNT(*) FROM tasks WHERE status='running' AND task_type NOT IN ('heartbeat', 'todo_resume')").fetchone()[0]
+                _running_count = conn.execute("SELECT COUNT(*) FROM tasks WHERE status='running' AND task_type NOT IN ('heartbeat', 'goal_resume')").fetchone()[0]
                 if _running_count > 0:
                     print(f"[Guardian] {_running_count} real task(s) running, skipping")
                     conn.close()
