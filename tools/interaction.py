@@ -507,9 +507,10 @@ class SearchHistoryTool(BaseTool):
         _end = _start + _per_page
         _page_items = top[_start:_end]
 
+        _total_pages = max(1, (_total + _per_page - 1) // _per_page)
         _type_tag = f" 类型:{memory_type}" if memory_type else ""
         lines = [
-            f"会话记忆检索结果 (第{_page}页，共{_total}条，关键词: '{query or '全部'}'{_type_tag}):",
+            f"会话记忆检索结果 (第{_page}/{_total_pages}页，共{_total}条，关键词: '{query or '全部'}'{_type_tag}):",
             "提示：用 expand_id 查看详情，page=N 翻页，memory_type=core/working/episode 筛选类型。"
         ]
         for _idx, (_score, _ts, _text) in enumerate(_page_items, _start + 1):
