@@ -212,7 +212,8 @@ class SearchHistoryTool(BaseTool):
 
     def execute(self, query: str = "", search_type: str = "all",
                 max_results: int = 8, expand_id: str = "",
-                topic: str = "", include_archived: bool = False, **kwargs) -> str:
+                topic: str = "", include_archived: bool = False,
+                page: int = 1, memory_type: str = "", **kwargs) -> str:
         agent_ctx = kwargs.get("_agent_context")
         if not agent_ctx:
             return "Error: Cannot search history without agent context."
@@ -266,6 +267,9 @@ class SearchHistoryTool(BaseTool):
                     if isinstance(tc, dict):
                         fn = tc.get("function", {})
                         name = fn.get("name", "")
+                        # Skip noise tools in search results
+                        if name in ("search_history",):
+                            continue
                         raw_args = fn.get("arguments", "{}")
                         # Normalize: args might be a JSON string OR already-parsed dict
                         if isinstance(raw_args, str):
@@ -327,8 +331,10 @@ class SearchHistoryTool(BaseTool):
                     scored.append((4 if match else 0, ts, s))
 
             if search_type in ("all", "agent_response") and role == "assistant" and not msg.get("tool_calls"):
-                if q_lower and q_lower in content.lower():
-                    scored.append((3, ts, f"[Agent 回复{tag}] {content[:400]}"))
+                if (q_lower and q_lower in content.lower()
+                        # Skip echoes of previous search results
+                        and "会话记忆检索结果" not in content[:50]):
+                    scored.append((3, ts, f"[Agent 回复{tag}] {content[:600]}"))
 
         # Also search persisted task_steps in database (survives across run_turns)
         try:
@@ -439,7 +445,8 @@ class SearchHistoryTool(BaseTool):
             _mem_store = getattr(agent_ctx, 'memory_store', None)
             if _mem_store and hasattr(_mem_store, 'search_memories') and q_lower:
                 _mem_results = _mem_store.search_memories(
-                    q_lower, top_k=5, topic=topic, include_archived=include_archived
+                    q_lower, top_k=5, topic=topic, include_archived=include_archived,
+                    memory_type=memory_type or None,
                 )
                 if _mem_results:
                     for _mem in _mem_results:
@@ -476,10 +483,22 @@ class SearchHistoryTool(BaseTool):
 
         # Sort by time_key descending (most recent first)
         top.sort(key=lambda x: -x[1])
-        lines = [f"会话记忆检索结果 ({len(top)} 条，时间最近→最远，关键词: '{query or '全部'}'):"]
-        lines.append("提示：使用 expand_id 参数可查看某条结果的完整内容（如 expand_id='step:204:39'）。")
-        for _idx, (_score, _ts, _text) in enumerate(top, 1):
+        _total = len(top)
+        _page = max(1, page)
+        _per_page = max(1, max_results)
+        _start = (_page - 1) * _per_page
+        _end = _start + _per_page
+        _page_items = top[_start:_end]
+
+        _type_tag = f" 类型:{memory_type}" if memory_type else ""
+        lines = [
+            f"会话记忆检索结果 (第{_page}页，共{_total}条，关键词: '{query or '全部'}'{_type_tag}):",
+            "提示：用 expand_id 查看详情，page=N 翻页，memory_type=core/working/episode 筛选类型。"
+        ]
+        for _idx, (_score, _ts, _text) in enumerate(_page_items, _start + 1):
             lines.append(f"  #{_idx} {_text}")
+        if _end < _total:
+            lines.append(f"  ... 还有 {_total - _end} 条，用 page={_page + 1} 查看下一页")
 
         return "\n".join(lines)
 
@@ -528,6 +547,18 @@ class SearchHistoryTool(BaseTool):
                             "type": "boolean",
                             "description": "Set to true to also search archived (old, 1yr+) memories. "
                                            "Default false. Use when normal search returns nothing useful."
+                        },
+                        "page": {
+                            "type": "integer",
+                            "description": "Page number for paginated results (default 1, most recent first). "
+                                           "Use when you see '还有 N 条，用 page=N 查看下一页'."
+                        },
+                        "memory_type": {
+                            "type": "string",
+                            "enum": ["", "core", "working", "episode"],
+                            "description": "Filter memory store by type: 'core' (long-term facts), "
+                                           "'working' (current task context), "
+                                           "'episode' (task experience). Leave empty for all."
                         }
                     },
                     "required": []
