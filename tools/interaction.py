@@ -166,9 +166,18 @@ class SearchHistoryTool(BaseTool):
                 if _mem_store and hasattr(_mem_store, 'get_memory'):
                     _mem = _mem_store.get_memory(mem_id)
                     if _mem:
+                        # Record recall with weight=3 (explicit expansion = high value)
+                        if hasattr(_mem_store, 'record_recall'):
+                            try:
+                                _mem_store.record_recall(mem_id, weight=3)
+                            except Exception:
+                                pass
                         return (
                             f"=== 记忆详情 #{mem_id} ===\n"
-                            f"类型: {_mem.get('memory_type', '?')} / {_mem.get('category', '?')}\n\n"
+                            f"话题: {_mem.get('topic', '')}\n"
+                            f"类型: {_mem.get('memory_type', '?')} / {_mem.get('category', '?')}\n"
+                            f"状态: {_mem.get('status', 'active')}\n"
+                            f"召回: {_mem.get('recall_count', 0)} 次\n\n"
                             f"{_mem.get('content', '(空)')}"
                         )
                 return f"未找到记忆 {expand_id}"
@@ -192,7 +201,8 @@ class SearchHistoryTool(BaseTool):
         return f"未知的展开目标: {expand_id}"
 
     def execute(self, query: str = "", search_type: str = "all",
-                max_results: int = 8, expand_id: str = "", **kwargs) -> str:
+                max_results: int = 8, expand_id: str = "",
+                topic: str = "", include_archived: bool = False, **kwargs) -> str:
         agent_ctx = kwargs.get("_agent_context")
         if not agent_ctx:
             return "Error: Cannot search history without agent context."
@@ -418,7 +428,9 @@ class SearchHistoryTool(BaseTool):
         try:
             _mem_store = getattr(agent_ctx, 'memory_store', None)
             if _mem_store and hasattr(_mem_store, 'search_memories') and q_lower:
-                _mem_results = _mem_store.search_memories(q_lower, top_k=5)
+                _mem_results = _mem_store.search_memories(
+                    q_lower, top_k=5, topic=topic, include_archived=include_archived
+                )
                 if _mem_results:
                     for _mem in _mem_results:
                         _content = str(_mem.get('content', ''))
@@ -496,6 +508,16 @@ class SearchHistoryTool(BaseTool):
                             "description": "Progressive drill-down: set to a result ID from a previous search "
                                            "(e.g. 'step:204:39', 'mem:42', 'msg:100') to get the FULL content "
                                            "of that specific item. Leave empty for normal search."
+                        },
+                        "topic": {
+                            "type": "string",
+                            "description": "Optional: limit search to a specific topic tag (e.g. '车票'). "
+                                           "Only affects memory store search."
+                        },
+                        "include_archived": {
+                            "type": "boolean",
+                            "description": "Set to true to also search archived (old, 1yr+) memories. "
+                                           "Default false. Use when normal search returns nothing useful."
                         }
                     },
                     "required": []
