@@ -413,6 +413,10 @@ class SearchHistoryTool(BaseTool):
                 db_msg.close()
                 for _mr in _msg_rows:
                     _role = _mr["role"]
+                    # Skip tool_step records — they contain JSON dumps of search/call
+                    # results that pollute results with noise
+                    if _role not in ("user", "agent"):
+                        continue
                     _content = str(_mr["content"] or "")
                     _created = str(_mr["created_at"] or "")
                     _msg_id = _mr.get("id", "")
