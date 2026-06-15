@@ -426,7 +426,24 @@ class SearchHistoryTool(BaseTool):
                             continue
                     else:
                         _match_count = 1
-                    _preview = _content[:500]
+                    # Show context around the first match rather than raw start
+                    _preview = _content
+                    if q_lower and _match_count > 0:
+                        _first_match_pos = len(_content)
+                        for _w in q_words:
+                            _p = _content_lower.find(_w)
+                            if _p >= 0 and _p < _first_match_pos:
+                                _first_match_pos = _p
+                        _ctx_start = max(0, _first_match_pos - 150)
+                        _ctx_end = min(len(_content), _first_match_pos + 350)
+                        _preview = ""
+                        if _ctx_start > 0:
+                            _preview = "..."
+                        _preview += _content[_ctx_start:_ctx_end]
+                        if _ctx_end < len(_content):
+                            _preview += "..."
+                    else:
+                        _preview = _content[:500]
                     _tag = f" ({_created})" if _created else ""
                     _role_label = "用户" if _role == "user" else "Agent"
                     _s = f"[{_role_label}消息{_tag}{_id_tag}] {_preview}"
