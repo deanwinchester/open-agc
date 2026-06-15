@@ -126,14 +126,12 @@ class MemoryStore:
             """)
             conn.commit()
 
-            # Check if memory_type column exists (for migration)
+            # Migrations
             cursor = conn.execute("PRAGMA table_info(memories)")
-            columns = [row[1] for row in cursor.fetchall()]
+            columns = {row[1] for row in cursor.fetchall()}
+
             if "memory_type" not in columns:
                 conn.execute("ALTER TABLE memories ADD COLUMN memory_type TEXT NOT NULL DEFAULT 'episode'")
-                conn.commit()
-
-            # Add session_id column for session isolation
             try:
                 conn.execute("ALTER TABLE memories ADD COLUMN session_id INTEGER DEFAULT 1")
             except Exception:
@@ -142,6 +140,19 @@ class MemoryStore:
                 conn.execute("ALTER TABLE conversations ADD COLUMN session_id INTEGER DEFAULT 1")
             except Exception:
                 pass
+            # New fields for topic, recall tracking, status, source
+            for col, dtype in [
+                ("topic", "TEXT DEFAULT ''"),
+                ("recall_count", "INTEGER DEFAULT 0"),
+                ("last_recalled_at", "TEXT"),
+                ("status", "TEXT DEFAULT 'active'"),
+                ("source", "TEXT DEFAULT 'manual'"),
+            ]:
+                if col not in columns:
+                    try:
+                        conn.execute(f"ALTER TABLE memories ADD COLUMN {col} {dtype}")
+                    except Exception:
+                        pass
             conn.commit()
 
             # Create FTS5 virtual table if not exists
@@ -222,8 +233,14 @@ class MemoryStore:
 
     def add_memory(self, content: str, category: str = None,
                    keywords: str = "", importance: int = 1,
-                   memory_type: str = "episode") -> int:
-        """Add a new memory entry. Returns the memory ID."""
+                   memory_type: str = "episode",
+                   topic: str = "", source: str = "manual") -> int:
+        """Add a new memory entry. Returns the memory ID.
+
+        Args:
+            topic: Topic tag set by agent (e.g. "车票", "偏好"). Searchable via search_history.
+            source: 'manual' (agent-initiated), 'reflection' (task reflection), 'auto' (legacy).
+        """
         if not category:
             category = auto_categorize(content)
         if memory_type not in MEMORY_TYPES:
@@ -233,18 +250,19 @@ class MemoryStore:
         with self._get_conn() as conn:
             cursor = conn.execute(
                 "INSERT INTO memories (category, memory_type, content, keywords, "
-                "created_at, updated_at, importance, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (category, memory_type, content, keywords, now, now, importance, self.session_id or 1)
+                "created_at, updated_at, importance, session_id, topic, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (category, memory_type, content, keywords, now, now,
+                 importance, self.session_id or 1, topic, source)
             )
             mid = cursor.lastrowid
 
-            # Add to FTS index
-            fts_text = _tokenize_for_fts(content)
-            fts_kw = _tokenize_for_fts(keywords)
+            # Add to FTS index (include topic in FTS for searchability)
+            fts_text = _tokenize_for_fts(f"{topic} {content} {keywords}")
             try:
                 conn.execute(
                     "INSERT INTO memories_fts(rowid, content, keywords) VALUES (?, ?, ?)",
-                    (mid, fts_text, fts_kw)
+                    (mid, fts_text, _tokenize_for_fts(keywords))
                 )
             except Exception:
                 pass
@@ -327,27 +345,63 @@ class MemoryStore:
 
         return None
 
+    def record_recall(self, memory_id: int, weight: int = 1):
+        """Increment recall_count and update last_recalled_at for a memory."""
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE memories SET recall_count = recall_count + ?, "
+                "last_recalled_at = ?, access_count = access_count + ? WHERE id = ?",
+                (weight, now, weight, memory_id)
+            )
+            conn.commit()
+
+    def _memory_score(self, row, created_dt, now_dt) -> float:
+        """Compute composite score for a memory based on recency, frequency, type."""
+        from datetime import datetime as _dt
+        days_since_created = max(1, (now_dt - created_dt).days)
+        # recency: when was this memory last recalled
+        last_recalled = row.get("last_recalled_at") or row[5]  # fallback to created_at
+        try:
+            lr_dt = _dt.fromisoformat(last_recalled) if isinstance(last_recalled, str) else _dt.now()
+        except Exception:
+            lr_dt = now_dt
+        days_since_recalled = max(0, (now_dt - lr_dt).days)
+        # type weight: core=1.0, working=0.7, episode=0.4
+        type_w = {"core": 1.0, "working": 0.7, "episode": 0.4}.get(row[2], 0.4)
+        recall_count = row[9] if len(row) > 9 else 0
+        recency = 1.0 / (1.0 + days_since_recalled * 0.1)
+        frequency = recall_count / max(1, days_since_created)
+        return recency * 0.35 + frequency * 0.35 + type_w * 0.30
+
     def search_memories(self, query: str, top_k: int = 5,
                         category: str = None,
                         memory_type: str = None,
-                        session_id: Optional[int] = None) -> List[Dict]:
-        """Search for relevant memories using FTS5 BM25 ranking.
+                        session_id: Optional[int] = None,
+                        topic: str = "",
+                        include_archived: bool = False) -> List[Dict]:
+        """Search for relevant memories using FTS5 BM25 ranking + composite scoring.
 
         Args:
-            session_id: Override the instance's session_id filter.
-                        Pass None to use instance default, -1 for global (all sessions).
+            session_id: Override instance's session_id filter.
+                        None=instance default, -1=global.
+            topic: Filter by topic tag.
+            include_archived: If True, also search archived (old) memories.
         """
         fts_query = _build_fts_query(query)
         if not fts_query:
             return []
 
+        from datetime import datetime as _dt_now
+        now_dt = _dt_now.now()
+
         try:
             with self._get_conn() as conn:
-                # Build query with optional filters
                 sql = """
                     SELECT m.id, m.category, m.memory_type, m.content, m.keywords,
                            m.created_at, m.access_count, m.importance,
-                           bm25(memories_fts) as score
+                           bm25(memories_fts) as bm25_score,
+                           m.recall_count, m.last_recalled_at, m.topic, m.status
                     FROM memories_fts fts
                     JOIN memories m ON fts.rowid = m.id
                     WHERE memories_fts MATCH ?
@@ -360,54 +414,59 @@ class MemoryStore:
                 if memory_type:
                     sql += " AND m.memory_type = ?"
                     params.append(memory_type)
+                if topic:
+                    sql += " AND m.topic = ?"
+                    params.append(topic)
+                if not include_archived:
+                    sql += " AND m.status = 'active'"
 
-                # Session isolation
                 effective_session = session_id if session_id is not None else self.session_id
                 if effective_session is not None and effective_session != -1:
                     sql += " AND m.session_id = ?"
                     params.append(effective_session)
 
-                # BM25 scores are negative, lower = better
-                # Boost core memories by adjusting final sort
-                sql += """
-                    ORDER BY
-                        CASE m.memory_type
-                            WHEN 'core' THEN score * 1.5
-                            WHEN 'working' THEN score * 1.2
-                            ELSE score
-                        END ASC
-                    LIMIT ?
-                """
-                params.append(top_k * 2)
+                sql += " LIMIT ?"
+                params.append(top_k * 3)
 
                 rows = conn.execute(sql, params).fetchall()
-
                 if not rows:
                     return []
 
-                # Update access count
-                memory_ids = [r[0] for r in rows[:top_k]]
+                # Compute composite score in Python
+                scored = []
+                for row in rows:
+                    created_at_str = row[5]
+                    try:
+                        created_dt = _dt_now.fromisoformat(created_at_str)
+                    except Exception:
+                        created_dt = now_dt
+                    composite = self._memory_score(row, created_dt, now_dt)
+                    scored.append((composite, row))
+
+                scored.sort(key=lambda x: -x[0])
+                top_rows = scored[:top_k]
+
+                # Record recall for returned memories
+                memory_ids = [r[1][0] for r in top_rows]
                 if memory_ids:
                     placeholders = ",".join("?" * len(memory_ids))
+                    now_s = _dt_now.now().isoformat()
                     conn.execute(
-                        f"UPDATE memories SET access_count = access_count + 1 "
+                        f"UPDATE memories SET recall_count = recall_count + 1, "
+                        f"last_recalled_at = ?, access_count = access_count + 1 "
                         f"WHERE id IN ({placeholders})",
-                        memory_ids
+                        (now_s, *memory_ids)
                     )
                     conn.commit()
 
                 memories = []
-                for row in rows[:top_k]:
+                for composite, row in top_rows:
                     memories.append({
-                        "id": row[0],
-                        "category": row[1],
-                        "memory_type": row[2],
-                        "content": row[3],
-                        "keywords": row[4],
-                        "created_at": row[5],
-                        "access_count": row[6],
-                        "importance": row[7],
-                        "relevance": round(abs(row[8]), 3)
+                        "id": row[0], "category": row[1], "memory_type": row[2],
+                        "content": row[3], "keywords": row[4], "created_at": row[5],
+                        "access_count": row[6], "importance": row[7],
+                        "relevance": round(composite, 3),
+                        "recall_count": row[9], "topic": row[11], "status": row[12],
                     })
 
                 return memories
@@ -415,20 +474,42 @@ class MemoryStore:
             print(f"[MemoryStore] Search error: {e}")
             return []
 
+    def get_memory(self, memory_id: int) -> Optional[Dict]:
+        """Get a single memory by ID with all fields."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT id, category, memory_type, content, keywords, "
+                "created_at, updated_at, access_count, importance, "
+                "recall_count, last_recalled_at, topic, status, source "
+                "FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0], "category": row[1], "memory_type": row[2],
+            "content": row[3], "keywords": row[4],
+            "created_at": row[5], "updated_at": row[6],
+            "access_count": row[7], "importance": row[8],
+            "recall_count": row[9], "last_recalled_at": row[10],
+            "topic": row[11], "status": row[12], "source": row[13],
+        }
+
     def get_all_memories(self, category: str = None,
                          memory_type: str = None,
                          limit: int = 50,
-                         session_id: Optional[int] = None) -> List[Dict]:
-        """Get all memories, optionally filtered by category and/or type.
-
-        Args:
-            session_id: Override the instance's session_id filter.
-        """
+                         session_id: Optional[int] = None,
+                         status: str = "active") -> List[Dict]:
+        """Get all memories, optionally filtered."""
         with self._get_conn() as conn:
             sql = ("SELECT id, category, memory_type, content, keywords, "
-                   "created_at, access_count, importance FROM memories WHERE 1=1")
+                   "created_at, access_count, importance, recall_count, "
+                   "last_recalled_at, topic, status, source "
+                   "FROM memories WHERE 1=1")
             params = []
 
+            if status:
+                sql += " AND status = ?"
+                params.append(status)
             if category:
                 sql += " AND category = ?"
                 params.append(category)
@@ -449,7 +530,8 @@ class MemoryStore:
         return [
             {"id": r[0], "category": r[1], "memory_type": r[2], "content": r[3],
              "keywords": r[4], "created_at": r[5], "access_count": r[6],
-             "importance": r[7]}
+             "importance": r[7], "recall_count": r[8], "last_recalled_at": r[9],
+             "topic": r[10], "status": r[11], "source": r[12]}
             for r in rows
         ]
 
@@ -510,6 +592,39 @@ class MemoryStore:
                     "SELECT memory_type, COUNT(*) FROM memories GROUP BY memory_type"
                 ).fetchall()
         return {mt: count for mt, count in rows}
+
+    def archive_old_memories(self, max_age_days: int = 365, min_score: float = 0.1) -> int:
+        """Auto-archive memories that are old and have low scores.
+
+        Called periodically during search. Returns number of archived memories.
+        """
+        from datetime import datetime as _dt_now
+        now_dt = _dt_now.now()
+        archived = 0
+        with self._get_conn() as conn:
+            sql = ("SELECT id, category, memory_type, content, keywords, created_at, "
+                   "access_count, importance, recall_count, last_recalled_at, topic, status "
+                   "FROM memories WHERE status = 'active'")
+            params = []
+            if self.session_id is not None:
+                sql += " AND session_id = ?"
+                params.append(self.session_id)
+            rows = conn.execute(sql, params).fetchall()
+            for row in rows:
+                created_at_str = row[5]
+                try:
+                    created_dt = _dt_now.fromisoformat(created_at_str)
+                except Exception:
+                    continue
+                age_days = (now_dt - created_dt).days
+                if age_days >= max_age_days:
+                    score = self._memory_score(row, created_dt, now_dt)
+                    if score < min_score:
+                        conn.execute("UPDATE memories SET status = 'archived' WHERE id = ?", (row[0],))
+                        archived += 1
+            if archived:
+                conn.commit()
+        return archived
 
     def consolidate(self, llm_client=None) -> str:
         """

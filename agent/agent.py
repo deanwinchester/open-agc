@@ -350,13 +350,18 @@ class OpenAGCAgent:
             f"- 简单的一次性任务不需要创建计划\n"
             f"\n# 记忆与技能系统\n"
             f"\n## 记忆系统\n"
-            f"你拥有智能记忆系统。每次对话开始时，系统会自动检索并展示过去交互中的相关记忆。"
-            f"你也可以使用 manage_memory 工具主动管理记忆："
-            f"action='add' 保存重要事实、用户偏好和学到的知识；"
-            f"action='search' 搜索过去的特定记忆。\n"
+            f"你可以用 manage_memory 工具管理记忆，用 search_history 工具搜索记忆。\n\n"
+            f"记住信息：manage_memory(action='add', topic='话题', content='内容')\n"
+            f"  - topic 必填，用短名词指定话题（如 '车票'、'偏好'、'项目配置'）\n"
+            f"  - 同话题的记忆会按时效性自动排序，最新最相关的优先\n\n"
+            f"回忆信息：search_history(query='关键词', topic='可选限定话题')\n"
+            f"  - 搜到线索后可用 expand_id='mem:N' 查看完整内容\n"
+            f"  - 一年未使用的记忆会自动归档，搜不到时可尝试 include_archived=True\n\n"
+            f"查看全部记忆：manage_memory(action='read')\n"
+            f"修改记忆：manage_memory(action='update', query=ID, content='新内容')\n"
+            f"  - 先用 search_history 找到 ID，再用 update 修改\n"
             f"\n## 技能系统\n"
             f"在每次任务开始时，系统会根据任务内容自动检索并注入相关技能供你参考执行。"
-            f"你也可以主动使用 manage_memory 工具查询和管理技能。"
             f"如果你成功完成了一项之前未完成过的复杂任务，并且得到了用户的正面反馈，"
             f"必须主动询问用户是否需要将过程保存为新技能。"
             f"如用户同意，请使用 save_learned_skill 工具。\n"
@@ -2472,13 +2477,8 @@ class OpenAGCAgent:
                 final_answer = message.content
                 if self.logger:
                     self.logger.log_agent_response(final_answer)
-                # Auto-extract & save memories in background thread
-                thread = threading.Thread(
-                    target=self._auto_save_memories,
-                    args=(user_input, final_answer),
-                    daemon=True
-                )
-                thread.start()
+                # [Removed] Auto-extract & save memories — was unreliable (no topic, noisy).
+                # Agent should use manage_memory(add) explicitly when needed.
                 # Extract knowledge graph entities from this turn's messages
                 try:
                     self.knowledge_graph.extract_from_messages(self.messages)
