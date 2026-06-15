@@ -196,7 +196,7 @@ class SearchHistoryTool(BaseTool):
                 from core.paths import get_data_path
                 _db = sqlite3.connect(get_data_path("chat_history.db"))
                 _row = _db.execute(
-                    "SELECT role, content, created_at FROM messages WHERE id=?", (msg_id,)
+                    "SELECT role, content, timestamp as created_at FROM messages WHERE id=?", (msg_id,)
                 ).fetchone()
                 _db.close()
                 if _row:
@@ -407,17 +407,14 @@ class SearchHistoryTool(BaseTool):
             _sess_id = getattr(agent_ctx, 'session_id', None)
             if _sess_id:
                 _msg_rows = db_msg.execute(
-                    "SELECT role, content, created_at FROM messages WHERE session_id=? "
+                    "SELECT id, role, content, timestamp as created_at FROM messages WHERE session_id=? "
                     "ORDER BY id ASC", (_sess_id,)
                 ).fetchall()
                 db_msg.close()
                 for _mr in _msg_rows:
                     _role = _mr["role"]
-                    # Skip non-conversation messages (tool_step records are JSON blobs)
-                    if _role not in ("user", "agent"):
-                        continue
                     _content = str(_mr["content"] or "")
-                    _created = str(_mr.get("timestamp") or _mr.get("created_at", "") or "")
+                    _created = str(_mr["created_at"] or "")
                     _msg_id = _mr.get("id", "")
                     if not _content:
                         continue
