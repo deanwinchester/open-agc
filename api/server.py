@@ -4672,9 +4672,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not query.strip():
                         continue
 
-                    # Save user message to DB
-                    save_message("user", query, ws_session_id)
-
                     # Auto-reconstruct context for continuation queries
                     _resolved_goal = _resolve_goal_for_query(query)
                     if _resolved_goal > 0:
@@ -4716,11 +4713,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Run the agent
                 response = await run_agent_with_progress(query, retry_model, agent_profile_name, images=ws_images, resume_task_id=resume_id_for_run)
 
-                # Save and send the response
-                save_message("agent", response, ws_session_id)
 
-
-                # Send the final response
+                # Send the final response (run_agent_with_progress already saved the message)
                 await _safe_send({
                     "type": "message",
                     "role": "agent",
