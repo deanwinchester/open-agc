@@ -306,7 +306,7 @@ class SearchHistoryTool(BaseTool):
                             if fpath: s += f" path={fpath}"
                             if cmd: s += f" cmd={cmd}"
                             if qtext: s += f" query={qtext[:80]}"
-                            scored.append((8 + data_score, ts, s))
+                            scored.append((2 + data_score, ts, s))
                         elif not q_lower and has_data:
                             s = f"[工具调用:{name}{tag}]"
                             if url: s += f" url={url}"
