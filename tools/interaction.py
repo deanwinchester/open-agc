@@ -370,8 +370,8 @@ class SearchHistoryTool(BaseTool):
                     else:
                         word_score = 1
 
-                    # Skip search_history's own calls — they just echo the query string back
-                    if step["tool_name"] == "search_history":
+                    # Skip noise: search_history echoes, manage_memory args are already in FTS5
+                    if step["tool_name"] in ("search_history", "manage_memory"):
                         continue
 
                     urls = re.findall(r'(?:https?|ftp)://[^\s\'"<>]{5,}', combined)
@@ -429,7 +429,7 @@ class SearchHistoryTool(BaseTool):
                         _ts2 = _dt2.strptime(_created, '%Y-%m-%d %H:%M:%S').timestamp() if _created else 0
                     except Exception:
                         _ts2 = 0
-                    scored.append((2 + _match_count, _ts2, _s))
+                    scored.append((5 + _match_count, _ts2, _s))
         except Exception as e:
             print(f"[SearchHistory] Messages table search error: {e}")
 
@@ -460,7 +460,7 @@ class SearchHistoryTool(BaseTool):
                             _mem_id = _mem.get('id', '')
                             _id_tag = f" mem:{_mem_id}" if _mem_id else ""
                             _s = f"[记忆存储 ({_cat}/{_type}){_id_tag}] {_preview}"
-                            scored.append((4, _ts3_val, _s))
+                            scored.append((4 + _match_count, _ts3_val, _s))
         except Exception as e:
             print(f"[SearchHistory] Memory store search error: {e}")
 
