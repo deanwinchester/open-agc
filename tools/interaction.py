@@ -405,13 +405,22 @@ class SearchHistoryTool(BaseTool):
             db_msg = sqlite3.connect(get_data_path("chat_history.db"))
             db_msg.row_factory = sqlite3.Row
             _sess_id = getattr(agent_ctx, 'session_id', None)
-            if _sess_id:
+            _msg_rows = []
+            # Try agent's session_id first, fall back to session 1 if needed
+            for _try_sid in ([_sess_id] if _sess_id else []):
                 _msg_rows = db_msg.execute(
                     "SELECT id, role, content, timestamp as created_at FROM messages WHERE session_id=? "
-                    "ORDER BY id ASC", (_sess_id,)
+                    "ORDER BY id ASC", (_try_sid,)
                 ).fetchall()
-                db_msg.close()
-                for _mr in _msg_rows:
+                if _msg_rows:
+                    break
+            if not _msg_rows:
+                _msg_rows = db_msg.execute(
+                    "SELECT id, role, content, timestamp as created_at FROM messages WHERE session_id=? "
+                    "ORDER BY id ASC", (1,)
+                ).fetchall()
+            db_msg.close()
+            for _mr in _msg_rows:
                     _role = _mr["role"]
                     if _role not in ("user", "agent"):
                         continue
