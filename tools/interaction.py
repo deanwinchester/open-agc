@@ -413,8 +413,11 @@ class SearchHistoryTool(BaseTool):
                 db_msg.close()
                 for _mr in _msg_rows:
                     _role = _mr["role"]
+                    # Skip non-conversation messages (tool_step records are JSON blobs)
+                    if _role not in ("user", "agent"):
+                        continue
                     _content = str(_mr["content"] or "")
-                    _created = str(_mr["created_at"] or "")
+                    _created = str(_mr.get("timestamp") or _mr.get("created_at", "") or "")
                     _msg_id = _mr.get("id", "")
                     if not _content:
                         continue
