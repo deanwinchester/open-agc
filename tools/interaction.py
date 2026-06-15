@@ -153,9 +153,19 @@ class SearchHistoryTool(BaseTool):
                     _args = _row["full_args"] or _row["args_preview"] or ""
                     _result = _row["full_result"] or _row["result_preview"] or ""
                     _time = _row["created_at"] or ""
+                    _tool = _row["tool_name"]
+                    # For manage_memory, the actual content is in the args (content param), not the result
+                    if _tool == "manage_memory" and not _result.strip():
+                        try:
+                            _args_parsed = json.loads(_args)
+                            _content_arg = _args_parsed.get("content", "")
+                            if _content_arg:
+                                _result = _content_arg
+                        except Exception:
+                            pass
                     return (
                         f"=== 步骤详情 #{tid}:{step} ===\n"
-                        f"工具: {_row['tool_name']}\n时间: {_time}\n\n"
+                        f"工具: {_tool}\n时间: {_time}\n\n"
                         f"--- 参数 ---\n{_args[:3000]}\n\n"
                         f"--- 结果 ---\n{_result[:5000]}"
                     )
@@ -399,11 +409,10 @@ class SearchHistoryTool(BaseTool):
                     _role = _mr["role"]
                     _content = str(_mr["content"] or "")
                     _created = str(_mr["created_at"] or "")
+                    _msg_id = _mr.get("id", "")
                     if not _content:
                         continue
-                    # Only search user messages (agent responses are captured elsewhere)
-                    if _role != "user":
-                        continue
+                    _id_tag = f" msg:{_msg_id}" if _msg_id else ""
                     _content_lower = _content.lower()
                     if q_lower:
                         _match_count = sum(1 for _w in q_words if _w in _content_lower)
@@ -411,9 +420,10 @@ class SearchHistoryTool(BaseTool):
                             continue
                     else:
                         _match_count = 1
-                    _preview = _content[:300]
+                    _preview = _content[:500]
                     _tag = f" ({_created})" if _created else ""
-                    _s = f"[会话消息{_tag}] {_preview}"
+                    _role_label = "用户" if _role == "user" else "Agent"
+                    _s = f"[{_role_label}消息{_tag}{_id_tag}] {_preview}"
                     try:
                         from datetime import datetime as _dt2
                         _ts2 = _dt2.strptime(_created, '%Y-%m-%d %H:%M:%S').timestamp() if _created else 0
