@@ -1,4 +1,5 @@
 from typing import Any, Dict
+from pydantic import PrivateAttr
 from tools.base import BaseTool
 
 
@@ -13,10 +14,12 @@ class MemoryTool(BaseTool):
         "注意：查找记忆请用 search_history 工具（支持多源搜索和渐进展开），不要用 manage_memory 来搜索。"
     )
 
+    _store: Any = PrivateAttr()
+
     def __init__(self, db_path: str = None, session_id: int = None):
         super().__init__()
         from core.memory_store import MemoryStore
-        self.store = MemoryStore(db_path=db_path, session_id=session_id)
+        object.__setattr__(self, '_store', MemoryStore(db_path=db_path, session_id=session_id))
 
     def execute(self, action: str, content: str = "", query: str = "",
                 category: str = "", memory_type: str = "",
@@ -47,12 +50,12 @@ class MemoryTool(BaseTool):
                 "topic": topic,
                 "source": "manual",
             }
-            mid = self.store.add_memory(**kwargs_for_add)
+            mid = self._store.add_memory(**kwargs_for_add)
             return f"✅ 记忆已添加（ID: {mid}，话题: {topic}，类型: {memory_type or 'working'}）"
 
         # ── Read ──
         elif action == "read":
-            memories = self.store.get_all_memories(
+            memories = self._store.get_all_memories(
                 category=category or None,
                 memory_type=memory_type or None,
                 limit=20,
@@ -83,8 +86,8 @@ class MemoryTool(BaseTool):
             if not content:
                 return "错误：请提供更新后的 'content'。"
             # Read old content first for reference
-            old = self.store.get_memory(memory_id)
-            self.store.update_memory(memory_id, content)
+            old = self._store.get_memory(memory_id)
+            self._store.update_memory(memory_id, content)
             old_preview = f" （原: {old['content'][:80]}）" if old else ""
             return f"✅ 记忆 ID {memory_id} 已更新{old_preview}。"
 
@@ -96,8 +99,8 @@ class MemoryTool(BaseTool):
                 memory_id = int(query)
             except (ValueError, TypeError):
                 return "错误：请在 'query' 中提供记忆 ID（数字）。"
-            old = self.store.get_memory(memory_id)
-            if self.store.delete_memory(memory_id):
+            old = self._store.get_memory(memory_id)
+            if self._store.delete_memory(memory_id):
                 return f"✅ 记忆 ID {memory_id} 已删除。"
             return f"错误：未找到 ID {memory_id} 的记忆。"
 
