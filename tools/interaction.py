@@ -413,8 +413,6 @@ class SearchHistoryTool(BaseTool):
                 db_msg.close()
                 for _mr in _msg_rows:
                     _role = _mr["role"]
-                    # Skip tool_step records — they contain JSON dumps of search/call
-                    # results that pollute results with noise
                     if _role not in ("user", "agent"):
                         continue
                     _content = str(_mr["content"] or "")
@@ -430,7 +428,7 @@ class SearchHistoryTool(BaseTool):
                             continue
                     else:
                         _match_count = 1
-                    # Show context around the first match rather than raw start
+                    # Show context around the first match
                     _preview = _content
                     if q_lower and _match_count > 0:
                         _first_match_pos = len(_content)
@@ -441,11 +439,9 @@ class SearchHistoryTool(BaseTool):
                         _ctx_start = max(0, _first_match_pos - 150)
                         _ctx_end = min(len(_content), _first_match_pos + 350)
                         _preview = ""
-                        if _ctx_start > 0:
-                            _preview = "..."
+                        if _ctx_start > 0: _preview = "..."
                         _preview += _content[_ctx_start:_ctx_end]
-                        if _ctx_end < len(_content):
-                            _preview += "..."
+                        if _ctx_end < len(_content): _preview += "..."
                     else:
                         _preview = _content[:500]
                     _tag = f" ({_created})" if _created else ""
@@ -456,7 +452,9 @@ class SearchHistoryTool(BaseTool):
                         _ts2 = _dt2.strptime(_created, '%Y-%m-%d %H:%M:%S').timestamp() if _created else 0
                     except Exception:
                         _ts2 = 0
-                    scored.append((5 + _match_count, _ts2, _s))
+                    # Tiebreaker: longer content → higher rank (rich messages before short repeats)
+                    _len_bonus = min(len(_content) // 500, 5)  # up to +5 for long msgs
+                    scored.append((5 + _match_count + _len_bonus, _ts2, _s))
         except Exception as e:
             print(f"[SearchHistory] Messages table search error: {e}")
 
