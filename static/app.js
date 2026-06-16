@@ -9,6 +9,7 @@ import { loadPlugins, loadPluginManager, loadMarketplace } from './js/plugins.js
 import { loadSessions, createSession, switchSession, deleteSession, renameSession } from './js/sessions.js';
 import { initSettingsListeners, loadSkillsConfig, loadAgents, openAIDesignModal, closeAIDesignModal, initAIDesignListeners } from './js/settings.js';
 import { initTaskFilters, initScheduleModal, loadTasks, updateTaskBadge, openTaskDetail } from './js/tasks.js';
+import { initGoalFilters, loadGoals } from './js/goals.js';
 import { refreshLlamaStatus, loadDownloadHistory, initLlamaListeners, renderSearchResults } from './js/llama.js';
 import { refreshSearXNGStatus, initSearXNGListeners } from './js/searxng.js';
 
@@ -18,6 +19,7 @@ window.onViewChange = onViewChange;
 window.toggleSidebar = toggleSidebar;
 window.closeSidebar = closeSidebar;
 window.showStatus = showStatus;
+window.loadGoals = loadGoals;
 window.loadPluginManager = loadPluginManager;
 window.loadMarketplace = loadMarketplace;
 window.loadSkillsConfig = loadSkillsConfig;
@@ -82,6 +84,7 @@ function initApp() {
   initSettingsListeners();
   initAIDesignListeners();
   initTaskFilters();
+  initGoalFilters();
   initScheduleModal();
   initLlamaListeners();
   initSearXNGListeners();

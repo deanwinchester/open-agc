@@ -88,7 +88,7 @@
                     <div id="session-list"></div>
                 </div>
 
-                <!-- 任务 Section -->
+                <!-- 目标与任务 Section -->
                 <div class="sidebar-section">
                     <div class="sidebar-section-header" data-section="tasks">
                         <div class="section-icon-title">
@@ -97,13 +97,17 @@
                                 <path d="M9 11l3 3L22 4"></path>
                                 <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
                             </svg>
-                            <span>任务</span>
+                            <span>目标与任务</span>
                         </div>
                         <span class="task-count-badge" id="task-count-badge" style="display:none;">0</span>
                     </div>
                     <nav class="nav-item" data-view="tasks" id="nav-tasks">
                         <span class="nav-dot"></span>
                         <span>全部任务</span>
+                    </nav>
+                    <nav class="nav-item" data-view="goals" id="nav-goals">
+                        <span class="nav-dot"></span>
+                        <span>目标管理</span>
                     </nav>
                 </div>
 
@@ -372,6 +376,41 @@
                 </header>
                 <div class="task-detail-content" id="task-detail-content">
                     <!-- Dynamic content -->
+                </div>
+            </div>
+
+            <!-- ============ View: Goals ============ -->
+            <div class="view" id="view-goals">
+                <header class="view-header">
+                    <h1>🎯 目标管理</h1>
+                    <p class="view-desc">管理大目标及其状态，跟踪进度</p>
+                </header>
+                <div class="view-toolbar" id="goal-view-toolbar">
+                    <div class="search-box">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <input type="text" id="goal-search-input" placeholder="搜索目标..." class="input-styled">
+                    </div>
+                    <button class="btn-primary" id="create-goal-btn"
+                        style="padding: 6px 14px; font-size: 0.85rem; gap: 4px; margin-left: auto;">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        添加目标
+                    </button>
+                </div>
+                <div class="goal-list" id="goal-list-container">
+                    <div class="empty-state">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <path d="M12 6v6l4 2"></path>
+                        </svg>
+                        <p>暂无目标</p>
+                        <small>添加大目标以跟踪重要任务进度，也可通过 Agent 的 manage_task_plan 工具自动管理</small>
+                    </div>
                 </div>
             </div>
 
@@ -1285,6 +1324,41 @@
                     <!-- Stats summary text -->
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- ============ Goal Create/Edit Modal ============ -->
+    <div class="modal-overlay" id="goal-modal">
+        <div class="modal-box" style="max-width: 480px; width: 90%;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem;">
+                <h3 style="margin: 0;" id="goal-modal-title">添加目标</h3>
+                <button class="icon-btn" id="goal-modal-close" title="关闭" style="margin-top: -4px; margin-right: -8px;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+            <div class="field" style="margin-top: 1.2rem;">
+                <label class="field-label">目标描述</label>
+                <textarea id="goal-desc-input" class="input-styled" rows="3" placeholder="描述你的大目标..." style="width: 100%; box-sizing: border-box; resize: vertical;" maxlength="100"></textarea>
+                <small class="field-hint" id="goal-desc-counter">0/100</small>
+            </div>
+            <div class="field" style="margin-top: 1rem;" id="goal-status-field">
+                <label class="field-label">状态</label>
+                <select id="goal-status-select" class="select-styled" style="width: 100%;">
+                    <option value="pending">⬜ 待执行</option>
+                    <option value="doing">🔄 执行中</option>
+                    <option value="done">✅ 已完成</option>
+                    <option value="stuck">🔴 受阻</option>
+                </select>
+            </div>
+            <div id="goal-save-status" style="font-size: 0.85rem; text-align: left; margin-top: 1rem; min-height: 20px;"></div>
+            <div class="modal-actions" style="margin-top: 1rem;">
+                <button class="btn-secondary" id="goal-modal-cancel">取消</button>
+                <button class="btn-primary" id="goal-modal-save">保存</button>
+            </div>
+            <input type="hidden" id="goal-edit-id" value="">
         </div>
     </div>
 

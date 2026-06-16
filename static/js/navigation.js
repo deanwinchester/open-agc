@@ -41,6 +41,7 @@ function _activateView(viewId) {
   if (viewId === 'settings-mcp') w.loadAgents?.();
   if (viewId === 'settings-plugins') w.loadPluginManager?.();
   if (viewId === 'tasks') w.loadTasks?.();
+  if (viewId === 'goals') w.loadGoals?.();
   if (viewId === 'downloads') w.loadDownloadHistory?.();
   if (viewId === 'logs') w.loadLogs?.();
   if (viewId === 'debug') w.loadLogs?.();
@@ -73,7 +74,7 @@ function _viewFromPath() {
   const viewId = segments[0];
   const param = segments[1] || '';
   // Map known views; fallback to chat for root or unknown paths
-  const known = ['chat', 'tasks', 'task-detail', 'settings-models', 'settings-skills', 'settings-mcp',
+  const known = ['chat', 'tasks', 'task-detail', 'goals', 'settings-models', 'settings-skills', 'settings-mcp',
                  'downloads', 'settings-plugins', 'logs', 'debug'];
   // Redirect old /logs to /debug
   if (viewId === 'logs') return 'debug';

@@ -195,6 +195,7 @@ class SearchHistoryTool(BaseTool):
                 msg_id = int(parts[1])
                 from core.paths import get_data_path
                 _db = sqlite3.connect(get_data_path("chat_history.db"))
+                _db.row_factory = sqlite3.Row
                 _row = _db.execute(
                     "SELECT role, content, timestamp as created_at FROM messages WHERE id=?", (msg_id,)
                 ).fetchone()
@@ -228,6 +229,7 @@ class SearchHistoryTool(BaseTool):
         q_lower = query.lower() if query else ""
         q_words = set(q_lower.split()) if q_lower else set()
         scored = []  # (score, time_key, ref_id, text)
+        _match_count = 0  # initialize for later sections (messages table, memory store)
         import time as _search_time
         _search_now = _search_time.time()
 
@@ -406,19 +408,17 @@ class SearchHistoryTool(BaseTool):
             db_msg.row_factory = sqlite3.Row
             _sess_id = getattr(agent_ctx, 'session_id', None)
             _msg_rows = []
-            # Try agent's session_id first, fall back to session 1 if needed
-            for _try_sid in ([_sess_id] if _sess_id else []):
-                _msg_rows = db_msg.execute(
+            # Collect messages from all relevant sessions (current session + session 1)
+            _search_sessions = set()
+            if _sess_id:
+                _search_sessions.add(_sess_id)
+            _search_sessions.add(1)  # Always include session 1 (main conversation)
+            for _sid in sorted(_search_sessions):
+                _rows = db_msg.execute(
                     "SELECT id, role, content, timestamp as created_at FROM messages WHERE session_id=? "
-                    "ORDER BY id ASC", (_try_sid,)
+                    "ORDER BY id ASC", (_sid,)
                 ).fetchall()
-                if _msg_rows:
-                    break
-            if not _msg_rows:
-                _msg_rows = db_msg.execute(
-                    "SELECT id, role, content, timestamp as created_at FROM messages WHERE session_id=? "
-                    "ORDER BY id ASC", (1,)
-                ).fetchall()
+                _msg_rows.extend(_rows)
             db_msg.close()
             for _mr in _msg_rows:
                     _role = _mr["role"]
@@ -426,7 +426,7 @@ class SearchHistoryTool(BaseTool):
                         continue
                     _content = str(_mr["content"] or "")
                     _created = str(_mr["created_at"] or "")
-                    _msg_id = _mr.get("id", "")
+                    _msg_id = _mr["id"]
                     if not _content:
                         continue
                     _id_tag = f" msg:{_msg_id}" if _msg_id else ""
@@ -499,9 +499,18 @@ class SearchHistoryTool(BaseTool):
         except Exception as e:
             print(f"[SearchHistory] Memory store search error: {e}")
 
-        # Take top N by relevance score, then sort by time (most recent first)
-        scored.sort(key=lambda x: -x[0])
-        top = scored[:max_results]
+        # Separate DB message results for priority placement (messages first),
+        # then sort each group by relevance score descending (no time re-sort).
+        _msg_results = [(s, t, txt) for s, t, txt in scored
+                        if txt.startswith("[用户消息") or txt.startswith("[Agent消息")]
+        _other_results = [(s, t, txt) for s, t, txt in scored
+                          if not (txt.startswith("[用户消息") or txt.startswith("[Agent消息"))]
+
+        _msg_results.sort(key=lambda x: -x[0])
+        _other_results.sort(key=lambda x: -x[0])
+
+        # Merge: messages first (sorted by relevance), then other results
+        top = (_msg_results + _other_results)[:max_results]
 
         if not top:
             return (
@@ -509,8 +518,6 @@ class SearchHistoryTool(BaseTool):
                 f"建议：尝试更短的关键词，或先用 search_available_tools 查看可用工具。"
             )
 
-        # Sort by time_key descending (most recent first)
-        top.sort(key=lambda x: -x[1])
         _total = len(top)
         _page = max(1, page)
         _per_page = max(1, max_results)
