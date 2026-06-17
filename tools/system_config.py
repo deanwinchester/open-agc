@@ -135,7 +135,7 @@ class ConfigureSystemTool(BaseTool):
         lines.append(f"\n配置文件路径: {CONFIG_PATH}")
         return "\n".join(lines)
 
-    def _update_setting(self, key: str, value: str) -> str:
+    def _update_setting(self, key: str, value: str, session_id: int = None) -> str:
         config = _load_config()
         try:
             parsed = json.loads(value)
@@ -143,6 +143,32 @@ class ConfigureSystemTool(BaseTool):
             parsed = value
         config[key] = parsed
         _save_config(config)
+
+        # Email keys need to sync to sessions table (both UI and email listener read from there)
+        _email_keys = {"email_account", "email_password", "email_imap_server",
+                       "email_smtp_server", "owner_email", "email_listener_enabled"}
+        if key in _email_keys:
+            try:
+                _sid = session_id or config.get("default_session_id", 1)
+                _econn = sqlite3.connect(get_data_path("chat_history.db"))
+                # Check if session row exists
+                _existing = _econn.execute(
+                    "SELECT email_enabled FROM sessions WHERE id=?", (_sid,)
+                ).fetchone()
+                if _existing is not None:
+                    _econn.execute(
+                        f"UPDATE sessions SET {key}=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (str(parsed) if not isinstance(parsed, bool) else (1 if parsed else 0), _sid))
+                else:
+                    _econn.execute(
+                        f"UPDATE sessions SET {key}=? WHERE id=?",
+                        (str(parsed) if not isinstance(parsed, bool) else (1 if parsed else 0), _sid))
+                _econn.commit()
+                _econn.close()
+                print(f"[Config] Synced email key '{key}' to sessions table (session {_sid})")
+            except Exception as _esync_err:
+                print(f"[Config] Failed to sync email key to sessions table: {_esync_err}")
+
         return f"已更新配置 {key} = {json.dumps(parsed, ensure_ascii=False)}"
 
     def _get_mcp_servers(self) -> str:
@@ -299,7 +325,8 @@ class ConfigureSystemTool(BaseTool):
             if action == "get_settings":
                 return self._get_settings()
             elif action == "update_setting":
-                return self._update_setting(kwargs.get("key", ""), kwargs.get("value", ""))
+                _sid = kwargs.get("_session_id") or kwargs.get("session_id")
+                return self._update_setting(kwargs.get("key", ""), kwargs.get("value", ""), session_id=_sid)
             elif action == "get_mcp_servers":
                 return self._get_mcp_servers()
             elif action == "add_mcp_server":

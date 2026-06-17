@@ -125,6 +125,64 @@ class PauseAndWaitTool(BaseTool):
         }
 
 
+class UserInterjectionResponseTool(BaseTool):
+    """Tool for agent to respond to user interjections during task execution."""
+    name: str = "user_interjection_response"
+    description: str = (
+        "当你在任务执行过程中收到 [用户插入: ...] 消息时，使用此工具判断是否应处理此消息。\n\n"
+        "参数 action:\n"
+        "  - accept：消息与当前任务相关（约束、反馈、补充信息等），将在当前任务中处理\n"
+        "  - reject：消息与当前任务无关（全新主题、不相关请求），系统将为其创建新任务\n"
+        "  - ask：不确定是否相关，需要向用户提问来澄清意图"
+    )
+
+    def execute(self, action: str = "accept", response: str = "",
+                reason: str = "", question: str = "", **kwargs) -> str:
+        import json
+        result = {"action": action}
+        if action == "accept":
+            result["response"] = response or "接受并继续处理"
+        elif action == "reject":
+            result["reason"] = reason or "与当前任务无关"
+        elif action == "ask":
+            result["question"] = question or "请澄清您的需求"
+        else:
+            return json.dumps({"action": "accept", "response": "接受并继续处理"}, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False)
+
+    def get_openai_schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["accept", "reject", "ask"],
+                            "description": "accept=接受并继续当前任务, reject=拒绝（系统将创建新任务）, ask=需要向用户提问"
+                        },
+                        "response": {
+                            "type": "string",
+                            "description": "action=accept 时：对用户插入消息的回应（如'已收到约束，将在后续步骤中处理'）"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "action=reject 时：解释为什么此消息与当前任务无关"
+                        },
+                        "question": {
+                            "type": "string",
+                            "description": "action=ask 时：需要向用户澄清的问题"
+                        }
+                    },
+                    "required": ["action"]
+                }
+            }
+        }
+
+
 class SearchHistoryTool(BaseTool):
     """Search the agent's own conversation memory — recall past queries, results, decisions."""
     name: str = "search_history"

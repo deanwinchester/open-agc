@@ -148,6 +148,20 @@ def load_goals() -> dict:
                         json.dump(data, f, ensure_ascii=False, indent=2)
                 except Exception:
                     pass
+            # Migration 2: task_id (int) → task_ids (list)
+            migrated_ids = False
+            for item in data.get("items", []):
+                if "task_id" in item and item["task_id"] is not None:
+                    if "task_ids" not in item:
+                        item["task_ids"] = [item["task_id"]]
+                    del item["task_id"]
+                    migrated_ids = True
+            if migrated_ids:
+                try:
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
             return data
         except Exception:
             pass
@@ -168,6 +182,34 @@ def _new_goal_id(items: list) -> int:
     return max((i.get("id", 0) for i in items), default=0) + 1
 
 
+def archive_overlapping_goals(new_desc: str, items: list) -> list:
+    """Archive existing goals whose descriptions overlap with a new goal.
+    Uses keyword overlap to detect duplicates. Returns list of archived goal IDs."""
+    if not new_desc or not items:
+        return []
+    archived_ids = []
+    new_lower = new_desc.lower()
+    # Extract keywords from new description (split on common delimiters)
+    new_tokens = set(re.findall(r'[一-鿿\w]+', new_lower))
+    if not new_tokens:
+        return []
+
+    for item in items:
+        if item.get("status") in ("archived", "done"):
+            continue
+        old_desc = item.get("desc", "").lower()
+        old_tokens = set(re.findall(r'[一-鿿\w]+', old_desc))
+        if not old_tokens:
+            continue
+        # Overlap ratio: intersection / min(len(A), len(B))
+        overlap = len(new_tokens & old_tokens) / max(len(old_tokens), 1)
+        if overlap >= 0.4:  # 40% keyword overlap → likely same topic
+            item["status"] = "archived"
+            item["updated"] = time.strftime("%Y-%m-%d %H:%M")
+            archived_ids.append(item["id"])
+    return archived_ids
+
+
 def format_goal_list_for_prompt(goals: dict = None) -> str:
     """Format goals as a compact section for system prompt injection."""
     if goals is None:
@@ -175,10 +217,13 @@ def format_goal_list_for_prompt(goals: dict = None) -> str:
     items = goals.get("items", [])
     if not items:
         return ""
+    icons = {"pending": "⬜", "doing": "🔄", "done": "✅", "stuck": "🔴", "archived": "📦"}
     lines = ["## 当前大目标"]
-    icons = {"pending": "⬜", "doing": "🔄", "done": "✅", "stuck": "🔴"}
     for item in items:
-        icon = icons.get(item.get("status", "pending"), "⬜")
+        status = item.get("status", "pending")
+        if status == "archived":
+            continue  # Don't show archived goals in agent prompt
+        icon = icons.get(status, "⬜")
         desc = item.get("desc", "")[:_MAX_GOAL_DESC]
         updated = item.get("updated", "")
         extra = f"（{updated}）" if updated else ""
@@ -245,12 +290,17 @@ class TaskPlanTool(BaseTool):
                 return f"[TaskPlan] ⚠️ 大目标已达上限 {_MAX_GOALS} 项，请先完成一些再添加。"
             if len(desc) > _MAX_GOAL_DESC:
                 desc = desc[:_MAX_GOAL_DESC]
+            # Archive overlapping goals before adding new one
+            _archived = archive_overlapping_goals(desc, goals["items"])
+            if _archived:
+                _archived_str = ", ".join(f"#{i}" for i in _archived)
+                print(f"[TaskPlan] Archived overlapping goals: {_archived_str}")
             new_goal = {
                 "id": _new_goal_id(goals["items"]),
                 "desc": desc,
                 "status": "pending",
                 "updated": time.strftime("%Y-%m-%d %H:%M"),
-                "task_id": task_id,
+                "task_ids": [task_id] if task_id else [],
                 "resume_count": 0,
             }
             goals["items"].append(new_goal)
@@ -264,7 +314,10 @@ class TaskPlanTool(BaseTool):
                     item["status"] = "doing"
                     item["updated"] = time.strftime("%Y-%m-%d %H:%M")
                     if task_id:
-                        item["task_id"] = task_id
+                        if "task_ids" not in item or not isinstance(item["task_ids"], list):
+                            item["task_ids"] = []
+                        if task_id not in item["task_ids"]:
+                            item["task_ids"].append(task_id)
                     save_goals(goals)
                     return f"[TaskPlan] 🔄 已开始: {item['desc']}\n\n{format_goal_list_for_prompt(goals)}"
             return f"[TaskPlan] ⚠️ 未找到 id={goal_id} 的大目标项。"
@@ -273,8 +326,8 @@ class TaskPlanTool(BaseTool):
             goals = load_goals()
             for item in goals["items"]:
                 if item["id"] == goal_id:
-                    desc = item["desc"]
-                    goals["items"].remove(item)
+                    item["status"] = "done"
+                    item["updated"] = time.strftime("%Y-%m-%d %H:%M")
                     save_goals(goals)
                     return f"[TaskPlan] ✅ 已完成: {item['desc']}\n\n{format_goal_list_for_prompt(goals)}"
             return f"[TaskPlan] ⚠️ 未找到 id={goal_id} 的大目标项。"
@@ -298,6 +351,7 @@ class TaskPlanTool(BaseTool):
                     item["status"] = "pending"
                     item["updated"] = time.strftime("%Y-%m-%d %H:%M")
                     item.pop("reason", None)
+                    item.pop("archived", None)
                     save_goals(goals)
                     return f"[TaskPlan] ⬜ 已重置: {item['desc']}\n\n{format_goal_list_for_prompt(goals)}"
             return f"[TaskPlan] ⚠️ 未找到 id={goal_id} 的大目标项。"

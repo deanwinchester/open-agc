@@ -1807,6 +1807,7 @@ textarea {
 .goal-item-icon.doing { background: rgba(74, 222, 128, 0.1); }
 .goal-item-icon.done { background: rgba(16, 185, 129, 0.1); }
 .goal-item-icon.stuck { background: rgba(239, 68, 68, 0.1); }
+.goal-item-icon.archived { background: rgba(156, 163, 175, 0.05); }
 
 .goal-item-body {
     flex: 1;
@@ -1847,6 +1848,7 @@ textarea {
 .goal-status-badge.doing { background: rgba(74, 222, 128, 0.15); color: #22c55e; }
 .goal-status-badge.done { background: rgba(16, 185, 129, 0.15); color: #10b981; }
 .goal-status-badge.stuck { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+.goal-status-badge.archived { background: rgba(156, 163, 175, 0.15); color: var(--text-secondary); opacity: 0.5; }
 
 .goal-item-actions {
     display: flex;
@@ -1898,6 +1900,10 @@ textarea {
 
 .goal-action-btn:hover { color: var(--theme-color); background: rgba(74, 222, 128, 0.1); }
 .goal-delete-btn:hover { color: var(--error); background: rgba(239, 68, 68, 0.1); }
+
+/* Archived goals */
+.goal-item[data-status="archived"] { opacity: 0.55; }
+.goal-item[data-status="archived"]:hover { opacity: 0.85; }
 
 .card {
     background: var(--bg-inner);

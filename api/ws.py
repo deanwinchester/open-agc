@@ -1,0 +1,979 @@
+"""WebSocket endpoint - register with app.websocket()."""
+import os, sys, json, re, sqlite3, asyncio, threading, queue, concurrent.futures, traceback
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+from fastapi import WebSocket, WebSocketDisconnect
+from api.db import DB_PATH
+from api.config import load_config, log_agent_error
+from api.state import (
+    connected_websockets, _main_event_loop, _active_agents, _background_agents,
+    _sandbox_waits, _pending_sandbox_approvals, _session_enabled_tools,
+    _llamacpp_download_state, _apply_pending_sandbox_approvals,
+    _broadcast_to_websockets, _ws_send_safe,
+)
+from api.task_core import (
+    create_task, update_task_status, update_task_type, get_task_context, save_task_context,
+    add_task_step, _extract_task_title, _record_task_deliverables, _load_session_context,
+    _resolve_task_for_query, _resolve_goal_for_query, _check_goal_completeness, _get_task_step_count,
+)
+from core.paths import get_data_path
+from core.llamacpp_manager import get_llamacpp_manager
+from core.logger import SessionLogger
+from core.stats_manager import get_stats_manager
+from agent.agent import OpenAGCAgent
+# Import background helper for task history broadcast
+from api.state import _broadcast_task_history
+
+
+def save_message(role: str, content: str, session_id: int = 1):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("INSERT INTO messages (role, content, session_id) VALUES (?, ?, ?)", (role, content, session_id))
+    conn.execute("UPDATE sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
+    conn.commit()
+    conn.close()
+
+
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    connected_websockets.append(websocket)
+
+    # Read session_id from query parameter, default to 1
+    ws_session_id = int(websocket.query_params.get("session_id", "1"))
+
+    # Push current download state to the newly connected client
+    if _llamacpp_download_state.get("active"):
+        await websocket.send_json({
+            "type": "llamacpp_download",
+            "task": _llamacpp_download_state.get("type", ""),
+            "label": _llamacpp_download_state.get("label", ""),
+            "progress": _llamacpp_download_state.get("progress", 0.0),
+            "stage": _llamacpp_download_state.get("stage", ""),
+            "error": _llamacpp_download_state.get("error", "")
+        })
+
+    # Broadcast history_steps if this session has a recent interrupted/completed task
+    try:
+        _hb_conn = sqlite3.connect(DB_PATH)
+        _hb_row = _hb_conn.execute(
+            "SELECT id, status FROM tasks WHERE session_id=? AND status IN ('interrupted','completed') ORDER BY updated_at DESC LIMIT 1",
+            (ws_session_id,)
+        ).fetchone()
+        _hb_conn.close()
+        if _hb_row:
+            _broadcast_task_history(_hb_row[0], ws_session_id, _hb_row[1])
+    except Exception:
+        pass
+
+    # Flag to track whether this connection is still alive
+    ws_alive = True
+
+    async def _safe_send(data: dict):
+        """Send JSON via WebSocket, silently ignore if connection is dead."""
+        nonlocal ws_alive
+        if not ws_alive:
+            return
+        try:
+            await websocket.send_json(data)
+        except Exception:
+            ws_alive = False
+
+    # We will maintain conversation history for this session here
+    # Load recent chat history from DB instead of starting empty
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        # Load the last 20 messages for the current session
+        cursor.execute("SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 50) ORDER BY id ASC", (ws_session_id,))
+        rows = cursor.fetchall()
+        conn.close()
+
+        # LLMs strict require 'assistant' not 'agent'
+        session_history = []
+        for row in rows:
+            role = row["role"]
+            if role in ("tool_step",):  # skip internal display messages
+                continue
+            if role == "agent":
+                role = "assistant"
+            session_history.append({"role": role, "content": row["content"]})
+    except Exception as e:
+        print(f"Failed to load chat history: {e}")
+        session_history = []
+    last_query = ""  # Track last query for retry
+    agent_is_running = False
+    receive_task = None # Persistent receive_task to avoid concurrency issues
+
+    # Replay the most recent task's steps for this session
+    # Only replay if the user hasn't sent new messages after the task completed
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT t.id, t.status, t.created_at, t.updated_at FROM tasks t "
+            "WHERE t.id IN (SELECT DISTINCT task_id FROM task_steps WHERE session_id=?) "
+            "ORDER BY t.created_at DESC LIMIT 1",
+            (ws_session_id,))
+        last_task = cursor.fetchone()
+        if last_task:
+            # Only replay if no newer user messages exist after the task completed
+            check_time = last_task["updated_at"] or last_task["created_at"]
+            newer_msgs = cursor.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id=? AND role='user' AND timestamp > ?",
+                (ws_session_id, check_time)).fetchone()[0]
+            if newer_msgs == 0:
+                steps = cursor.execute(
+                    "SELECT step_number, tool_name, tool_label, args_preview, "
+                    "result_preview, success FROM task_steps "
+                    "WHERE task_id=? ORDER BY created_at",
+                    (last_task["id"],)).fetchall()
+                if steps:
+                    await _safe_send({
+                        "type": "history_steps",
+                        "task_id": last_task["id"],
+                        "task_status": last_task["status"],
+                        "steps": [dict(s) for s in steps],
+                        "session_id": ws_session_id
+                    })
+        conn.close()
+    except Exception as e:
+        print(f"[WS] Task replay error: {e}")
+    
+    async def run_agent_with_progress(query: str, model: str = None, agent_profile_name: str = None, images: list = None, resume_task_id: int = None):
+        """Run agent in a thread and push progress to WebSocket via a Queue.
+
+        If resume_task_id is set, steps are appended to the existing task instead of creating a new one.
+        """
+        nonlocal session_history, last_query, agent_is_running, receive_task, ws_alive, ws_session_id
+
+        if agent_is_running:
+            return "BUSY"
+
+        agent_is_running = True
+        # Pre-resolve task_id BEFORE agent execution so tools always get a valid _task_id.
+        # resume_task_id is used when explicitly resuming; otherwise detect new vs continuation.
+        if resume_task_id:
+            ws_task_id = resume_task_id
+        else:
+            ws_task_id = _resolve_task_for_query(ws_session_id, query)
+        step_offset = 0
+
+        # Always compute step offset from existing steps for ANY existing task,
+        # not just explicit resume. Prevents step numbering reset after WS reconnect.
+        if ws_task_id:
+            try:
+                _offset_conn = sqlite3.connect(DB_PATH)
+                _max_step = _offset_conn.execute(
+                    "SELECT COALESCE(MAX(step_number), -1) FROM task_steps WHERE task_id=?",
+                    (ws_task_id,)).fetchone()[0]
+                _offset_conn.close()
+                step_offset = _max_step + 1
+            except Exception as e:
+                print(f"[Task] Step offset error: {e}")
+
+        # Additional resume-specific handling (status update)
+        if resume_task_id:
+            try:
+                update_task_status(resume_task_id, "running")
+            except Exception as e:
+                print(f"[Task] Resume status error: {e}")
+
+        try:
+            import queue as thread_queue
+            progress_queue = thread_queue.Queue()
+            has_taken_action = False
+            agent = None
+            _bg_pid = None
+            _bg_wake = None
+
+            # Accumulate shell output per step for tool_step message persistence
+            _step_outputs: dict = {}
+            def progress_callback(event: dict):
+                nonlocal has_taken_action, ws_task_id, _bg_pid
+                """Thread-safe: push progress events from thread pool into queue."""
+                # Handle sandbox_approved: persist to pending approvals so it
+                # survives agent recreation on task resume
+                if event.get("event") == "sandbox_approved":
+                    _path = event.get("path", "")
+                    _sid = event.get("session_id") or ws_session_id
+                    if _path:
+                        _pending_sandbox_approvals.setdefault(_sid, []).append({
+                            "action": "approve_dir", "path": _path
+                        })
+                        print(f"[Sandbox] Persisted approval: {_path} for session {_sid}")
+                    return  # Don't queue this event to frontend
+
+                # Record task steps (offset on resume to continue numbering)
+                adjusted_step = event.get("step", 0) + step_offset
+                event["step"] = adjusted_step
+
+                # Accumulate shell output per step for tool_step persistence
+                # Capture PID from pause_and_wait for BgMonitor tracking
+                if event.get("event") == "task_backgrounded":
+                    _bg_pid = event.get("pid")
+                    _bg_wake = event.get("wake_in_minutes")
+
+                if event.get("event") == "shell_output":
+                    text = event.get("text", "")
+                    if text:
+                        prev = _step_outputs.get(adjusted_step, "")
+                        _step_outputs[adjusted_step] = (prev + text)[-8000:]  # cap at 8K chars
+
+                if ws_task_id and event.get("event") == "tool_start":
+                    try:
+                        add_task_step(
+                            task_id=ws_task_id,
+                            step_number=adjusted_step,
+                            tool_name=event.get("tool", ""),
+                            tool_label=event.get("tool_label", ""),
+                            args_preview=event.get("args_preview", ""),
+                            session_id=ws_session_id,
+                            tool_call_id=event.get("tool_call_id"),
+                            full_args=event.get("tool_args")
+                        )
+                    except Exception as e:
+                        print(f"[Task] Failed to add step: {e}")
+
+                if ws_task_id and event.get("event") == "tool_done":
+                    # Link any pending downloads to this task (downloads run AFTER tool execution)
+                    try:
+                        import tools.download as _dl
+                        pending = getattr(_dl, '_pending_task_links', {})
+                        dl_ids = pending.pop(ws_session_id, [])
+                        if dl_ids:
+                            print(f"[Task] tool_done: linking {len(dl_ids)} download(s) to task {ws_task_id}")
+                            dl_conn = sqlite3.connect(DB_PATH)
+                            for dl_id in dl_ids:
+                                dl_conn.execute(
+                                    "UPDATE downloads SET task_id=? WHERE id=? AND task_id IS NULL",
+                                    (ws_task_id, dl_id))
+                                # Check if this download already failed before linking
+                                already_failed = dl_conn.execute(
+                                    "SELECT status, label, filename, error_message FROM downloads WHERE id=? AND status='failed'",
+                                    (dl_id,)).fetchone()
+                                if already_failed:
+                                    err = already_failed[3] or "未知错误"
+                                    label = already_failed[1] or already_failed[2] or f"download #{dl_id}"
+                                    save_message("system",
+                                        f"❌ 下载失败: {label}\n错误信息: {err}",
+                                        ws_session_id)
+                                    _broadcast_to_websockets({
+                                        "type": "download_failed",
+                                        "download_id": dl_id,
+                                        "task_id": ws_task_id,
+                                        "session_id": ws_session_id,
+                                        "label": label,
+                                        "error": err
+                                    })
+                                    # Inject failure info into the running agent so it can retry
+                                    try:
+                                        _aa_dict = _active_agents.get(ws_session_id, {})
+                                        agent_ref = next(iter(_aa_dict.values())) if _aa_dict else None
+                                        if agent_ref:
+                                            agent_ref.pending_messages.append(
+                                                f"【系统通知】下载失败了。\n文件: {label}\n错误: {err}\n"
+                                                f"download_id: {dl_id}\n"
+                                                f"请尝试其他方式重新下载（如换源），如果确实无法下载则结束任务。"
+                                            )
+                                            print(f"[Task] Injected download failure into agent for session {ws_session_id}")
+                                    except Exception as inject_err:
+                                        print(f"[Task] Failed to inject failure into agent: {inject_err}")
+                                    print(f"[Task] tool_done: download #{dl_id} already failed — notified session {ws_session_id}")
+                                # Also check if download already completed before linking
+                                already_done = dl_conn.execute(
+                                    "SELECT status, label, filename FROM downloads WHERE id=? AND status='completed'",
+                                    (dl_id,)).fetchone()
+                                if already_done:
+                                    label = already_done[1] or already_done[2] or f"download #{dl_id}"
+                                    try:
+                                        _aa_dict = _active_agents.get(ws_session_id, {})
+                                        agent_ref = next(iter(_aa_dict.values())) if _aa_dict else None
+                                        if agent_ref:
+                                            agent_ref.pending_messages.append(
+                                                f"【系统通知】后台下载已完成。\n文件: {label}\n"
+                                                f"请继续执行之前的任务。"
+                                            )
+                                            print(f"[Task] Injected download completion into agent for session {ws_session_id}")
+                                    except Exception as inject_err:
+                                        print(f"[Task] Failed to inject download completion: {inject_err}")
+                            dl_conn.commit()
+                            dl_conn.close()
+                    except Exception as link_err:
+                        print(f"[Task] tool_done link error: {link_err}")
+                    try:
+                        # Update the step with result and tool_call_id
+                        conn = sqlite3.connect(DB_PATH)
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "UPDATE task_steps SET result_preview=?, full_result=?, success=?, tool_call_id=COALESCE(?, tool_call_id) WHERE task_id=? AND step_number=?",
+                            (event.get("result_preview", ""),
+                             event.get("full_result", event.get("result_preview", "")),
+                             1 if event.get("success") else 0,
+                             event.get("tool_call_id"),
+                             ws_task_id, adjusted_step)
+                        )
+                        conn.commit()
+                        conn.close()
+                    except Exception as e:
+                        print(f"[Task] Failed to update step: {e}")
+
+                # Update task_steps with tool result (result_preview only set on tool_done)
+                if ws_task_id and event.get("event") == "tool_done":
+                    try:
+                        _rpreview = event.get("result_preview", "")
+                        _success = 1 if event.get("success") else 0
+                        _conn_step = sqlite3.connect(DB_PATH)
+                        _conn_step.execute(
+                            "UPDATE task_steps SET result_preview=?, success=? WHERE task_id=? AND step_number=?",
+                            (_rpreview, _success, ws_task_id, adjusted_step)
+                        )
+                        _conn_step.commit()
+                        _conn_step.close()
+                    except Exception:
+                        pass
+
+                # Save tool_step as a message in the chat flow (skip for heartbeats)
+                if ws_session_id and event.get("event") == "tool_done":
+                    try:
+                        import json as _js
+                        step_output = _step_outputs.pop(adjusted_step, "")
+                        ts_content = _js.dumps({
+                            "step": adjusted_step,
+                            "tool": event.get("tool", ""),
+                            "tool_label": event.get("tool_label", ""),
+                            "args_preview": event.get("args_preview", ""),
+                            "result_preview": event.get("result_preview", ""),
+                            "success": event.get("success", True),
+                            "output": step_output[:5000],
+                        }, ensure_ascii=False)
+                        save_message("tool_step", ts_content, ws_session_id)
+                    except Exception as e:
+                        print(f"[Task] Failed to save tool_step message: {e}")
+
+                # Attach task_id to the event so frontend can track it
+                if ws_task_id:
+                    event["task_id"] = ws_task_id
+                # Adjust step number for resumed tasks
+                if step_offset:
+                    event["step"] = event.get("step", 0) + step_offset
+
+                progress_queue.put(event)
+            
+            current_model = model or os.getenv("DEFAULT_MODEL", "moonshot/kimi-latest")
+
+            # Auto-start llama-server if using a llamacpp model
+            if "llamacpp/" in current_model:
+                lm = get_llamacpp_manager()
+                if not lm.is_running():
+                    model_filename = current_model.replace("llamacpp/", "")
+                    await _safe_send({
+                        "type": "status",
+                        "message": f"正在启动 llama-server 并加载 {model_filename}..."
+                    })
+                    lm.start(model_filename)
+                    for i in range(120):
+                        await asyncio.sleep(0.5)
+                        if lm.is_running():
+                            await _safe_send({
+                                "type": "status",
+                                "message": "llama-server 就绪，开始处理..."
+                            })
+                            break
+                    else:
+                        _broadcast_to_websockets({
+                            "type": "llamacpp_download",
+                            "task": "binary",
+                            "label": "llama-server 启动失败",
+                            "progress": 0.0,
+                            "stage": "error",
+                            "error": "模型文件可能不兼容或损坏，请尝试下载其他 GGUF 模型"
+                        })
+                        await _safe_send({
+                            "type": "system_message",
+                            "message": "❌ **llama-server 启动失败**\n\n模型文件可能不兼容或损坏，请尝试下载其他 GGUF 模型。\n可在「设置 → 模型管理」中更换模型。"
+                        })
+                        save_message("system",
+                            "❌ llama-server 启动失败，模型文件可能不兼容或损坏，请在设置中更换模型。",
+                            ws_session_id)
+                        agent_is_running = False
+                        return
+
+            from core.logger import SessionLogger
+            session_logger = SessionLogger(
+                log_dir=get_data_path("logs"),
+                session_id=ws_session_id
+            )
+            agent = OpenAGCAgent(model=current_model, session_id=ws_session_id,
+                                 logger=session_logger,
+                                 pre_enabled_tools=_session_enabled_tools.get(ws_session_id))
+            _apply_pending_sandbox_approvals(agent, ws_session_id)
+            _active_agents.setdefault(ws_session_id, {})[ws_task_id or 0] = agent
+            
+            # Inject custom agent profile prompt if specified
+            if agent_profile_name and agent_profile_name != "default":
+                config = load_config()
+                profiles_raw = config.get("agent_profiles", [])
+                try:
+                    profiles = json.loads(profiles_raw) if isinstance(profiles_raw, str) else profiles_raw
+                    for p in profiles:
+                        if isinstance(p, dict) and p.get("name") == agent_profile_name and p.get("prompt"):
+                            agent.system_prompt_base = f"【角色设定: {p['name']}】\n{p['prompt']}\n\n---\n" + agent.system_prompt_base
+                            if p.get("model"):
+                                agent.llm.default_model = p["model"]
+                            break
+                except Exception as e:
+                    print(f"Failed to load agent profile {agent_profile_name}: {e}")
+            
+            # Inject previous session history
+            if session_history:
+                session_history = [{k:v for k,v in m.items() if k != '_timestamp'} for m in session_history]
+                agent.messages.extend(session_history)
+
+            # Save the first user query so it survives crashes in the messages table
+            try:
+                save_message("user", query, ws_session_id)
+            except Exception:
+                pass
+
+            loop = asyncio.get_event_loop()
+            
+            import concurrent.futures
+            agent_future = loop.run_in_executor(
+                None, 
+                lambda: agent.run_turn(query, False, progress_callback, images=images, task_id=ws_task_id, skip_rag=bool(resume_task_id))
+            )
+            
+            # Handle agent progress and check for interruption
+            while not agent_future.done() and ws_alive:
+                if receive_task is None:
+                    receive_task = asyncio.create_task(websocket.receive_text())
+
+                done, pending = await asyncio.wait(
+                    [receive_task],
+                    timeout=0.15,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                if receive_task in done:
+                    try:
+                        data = receive_task.result()
+                        user_msg = json.loads(data)
+                        if user_msg.get("type") == "interrupt":
+                            agent.is_interrupted = True
+                            interrupt_shell()
+                            if ws_task_id:
+                                update_task_status(ws_task_id, "interrupted", interruption_reason="user")
+                            # Also interrupt any background agents for this session
+                            for tid, bg_agent in list(_background_agents.items()):
+                                bg_agent.is_interrupted = True
+                            interrupt_shell()
+                            # Cancel any active download
+                            if _llamacpp_download_state.get("active"):
+                                _llamacpp_download_state["cancelled"] = True
+                                _llamacpp_download_state["active"] = False
+                                _broadcast_to_websockets({
+                                    "type": "llamacpp_download",
+                                    "task": _llamacpp_download_state.get("type", ""),
+                                    "label": "下载已取消",
+                                    "progress": 0.0,
+                                    "stage": "error",
+                                    "error": "用户中断"
+                                })
+                        elif user_msg.get("type") == "tool_reply":
+                            agent.user_input_queue.put(user_msg.get("answer"))
+                        elif user_msg.get("type") == "sandbox_response":
+                            sid = user_msg.get("session_id", ws_session_id)
+                            action = user_msg.get("action", "deny_once")
+                            wait = _sandbox_waits.get(sid)
+                            if wait:
+                                wait["result"]["action"] = action
+                                wait["result"]["path"] = user_msg.get("path", "")
+                                wait["event"].set()
+                                print(f"[WS] Sandbox response: {action} for {sid}")
+                            elif action in ("approve_once", "approve_dir", "approve_always", "approve_session"):
+                                # Late approval: apply to running agent's whitelist directly
+                                _path = user_msg.get("path", "")
+                                if _path and hasattr(agent, '_session_sandbox_whitelist'):
+                                    import os as _ws_os
+                                    _ws_dir = _ws_os.path.dirname(_ws_os.path.abspath(_path))
+                                    agent._session_sandbox_whitelist.add(_ws_dir)
+                                    agent._session_sandbox_whitelist.add(_path)
+                                    print(f"[WS] Late sandbox approval applied to running agent: {_path}")
+                        else:
+                            # Non-blocking input: queue message to agent
+                            q = user_msg.get("query", user_msg.get("text", ""))
+                            if q.strip():
+                                # Get the most recent agent for this session
+                                _aa_sess = _active_agents.get(ws_session_id, {})
+                                a = next(iter(_aa_sess.values())) if _aa_sess else None
+                                if a:
+                                    a.queue_message(q)
+                                    save_message("user", q, ws_session_id)
+                                    # Save as tool_step in the task flow
+                                    if ws_task_id:
+                                        import json as _jj
+                                        _interject_data = {
+                                            "step": -1,
+                                            "tool": "user_interjection",
+                                            "tool_label": "用户插入",
+                                            "args_preview": q[:200],
+                                            "success": True,
+                                            "output": ""
+                                        }
+                                        save_message("tool_step", _jj.dumps(_interject_data, ensure_ascii=False), ws_session_id)
+                                        # Also broadcast as a progress event so frontend shows it live
+                                        await _safe_send({
+                                            "type": "progress",
+                                            "event": "tool_start",
+                                            "step": -1,
+                                            "tool": "user_interjection",
+                                            "tool_label": "用户插入",
+                                            "args_preview": q[:200],
+                                            "task_id": ws_task_id,
+                                            "session_id": ws_session_id,
+                                            "background": False
+                                        })
+                                        await _safe_send({
+                                            "type": "progress",
+                                            "event": "tool_done",
+                                            "step": -1,
+                                            "tool": "user_interjection",
+                                            "tool_label": "用户插入",
+                                            "result_preview": q[:200],
+                                            "success": True,
+                                            "task_id": ws_task_id,
+                                            "session_id": ws_session_id,
+                                            "background": False
+                                        })
+                                    print(f"[WS] Queued message to agent session {ws_session_id}")
+                        receive_task = None
+                    except (WebSocketDisconnect, RuntimeError):
+                        ws_alive = False
+                        if websocket in connected_websockets:
+                            connected_websockets.remove(websocket)
+                        _active_agents.pop(ws_session_id, None)
+                        receive_task = None
+                        # Don't raise — ws_alive=False will let outer loop break
+                    except Exception:
+                        receive_task = None
+
+                # Drain the thread-safe queue (no cross-thread race)
+                while True:
+                    try:
+                        event = progress_queue.get_nowait()
+                        event["session_id"] = ws_session_id
+                        await _safe_send({
+                                "type": "progress",
+                                **event
+                            })
+                    except thread_queue.Empty:
+                        break
+
+            while not progress_queue.empty():
+                try:
+                    event = progress_queue.get_nowait()
+                    event["session_id"] = ws_session_id
+                    await _safe_send({
+                        "type": "progress",
+                        **event
+                    })
+                except Exception:
+                    break
+            
+            response = await agent_future
+            session_history = agent.messages[1:]
+            # Persist enabled tools for next turn (avoid re-discovering)
+            _session_enabled_tools[ws_session_id] = getattr(agent, 'active_tool_names', set())
+
+            # Detect max_iterations hit for longrun auto-resume
+            is_max_iter = response and response.startswith("[MAX_ITERATIONS_REACHED]")
+            is_backgrounded = response and response.startswith("[TASK_BACKGROUNDED]")
+            is_interjection_rejected = response and response.startswith("[INTERJECTION_REJECTED]")
+            if is_interjection_rejected:
+                try:
+                    _reject_line = response[len("[INTERJECTION_REJECTED] "):]
+                    _newline_pos = _reject_line.find("\n")
+                    _reject_json = _reject_line[:_newline_pos] if _newline_pos >= 0 else _reject_line
+                    _remaining = _reject_line[_newline_pos + 1:] if _newline_pos >= 0 else ""
+                    import json as _rj
+                    reject_data = _rj.loads(_reject_json)
+                    rejected_msg = reject_data.get("message", "")
+                    if rejected_msg and ws_session_id:
+                        new_task_id = create_task(
+                            reject_data.get("response", rejected_msg)[:120] or rejected_msg[:120],
+                            rejected_msg, session_id=ws_session_id)
+                        print(f"[WS] Created new task #{new_task_id} for rejected interjection")
+                        await _safe_send({"type": "system_message",
+                            "message": f"📋 **已为您创建新任务 #{new_task_id}**（当前任务不相关）\n{reject_data.get('reason', '')}",
+                            "session_id": ws_session_id})
+                except Exception as _rj_err:
+                    print(f"[WS] Interjection reject error: {_rj_err}")
+                response = _remaining if '_remaining' in locals() else response
+
+            if response and not is_max_iter and not is_backgrounded:
+                print(f"[WS] run_agent response (first 80): {str(response)[:80]}")
+
+            if ws_task_id and is_backgrounded:
+                # Agent voluntarily paused — save context, mark backgrounded
+                save_task_context(ws_task_id, agent.messages[1:])
+                # Check for WAKE_IN=N in response as fallback timer
+                _resp_body = response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台"
+                _wake_match = re.search(r'WAKE_IN=(\d+)', response)
+                _wake_min = int(_wake_match.group(1)) if _wake_match else _bg_wake
+                if _wake_min:
+                    _wake_dt = (datetime.utcnow() + timedelta(minutes=_wake_min)).strftime('%Y-%m-%d %H:%M:%S')
+                    try:
+                        _wake_conn = sqlite3.connect(DB_PATH)
+                        _wake_conn.execute("UPDATE tasks SET wake_at=? WHERE id=?", (_wake_dt, ws_task_id))
+                        _wake_conn.commit()
+                        _wake_conn.close()
+                        print(f"[Task] Set wake_at={_wake_dt} for task {ws_task_id} (after {_wake_min}min)")
+                    except Exception as _wake_err:
+                        print(f"[Task] Failed to set wake_at: {_wake_err}")
+                update_task_status(ws_task_id, "backgrounded",
+                    _resp_body, interruption_reason="backgrounded")
+                # Register PID for BgMonitor tracking if available
+                if _bg_pid:
+                    try:
+                        from tools.shell import get_background_processes
+                        _bg_procs = get_background_processes()
+                        if str(ws_task_id) not in _bg_procs:
+                            from tools.shell import _background_process_info, _background_process_lock
+                            with _background_process_lock:
+                                _background_process_info[str(ws_task_id)] = {"pid": _bg_pid, "command": "", "started_at": _time.time()}
+                            print(f"[Task] Registered PID {_bg_pid} for BgMonitor tracking (task {ws_task_id})")
+                    except Exception:
+                        pass
+                # Send notification to frontend
+                await _safe_send({
+                    "type": "task_backgrounded",
+                    "task_id": ws_task_id,
+                    "message": "任务已进入后台，完成后自动恢复",
+                    "session_id": ws_session_id
+                })
+                agent_is_running = False
+                return response
+
+            if ws_task_id:
+                summary = response[:200] if response else ""
+                # Update task title from agent's first response line
+                if response and not response.startswith("[MAX_ITERATIONS_REACHED]") and not is_backgrounded:
+                    title = _extract_task_title(response)
+                    if title:
+                        try:
+                            tconn = sqlite3.connect(DB_PATH)
+                            tconn.execute("UPDATE tasks SET title=? WHERE id=?", (title, ws_task_id))
+                            tconn.commit()
+                            tconn.close()
+                        except Exception:
+                            pass
+                if is_max_iter:
+                    # Save context for potential resume
+                    save_task_context(ws_task_id, agent.messages[1:])
+                    update_task_status(ws_task_id, "interrupted", summary, interruption_reason="max_iterations")
+                    # Auto-detect as longrun if not already
+                    try:
+                        conn_tmp = sqlite3.connect(DB_PATH)
+                        cur_tmp = conn_tmp.cursor()
+                        cur_tmp.execute("SELECT task_type FROM tasks WHERE id=?", (ws_task_id,))
+                        row_tmp = cur_tmp.fetchone()
+                        conn_tmp.close()
+                        if row_tmp and row_tmp[0] == 'oneshot':
+                            update_task_type(ws_task_id, 'longrun')
+                    except Exception:
+                        pass
+                elif response and ("interrupted by user" in response.lower() or "interrupted" in response.lower()):
+                    # Don't save context on user interrupt — the current agent.messages
+                    # reflects only the interrupted turn (1-2 messages) which would
+                    # overwrite the full snapshot from previous successful turns.
+                    # Keep the last good snapshot intact for resume.
+                    print(f"[Task] User interrupt for task {ws_task_id}: keeping previous snapshot")
+                    update_task_status(ws_task_id, "interrupted", summary, interruption_reason="user")
+                else:
+                    save_task_context(ws_task_id, agent.messages[1:])
+                    _record_task_deliverables(ws_task_id)
+                    update_task_status(ws_task_id, "completed", summary)
+                    _check_goal_completeness(ws_task_id)
+
+                # Update total tokens in tasks table from stats
+                try:
+                    stats = get_stats_manager().get_task_usage(ws_task_id)
+                    if stats:
+                        conn_tmp = sqlite3.connect(DB_PATH)
+                        conn_tmp.execute("UPDATE tasks SET total_tokens = ?, total_cost = ?, prompt_tokens = ?, completion_tokens = ?, cached_tokens = ? WHERE id = ?",
+                                         (stats["total"], stats.get("cost", 0.0), stats.get("prompt", 0), stats.get("completion", 0), stats.get("cached", 0), ws_task_id))
+                        conn_tmp.commit()
+                        conn_tmp.close()
+                except Exception:
+                    pass
+            
+            # Persist final answer so it survives page refresh
+            try:
+                save_message("agent", response, ws_session_id)
+            except Exception:
+                pass
+
+            return response
+        except Exception as e:
+            if ws_task_id:
+                # Save context so failed tasks can also be resumed
+                if agent:
+                    try:
+                        save_task_context(ws_task_id, agent.messages[1:])
+                    except Exception:
+                        pass
+                update_task_status(ws_task_id, "failed", str(e)[:200], interruption_reason="error")
+            raise
+        finally:
+            agent_is_running = False
+
+    try:
+        while True:
+            if not ws_alive:
+                print("[WS] Not alive, exiting main loop")
+                break
+            config = load_config()
+            heartbeat_enabled = config.get("heartbeat_enabled", False)
+            heartbeat_interval = config.get("heartbeat_interval", 180)
+
+            try:
+                # Wait for user message with timeout for heartbeat
+                if receive_task is None:
+                    receive_task = asyncio.create_task(websocket.receive_text())
+                
+                timeout = heartbeat_interval if heartbeat_enabled else None
+                
+                # Check if we already have a finished receive_task result from a previous agent run_turn interrupt
+                if receive_task.done():
+                    data = receive_task.result()
+                    receive_task = None 
+                else:
+                    done, pending = await asyncio.wait([receive_task], timeout=timeout)
+                    if receive_task in done:
+                        data = receive_task.result()
+                        receive_task = None
+                    else:
+                        # ── Timeout: no user message received ──
+                        # Recovery is handled by the background guardian.
+                        continue
+                        if not is_heartbeat:
+                            continue
+
+                user_msg = json.loads(data)
+                msg_type = user_msg.get("type", "query")
+                resume_id_for_run = None
+
+                if msg_type == "sandbox_response":
+                    # Resolve a pending sandbox auth wait
+                    sid = user_msg.get("session_id", ws_session_id)
+                    action = user_msg.get("action", "deny_once")
+                    wait = _sandbox_waits.get(sid)
+                    if wait:
+                        wait["result"]["action"] = action
+                        wait["result"]["path"] = user_msg.get("path", "")
+                        wait["event"].set()
+                        print(f"[WS] Sandbox response: {action} for session {sid}")
+                    elif action in ("approve_once", "approve_dir", "approve_always", "approve_session"):
+                        # Late approval after wait timed out — save and resume task
+                        _path = user_msg.get("path", "")
+                        if _path:
+                            print(f"[WS] Late sandbox approval: {action} for {_path}")
+                            _pending_sandbox_approvals.setdefault(sid, []).append({
+                                "action": action, "path": _path
+                            })
+                            # Find backgrounded/interrupted task for this session and resume
+                            try:
+                                _late = sqlite3.connect(DB_PATH)
+                                _late_t = _late.execute(
+                                    "SELECT id, user_query FROM tasks WHERE session_id=? AND status IN ('backgrounded','interrupted') ORDER BY id DESC LIMIT 1",
+                                    (sid,)).fetchone()
+                                _late.close()
+                                if _late_t:
+                                    _tid2 = _late_t[0]
+                                    _uq2 = _late_t[1] or ""
+                                    _ctx2 = get_task_context(_tid2)
+                                    if _ctx2 is None:
+                                        _ctx2 = []
+                                    _ctx2.append({"role": "user", "content":
+                                        f"【系统通知】你之前因沙箱权限等待超时而中断。路径 {_path} 已获得用户授权，"
+                                        f"请重新尝试之前被阻止的操作。"})
+                                    save_task_context(_tid2, _ctx2)
+                                    update_task_status(_tid2, "interrupted",
+                                        "延迟授权触发恢复", interruption_reason="background_complete")
+                                    print(f"[WS] Resuming task #{_tid2} after late sandbox approval")
+                                    import threading as _thr
+                                    _thr.Thread(
+                                        target=_run_background_task,
+                                        args=(_tid2, _uq2, _ctx2, True),
+                                        daemon=True
+                                    ).start()
+                            except Exception as _late_err:
+                                print(f"[WS] Late sandbox resume error: {_late_err}")
+                    continue
+
+                if msg_type == "resume":
+                    # Resume an interrupted task
+                    task_id = user_msg.get("task_id")
+                    if task_id and not agent_is_running:
+                        resume_id_for_run = task_id
+                        try:
+                            ctx = get_task_context(task_id)
+                            # Always load steps for replay and context
+                            conn2 = sqlite3.connect(DB_PATH)
+                            conn2.row_factory = sqlite3.Row
+                            steps = conn2.execute(
+                                "SELECT step_number, tool_name, tool_label, args_preview, "
+                                "result_preview, full_result, full_args, success FROM task_steps "
+                                "WHERE task_id=? ORDER BY created_at", (task_id,)).fetchall()
+                            # Also fetch the original task goal
+                            task_row = conn2.execute(
+                                "SELECT user_query FROM tasks WHERE id=?", (task_id,)).fetchone()
+                            conn2.close()
+                            await _safe_send({
+                                "type": "history_steps",
+                                "task_id": task_id,
+                                "task_status": "resuming",
+                                "steps": [dict(s) for s in steps]
+                            })
+                            if ctx:
+                                session_history = ctx
+                            original_goal = (task_row["user_query"] if task_row else "")
+                            query = "【系统提示】任务已恢复，请根据历史上下文，从上次中断的地方继续执行任务。"
+                            # Append extra instruction if provided by user
+                            extra = user_msg.get("extra_instruction", "").strip()
+                            if extra:
+                                query += f"\n\n用户附加指令：{extra}"
+                        except Exception as e:
+                            print(f"[WS] Resume error: {e}")
+                            query = "继续执行未完成的任务。"
+                            extra = user_msg.get("extra_instruction", "").strip()
+                            if extra:
+                                query += f"\n\n用户附加指令：{extra}"
+                        retry_model = None
+                        agent_profile_name = None
+                        ws_images = None
+                    else:
+                        continue
+                elif msg_type == "retry":
+                    query = user_msg.get("query", last_query)
+                    retry_model = user_msg.get("model", None)
+                    agent_profile_name = user_msg.get("agent_name", None)
+                    ws_images = user_msg.get("images", None)
+                    if not query.strip():
+                        continue
+                else:
+                    query = user_msg.get("query", "")
+                    retry_model = None
+                    agent_profile_name = user_msg.get("agent_name", None)
+                    ws_images = user_msg.get("images", None)
+                    if not query.strip():
+                        continue
+
+                    # If an agent is already running for this session (from another WS
+                    # connection or previous turn), queue the message instead of starting
+                    # a new agent loop.
+                    _existing_session_agents = _active_agents.get(ws_session_id, {})
+                    if _existing_session_agents:
+                        _existing_session_agent = next(iter(_existing_session_agents.values()))
+                        if not getattr(_existing_session_agent, 'is_interrupted', False):
+                            _existing_session_agent.queue_message(query)
+                            save_message("user", query, ws_session_id)
+                            print(f"[WS] Existing agent active for session {ws_session_id} — queued message (not starting new loop)")
+                            continue
+
+                    # Auto-reconstruct context for continuation queries
+                    _resolved_goal = _resolve_goal_for_query(query)
+                    if _resolved_goal > 0:
+                        try:
+                            from tools.task_plan import load_goals as _ct_load
+                            _ct_goals = _ct_load()
+                            for _ct_item in _ct_goals.get("items", []):
+                                if _ct_item["id"] == _resolved_goal:
+                                    query += f"\n\n[关联大目标 #{_resolved_goal}] {_ct_item['desc']}"
+                                    break
+                        except Exception:
+                            pass
+
+                        if not resume_id_for_run:
+                            try:
+                                conn_cont = sqlite3.connect(DB_PATH)
+                                conn_cont.row_factory = sqlite3.Row
+                                latest_task = conn_cont.execute(
+                                    "SELECT id FROM tasks "
+                                    "WHERE session_id=? AND status IN ('interrupted','backgrounded','background_failed')"
+                                    "ORDER BY id DESC LIMIT 1",
+                                    (ws_session_id,)
+                                ).fetchone()
+                                if latest_task:
+                                    resume_id_for_run = latest_task["id"]
+                                    session_history = get_task_context(resume_id_for_run)
+                                conn_cont.close()
+                            except Exception as e:
+                                print(f"[WS] Continuation context error: {e}")
+
+
+                # Send thinking status
+                await _safe_send({
+                    "type": "status",
+                    "message": "Agent is thinking...",
+                    "session_id": ws_session_id
+                })
+
+                # Run the agent
+                response = await run_agent_with_progress(query, retry_model, agent_profile_name, images=ws_images, resume_task_id=resume_id_for_run)
+
+
+                # Send the final response (run_agent_with_progress already saved the message)
+                await _safe_send({
+                    "type": "message",
+                    "role": "agent",
+                    "content": response,
+                    "session_id": ws_session_id
+                })
+                
+            except (WebSocketDisconnect, RuntimeError) as _ws_err:
+                # WebSocketDisconnect doesn't contain "disconnect" in str() output.
+                # Check by type for WebSocketDisconnect or message for RuntimeError.
+                if isinstance(_ws_err, WebSocketDisconnect) or "disconnect" in str(_ws_err).lower():
+                    print("[WS] Client disconnected")
+                    break
+                # Not a disconnect — re-raise
+                raise
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                err_str = str(e).lower()
+                # Log error to stderr only — don't pollute the chat session
+                log_agent_error(str(e))
+                print(f"[Agent Error] {e}")
+                # Only show API key hint in chat (actionable by user); hide internal errors
+                if "api_key" in err_str or "authentication" in err_str or "not found" in err_str or "key" in err_str:
+                    hint = (
+                        "---\n**💡 提示：您似乎尚未配置此模型的 API Key！**\n\n"
+                        "以 DeepSeek 为例，请前往 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) "
+                        "免费申请一个 API Key，然后在左侧边栏的「设置 - 模型配置」中填入并保存即可开始对话！"
+                    )
+                    save_message("system", hint, ws_session_id)
+                    await _safe_send({
+                        "type": "error",
+                        "content": hint,
+                        "session_id": ws_session_id
+                    })
+                else:
+                    # Non-actionable errors: just a brief notification, no full stack in chat
+                    print(f"[Agent Error] Full traceback above. Hiding from chat to avoid clutter.")
+                
+    except WebSocketDisconnect:
+        print("Client disconnected")
+        if websocket in connected_websockets:
+            connected_websockets.remove(websocket)
+        _active_agents.pop(ws_session_id, None)  # nested dict cleaned up
+        _session_enabled_tools.pop(ws_session_id, None)
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        if websocket in connected_websockets:
+            connected_websockets.remove(websocket)
+        _active_agents.pop(ws_session_id, None)  # nested dict cleaned up
+        _session_enabled_tools.pop(ws_session_id, None)
+
