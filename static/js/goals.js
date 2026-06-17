@@ -5,8 +5,9 @@ import { cachedFetch } from './cache.js';
 import { escapeHtml, showStatus, formatTime } from './utils.js';
 import { state } from './state.js';
 
-const STATUS_ICONS = { pending: '⬜', doing: '🔄', done: '✅', stuck: '🔴' };
-const STATUS_LABELS = { pending: '待执行', doing: '执行中', done: '已完成', stuck: '受阻' };
+const STATUS_ICONS = { pending: '⬜', doing: '🔄', done: '✅', stuck: '🔴', archived: '📦' };
+const STATUS_LABELS = { pending: '待执行', doing: '执行中', done: '已完成', stuck: '受阻', archived: '已归档' };
+const STATUS_ORDER = { doing: 0, pending: 1, stuck: 2, done: 3, archived: 4 };
 
 // ── Initialization ──
 
@@ -56,6 +57,14 @@ export async function loadGoals(resetPage = false) {
     if (q) {
       items = items.filter(g => g.desc.toLowerCase().includes(q));
     }
+
+    // Sort: doing > pending > stuck > done > archived
+    items.sort((a, b) => {
+      const oa = STATUS_ORDER[a.status] ?? 9;
+      const ob = STATUS_ORDER[b.status] ?? 9;
+      if (oa !== ob) return oa - ob;
+      return (b.id || 0) - (a.id || 0);  // newer first within same status
+    });
 
     if (items.length === 0) {
       container.innerHTML = `
@@ -124,7 +133,7 @@ function renderGoalCard(goal) {
   const allStatuses = ['pending', 'doing', 'done', 'stuck'];
 
   return `
-    <div class="goal-item" data-goal-id="${goal.id}">
+    <div class="goal-item" data-goal-id="${goal.id}" data-status="${goal.status}">
       <div class="goal-item-icon ${goal.status}">${icon}</div>
       <div class="goal-item-body">
         <div class="goal-item-title">${escapeHtml(goal.desc)}</div>

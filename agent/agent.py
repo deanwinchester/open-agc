@@ -38,7 +38,7 @@ from tools.auto_tool import (DynamicTool, load_all_dynamic_tools,
 from agent.sub_agent import SubAgent, TOOL_SETS
 from tools.discovery import ToolDiscoveryTool
 from tools.mcp_tool import get_mcp_manager
-from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused, SearchHistoryTool
+from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused, SearchHistoryTool, UserInterjectionResponseTool
 from tools.shell_interact import ShellSendTool
 from tools.sandbox import EnterWorktreeTool, ExitWorktreeTool
 from tools.self_review import SelfReviewTool
@@ -174,6 +174,9 @@ class OpenAGCAgent:
         self._pre_enabled_tools = pre_enabled_tools or set()
         self._session_sandbox_whitelist: set = set()
         self.pending_messages: list = []
+        self._processing_interjection: bool = False
+        self._rejected_interjection: Optional[dict] = None
+        self._interjection_stuck_count: int = 0
         self._session_sandbox_whitelist: set = set()  # One-time approved paths
         self._session_permission_whitelist: set = set()  # Session-approved command categories
         self._session_network_whitelist: set = set()  # Session-approved network domains
@@ -412,6 +415,7 @@ class OpenAGCAgent:
             "send_email": SendEmailTool(),
             "queue_download": DownloadTool(),
             "ask_user_question": AskUserQuestionTool(),
+            "user_interjection_response": UserInterjectionResponseTool(),
             "search_history": SearchHistoryTool(),
             "pause_and_wait": PauseAndWaitTool(),
             "enter_sandbox_mode": EnterWorktreeTool(),
@@ -449,6 +453,7 @@ class OpenAGCAgent:
             "search_available_tools": "检索扩展工具",
             "compact_context": "清理上下文历史",
             "ask_user_question": "向用户提问",
+            "user_interjection_response": "响应中断消息",
             "search_history": "检索会话历史",
             "pause_and_wait": "暂停并等待后台完成",
             "enter_sandbox_mode": "进入沙箱模式",
@@ -493,7 +498,7 @@ class OpenAGCAgent:
         # Progressive Disclosure Setup
         CORE_TOOL_NAMES = {"execute_shell", "manage_memory", "read_file", "write_file", "edit_file",
                            "search_file_content", "find_files", "search_available_tools",
-                           "ask_user_question", "search_history", "queue_download", "pause_and_wait",
+                           "ask_user_question", "user_interjection_response", "search_history", "queue_download", "pause_and_wait",
                            "execute_python", "search_web", "self_review", "configure_system",
                            "manage_task_plan", "parse_html", "shell_send"}
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
@@ -706,22 +711,41 @@ class OpenAGCAgent:
         return words
 
     def _check_pending_messages(self, current_query: str = "") -> str:
-        """Poll pending message queue. Returns injected message or empty string."""
+        """Poll pending message queue.
+
+        New protocol: Returns injected message with `[用户插入: msg]` prefix and
+        system instruction to use `user_interjection_response` tool for judgment.
+
+        Returns:
+            Empty string if nothing to inject, or the interjection message.
+        """
         if not self.pending_messages:
             return ""
-        msg = self.pending_messages.pop(0)
-        if current_query:
-            cur_words = self._text_keywords(current_query)
-            new_words = self._text_keywords(msg)
-            if cur_words and new_words:
-                overlap = len(cur_words & new_words) / max(len(cur_words), len(new_words))
-                # Chinese text with bigram matching typically gets 0.05-0.2 overlap
-                # Even 5% overlap suggests they're related topics
-                if overlap > 0.05:
-                    return f"[用户追加指令] {msg}"
-        # If no current_query to compare against, always accept
-        # If word overlap was too low, still accept (don't drop user messages)
-        return f"[用户追加指令] {msg}"
+
+        # If already processing an interjection, check for stuck timeout
+        if self._processing_interjection:
+            self._interjection_stuck_count += 1
+            if self._interjection_stuck_count > 12:  # ~12 iterations = ~30s timeout
+                self._processing_interjection = False
+                self._interjection_stuck_count = 0
+                # Auto-pop and accept on timeout
+                msg = self.pending_messages.pop(0)
+                print(f"[Agent] Interjection timeout, auto-accepting: {msg[:60]}")
+                return ""
+            return ""
+
+        # New interjection: inject with protocol
+        msg = self.pending_messages[0]  # peek, don't pop
+        self._processing_interjection = True
+        self._interjection_stuck_count = 0
+        print(f"[Agent] Injected interjection for LLM judgment: {msg[:80]}")
+        return (
+            f"[用户插入: {msg}] "
+            f"【系统指令：请使用 user_interjection_response 工具判断是否处理此插入消息。"
+            f"如果与你当前任务相关（约束/反馈/补充信息），选择 accept；"
+            f"如果完全是新话题或无关内容，选择 reject（系统将自动为其创建新任务）；"
+            f"如果不确定，选择 ask 向用户提问。】"
+        )
 
     def queue_message(self, text: str):
         """Add a message to the pending queue (non-blocking input)."""
@@ -2335,6 +2359,68 @@ class OpenAGCAgent:
                         "content": result_str
                     })
 
+                    # Handle user_interjection_response results
+                    if function_name == "user_interjection_response":
+                        self._processing_interjection = False
+                        self._interjection_stuck_count = 0
+                        try:
+                            import json as _jj
+                            jr = _jj.loads(result_str)
+                            action = jr.get("action", "accept")
+                            if action == "accept":
+                                self.pending_messages.pop(0)
+                                # Re-inject as clean user message so LLM processes it naturally
+                                clean_msg = jr.get("response", "") or "已收到"
+                                self.messages[-2]["content"] = f"[用户插入已接受] {clean_msg}"
+                                if verbose:
+                                    print(f"[Agent] ✅ Interjection accepted: {clean_msg[:60]}")
+                            elif action == "reject":
+                                self.pending_messages.pop(0)
+                                reason = jr.get("reason", "")
+                                self._rejected_interjection = {
+                                    "message": self.messages[-2].get("content", ""),
+                                    "reason": reason,
+                                    "response": jr.get("response", ""),
+                                }
+                                # Remove injected interjection messages from context
+                                self.messages.pop()  # tool result
+                                self.messages.pop()  # assistant tool_call
+                                self.messages.pop()  # user interjection
+                                if verbose:
+                                    print(f"[Agent] ❌ Interjection rejected: {reason[:60]}")
+                                continue  # Skip rest of loop, go back to LLM
+                            elif action == "ask":
+                                self.pending_messages.pop(0)
+                                question = jr.get("question", "请澄清您的需求")
+                                if verbose:
+                                    print(f"[Agent] ❓ Interjection needs clarification: {question[:60]}")
+                                # Use ask_user_question to get clarification
+                                from tools.interaction import AskUserQuestionTool
+                                aqt = AskUserQuestionTool()
+                                # Create a fake context that stores the answer
+                                _fake_ctx = type('obj', (object,), {
+                                    'wait_for_user_input': lambda self, q, opts: None
+                                })()
+                                try:
+                                    answer = aqt.execute(
+                                        question_text=question,
+                                        _agent_context=self  # This triggers user_input_queue.wait
+                                    )
+                                    if answer:
+                                        clean_msg = jr.get("response", "") or ""
+                                        self.messages.append({
+                                            "role": "user",
+                                            "content": f"[用户澄清] {answer}"
+                                        })
+                                        if verbose:
+                                            print(f"[Agent] Got clarification: {answer[:60]}")
+                                except Exception:
+                                    pass
+                                continue
+                        except json.JSONDecodeError:
+                            self._processing_interjection = False
+                            print(f"[Agent] Failed to parse interjection response")
+
                     # Handle self_review results
                     if function_name == "self_review":
                         self._in_self_review = False
@@ -2498,6 +2584,12 @@ class OpenAGCAgent:
                         print(f"[Agent] Auto-generated tool: {tool_name}")
                 except Exception as e:
                     print(f"[Agent] Auto-tool generation error: {e}")
+                # If there are rejected interjections, attach them to the response
+                if self._rejected_interjection:
+                    import json as _rj
+                    reject_data = self._rejected_interjection
+                    self._rejected_interjection = None
+                    return f"[INTERJECTION_REJECTED] {_rj.dumps(reject_data, ensure_ascii=False)}\n{final_answer}"
                 return final_answer
 
         # Extract knowledge graph entities even on failure
