@@ -72,14 +72,20 @@ async def upgrade_server():
 # ── Logs API ──
 
 @router.get("/api/logs")
-async def get_server_logs(lines: int = 100):
-    """Read the last N lines of server.log."""
-    log_path = os.path.join(get_data_path("logs"), "server.log")
-    if not os.path.exists(log_path):
-        return {"lines": []}
-    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-        all_lines = f.readlines()
-    return {"lines": all_lines[-lines:]}
+async def get_server_logs(lines: int = 200):
+    """Return the last N lines of the agent log file."""
+    from api.state import _AGENT_LOG_FILE
+    log_path = _AGENT_LOG_FILE
+    if not log_path or not os.path.exists(log_path):
+        return {"lines": [], "total": 0}
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        all_lines = content.split("\n")
+        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        return {"lines": tail, "total": len(all_lines)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Model Call Logs API ──
@@ -164,33 +170,56 @@ async def get_model_log_detail(log_id: int):
 
 @router.get("/api/tools/stats")
 async def get_tool_stats():
-    """Get tool usage statistics."""
+    """Return tool usage statistics from tool_frequency.json."""
+    from core.paths import get_data_path as _gdp
+    freq_path = os.path.join(os.path.dirname(_gdp("config.json")), "tool_frequency.json")
+    if not os.path.exists(freq_path):
+        return {"tools": [], "summary": {"total_calls": 0, "total_tools": 0}}
     try:
-        from core.stats_manager import get_stats_manager
-        sm = get_stats_manager()
-        tools = sm.get_tool_stats() if hasattr(sm, 'get_tool_stats') else []
+        with open(freq_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
     except Exception:
-        tools = []
-    return {"tools": tools}
+        return {"tools": [], "summary": {"total_calls": 0, "total_tools": 0}}
+    tools = []
+    total_calls = 0
+    for name, info in sorted(data.items(), key=lambda x: -x[1].get("calls", 0)):
+        info["name"] = name
+        total_calls += info.get("calls", 0)
+        tools.append(info)
+    return {"tools": tools, "summary": {"total_calls": total_calls, "total_tools": len(tools)}}
 
 
 @router.get("/api/tools/auto-tools")
 async def get_auto_tools():
-    """List auto-generated tools with usage stats."""
+    """Return auto-generated tools list with usage info."""
     import os as _os
     from core.paths import get_data_path as _gdp
-    tools_dir = _os.path.join(_gdp("auto_tools"), "1")
+    _auto_dir = _gdp("auto_tools")
+    # Load frequency data for enrichment
+    _freq = {}
+    try:
+        _fp = _os.path.join(_os.path.dirname(_gdp("config.json")), "tool_frequency.json")
+        if _os.path.exists(_fp):
+            with open(_fp, "r", encoding="utf-8") as f:
+                _freq = json.load(f)
+    except Exception:
+        pass
     tools = []
-    if _os.path.exists(tools_dir):
-        for f in sorted(_os.listdir(tools_dir)):
-            if f.endswith(".py"):
-                name = f.replace(".py", "")
-                tools.append({
-                    "name": name,
-                    "session": "1",
-                    "calls": 0,
-                    "sessions": 0,
-                    "type": "auto_tool",
-                    "last_used": "-",
-                })
+    if _os.path.exists(_auto_dir):
+        for sess_dir in sorted(_os.listdir(_auto_dir)):
+            sess_path = _os.path.join(_auto_dir, sess_dir)
+            if not _os.path.isdir(sess_path):
+                continue
+            for f in sorted(_os.listdir(sess_path)):
+                if f.endswith(".py"):
+                    name = f.replace(".py", "")
+                    freq = _freq.get(name, {})
+                    tools.append({
+                        "name": name,
+                        "session": sess_dir,
+                        "calls": freq.get("calls", 0),
+                        "sessions": freq.get("sessions", 0),
+                        "type": "auto_tool",
+                        "last_used": freq.get("last_used", "-"),
+                    })
     return {"tools": tools}
