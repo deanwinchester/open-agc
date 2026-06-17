@@ -49,7 +49,7 @@ async def control_searxng(body: dict):
 @router.get("/api/version")
 async def get_api_version():
     from core.auto_upgrade import AutoUpgrader
-    upgrader = AutoUpgrader(get_data_path("upgrade"))
+    upgrader = AutoUpgrader()
     current, latest = upgrader.check()
     return {
         "current": current or get_version(),
@@ -85,19 +85,21 @@ async def get_server_logs(lines: int = 100):
 
 @router.get("/api/model-logs/status")
 async def get_model_logging_status():
-    from core.stats_manager import get_stats_manager
-    sm = get_stats_manager()
-    return {"enabled": sm.is_logging_enabled()}
+    from api.config import load_config
+    cfg = load_config()
+    enabled = cfg.get("model_logging_enabled", False)
+    return {"enabled": enabled}
 
 
 @router.post("/api/model-logs/toggle")
 async def toggle_model_logging(body: dict = {}):
-    from core.stats_manager import get_stats_manager
-    sm = get_stats_manager()
+    from api.config import load_config, save_config
+    cfg = load_config()
     enabled = body.get("enabled", None)
     if enabled is not None:
-        sm.set_logging_enabled(enabled)
-    return {"enabled": sm.is_logging_enabled()}
+        cfg["model_logging_enabled"] = enabled
+        save_config(cfg)
+    return {"enabled": cfg.get("model_logging_enabled", False)}
 
 
 @router.post("/api/model-logs/clear")
