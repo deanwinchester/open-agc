@@ -357,10 +357,11 @@ async def get_task_logs(task_id: int, lines: int = 50):
         else:
             output_path = None
     if not output_path or not os.path.exists(output_path):
-        return {"logs": "", "lines": 0}
+        return {"logs": "", "lines": []}
     with open(output_path, "r", encoding="utf-8", errors="replace") as f:
         all_lines = f.readlines()
-    return {"logs": "".join(all_lines[-lines:]), "lines": min(lines, len(all_lines))}
+    selected = all_lines[-lines:]
+    return {"logs": "".join(selected), "lines": selected}
 
 
 @router.post("/api/tasks/{task_id}/kill")
