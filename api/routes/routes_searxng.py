@@ -157,7 +157,7 @@ async def get_model_log_detail(log_id: int):
     conn.close()
     if not row:
         raise HTTPException(status_code=404, detail="Log not found")
-    return {"log": dict(row)}
+    return dict(row)
 
 
 # ── Tools Stats API ──
