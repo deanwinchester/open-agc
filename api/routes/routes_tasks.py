@@ -114,7 +114,7 @@ async def get_task_detail(task_id: int):
     task["prompt_tokens"] = task.get("prompt_tokens", 0)
     task["completion_tokens"] = task.get("completion_tokens", 0)
     task["cached_tokens"] = task.get("cached_tokens", 0)
-    return task
+    return {"task": task}
 
 
 @router.get("/api/tasks/{task_id}/steps")
