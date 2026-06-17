@@ -164,9 +164,14 @@ async def get_model_log_detail(log_id: int):
 
 @router.get("/api/tools/stats")
 async def get_tool_stats():
-    from core.stats_manager import get_stats_manager
-    sm = get_stats_manager()
-    return {"tools": sm.get_tool_stats()}
+    """Get tool usage statistics."""
+    try:
+        from core.stats_manager import get_stats_manager
+        sm = get_stats_manager()
+        tools = sm.get_tool_stats() if hasattr(sm, 'get_tool_stats') else []
+    except Exception:
+        tools = []
+    return {"tools": tools}
 
 
 @router.get("/api/tools/auto-tools")
