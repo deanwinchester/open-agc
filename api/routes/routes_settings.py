@@ -12,7 +12,273 @@ from api.state import connected_websockets, _llamacpp_download_state, _broadcast
 from api.task_core import create_task, update_task_status, get_task_context, save_task_context, add_task_step
 from core.paths import get_data_path
 from core.llamacpp_manager import get_llamacpp_manager
+from api.background import _run_background_task
+from api.ws import save_message
 from core.stats_manager import get_stats_manager
+
+
+# Download helper functions
+def delete_download_record(download_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM downloads WHERE id=?", (download_id,))
+    conn.commit()
+    conn.close()
+
+
+# Global state imported from api.state: connected_websockets, _sandbox_waits,
+# _pending_sandbox_approvals, _apply_pending_sandbox_approvals, _active_agents,
+# _background_agents, _session_enabled_tools, _guardian_resume_lock,
+# _llamacpp_download_state, _main_event_loop, _broadcast_to_websockets, etc.
+
+
+
+
+def list_download_records(status_filter: str = None) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    if status_filter:
+        cursor.execute("SELECT * FROM downloads WHERE status=? ORDER BY created_at DESC",
+                       (status_filter,))
+    else:
+        cursor.execute("SELECT * FROM downloads ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+
+def get_download_record(download_id: int) -> Optional[Dict]:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM downloads WHERE id=?", (download_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return None
+
+
+
+def get_download_events(download_id: int) -> list:
+    """Return all events for a given download, ordered by creation time."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM download_events WHERE download_id=? ORDER BY id ASC", (download_id,)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[Download] Failed to get events for #{download_id}: {e}")
+        return []
+
+
+
+def log_download_event(download_id: int, event_type: str, message: str = "", details: str = ""):
+    """Write a structured event to the download_events log table."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT INTO download_events (download_id, event_type, message, details) VALUES (?, ?, ?, ?)",
+            (download_id, event_type, message, details)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[Download] Failed to log event #{download_id} {event_type}: {e}")
+
+
+
+def _direct_resume_background_task(task_id: int, user_query: str, context: list,
+                                     download_id: int = None):
+    """Directly resume a backgrounded task (thread-safe, non-blocking).
+    If download_id is provided, marks background_resumed=1 inside the thread
+    so BgMonitor doesn't double-resume."""
+    try:
+        def _do_resume():
+            # Mark as resumed FIRST so monitor won't also pick it up
+            if download_id is not None:
+                try:
+                    _conn = sqlite3.connect(DB_PATH)
+                    _conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?", (download_id,))
+                    _conn.commit()
+                    _conn.close()
+                except Exception:
+                    pass
+            update_task_status(task_id, "interrupted",
+                "后台下载触发恢复", interruption_reason="background_complete")
+            _run_background_task(task_id, user_query, context, True)
+        threading.Thread(target=_do_resume, daemon=True).start()
+    except Exception as e:
+        print(f"[Download] _direct_resume_background_task failed for task {task_id}: {e}")
+
+
+
+def update_download_progress(download_id: int, progress: float,
+                              downloaded_bytes: int = None,
+                              status: str = None, error_message: str = None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    fields = ["progress=?", "updated_at=CURRENT_TIMESTAMP"]
+    params = [progress]
+    if downloaded_bytes is not None:
+        fields.append("downloaded_bytes=?")
+        params.append(downloaded_bytes)
+    if status is not None:
+        fields.append("status=?")
+        params.append(status)
+    if error_message is not None:
+        fields.append("error_message=?")
+        params.append(error_message)
+    params.append(download_id)
+    cursor.execute(f"UPDATE downloads SET {', '.join(fields)} WHERE id=?", params)
+    conn.commit()
+
+    # Log event for important status transitions
+    if status == 'completed':
+        log_download_event(download_id, "completed", "下载完成", "")
+    elif status == 'failed':
+        log_download_event(download_id, "failed", "下载失败", error_message or "未知错误")
+
+    # Notify the linked task (both success and failure)
+    if status in ('completed', 'failed'):
+        try:
+            cursor.execute("SELECT task_id, label, filename, target_path FROM downloads WHERE id=?", (download_id,))
+            dl_row = cursor.fetchone()
+            if dl_row:
+                task_id = dl_row[0]
+                label = dl_row[1] or dl_row[2] or f"download #{download_id}"
+                save_path = dl_row[3] or ""
+                if task_id:
+                    cursor.execute(
+                        "SELECT session_id FROM task_steps WHERE task_id=? AND session_id IS NOT NULL LIMIT 1",
+                        (task_id,))
+                    sid_row = cursor.fetchone()
+                    session_id = sid_row[0] if sid_row else 1
+
+                    if status == 'completed':
+                        path_hint = f"\n保存路径: {save_path}" if save_path else ""
+                        save_message("system",
+                            f"✅ 下载完成: {label}{path_hint}", session_id)
+                        try:
+                            cursor.execute("SELECT MAX(step_number) FROM task_steps WHERE task_id=?", (task_id,))
+                            max_step = cursor.fetchone()[0] or 0
+                            add_task_step(task_id, max_step + 1, "queue_download",
+                                tool_label=f"✅ 下载完成: {label}",
+                                args_preview=f"filename={label}",
+                                result_preview="下载完成",
+                                full_result="",
+                                success=True, session_id=session_id)
+                        except Exception as step_err:
+                            print(f"[Download] Failed to add completed step for task {task_id}: {step_err}")
+
+                        # Inject "download done" context for background tasks
+                        try:
+                            cursor.execute(
+                                "SELECT status, user_query FROM tasks WHERE id=?",
+                                (task_id,))
+                            task_row = cursor.fetchone()
+                            if task_row and task_row[0] in ('backgrounded',):
+                                ctx = get_task_context(task_id)
+                                if ctx:
+                                    ctx.append({"role": "user", "content": (
+                                        "【系统通知】后台下载任务已完成，文件已就绪。"
+                                        + (f"\n文件位置: {save_path}" if save_path else "")
+                                        + "请继续执行之前未完成的任务，不要重复下载已有文件。"
+                                    )})
+                                    save_task_context(task_id, ctx)
+                                    # Direct resume — wake task immediately instead of waiting for poll
+                                    user_query = task_row[1] or ""
+                                    print(f"[Download] Download #{download_id} complete — directly resuming task {task_id}")
+                                    _direct_resume_background_task(task_id, user_query, ctx, download_id=download_id)
+                        except Exception as e:
+                            print(f"[Download] Failed to resume task {task_id} after download complete: {e}")
+
+                        _broadcast_to_websockets({
+                            "type": "download_success",
+                            "download_id": download_id,
+                            "task_id": task_id,
+                            "session_id": session_id,
+                            "label": label
+                        })
+                    else:  # failed
+                        err = error_message or "未知错误"
+                        save_message("system",
+                            f"❌ 下载失败: {label}\n错误信息: {err}",
+                            session_id)
+                        try:
+                            cursor.execute("SELECT MAX(step_number) FROM task_steps WHERE task_id=?", (task_id,))
+                            max_step = cursor.fetchone()[0] or 0
+                            add_task_step(task_id, max_step + 1, "queue_download",
+                                tool_label=f"❌ 下载失败: {label}",
+                                args_preview=f"filename={label}",
+                                result_preview=f"错误: {err}",
+                                full_result=f"下载失败: {label}\n错误信息: {err}",
+                                success=False, session_id=session_id)
+
+                            # Don't mark as background_failed — keep backgrounded for retry analysis
+                            cursor.execute(
+                                "SELECT status, user_query FROM tasks WHERE id=?",
+                                (task_id,))
+                            task_row = cursor.fetchone()
+                            if task_row and task_row[0] in ('backgrounded', 'completed'):
+                                ctx = get_task_context(task_id)
+                                if ctx:
+                                    ctx.append({"role": "user", "content": (
+                                        f"【系统通知】下载任务失败了。\n文件: {label}\n错误信息: {err}\n"
+                                        "请分析失败原因，尝试其他方式重新下载（如换源、换文件名），"
+                                        "如果确实无法下载则结束任务。"
+                                    )})
+                                    save_task_context(task_id, ctx)
+                                    # Wake the task so agent can analyze and retry
+                                    user_query = task_row[1] or ""
+                                    print(f"[Download] Download #{download_id} failed — directly resuming task {task_id} for retry analysis")
+                                    _direct_resume_background_task(task_id, user_query, ctx, download_id=download_id)
+                        except Exception as step_err:
+                            print(f"[Download] Failed to update task {task_id}: {step_err}")
+
+                        _broadcast_to_websockets({
+                            "type": "download_failed",
+                            "download_id": download_id,
+                            "task_id": task_id,
+                            "session_id": session_id,
+                            "label": label,
+                            "error": err
+                        })
+                else:
+                    print(f"[Download] download #{download_id} {status}, task_id=NULL (will check at tool_done)")
+            else:
+                print(f"[Download] download #{download_id} {status}, but no DB row found!")
+        except Exception as notify_err:
+            print(f"[Download] NOTIFICATION ERROR for #{download_id}: {notify_err}")
+
+    conn.close()
+
+
+
+def create_download_record(type_: str, label: str, repo_id: str = None,
+                           filename: str = None, source: str = "huggingface",
+                           url: str = None, target_path: str = "",
+                           partial_path: str = "", total_size: int = 0,
+                           task_id: int = None) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        '''INSERT INTO downloads (type, label, repo_id, filename, source, url,
+           target_path, partial_path, total_size, downloaded_bytes, status, progress, task_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'downloading', 0.0, ?)''',
+        (type_, label, repo_id, filename, source, url, target_path, partial_path, total_size, task_id)
+    )
+    download_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return download_id
+
+
 
 router = APIRouter()
 
