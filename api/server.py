@@ -775,6 +775,11 @@ def load_config() -> dict:
 from api.ws import websocket_endpoint
 app.websocket("/ws")(websocket_endpoint)
 
+# SPA fallback: serve index.html for all unmatched frontend routes
+@app.get("/{full_path:path}")
+async def spa_fallback(full_path: str):
+    return FileResponse("static/index.html")
+
 # Start background systems
 import api.background as _bg
 _bg.start_email_listener()
