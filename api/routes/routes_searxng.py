@@ -76,10 +76,10 @@ async def get_server_logs(lines: int = 100):
     """Read the last N lines of server.log."""
     log_path = os.path.join(get_data_path("logs"), "server.log")
     if not os.path.exists(log_path):
-        return {"logs": []}
+        return {"lines": []}
     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
         all_lines = f.readlines()
-    return {"logs": all_lines[-lines:]}
+    return {"lines": all_lines[-lines:]}
 
 
 # ── Model Call Logs API ──
@@ -176,7 +176,7 @@ async def get_tool_stats():
 
 @router.get("/api/tools/auto-tools")
 async def get_auto_tools():
-    """List auto-generated tools."""
+    """List auto-generated tools with usage stats."""
     import os as _os
     from core.paths import get_data_path as _gdp
     tools_dir = _os.path.join(_gdp("auto_tools"), "1")
@@ -184,5 +184,13 @@ async def get_auto_tools():
     if _os.path.exists(tools_dir):
         for f in sorted(_os.listdir(tools_dir)):
             if f.endswith(".py"):
-                tools.append(f.replace(".py", ""))
+                name = f.replace(".py", "")
+                tools.append({
+                    "name": name,
+                    "session": "1",
+                    "calls": 0,
+                    "sessions": 0,
+                    "type": "auto_tool",
+                    "last_used": "-",
+                })
     return {"tools": tools}
