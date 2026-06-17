@@ -50,22 +50,23 @@ async def control_searxng(body: dict):
 async def get_api_version():
     from core.auto_upgrade import AutoUpgrader
     upgrader = AutoUpgrader()
-    current, latest = upgrader.check()
+    current = get_version()
+    latest = upgrader.fetch_latest_release()
     return {
-        "current": current or get_version(),
-        "latest": latest or get_version(),
-        "update_available": bool(latest and latest != current) if current else False,
+        "current": current,
+        "latest": latest or current,
+        "update_available": bool(latest and latest != current),
     }
 
 
 @router.post("/api/upgrade")
 async def upgrade_server():
     from core.auto_upgrade import AutoUpgrader
-    upgrader = AutoUpgrader(get_data_path("upgrade"))
-    success, message = upgrader.upgrade()
+    upgrader = AutoUpgrader()
+    success = upgrader.perform_upgrade()
     if not success:
-        raise HTTPException(status_code=500, detail=message)
-    return {"status": "ok", "message": message}
+        raise HTTPException(status_code=500, detail="Upgrade failed")
+    return {"status": "ok", "message": "Upgrade completed"}
 
 
 # ── Logs API ──
