@@ -243,6 +243,12 @@ def _run_migrations(cursor):
     except Exception:
         pass
 
+    # Ensure wake_at exists on tasks (not just task_steps)
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN wake_at DATETIME")
+    except Exception:
+        pass  # Already exists
+
 
 def create_indexes():
     """Create indexes for query performance."""

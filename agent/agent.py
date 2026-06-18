@@ -748,8 +748,14 @@ class OpenAGCAgent:
         )
 
     def queue_message(self, text: str):
-        """Add a message to the pending queue (non-blocking input)."""
+        """Add a message to the pending queue (non-blocking input).
+        Also unblocks any wait_for_user_input by putting into user_input_queue."""
         self.pending_messages.append(text)
+        # If agent is blocked on ask_user_question, unblock with the message
+        try:
+            self.user_input_queue.put_nowait(f"[用户消息] {text}")
+        except Exception:
+            pass
 
     def _handle_sandbox_blocked(self, sb, tool_name, tool_args, progress_callback):
         """Pause agent loop and wait for user to approve/deny sandbox path access."""
