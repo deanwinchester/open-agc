@@ -942,8 +942,5 @@ def start_guardian_loop():
     print("[Guardian] Started (code-based polling + goal patrol)")
 
 
-# Start background listeners
-start_background_monitor()
-start_email_listener()
-start_task_scheduler()
-start_guardian_loop()
+# Background listeners are started from api/server.py (_bg.start_*)
+# Do NOT call them here — they would run twice!
