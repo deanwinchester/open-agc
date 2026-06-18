@@ -74,7 +74,7 @@ litellm.supports_token_counter = False
 from api.config import load_config, save_config, log_agent_error
 from api.db import DB_PATH, init_db, create_indexes
 from api.state import (
-    _main_event_loop, connected_websockets, _sandbox_waits, _pending_sandbox_approvals,
+    connected_websockets, _sandbox_waits, _pending_sandbox_approvals,
     _apply_pending_sandbox_approvals, _active_agents, _background_agents,
     _session_enabled_tools, _guardian_resume_lock, _llamacpp_download_state,
     _SERVER_START_TIME, _broadcast_to_websockets, _ws_send_safe,
@@ -130,9 +130,9 @@ init_download_routes(
 
 @app.on_event("startup")
 async def _capture_event_loop():
-    global _main_event_loop
-    _main_event_loop = asyncio.get_running_loop()
-    print(f"[Server] Event loop captured: {_main_event_loop}")
+    loop = asyncio.get_running_loop()
+    _state_mod._main_event_loop = loop
+    print(f"[Server] Event loop captured: {loop}")
 
 # Initialize Database
 DB_PATH = get_data_path("chat_history.db")
@@ -535,6 +535,7 @@ async def spa_fallback(full_path: str):
     return FileResponse("static/index.html")
 
 # Start background systems
+import api.state as _state_mod
 import api.background as _bg
 _bg.start_email_listener()
 _bg.start_task_scheduler()
