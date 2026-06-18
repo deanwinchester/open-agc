@@ -360,7 +360,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 progress_queue.put(event)
             
-            current_model = model or os.getenv("DEFAULT_MODEL", "moonshot/kimi-latest")
+            _cfg_model = load_config().get("default_model", "moonshot/kimi-latest")
+            current_model = model or os.getenv("DEFAULT_MODEL") or _cfg_model
 
             # Auto-start llama-server if using a llamacpp model
             if "llamacpp/" in current_model:
