@@ -360,8 +360,8 @@ class MemoryStore:
         """Compute composite score for a memory based on recency, frequency, type."""
         from datetime import datetime as _dt
         days_since_created = max(1, (now_dt - created_dt).days)
-        # recency: when was this memory last recalled
-        last_recalled = row.get("last_recalled_at") or row[5]  # fallback to created_at
+        # recency: when was this memory last recalled (index 10 = last_recalled_at)
+        last_recalled = row[10] if len(row) > 10 and row[10] else row[5]  # fallback to created_at
         try:
             lr_dt = _dt.fromisoformat(last_recalled) if isinstance(last_recalled, str) else _dt.now()
         except Exception:
