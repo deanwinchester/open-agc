@@ -728,6 +728,16 @@ async def websocket_endpoint(websocket: WebSocket):
             raise
         finally:
             agent_is_running = False
+            # Clean up finished agent from _active_agents so new messages
+            # can start a fresh agent loop (instead of being queued to a dead agent)
+            try:
+                _aa_sess = _active_agents.get(ws_session_id, {})
+                _keys_to_remove = [k for k, v in _aa_sess.items() if v is agent]
+                for k in _keys_to_remove:
+                    del _aa_sess[k]
+                    print(f"[WS] Removed finished agent (task_id={k}) from _active_agents")
+            except Exception:
+                pass
 
     try:
         while True:
