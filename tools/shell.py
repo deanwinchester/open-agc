@@ -90,7 +90,7 @@ class ShellTool(BaseTool):
         server_pid = os.getpid()
 
         suicidal_patterns = [
-            (r'taskkill\b.*(?:/im\s+python\b|/im\s+python3?\b)', "禁止终止 python.exe（会杀死 Open-AGC 自身）"),
+            (r'taskkill\b.*(?:/im\s+python\b|/im\s+python3?\b|/fi\s+["\']?\s*imagename\s+eq\s+python\b)', "禁止终止 python.exe（会杀死 Open-AGC 自身）"),
             (r'taskkill\b.*/pid\s+' + str(server_pid), "禁止终止 Open-AGC 进程自身"),
             (r'tskill\s+python\b', "禁止终止 python 进程"),
             (r'wmic\s+process\s+where.*delete', "禁止通过 WMI 终止进程"),
