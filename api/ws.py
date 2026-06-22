@@ -83,8 +83,8 @@ async def websocket_endpoint(websocket: WebSocket):
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        # Load the last 20 messages for the current session
-        cursor.execute("SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 50) ORDER BY id ASC", (ws_session_id,))
+        # Load the last 20 user/agent messages for context (exclude tool_step from count)
+        cursor.execute("SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? AND role != 'tool_step' ORDER BY id DESC LIMIT 20) ORDER BY id ASC", (ws_session_id,))
         rows = cursor.fetchall()
         conn.close()
 
