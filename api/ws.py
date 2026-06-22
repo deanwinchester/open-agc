@@ -587,11 +587,8 @@ async def websocket_endpoint(websocket: WebSocket):
             # Persist enabled tools for next turn (avoid re-discovering)
             _session_enabled_tools[ws_session_id] = getattr(agent, 'active_tool_names', set())
 
-            # Detect max_iterations hit for longrun auto-resume
-            is_max_iter = response and response.startswith("[MAX_ITERATIONS_REACHED]")
-            is_backgrounded = response and response.startswith("[TASK_BACKGROUNDED]")
-            is_interjection_rejected = response and response.startswith("[INTERJECTION_REJECTED]")
-            if is_interjection_rejected:
+            # Handle [INTERJECTION_REJECTED] prefix (strips it from response)
+            if response and response.startswith("[INTERJECTION_REJECTED]"):
                 try:
                     _reject_line = response[len("[INTERJECTION_REJECTED] "):]
                     _newline_pos = _reject_line.find("\n")
@@ -612,6 +609,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     print(f"[WS] Interjection reject error: {_rj_err}")
                 response = _remaining if '_remaining' in locals() else response
 
+            # Detect max_iterations / backgrounded (check AFTER stripping interjection prefix)
+            is_max_iter = response and response.startswith("[MAX_ITERATIONS_REACHED]")
+            is_backgrounded = response and response.startswith("[TASK_BACKGROUNDED]")
             if response and not is_max_iter and not is_backgrounded:
                 print(f"[WS] run_agent response (first 80): {str(response)[:80]}")
 
