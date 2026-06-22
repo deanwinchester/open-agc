@@ -728,6 +728,18 @@ async def websocket_endpoint(websocket: WebSocket):
             raise
         finally:
             agent_is_running = False
+            # If ws_alive is False (WS disconnected mid-execution), broadcast the
+            # response to any reconnected client so the final message appears.
+            try:
+                _resp = locals().get('response')
+                if not ws_alive and _resp:
+                    _broadcast_to_websockets({
+                        "type": "message", "role": "agent",
+                        "content": _resp, "session_id": ws_session_id
+                    })
+                    print(f"[WS] Broadcast final response after disconnect (session {ws_session_id})")
+            except Exception:
+                pass
             # Clean up finished agent from _active_agents so new messages
             # can start a fresh agent loop (instead of being queued to a dead agent)
             try:
