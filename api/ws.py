@@ -125,7 +125,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if newer_msgs == 0:
                 steps = cursor.execute(
                     "SELECT step_number, tool_name, tool_label, args_preview, "
-                    "result_preview, success FROM task_steps "
+                    "result_preview, full_result, full_args, success, thinking_content FROM task_steps "
                     "WHERE task_id=? ORDER BY created_at",
                     (last_task["id"],)).fetchall()
                 if steps:
@@ -847,7 +847,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             conn2.row_factory = sqlite3.Row
                             steps = conn2.execute(
                                 "SELECT step_number, tool_name, tool_label, args_preview, "
-                                "result_preview, full_result, full_args, success FROM task_steps "
+                                "result_preview, full_result, full_args, success, thinking_content FROM task_steps "
                                 "WHERE task_id=? ORDER BY created_at", (task_id,)).fetchall()
                             # Also fetch the original task goal
                             task_row = conn2.execute(
