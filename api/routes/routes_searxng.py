@@ -163,7 +163,23 @@ async def get_model_log_detail(log_id: int):
     conn.close()
     if not row:
         raise HTTPException(status_code=404, detail="Log not found")
-    return dict(row)
+    result = dict(row)
+    # Load full request/response from file if stored as paths
+    resp_data = result.get("response_data", "")
+    if resp_data and "|" in resp_data:
+        parts = resp_data.split("|", 1)
+        req_path, resp_path = parts[0], parts[1]
+        try:
+            with open(req_path, "r", encoding="utf-8") as _f:
+                result["request_data"] = _f.read()
+        except Exception:
+            result["request_data"] = "(文件读取失败)"
+        try:
+            with open(resp_path, "r", encoding="utf-8") as _f:
+                result["response_data"] = _f.read()
+        except Exception:
+            result["response_data"] = "(文件读取失败)"
+    return result
 
 
 # ── Tools Stats API ──

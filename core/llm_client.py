@@ -142,13 +142,36 @@ def _log_model_call(provider: str, model: str, prompt_tokens: int,
                      cache_hit: str, latency_ms: int,
                      cached_tokens: int = 0,
                      session_id: int = None, task_id: int = None):
-    """Insert a model call log entry."""
+    """Insert a model call log entry. Full request/response saved to files."""
     if not _model_logging_enabled:
         return
     try:
+        # Save full request/response to files
+        from core.paths import get_data_path
+        import os as _ml_os
+        import time as _ml_time
+        _log_dir = _ml_os.path.join(get_data_path("logs"), "model_calls")
+        _ml_os.makedirs(_log_dir, exist_ok=True)
+        _ts = _ml_time.strftime("%Y%m%d_%H%M%S")
+        _seq = int(_ml_time.time() * 1000) % 10000
+        _base = f"{_ts}_{_seq}_{provider}_{model.replace('/','_')}"
+        # Truncate very long filenames
+        if len(_base) > 200:
+            _base = _base[:200]
+
+        _req_path = _ml_os.path.join(_log_dir, f"{_base}_req.json")
+        _resp_path = _ml_os.path.join(_log_dir, f"{_base}_resp.json")
+
+        with open(_req_path, "w", encoding="utf-8") as _f:
+            _f.write(request_data[:100000] if request_data else "")
+        with open(_resp_path, "w", encoding="utf-8") as _f:
+            _f.write(response_data[:100000] if response_data else "")
+
+        # Store file paths + summary in DB
         _init_model_logs_table()
         conn = _get_model_logs_conn()
         cost = _calculate_cost(provider, model, prompt_tokens, completion_tokens, cached_tokens)
+        _summary = (request_data or "")[:500]
         conn.execute(
             """INSERT INTO model_call_logs
                (session_id, task_id, provider, model, prompt_tokens,
@@ -156,7 +179,7 @@ def _log_model_call(provider: str, model: str, prompt_tokens: int,
                 cache_hit, latency_ms, cost_estimate, cached_tokens)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (session_id, task_id, provider, model, prompt_tokens,
-             completion_tokens, total_tokens, request_data, response_data,
+             completion_tokens, total_tokens, _summary, f"{_req_path}|{_resp_path}",
              cache_hit, latency_ms, cost, cached_tokens)
         )
         conn.commit()
