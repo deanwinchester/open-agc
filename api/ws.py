@@ -622,6 +622,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 _resp_body = response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台"
                 _wake_match = re.search(r'WAKE_IN=(\d+)', response)
                 _wake_min = int(_wake_match.group(1)) if _wake_match else _bg_wake
+                print(f"[Task] wake_at debug: response={response[:100]}, _wake_match={_wake_match.group(1) if _wake_match else None}, _bg_wake={_bg_wake}, _wake_min={_wake_min}")
                 if _wake_min:
                     _wake_dt = (datetime.utcnow() + timedelta(minutes=_wake_min)).strftime('%Y-%m-%d %H:%M:%S')
                     try:
@@ -632,6 +633,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         print(f"[Task] Set wake_at={_wake_dt} for task {ws_task_id} (after {_wake_min}min)")
                     except Exception as _wake_err:
                         print(f"[Task] Failed to set wake_at: {_wake_err}")
+                else:
+                    print(f"[Task] wake_at NOT set: _wake_min is falsy")
                 update_task_status(ws_task_id, "backgrounded",
                     _resp_body, interruption_reason="backgrounded")
                 # Register PID for BgMonitor tracking if available
