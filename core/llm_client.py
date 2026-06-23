@@ -146,16 +146,28 @@ def _log_model_call(provider: str, model: str, prompt_tokens: int,
     if not _model_logging_enabled:
         return
     try:
-        # Save full request/response to files
         from core.paths import get_data_path
         import os as _ml_os
         import time as _ml_time
         _log_dir = _ml_os.path.join(get_data_path("logs"), "model_calls")
         _ml_os.makedirs(_log_dir, exist_ok=True)
+
+        # Auto-cleanup: delete log files older than 7 days (once per ~100 writes)
+        _cleanup_counter = getattr(_log_model_call, '_cleanup_counter', 0) + 1
+        _log_model_call._cleanup_counter = _cleanup_counter
+        if _cleanup_counter % 100 == 0:
+            try:
+                _cutoff = _ml_time.time() - 7 * 86400
+                for _f in _ml_os.listdir(_log_dir):
+                    _fp = _ml_os.path.join(_log_dir, _f)
+                    if _ml_os.path.isfile(_fp) and _ml_os.path.getmtime(_fp) < _cutoff:
+                        _ml_os.remove(_fp)
+            except Exception:
+                pass
+
         _ts = _ml_time.strftime("%Y%m%d_%H%M%S")
         _seq = int(_ml_time.time() * 1000) % 10000
         _base = f"{_ts}_{_seq}_{provider}_{model.replace('/','_')}"
-        # Truncate very long filenames
         if len(_base) > 200:
             _base = _base[:200]
 
