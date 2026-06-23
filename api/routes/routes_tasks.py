@@ -399,3 +399,23 @@ async def reset_task_resume_count(task_id: int):
     from api.config import log_agent_error
     log_agent_error(f"Task #{task_id}: resume_count manually reset to 0")
     return {"status": "success"}
+
+
+@router.post("/api/tasks/{task_id}/reply")
+async def reply_to_background_task(task_id: int, body: dict):
+    """Reply to a background task that called ask_user_question.
+    Puts the answer into the agent's user_input_queue to unblock it.
+    """
+    answer = body.get("answer", "")
+    if not answer:
+        raise HTTPException(status_code=400, detail="answer is required")
+    from api.state import _background_agents
+    agent = _background_agents.get(task_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Task not found or not running in background")
+    try:
+        from queue import Queue
+        agent.user_input_queue.put_nowait(answer)
+        return {"status": "success", "message": f"Answer delivered to task #{task_id}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to deliver answer: {e}")
