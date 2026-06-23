@@ -849,6 +849,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Resume an interrupted task
                     task_id = user_msg.get("task_id")
                     if task_id and not agent_is_running:
+                        # Don't resume if this task is already running in background
+                        if task_id in _background_agents:
+                            _bg_agent = _background_agents.get(task_id)
+                            if _bg_agent and not getattr(_bg_agent, 'is_interrupted', False):
+                                # Queue to the existing background agent instead
+                                _extra = user_msg.get("extra_instruction", "").strip()
+                                _msg = f"[用户继续指令] {_extra}" if _extra else "继续执行未完成的任务"
+                                _bg_agent.queue_message(_msg)
+                                print(f"[WS] Task #{task_id} is already running in background — queued resume message")
+                                continue
                         resume_id_for_run = task_id
                         try:
                             ctx = get_task_context(task_id)
