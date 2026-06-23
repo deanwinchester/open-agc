@@ -339,8 +339,12 @@ function initApp() {
       }
       updateTaskBadge();
     } else if (data.type === 'task_backgrounded') {
+      hideThinkingStatus();
       appendMessage(`⏸️ **任务已进入后台**\n\n${data.message || '后台任务处理中...'}\n\n完成后将自动恢复执行。`, 'system');
       hideProgressContainer();
+      state.isAgentThinking = false;
+      state.currentTaskId = null;
+      updateInputState();
       updateTaskBadge();
     } else if (data.type === 'download_success') {
       appendMessage(
