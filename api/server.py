@@ -254,11 +254,12 @@ def reconcile_downloads():
 reconcile_downloads()
 
 def reconcile_tasks():
-    """On startup, mark any 'running' tasks as interrupted (server was restarted)."""
+    """On startup, mark 'running'/'backgrounded' tasks as interrupted (server was restarted)."""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        interrupted = cursor.execute(
+        # Mark running tasks as interrupted
+        running = cursor.execute(
             "SELECT id FROM tasks WHERE status='running'").fetchall()
         cursor.execute(
             "UPDATE tasks SET status='interrupted', interruption_reason='server_restart', "
@@ -266,14 +267,27 @@ def reconcile_tasks():
         count = cursor.rowcount
         conn.commit()
 
+        # Also mark backgrounded tasks as interrupted if no surviving process info
+        # (in-memory process dict is lost on restart, so they can't be monitored)
+        bg_count = cursor.execute(
+            "UPDATE tasks SET status='interrupted', interruption_reason='server_restart', "
+            "updated_at=CURRENT_TIMESTAMP WHERE status='backgrounded'"
+        ).rowcount
+        if bg_count:
+            print(f"[Startup] Marked {bg_count} backgrounded task(s) as interrupted (server restart)")
+            conn.commit()
+
         # For each interrupted task, try to build a fallback snapshot
         # from task_steps + messages table (since run_turn never completed
         # and context_snapshot was never saved).
-        for (tid,) in interrupted:
+        # Build fallback snapshots for both running and backgrounded tasks
+        all_interrupted = running + [(r[0],) for r in cursor.execute(
+            "SELECT id FROM tasks WHERE status='interrupted' AND interruption_reason='server_restart'"
+        ).fetchall() if r[0] not in [x[0] for x in running]]
+        for (tid,) in all_interrupted:
             try:
                 _ctx = get_task_context(tid)
                 if _ctx and len(_ctx) > 1:
-                    # A valid snapshot already exists — skip
                     continue
                 # Reconstruct from task_steps + messages table
                 _cid = cursor.execute(
