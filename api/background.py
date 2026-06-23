@@ -495,8 +495,19 @@ def start_background_monitor():
                                         "【系统通知】定时唤醒时间已到，请继续执行之前未完成的任务。"
                                     )})
                                     save_task_context(tid, ctx)
+                                # Directly resume the task (not just mark interrupted)
+                                _uq = conn.execute(
+                                    "SELECT user_query FROM tasks WHERE id=?", (tid,)
+                                ).fetchone()
+                                user_query = _uq[0] if _uq else ""
                                 update_task_status(tid, "interrupted",
                                     "定时唤醒", interruption_reason="background_complete")
+                                threading.Thread(
+                                    target=lambda _tid=tid, _uq=user_query, _ctx=ctx: (
+                                        _run_background_task(_tid, _uq, _ctx, True)
+                                    ),
+                                    daemon=True
+                                ).start()
                                 continue
                         except Exception as _wake_err:
                             print(f"[BgMonitor] Task {tid}: wake_at parse error: {_wake_err}")
