@@ -309,6 +309,19 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         if is_backgrounded:
             # Agent auto-backgrounded (shell timeout) — save context for resume
             save_task_context(task_id, agent.messages[msg_count_before:])
+            # Parse WAKE_IN=N for wake-up timer (same logic as ws.py)
+            _wake_match = re.search(r'WAKE_IN=(\d+)', response)
+            _wake_min = int(_wake_match.group(1)) if _wake_match else None
+            if _wake_min:
+                _wake_dt = (datetime.utcnow() + timedelta(minutes=_wake_min)).strftime('%Y-%m-%d %H:%M:%S')
+                try:
+                    _wk_conn = sqlite3.connect(DB_PATH)
+                    _wk_conn.execute("UPDATE tasks SET wake_at=? WHERE id=?", (_wake_dt, task_id))
+                    _wk_conn.commit()
+                    _wk_conn.close()
+                    print(f"[BgTask] Set wake_at={_wake_dt} for task {task_id} (after {_wake_min}min)")
+                except Exception as _wke:
+                    print(f"[BgTask] Failed to set wake_at: {_wke}")
             update_task_status(task_id, "backgrounded",
                 response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台",
                 interruption_reason="backgrounded")
