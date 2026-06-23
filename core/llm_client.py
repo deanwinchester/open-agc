@@ -587,40 +587,43 @@ class LLMClient:
         
         last_error = None
         for attempt_model in models_to_try:
-            kwargs = {
-                "model": attempt_model,
-                "messages": messages,
-            }
-            if tools:
-                kwargs["tools"] = tools
-            
+            # Retry transient errors (connection reset, timeout, 5xx) up to 3 times
+            _max_retries = 3
+            _retry_delay = 2  # seconds, doubles each retry
+            for _retry in range(_max_retries):
+                if _retry > 0:
+                    import time as _rt
+                    _rt.sleep(_retry_delay)
+                    _retry_delay *= 2
+                    print(f"[LLMClient] Retry {_retry}/{_max_retries} for {attempt_model}...")
+                kwargs = {
+                    "model": attempt_model,
+                    "messages": messages,
+                }
+                if tools:
+                    kwargs["tools"] = tools
 
-            if "llamacpp/" in attempt_model:
-                kwargs["api_base"] = self.llamacpp_api_base
-                if not attempt_model.startswith("openai/"):
-                    kwargs["model"] = f"openai/{attempt_model.replace('llamacpp/', '')}"
-                if "api_key" not in kwargs:
-                    kwargs["api_key"] = "sk-no-key-required"
-                # Truncate to fit context window, then sanitize for GGUF chat template
-                truncated = self._truncate_for_context(messages, max_tokens=self.llamacpp_ctx_size)
-                kwargs["messages"] = self._sanitize_for_llamacpp(truncated)
-                kwargs["timeout"] = 600
-            else:
-                # General sanitization for API models — remove orphaned tool_calls
-                kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
+                if "llamacpp/" in attempt_model:
+                    kwargs["api_base"] = self.llamacpp_api_base
+                    if not attempt_model.startswith("openai/"):
+                        kwargs["model"] = f"openai/{attempt_model.replace('llamacpp/', '')}"
+                    if "api_key" not in kwargs:
+                        kwargs["api_key"] = "sk-no-key-required"
+                    truncated = self._truncate_for_context(messages, max_tokens=self.llamacpp_ctx_size)
+                    kwargs["messages"] = self._sanitize_for_llamacpp(truncated)
+                    kwargs["timeout"] = 600
+                else:
+                    kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
 
-            # Double-check: strip any remaining orphaned tool_calls (strict providers like Moonshot reject them)
-            kwargs["messages"] = self._remove_orphaned_tool_calls(kwargs.get("messages", messages))
+                kwargs["messages"] = self._remove_orphaned_tool_calls(kwargs.get("messages", messages))
 
             try:
                 t0 = time.time()
                 try:
                     response = litellm.completion(**kwargs)
                 except ContextWindowExceededError:
-                    # Context too long — compress and retry
                     print(f"[LLMClient] Context window exceeded for {attempt_model}, compressing...")
                     truncated = self._truncate_for_context(messages, max_tokens=1000000)
-                    # Add a compression note so the LLM knows history was trimmed
                     if len(truncated) < len(messages):
                         note = {"role": "system", "content": (
                             "[上下文压缩] 较早的对话历史已被截断以适应该模型的上下文窗口。"
@@ -629,12 +632,9 @@ class LLMClient:
                         truncated.insert(1, note)
                     kwargs["messages"] = truncated
                     response = litellm.completion(**kwargs)
-                    # Persist compression: replace original messages in-place so
-                    # agent's self.messages reflects the compressed state
                     messages[:] = truncated
                 t1 = time.time()
 
-                # ── Log model call ──
                 try:
                     usage = getattr(response, "usage", None)
                     pt = getattr(usage, "prompt_tokens", 0) if usage else 0
@@ -646,20 +646,14 @@ class LLMClient:
                         msg = response.choices[0].message
                         resp_text = (getattr(msg, "content", "") or "")[:50000]
                         if not resp_text:
-                            # Record tool_calls if no text content
                             tc = getattr(msg, "tool_calls", None)
                             if tc:
                                 resp_text = json.dumps([{"function": {"name": t.function.name, "arguments": t.function.arguments} if hasattr(t, 'function') and hasattr(t.function, 'name') else str(t)} for t in tc], ensure_ascii=False)[:50000]
                     _log_model_call(
-                        provider=_infer_provider(attempt_model),
-                        model=attempt_model,
-                        prompt_tokens=pt,
-                        completion_tokens=ct,
-                        total_tokens=tt,
-                        request_data=req_text,
-                        response_data=resp_text,
-                        cache_hit=_detect_cache_hit(response),
-                        cached_tokens=_detect_cached_tokens(response),
+                        provider=_infer_provider(attempt_model), model=attempt_model,
+                        prompt_tokens=pt, completion_tokens=ct, total_tokens=tt,
+                        request_data=req_text, response_data=resp_text,
+                        cache_hit=_detect_cache_hit(response), cached_tokens=_detect_cached_tokens(response),
                         latency_ms=int((t1 - t0) * 1000),
                     )
                 except Exception as log_e:
@@ -668,10 +662,19 @@ class LLMClient:
                 return response, attempt_model
             except Exception as e:
                 last_error = e
-                print(f"[LLMClient] Model {attempt_model} failed: {str(e)}")
-                if attempt_model != models_to_try[-1]:
-                    print(f"[LLMClient] Trying next fallback...")
-                continue
+                _err_str = str(e).lower()
+                print(f"[LLMClient] Model {attempt_model} failed: {str(e)[:150]}")
+                if any(kw in _err_str for kw in ["authentication", "api_key", "api key",
+                       "invalid_api_key", "not found", "model_not_found",
+                       "insufficient_quota", "exceeded quota"]):
+                    print(f"[LLMClient] Non-retryable error, skipping retries")
+                    break
+                if _retry < _max_retries - 1:
+                    print(f"[LLMClient] Will retry ({_retry+1}/{_max_retries})...")
+                else:
+                    print(f"[LLMClient] All retries exhausted for {attempt_model}")
+                    if attempt_model != models_to_try[-1]:
+                        print(f"[LLMClient] Trying next fallback...")
         
         # All models failed
         raise last_error
