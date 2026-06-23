@@ -673,8 +673,15 @@ function initApp() {
       scrollToBottom();
       
       const submitAnswer = (ans) => {
-          if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
-          state.ws.send(JSON.stringify({ type: 'tool_reply', answer: ans }));
+          if (data.background && data.task_id) {
+              fetch(`/api/tasks/${data.task_id}/reply`, {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({answer: ans})
+              }).catch(() => {});
+          } else if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+              state.ws.send(JSON.stringify({ type: 'tool_reply', answer: ans }));
+          }
           stepEl.querySelector('.ask-user-form').innerHTML = `<span style="color: var(--success, #2ecc71); font-size: 0.9rem;">✓ 您的回答：<strong>${escapeHtml(ans)}</strong></span>`;
       };
 

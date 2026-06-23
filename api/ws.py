@@ -483,6 +483,13 @@ async def websocket_endpoint(websocket: WebSocket):
                                 })
                         elif user_msg.get("type") == "tool_reply":
                             agent.user_input_queue.put(user_msg.get("answer"))
+                            # Also unblock any background agents waiting for user input
+                            _answer = user_msg.get("answer", "")
+                            for _tid, _bg_a in list(_background_agents.items()):
+                                try:
+                                    _bg_a.user_input_queue.put_nowait(_answer)
+                                except Exception:
+                                    pass
                         elif user_msg.get("type") == "sandbox_response":
                             sid = user_msg.get("session_id", ws_session_id)
                             action = user_msg.get("action", "deny_once")
