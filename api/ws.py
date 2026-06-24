@@ -825,6 +825,45 @@ async def websocket_endpoint(websocket: WebSocket):
                 msg_type = user_msg.get("type", "query")
                 resume_id_for_run = None
 
+                if msg_type == "switch_session":
+                    # Switch to a different session without reconnecting WebSocket
+                    new_sid = int(user_msg.get("session_id", 1))
+                    if new_sid != ws_session_id:
+                        ws_session_id = new_sid
+                        # Reload session_history for the new session's LLM context
+                        try:
+                            _ss_conn = sqlite3.connect(DB_PATH)
+                            _ss_conn.row_factory = sqlite3.Row
+                            _ss_cursor = _ss_conn.cursor()
+                            _ss_cursor.execute(
+                                "SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? AND role != 'tool_step' ORDER BY id DESC LIMIT 20) ORDER BY id ASC",
+                                (ws_session_id,))
+                            _ss_rows = _ss_cursor.fetchall()
+                            _ss_conn.close()
+                            session_history = []
+                            for _ss_row in _ss_rows:
+                                _ss_role = _ss_row["role"]
+                                if _ss_role in ("tool_step",): continue
+                                if _ss_role == "agent": _ss_role = "assistant"
+                                session_history.append({"role": _ss_role, "content": _ss_row["content"]})
+                        except Exception as _ss_e:
+                            print(f"[WS] Session switch: failed to reload history: {_ss_e}")
+                            session_history = []
+                        # Broadcast history_steps for the new session's most recent task
+                        try:
+                            _ss_conn2 = sqlite3.connect(DB_PATH)
+                            _ss_conn2.row_factory = sqlite3.Row
+                            _ss_last = _ss_conn2.execute(
+                                "SELECT id, status FROM tasks WHERE session_id=? AND status IN ('interrupted','completed','running','backgrounded') ORDER BY updated_at DESC LIMIT 1",
+                                (ws_session_id,)
+                            ).fetchone()
+                            _ss_conn2.close()
+                            if _ss_last:
+                                _broadcast_task_history(_ss_last[0], ws_session_id, _ss_last[1])
+                        except Exception as _ss_e2:
+                            print(f"[WS] Session switch: failed to broadcast history: {_ss_e2}")
+                    continue
+
                 if msg_type == "sandbox_response":
                     # Resolve a pending sandbox auth wait
                     sid = user_msg.get("session_id", ws_session_id)
