@@ -1398,7 +1398,7 @@ function initApp() {
     const atBottom = chatContainer.scrollTop + chatContainer.clientHeight >= chatContainer.scrollHeight - threshold;
     if (atBottom) {
       hideScrollHint();
-    } else if (!state.isAgentThinking && !scrollHintEl) {
+    } else if (!scrollHintEl) {
       showScrollHint();
     }
   });
