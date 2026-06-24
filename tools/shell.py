@@ -204,6 +204,7 @@ class ShellTool(BaseTool):
                             "command": command[:200],
                             "started_at": _t0,
                             "timeout": 0,
+                        "alive": True,
                         }
                 return f"[Background] Command started with PID {proc.pid}." 
             else:
@@ -337,6 +338,7 @@ class ShellTool(BaseTool):
                                     "command": command[:200],
                                     "started_at": _t0,
                                     "timeout": timeout,
+                                    "alive": True,
                                 }
                         tail = _read_tail(out_path, 3000)
                         hint = ""
