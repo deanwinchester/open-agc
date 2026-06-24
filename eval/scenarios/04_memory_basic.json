@@ -1,0 +1,13 @@
+{
+  "name": "memory_add_and_search",
+  "description": "Agent can save and retrieve memories",
+  "prompt": "记住我喜欢吃火锅，然后回忆我喜欢的食物",
+  "expected": {
+    "tool_used": ["manage_memory", "search_history"],
+    "output_contains": ["火锅"],
+    "max_steps": 10,
+    "max_tokens": 15000
+  },
+  "timeout": 60,
+  "tags": ["memory"]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "shell_list_files",
+  "description": "Agent can execute shell commands to list files",
+  "prompt": "列出当前目录下的文件",
+  "expected": {
+    "tool_used": ["execute_shell"],
+    "output_contains": ["agent", "main"],
+    "max_steps": 3,
+    "max_tokens": 5000
+  },
+  "timeout": 30,
+  "tags": ["core", "shell"]
+}
