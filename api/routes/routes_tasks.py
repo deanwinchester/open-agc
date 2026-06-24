@@ -18,7 +18,7 @@ from api.task_core import (
     save_task_context, add_task_step, _extract_task_title,
     _record_task_deliverables, increment_task_resume, _check_goal_completeness,
 )
-from tools.shell import interrupt_shell, get_background_processes, cleanup_background_process
+from tools.shell import interrupt_shell, get_background_processes, get_orphan_processes, cleanup_background_process, adopt_orphan_processes
 
 router = APIRouter()
 
@@ -313,16 +313,24 @@ async def update_schedule(task_id: int, req: ScheduleTaskRequest):
 
 @router.get("/api/processes")
 async def list_processes():
-    """List all running background shell processes."""
+    """List all running background shell processes (including orphans)."""
     procs = get_background_processes()
+    orphans = get_orphan_processes()
+    # Merge orphans into main list (orphan key prefix = no task_id assigned yet)
+    for oid, info in orphans.items():
+        procs[oid] = info
     return {"processes": procs}
 
 
 @router.get("/api/tasks/{task_id}/process")
 async def get_task_process(task_id: int):
-    """Get process info for a task."""
+    """Get process info for a task. Also adopts orphan processes if found."""
+    # Try to adopt any orphans that might belong to this task
+    adopt_orphan_processes(task_id)
     procs = get_background_processes()
     pinfo = procs.get(str(task_id))
+    if not pinfo:
+        pinfo = get_orphan_processes().get(str(task_id))
     if not pinfo:
         return {"process": None}
     uptime = _time.time() - pinfo.get("started_at", _time.time())
