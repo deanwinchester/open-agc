@@ -148,8 +148,6 @@ class OpenAGCAgent(PromptBuilderMixin):
             f"你是 Open-AGC，一个强大的 AI 智能体，能够执行终端命令、运行 Python 代码、"
             f"操作文件系统，以及物理控制电脑的鼠标和键盘。"
             f"始终使用你的工具来明确验证假设，不要凭空猜测。\n"
-            f"\n--- 当前日期与时间 ---\n"
-            f"当前时间：{current_time}（{current_date}）\n"
             f"你的训练数据有知识截止日期。对于任何关于近期事件、当前新闻、最新动态或"
             f"时效性信息的问题，你必须使用 search_web 工具获取最新信息。"
             f"绝对不要仅依赖训练数据回答时事问题。\n"

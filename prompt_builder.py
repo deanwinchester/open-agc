@@ -128,8 +128,6 @@ class PromptBuilderMixin:
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         current_date = datetime.now().strftime("%Y年%m月%d日")
 
-        prompt = self.system_prompt_base.replace("{current_time}", current_time)
-        prompt = prompt.replace("{current_date}", current_date)
         prompt = prompt.replace("{cwd_dir}", self.sandbox_dir or os.getcwd())
         prompt = prompt.replace("{system_env}", detect_system_env())
 
@@ -169,5 +167,9 @@ class PromptBuilderMixin:
             prompt += f"\n\n{experience_context}"
         if kg_context:
             prompt += f"\n\n{kg_context}"
+
+        # Append time/date at the end (not in the prefix!) so DeepSeek cache
+        # can reuse the stable prefix across turns and across minutes.
+        prompt += f"\n--- 当前日期与时间 ---\n当前时间：{current_time}（{current_date}）\n"
 
         return prompt
