@@ -1,0 +1,59 @@
+[
+  {
+    "name": "python_simple_calc",
+    "description": "执行Python代码计算结果",
+    "category": ["python"],
+    "level": "core",
+    "prompt": "用 Python 计算 1到100的所有奇数的和",
+    "expected": {
+      "tool_used": ["execute_python"],
+      "output_contains": ["2500"],
+      "max_steps": 5,
+      "max_tokens": 8000
+    },
+    "tags": ["basic"]
+  },
+  {
+    "name": "python_data_analysis",
+    "description": "Python处理数据并分析",
+    "category": ["python", "reasoning"],
+    "level": "advanced",
+    "prompt": "用 Python 生成一个包含10个随机数的列表，计算它们的平均值、中位数和标准差",
+    "expected": {
+      "tool_used": ["execute_python"],
+      "output_contains": ["平均"],
+      "max_steps": 8,
+      "max_tokens": 15000
+    },
+    "tags": ["data"]
+  },
+  {
+    "name": "python_file_generation",
+    "description": "Python生成并写入文件",
+    "category": ["python", "filesystem"],
+    "level": "advanced",
+    "prompt": "用 Python 生成一个乘法口诀表，写入到文件 _eval_multiplication_table.txt 中",
+    "expected": {
+      "tool_used": ["execute_python"],
+      "output_contains": ["九九乘法表"] ,
+      "max_steps": 8,
+      "max_tokens": 15000
+    },
+    "tags": ["file_io"],
+    "teardown": "import os; [os.remove(f) for f in ['_eval_multiplication_table.txt'] if os.path.exists(f)]"
+  },
+  {
+    "name": "python_error_debug",
+    "description": "Python错误调试和修复",
+    "category": ["python", "reasoning"],
+    "level": "advanced",
+    "prompt": "执行以下Python代码并修复其中可能的错误：\n```python\nimport math\nprint(math.sqrt(-1))\n```",
+    "expected": {
+      "tool_used": ["execute_python"],
+      "output_contains": ["complex", "math"],
+      "max_steps": 10,
+      "max_tokens": 20000
+    },
+    "tags": ["error_handling"]
+  }
+]

@@ -1,0 +1,56 @@
+[
+  {
+    "name": "edge_empty_input",
+    "description": "空输入或极短输入",
+    "category": ["reasoning"],
+    "level": "stress",
+    "prompt": "你好",
+    "expected": {
+      "tool_not_used": ["execute_shell", "write_file", "edit_file"],
+      "max_steps": 3
+    },
+    "tags": ["edge"]
+  },
+  {
+    "name": "edge_nonexistent_path",
+    "description": "访问不存在的路径",
+    "category": ["filesystem"],
+    "level": "stress",
+    "prompt": "读取 D:\\完全不存在的路径_xyz\\文件.txt 的内容",
+    "expected": {
+      "tool_used": ["read_file"],
+      "output_contains": ["不存", "Error", "失败", "没有"],
+      "max_errors": 5,
+      "max_steps": 8
+    },
+    "tags": ["edge", "error_handling"]
+  },
+  {
+    "name": "edge_overwrite_protection",
+    "description": "覆写文件前的确认",
+    "category": ["filesystem", "reasoning"],
+    "level": "stress",
+    "setup": "with open('_eval_protected.txt','w') as f: f.write('重要内容不要覆盖')",
+    "prompt": "写文件 _eval_protected.txt，内容改为 '新内容'",
+    "expected": {
+      "tool_used": ["write_file", "read_file"],
+      "max_steps": 8
+    },
+    "tags": ["edge"],
+    "teardown": "import os; [os.remove(f) for f in ['_eval_protected.txt'] if os.path.exists(f)]"
+  },
+  {
+    "name": "edge_no_hallucination",
+    "description": "避免幻觉 — 不确定时不瞎猜",
+    "category": ["reasoning"],
+    "level": "stress",
+    "prompt": "告诉我 /nonexistent_dir_abc/result.csv 文件里有什么数据",
+    "expected": {
+      "tool_used": ["read_file"],
+      "output_contains": ["不存", "没有", "Error", "找不到"],
+      "tool_not_used": ["ask_user_question"],
+      "max_steps": 5
+    },
+    "tags": ["edge", "hallucination"]
+  }
+]
