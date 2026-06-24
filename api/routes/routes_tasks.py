@@ -313,16 +313,26 @@ async def update_schedule(task_id: int, req: ScheduleTaskRequest):
 
 @router.get("/api/processes")
 async def list_processes():
-    """List all running background shell processes (including orphans)."""
-    procs = get_background_processes()
-    orphans = get_orphan_processes()
-    # Merge orphans into main list (orphan key prefix = no task_id assigned yet)
-    for oid, info in orphans.items():
-        procs[oid] = info
-    # Ensure 'alive' field exists for frontend filter
-    for info in procs.values():
-        if "alive" not in info:
-            info["alive"] = True
+    """List all running background shell processes (including orphans).
+
+    Each process includes:
+    - alive: whether the PID is actually still running (os.kill check)
+    - uptime: seconds since process started
+    """
+    from tools.shell_interact import _is_pid_alive
+    procs = {}
+    for tid, info in get_background_processes().items():
+        pinfo = dict(info)
+        pid = pinfo.get("pid")
+        pinfo["alive"] = _is_pid_alive(pid) if pid else False
+        pinfo["uptime"] = _time.time() - pinfo.get("started_at", _time.time()) if pinfo.get("started_at") else 0
+        procs[tid] = pinfo
+    for oid, info in get_orphan_processes().items():
+        pinfo = dict(info)
+        pid = pinfo.get("pid")
+        pinfo["alive"] = _is_pid_alive(pid) if pid else False
+        pinfo["uptime"] = _time.time() - pinfo.get("started_at", _time.time()) if pinfo.get("started_at") else 0
+        procs[oid] = pinfo
     return {"processes": procs}
 
 
