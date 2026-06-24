@@ -101,21 +101,10 @@ export async function switchSession(sessionId) {
   };
   window._sessionScrollHandler = onScroll;
   chatContainer.addEventListener('scroll', onScroll);
-  // Reconnect WebSocket to the new session so history_steps are replayed
-  if (prevId !== sessionId && window.connectWebSocket) {
-    window._intentionalClose = true;
-    if (state.ws) {
-      // Detach old handlers so they don't fire reconnect after we close
-      state.ws.onclose = null;
-      state.ws.onerror = null;
-      state.ws.close();
-    }
-    // Clear any pending reconnect timer
-    if (window._wsReconnectTimer) {
-      clearTimeout(window._wsReconnectTimer);
-      window._wsReconnectTimer = null;
-    }
-    window.connectWebSocket();
+  // Tell the server to switch session context via existing WebSocket
+  // (no reconnect needed — avoids disconnect/reconnect cycle)
+  if (prevId !== sessionId && state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify({ type: 'switch_session', session_id: sessionId }));
   }
   renderSessionList();
 }
