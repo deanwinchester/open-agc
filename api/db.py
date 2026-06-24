@@ -176,66 +176,60 @@ def _run_migrations(cursor):
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO sessions (name) VALUES (?)", ("默认会话",))
 
-    # Ordered migration pairs: (col_name, col_def)
-    migrations = [
-        ("category", "TEXT DEFAULT 'model'"),
-        ("task_type", "TEXT DEFAULT 'oneshot'"),
-        ("schedule_cron", "TEXT"),
-        ("schedule_enabled", "INTEGER DEFAULT 0"),
-        ("next_run_at", "DATETIME"),
-        ("last_run_at", "DATETIME"),
-        ("run_count", "INTEGER DEFAULT 0"),
-        ("max_resume_count", "INTEGER DEFAULT 10"),
-        ("resume_count", "INTEGER DEFAULT 0"),
-        ("context_snapshot", "TEXT"),
-        ("total_tokens", "INTEGER DEFAULT 0"),
-        ("total_cost", "REAL DEFAULT 0.0"),
-        ("interruption_reason", "TEXT"),
-        ("session_id", "INTEGER DEFAULT 1"),
-        # Email columns for sessions
-        ("email_enabled", "INTEGER DEFAULT 0"),
-        ("email_account", "TEXT DEFAULT ''"),
-        ("email_password", "TEXT DEFAULT ''"),
-        ("email_imap_server", "TEXT DEFAULT ''"),
-        ("email_smtp_server", "TEXT DEFAULT ''"),
-        ("owner_email", "TEXT DEFAULT ''"),
-        # task_steps columns
-        ("session_id", "INTEGER DEFAULT 1"),
-        ("tool_call_id", "TEXT"),
-        ("full_args", "TEXT"),
-        ("generated_files", "TEXT DEFAULT ''"),
-        # downloads columns
-        ("task_id", "INTEGER"),
-        ("background_resumed", "INTEGER DEFAULT 0"),
-        # model_call_logs columns
-        ("cached_tokens", "INTEGER DEFAULT 0"),
-        # tasks token breakdown
-        ("prompt_tokens", "INTEGER DEFAULT 0"),
-        ("completion_tokens", "INTEGER DEFAULT 0"),
-        ("cached_tokens", "INTEGER DEFAULT 0"),
-        ("plan_id", "TEXT DEFAULT ''"),
-        ("task_goal", "TEXT DEFAULT ''"),
-        # wake_at for scheduled wake-up timer
-        ("wake_at", "DATETIME"),
-    ]
+    # Per-table migration lists: each (col_name, col_def) targets ONE specific table.
+    # This prevents every table from accidentally inheriting columns from every other table.
+    table_migrations: dict = {
+        "tasks": [
+            ("category", "TEXT DEFAULT 'model'"),
+            ("task_type", "TEXT DEFAULT 'oneshot'"),
+            ("schedule_cron", "TEXT"),
+            ("schedule_enabled", "INTEGER DEFAULT 0"),
+            ("next_run_at", "DATETIME"),
+            ("last_run_at", "DATETIME"),
+            ("run_count", "INTEGER DEFAULT 0"),
+            ("max_resume_count", "INTEGER DEFAULT 10"),
+            ("resume_count", "INTEGER DEFAULT 0"),
+            ("context_snapshot", "TEXT"),
+            ("total_tokens", "INTEGER DEFAULT 0"),
+            ("total_cost", "REAL DEFAULT 0.0"),
+            ("interruption_reason", "TEXT"),
+            ("session_id", "INTEGER DEFAULT 1"),
+            ("prompt_tokens", "INTEGER DEFAULT 0"),
+            ("completion_tokens", "INTEGER DEFAULT 0"),
+            ("cached_tokens", "INTEGER DEFAULT 0"),
+            ("plan_id", "TEXT DEFAULT ''"),
+            ("task_goal", "TEXT DEFAULT ''"),
+        ],
+        "sessions": [
+            ("session_id", "INTEGER DEFAULT 1"),
+            ("email_enabled", "INTEGER DEFAULT 0"),
+            ("email_account", "TEXT DEFAULT ''"),
+            ("email_password", "TEXT DEFAULT ''"),
+            ("email_imap_server", "TEXT DEFAULT ''"),
+            ("email_smtp_server", "TEXT DEFAULT ''"),
+            ("owner_email", "TEXT DEFAULT ''"),
+        ],
+        "task_steps": [
+            ("session_id", "INTEGER DEFAULT 1"),
+            ("tool_call_id", "TEXT"),
+            ("full_args", "TEXT"),
+            ("generated_files", "TEXT DEFAULT ''"),
+        ],
+        "downloads": [
+            ("task_id", "INTEGER"),
+            ("background_resumed", "INTEGER DEFAULT 0"),
+        ],
+        "model_call_logs": [
+            ("cached_tokens", "INTEGER DEFAULT 0"),
+        ],
+    }
 
-    for col, dtype in migrations:
-        try:
-            cursor.execute(f"ALTER TABLE task_steps ADD COLUMN {col} {dtype}")
-        except Exception:
+    for table, cols in table_migrations.items():
+        for col, dtype in cols:
             try:
-                cursor.execute(f"ALTER TABLE tasks ADD COLUMN {col} {dtype}")
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}")
             except Exception:
-                try:
-                    cursor.execute(f"ALTER TABLE downloads ADD COLUMN {col} {dtype}")
-                except Exception:
-                    try:
-                        cursor.execute(f"ALTER TABLE model_call_logs ADD COLUMN {col} {dtype}")
-                    except Exception:
-                        try:
-                            cursor.execute(f"ALTER TABLE sessions ADD COLUMN {col} {dtype}")
-                        except Exception:
-                            pass
+                pass  # Column already exists
 
     # Specific migrations
     try:

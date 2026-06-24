@@ -61,8 +61,8 @@ async def websocket_endpoint(websocket: WebSocket):
         _hb_conn.close()
         if _hb_row:
             _broadcast_task_history(_hb_row[0], ws_session_id, _hb_row[1])
-    except Exception:
-        pass
+    except Exception as _hb_e:
+        print(f"[WS] Broadcast task history error: {_hb_e}")
 
     # Flag to track whether this connection is still alive
     ws_alive = True
@@ -330,8 +330,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                         _conn_step.commit()
                         _conn_step.close()
-                    except Exception:
-                        pass
+                    except Exception as _step_e:
+                        print(f"[WS] Task step update error: {_step_e}")
 
                 # Save tool_step as a message in the chat flow (skip for heartbeats)
                 if ws_session_id and event.get("event") == "tool_done":
@@ -434,8 +434,8 @@ async def websocket_endpoint(websocket: WebSocket):
             # Save the first user query so it survives crashes in the messages table
             try:
                 save_message("user", query, ws_session_id)
-            except Exception:
-                pass
+            except Exception as _msg_e:
+                print(f"[WS] Save user message failed: {_msg_e}")
 
             loop = asyncio.get_event_loop()
             
@@ -488,8 +488,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             for _tid, _bg_a in list(_background_agents.items()):
                                 try:
                                     _bg_a.user_input_queue.put_nowait(_answer)
-                                except Exception:
-                                    pass
+                                except Exception as _queue_e:
+                                    print(f"[WS] Background agent queue error (task {_tid}): {_queue_e}")
                         elif user_msg.get("type") == "sandbox_response":
                             sid = user_msg.get("session_id", ws_session_id)
                             action = user_msg.get("action", "deny_once")
@@ -563,7 +563,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         _active_agents.pop(ws_session_id, None)
                         receive_task = None
                         # Don't raise — ws_alive=False will let outer loop break
-                    except Exception:
+                    except Exception as _recv_e:
+                        print(f"[WS] Receive task cleanup error: {_recv_e}")
                         receive_task = None
 
                 # Drain the thread-safe queue (no cross-thread race)
@@ -586,7 +587,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         "type": "progress",
                         **event
                     })
-                except Exception:
+                except Exception as _prog_e:
+                    print(f"[WS] Progress send error, breaking loop: {_prog_e}")
                     break
             
             response = await agent_future
@@ -654,8 +656,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             with _background_process_lock:
                                 _background_process_info[str(ws_task_id)] = {"pid": _bg_pid, "command": "", "started_at": _time.time()}
                             print(f"[Task] Registered PID {_bg_pid} for BgMonitor tracking (task {ws_task_id})")
-                    except Exception:
-                        pass
+                    except Exception as _bg_e:
+                        print(f"[WS] Background process registration error: {_bg_e}")
                 # Send notification to frontend
                 await _safe_send({
                     "type": "task_backgrounded",
@@ -692,8 +694,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         conn_tmp.close()
                         if row_tmp and row_tmp[0] == 'oneshot':
                             update_task_type(ws_task_id, 'longrun')
-                    except Exception:
-                        pass
+                    except Exception as _task_type_e:
+                        print(f"[WS] Task type update error: {_task_type_e}")
                 elif response and ("interrupted by user" in response.lower() or "interrupted" in response.lower()):
                     # Don't save context on user interrupt — the current agent.messages
                     # reflects only the interrupted turn (1-2 messages) which would
@@ -722,8 +724,8 @@ async def websocket_endpoint(websocket: WebSocket):
             # Persist final answer so it survives page refresh
             try:
                 save_message("agent", response, ws_session_id)
-            except Exception:
-                pass
+            except Exception as _final_e:
+                print(f"[WS] Save final message failed: {_final_e}")
 
             return response
         except Exception as e:
@@ -748,8 +750,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         "content": _resp, "session_id": ws_session_id
                     })
                     print(f"[WS] Broadcast final response after disconnect (session {ws_session_id})")
-            except Exception:
-                pass
+            except Exception as _resp_e:
+                print(f"[WS] Broadcast final response error: {_resp_e}")
             # Clean up finished agent from _active_agents so new messages
             # can start a fresh agent loop (instead of being queued to a dead agent)
             try:
@@ -758,8 +760,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 for k in _keys_to_remove:
                     del _aa_sess[k]
                     print(f"[WS] Removed finished agent (task_id={k}) from _active_agents")
-            except Exception:
-                pass
+            except Exception as _clean_e:
+                print(f"[WS] Agent cleanup error: {_clean_e}")
 
     try:
         while True:

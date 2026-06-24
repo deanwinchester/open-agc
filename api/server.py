@@ -508,8 +508,8 @@ def load_config() -> dict:
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as _cfg_e:
+            print(f"[Server] Config read error: {_cfg_e}")
     return {
         "api_keys": {
             "llamacpp": "http://localhost:8080/v1",
@@ -559,3 +559,23 @@ _bg.start_guardian_loop()
 # Call local startup reconciliation
 reconcile_tasks()
 reconcile_backgrounded_after_restart()
+
+# Run security audit on configuration
+try:
+    from core.config_audit import audit_all
+    for _warn in audit_all():
+        print(_warn)
+except Exception as _audit_e:
+    print(f"[Server] Config audit error: {_audit_e}")
+
+# Run database maintenance (cleanup old logs, vacuum)
+try:
+    from core.db_maintenance import cleanup_old_data
+    result = cleanup_old_data(days=30, min_cost=0.0)
+    if result.get("model_logs", {}).get("deleted_rows", 0) > 0:
+        print(f"[Server] DB cleanup: removed {result['model_logs']['deleted_rows']} old log entries")
+    if result.get("vacuum", {}).get("bytes_freed", 0) > 0:
+        mb = result["vacuum"]["bytes_freed"] / 1024 / 1024
+        print(f"[Server] DB vacuum: freed {mb:.1f} MB")
+except Exception as _db_e:
+    print(f"[Server] DB maintenance error: {_db_e}")

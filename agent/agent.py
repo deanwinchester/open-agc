@@ -50,107 +50,16 @@ from tools.reader_lm import ReaderLMTool
 from tools.compact_context import CompactContextTool
 
 
+from agent.context_manager import (
+    compress_search_results, compress_file_content, compress_shell_output,
+    compress_tool_result, fold_tool_calls, compact_messages,
+)
+from prompt_builder import detect_system_env, PromptBuilderMixin
+
 def _detect_system_env() -> str:
-    """Detect the current system environment and return a description string for the system prompt."""
-
-    # OS detection
-    system = platform.system()  # "Darwin", "Windows", "Linux"
-    os_name = system
-    if system == "Darwin":
-        mac_ver = platform.mac_ver()[0]
-        os_name = f"macOS {mac_ver}" if mac_ver else "macOS"
-    elif system == "Windows":
-        win_ver = platform.version()
-        os_name = f"Windows {win_ver}" if win_ver else "Windows"
-    elif system == "Linux":
-        try:
-            import subprocess
-            distro = subprocess.run(["lsb_release", "-ds"], capture_output=True, text=True, timeout=3).stdout.strip()
-            os_name = distro or "Linux"
-        except Exception:
-            os_name = "Linux"
-
-    # Architecture
-    arch = platform.machine()  # "arm64", "x86_64", etc.
-
-    # Shell
-    default_shell = os.environ.get("SHELL", "unknown").split("/")[-1]  # "zsh", "bash", etc.
-
-    # Python
-    py_ver = platform.python_version()
-
-    # Package managers
-    pkg_managers = []
-    if shutil.which("brew"):
-        pkg_managers.append("brew")
-    if shutil.which("apt"):
-        pkg_managers.append("apt")
-    if shutil.which("pip3"):
-        pkg_managers.append("pip3")
-    elif shutil.which("pip"):
-        pkg_managers.append("pip")
-
-    pkg_hint = ", ".join(pkg_managers) if pkg_managers else "未检测到常见包管理器"
-
-    # Home directory
-    home = os.path.expanduser("~")
-
-    # Sudo check (non-invasive: check if sudo binary exists and user has recent sudo timestamp)
-    sudo_available = "sudo" if shutil.which("sudo") else ""
-    sudo_hint = ""
-    if sudo_available and system != "Windows":
-        sudo_hint = (
-            "sudo 可用。注意：在子进程中运行时，sudo 没有 TTY 无法交互式输入密码。"
-            "需要使用 -S 从 stdin 读密码，或用 -n 跳过密码（需 NOPASSWD 配置），"
-            "或使用 `echo password | sudo -S command`"
-        )
-
-    parts = [
-        f"# 系统环境",
-        f"- 操作系统：{os_name}",
-        f"- 架构：{arch}",
-        f"- 默认 Shell：{default_shell}",
-        f"- Python 版本：{py_ver}",
-        f"- 包管理器：{pkg_hint}",
-        f"- 用户主目录：{home}",
-    ]
-
-    if system == "Windows":
-        parts.append(
-            f"- **Windows 注意事项**：PowerShell 中的 curl 命令是 Invoke-WebRequest 别名，"
-            f"需使用 curl.exe。中文乱码可在命令前添加 "
-            f"`$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()`。"
-        )
-    elif system == "Darwin":
-        parts.append(
-            f"- **macOS 注意事项**：使用 brew 安装软件。Shell 工具使用 zsh/bash，"
-            f"不支持 PowerShell 语法。系统偏好中文界面。"
-        )
-    elif system == "Linux":
-        parts.append(f"- **Linux 注意事项**：使用 apt/yum 安装软件，标准 POSIX shell 环境。")
-
-    if sudo_hint:
-        parts.append(f"- **sudo 注意事项**：{sudo_hint}")
-
-    # Docker detection and persistence guidance
-    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
-        from core.paths import get_data_dir, get_skills_dir, get_bin_dir
-        parts.append(
-            f"- **Docker 持久化指导**：\n"
-            f"  1. 下载的文件和生成的脚本必须放在 workspace/ 或 data/ 下——"
-            f"仅这两个目录是持久化卷（VOLUME），其它目录在容器重启后会丢失\n"
-            f"  2. 学到的技能(save_learned_skill)自动持久化到 data/skills/\n"
-            f"  3. 安装的系统包(apt/pip)重启后会丢失，用完后即刻完成任务，"
-            f"不要依赖重启后仍存在\n"
-            f"  4. 持久数据目录: {get_data_dir()}\n"
-            f"  5. 技能目录: {get_skills_dir()}\n"
-            f"  6. 二进制目录: {get_bin_dir()}"
-        )
-
-    return "\n".join(parts)
-
-
-class OpenAGCAgent:
+    """Delegate to prompt_builder module."""
+    return detect_system_env()
+class OpenAGCAgent(PromptBuilderMixin):
     """
     Main Agent Loop handling context, Tool calling, and orchestration.
     Supports real-time progress callbacks for task tracking.
@@ -1285,280 +1194,17 @@ class OpenAGCAgent:
 
     @staticmethod
     def _compress_search_results(result: str) -> str:
-        """Compress search results: keep all entries, truncate snippets per-entry.
-
-        Search results are structured as:
-          [From Engine]
-          1. Title
-             URL: xxx
-             Snippet: yyy
-          2. Title
-             ...
-        """
-        MAX_ENTRY_CHARS = 400  # max chars per result entry (title+url+snippet)
-        MAX_TOTAL = 4000
-
-        lines = result.split("\n")
-        compressed = []
-        current_entry = []
-
-        for line in lines:
-            # Detect numbered entry start: "N. Title"
-            if re.match(r'^\d+\.\s', line):
-                # Flush previous entry
-                if current_entry:
-                    entry_text = "\n".join(current_entry)
-                    if len(entry_text) > MAX_ENTRY_CHARS:
-                        entry_text = entry_text[:MAX_ENTRY_CHARS] + "..."
-                    compressed.append(entry_text)
-                current_entry = [line]
-            else:
-                current_entry.append(line)
-
-        # Flush last entry
-        if current_entry:
-            entry_text = "\n".join(current_entry)
-            if len(entry_text) > MAX_ENTRY_CHARS:
-                entry_text = entry_text[:MAX_ENTRY_CHARS] + "..."
-            compressed.append(entry_text)
-
-        result_text = "\n".join(compressed)
-        if len(result_text) > MAX_TOTAL:
-            # Truncate from the end (lose lowest-ranked results)
-            result_text = result_text[:MAX_TOTAL] + "\n...(truncated)"
-
-        return result_text
-
+        return compress_search_results(result)
     @staticmethod
     def _compress_file_content(result: str) -> str:
-        """Compress file content: keep head + tail with omitted-line annotation."""
-        HEAD_LINES = 30
-        TAIL_LINES = 20
-        lines = result.split("\n")
-        if len(lines) <= HEAD_LINES + TAIL_LINES + 5:
-            return result
-        head = lines[:HEAD_LINES]
-        tail = lines[-TAIL_LINES:]
-        omitted = len(lines) - HEAD_LINES - TAIL_LINES
-        return "\n".join(head + [f"─── {omitted} lines omitted ───"] + tail)
-
+        return compress_file_content(result)
     @staticmethod
     def _compress_shell_output(result: str, tool_name: str) -> str:
-        """Compress shell/Python output: keep head + scored middle lines + tail."""
-        COMPRESS_THRESHOLD = 3000
-        EXTRACTIVE_TARGET = 8000
-
-        if len(result) <= COMPRESS_THRESHOLD:
-            return result
-
-        lines = result.split("\n")
-
-        def _line_score(line: str) -> int:
-            low = line.lower()
-            score = 0
-            if any(kw in low for kw in ("error", "exception", "traceback", "fail", "trace ", "fatal", "warning", "cannot", "not found", "denied", "unexpected", "syntaxerror", "command not found")):
-                score += 5
-            if any(kw in low for kw in ("exit code", "returncode", "status", "result")):
-                score += 3
-            if any(kw in low for kw in ("file", "path", "dir", "found", "missing")):
-                score += 2
-            if any(c.isdigit() for c in line):
-                score += 1
-            if len(line) > 300:
-                score -= 2
-            return score
-
-        head = lines[:15]
-        tail = lines[-5:]
-        middle = lines[15:-5] if len(lines) > 20 else []
-
-        if not middle:
-            compressed = "\n".join(head + tail)
-            return (f"[Compressed: {len(result)} chars → {len(compressed)} chars | "
-                    f"original tool: {tool_name}]\n{compressed}")
-
-        scored_lines = [(i, _line_score(l), l) for i, l in enumerate(middle, start=15)]
-        scored_lines.sort(key=lambda x: -x[1])
-
-        # Keep lines scoring >= 2 (lowered from 3), ensure at least 20% of middle
-        important = [(i, l) for i, s, l in scored_lines if s >= 2]
-        min_keep = max(1, len(middle) // 5)
-        if len(important) < min_keep:
-            extra = scored_lines[:min_keep - len(important)]
-            existing_ids = {idx for idx, _ in important}
-            for idx, s, l in extra:
-                if idx not in existing_ids:
-                    important.append((idx, l))
-                    existing_ids.add(idx)
-
-        # Section markers
-        section_lines = []
-        existing_ids = {idx for idx, _ in important}
-        for i, l in enumerate(middle):
-            idx = i + 15
-            if idx not in existing_ids and re.search(r'^[-|=+|]{5,}|^#{1,3}\s', l):
-                section_lines.append((idx, l))
-                existing_ids.add(idx)
-
-        # Build compressed
-        compressed_lines = list(head)
-
-        if important or section_lines:
-            compressed_lines.append(f"─── key output ({len(important)} important lines) ───")
-            seen = set()
-            for idx, l in sorted(important + section_lines):
-                if l not in seen:
-                    compressed_lines.append(l)
-                    seen.add(l)
-            omitted = len(lines) - len(head) - len(tail) - len(seen)
-            if omitted > 0:
-                compressed_lines.append(f"─── {omitted} lines omitted ───")
-
-        compressed_lines.extend(tail)
-        compressed = "\n".join(compressed_lines)
-
-        if len(compressed) > EXTRACTIVE_TARGET:
-            compressed = "\n".join(head + [f"─── {len(lines) - len(head) - len(tail)} lines omitted ───"] + tail)
-
-        if len(compressed) > COMPRESS_THRESHOLD * 2:
-            half = COMPRESS_THRESHOLD
-            compressed = (compressed[:half] +
-                          f"\n...[truncated {len(result)} chars to {half * 2}]...\n" +
-                          compressed[-half:])
-
-        return (f"[Compressed: {len(result)} chars → {len(compressed)} chars | "
-                f"original tool: {tool_name}]\n{compressed}")
-
+        return compress_shell_output(result, tool_name)
     def _compress_tool_result(self, result: str, tool_name: str) -> str:
-        """Dispatch to tool-specific compression strategy."""
-        if tool_name == "search_web":
-            return self._compress_search_results(result)
-        if tool_name in ("read_file", "write_file", "edit_file", "browser_automation"):
-            return self._compress_file_content(result)
-        return self._compress_shell_output(result, tool_name)
-
+        return compress_tool_result(result, tool_name)
     def _fold_tool_calls(self, messages: List[Dict], force: bool = False) -> List[Dict]:
-        """Fold consecutive tool-call rounds exceeding the threshold into a summary.
-
-        Long chains of tool_call → tool_result → tool_call → tool_result consume
-        context window without adding decision value.  Older rounds are replaced
-        by a concise execution log.
-        """
-        FOLD_AFTER_N = 30       # total rounds before folding kicks in
-        KEEP_LAST_N = 20        # always keep this many most-recent rounds intact
-
-        # Identify tool-call round boundaries [(start, end), ...]
-        bounds: List[tuple] = []
-        i = 0
-        while i < len(messages):
-            m = messages[i]
-            if m.get("role") == "assistant" and m.get("tool_calls"):
-                start = i
-                i += 1
-                while i < len(messages) and messages[i].get("role") == "tool":
-                    i += 1
-                bounds.append((start, i))
-            else:
-                i += 1
-
-        import sys as _dbg2
-        print(f"[DBG] _fold_tool_calls: {len(bounds)} bounds, force={force}, FOLD_AFTER_N={FOLD_AFTER_N}, KEEP_LAST_N={KEEP_LAST_N}", file=_dbg2.stderr, flush=True)
-        if len(bounds) <= FOLD_AFTER_N and not force:
-            return messages
-            
-        if force and len(bounds) <= KEEP_LAST_N:
-            return messages
-
-        fold_bounds = bounds[:-KEEP_LAST_N]   # rounds to summarise
-        keep_bounds = bounds[-KEEP_LAST_N:]   # rounds to preserve verbatim
-
-        # Build summary lines from the rounds being folded
-        summary_lines = []
-        for idx, (start, end) in enumerate(fold_bounds, 1):
-            msg = messages[start]
-            for tc in (msg.get("tool_calls") or []):
-                if not isinstance(tc, dict):
-                    continue
-                name = tc.get("function", {}).get("name", "?")
-                args_raw = tc.get("function", {}).get("arguments", "{}")
-                try:
-                    args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
-                except Exception:
-                    args = {}
-                preview = ", ".join(
-                    f"{k}={str(v)[:80]}" for k, v in list(args.items())[:2]
-                )
-                summary_lines.append(f"  {idx}. {name}({preview})")
-            # Check tool results in this round for errors
-            for j in range(start + 1, end):
-                content = str(messages[j].get("content", ""))
-                low_content = content.lower()
-                if content.startswith("Error") or "traceback" in low_content[:300] or "system guard" in low_content[:50]:
-                    if summary_lines:
-                        error_snippet = content.split('\n')[0][:100].strip()
-                        summary_lines[-1] += f" ⚠️ [Failed: {error_snippet}]"
-
-        cut_idx = fold_bounds[0][0]          # first message of the oldest folded round
-        keep_idx = keep_bounds[0][0]          # first message of the first kept round
-
-        summary_text = (
-            f"[以下 {len(fold_bounds)} 轮工具调用已折叠为摘要，保留最近 {len(keep_bounds)} 轮]\n"
-            + "\n".join(summary_lines)
-        )
-
-        pruned = messages[:cut_idx]
-        pruned.append({"role": "assistant", "content": summary_text})
-        pruned.extend(messages[keep_idx:])
-        return pruned
-
-    # ── LLM-based context compaction (Claude Code style) ──
-
-    # Compact prompt modeled on claude-code-source/src/services/compact/prompt.ts
-    _COMPACT_NO_TOOLS = (
-        "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n"
-        "- Do NOT use Read, Bash, Grep, Glob, Edit, Write, execute_shell, execute_python, or ANY other tool.\n"
-        "- You already have all the context you need in the conversation above.\n"
-        "- Tool calls will be REJECTED and will waste your only turn.\n"
-        "- Your entire response must be plain text: an <analysis> block followed by a <summary> block.\n\n"
-    )
-
-    _COMPACT_PROMPT_BASE = (
-        "Your task is to create a detailed summary of the conversation so far, "
-        "paying close attention to the user's explicit requests and your previous actions. "
-        "This summary should be thorough in capturing technical details, code patterns, "
-        "and decisions that would be essential for continuing work without losing context.\n\n"
-        "Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts. "
-        "In your analysis:\n"
-        "1. Chronologically analyze each message and section of the conversation. "
-        "For each section thoroughly identify:\n"
-        "   - The user's explicit requests and intents\n"
-        "   - Your approach to addressing the requests\n"
-        "   - Key decisions, technical concepts and code patterns\n"
-        "   - Specific details like file names, code snippets, function signatures\n"
-        "   - Errors that you ran into and how you fixed them\n"
-        "   - User feedback, especially if the user told you to do something differently\n"
-        "2. Double-check for technical accuracy and completeness.\n\n"
-        "Your summary should include the following sections:\n\n"
-        "1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail.\n"
-        "2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.\n"
-        "3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. "
-        "Include full code snippets where applicable.\n"
-        "4. Errors and fixes: List all errors that you ran into, and how you fixed them. "
-        "Pay special attention to user feedback.\n"
-        "5. Problem Solving: Document problems solved and any ongoing troubleshooting.\n"
-        "6. All user messages: List ALL user messages that are not tool results.\n"
-        "7. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.\n"
-        "8. Current Work: Describe precisely what was being worked on immediately before this summary request. "
-        "Include file names and code snippets where applicable.\n"
-        "9. Optional Next Step: List the next step that you will take related to the most recent work. "
-        "Ensure this step is directly in line with the user's most recent explicit requests.\n\n"
-        "Structure your output like this:\n"
-        "<analysis>\n[Your analysis]\n</analysis>\n\n"
-        "<summary>\n1. Primary Request and Intent:\n   ...\n2. Key Technical Concepts:\n   ...\n"
-        "...\n9. Optional Next Step:\n   ...\n</summary>\n\n"
-        "REMINDER: Do NOT call any tools. Respond with plain text only."
-    )
-
+        return fold_tool_calls(messages, force=force)
     def _llm_compact_messages(self, messages, target_token_savings=None):
         """Use LLM to produce a structured conversation summary (Claude Code style).
 
@@ -2136,7 +1782,28 @@ class OpenAGCAgent:
                 screenshot_urls = []
                 for tool_call in tool_calls:
                     function_name = tool_call.function.name
-                    function_args = json.loads(tool_call.function.arguments)
+                    raw_args = tool_call.function.arguments
+                    try:
+                        function_args = json.loads(raw_args)
+                    except json.JSONDecodeError:
+                        # LLM sometimes returns malformed JSON (trailing comma, single quotes, etc.)
+                        # Attempt simple repair before giving up
+                        import re as _re
+                        repaired = raw_args.strip()
+                        # Try wrapping bare keys in quotes (common issue: `{key: value}`)
+                        if not repaired.startswith('{'):
+                            repaired = '{' + repaired
+                        if not repaired.endswith('}'):
+                            repaired = repaired + '}'
+                        # Replace single quotes with double quotes (but preserve escaped ones)
+                        repaired = _re.sub(r"(?<!\\)'", '"', repaired)
+                        # Remove trailing commas before }
+                        repaired = _re.sub(r',\s*}', '}', repaired)
+                        try:
+                            function_args = json.loads(repaired)
+                        except json.JSONDecodeError:
+                            print(f"[Agent] Failed to parse tool_call args for {function_name}: {str(raw_args)[:200]}")
+                            continue
                     
                     step_counter += 1
                     
