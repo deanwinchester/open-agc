@@ -590,6 +590,10 @@ function initApp() {
   function finishProgressContainer() {
     if (!progressInline) return;
     var card = progressInline;  // Capture before nulling
+    // Clear per-session cache so next query creates a fresh card
+    if (card.dataset.sessionId) {
+      delete window._perSessionProgress[card.dataset.sessionId];
+    }
     var title = card.querySelector('.progress-title');
     var spinner = card.querySelector('.progress-spinner');
     var currentStepEl = card.querySelector('.progress-current-step');
