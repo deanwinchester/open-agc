@@ -1,0 +1,13 @@
+{
+  "name": "tool_composition_create_file",
+  "description": "Agent can compose multiple tools: write, then read a file",
+  "prompt": "先创建一个名为 eval_test.txt 的文件，内容是 'hello eval'，然后读取它",
+  "expected": {
+    "tool_used": ["write_file", "read_file"],
+    "output_contains": ["hello eval"],
+    "max_steps": 8,
+    "max_tokens": 15000
+  },
+  "timeout": 30,
+  "tags": ["core", "filesystem"]
+}
