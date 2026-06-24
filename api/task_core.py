@@ -288,6 +288,40 @@ def _load_session_context(session_id: int, limit: int = 50) -> list:
         return []
 
 
+def record_tool_step(task_id: int, step_number: int, event: dict, session_id: int = 1):
+    """Record or update a tool execution step in task_steps.
+
+    Shared by ws.py and background.py to avoid duplicated DB logic.
+    - On tool_start: inserts a new step row.
+    - On tool_done: updates the step with result and success status.
+    """
+    try:
+        if event.get("event") == "tool_start":
+            add_task_step(
+                task_id=task_id, step_number=step_number,
+                tool_name=event.get("tool", ""),
+                tool_label=event.get("tool_label", ""),
+                args_preview=event.get("args_preview", ""),
+                session_id=session_id,
+                tool_call_id=event.get("tool_call_id"),
+                full_args=event.get("tool_args")
+            )
+        elif event.get("event") == "tool_done":
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=?",
+                (event.get("result_preview", ""),
+                 event.get("full_result", event.get("result_preview", "")),
+                 1 if event.get("success") else 0,
+                 task_id, step_number)
+            )
+            conn.commit()
+            conn.close()
+    except Exception as _step_e:
+        print(f"[TaskCore] record_tool_step error: {_step_e}")
+
+
 def save_message(role: str, content: str, session_id: int = 1, task_id: int = None):
     """Save a chat message. If task_id is provided, links the message to its task."""
     try:
