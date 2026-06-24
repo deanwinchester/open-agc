@@ -1006,7 +1006,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         "session_id": ws_session_id
                     })
                 else:
-                    # Non-actionable errors: just a brief notification, no full stack in chat
+                    # Non-actionable errors: notify frontend to stop thinking animation
+                    await _safe_send({
+                        "type": "error",
+                        "content": "Agent 执行出错，任务已标记为失败。",
+                        "session_id": ws_session_id
+                    })
                     print(f"[Agent Error] Full traceback above. Hiding from chat to avoid clutter.")
                 
     except WebSocketDisconnect:
