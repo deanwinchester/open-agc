@@ -13,7 +13,7 @@ from api.state import (
 )
 from api.task_core import (
     create_task, update_task_status, update_task_type, get_task_context, save_task_context,
-    save_message,
+    save_message, handle_task_completion,
     add_task_step, _extract_task_title, _record_task_deliverables, _load_session_context,
     _resolve_task_for_query, _resolve_goal_for_query, _check_goal_completeness, _get_task_step_count,
 )
