@@ -449,7 +449,7 @@ export async function openTaskDetail(taskId) {
         for (var i = 0; i < steps.length; i++) {
           var st = steps[i];
           var displayNum = _stepTotal - (_stepPage - 1) * 50 - i;
-          html += '<div class="task-step-card ' + (st.success ? 'success' : st.success === false ? 'failed' : 'running') + '" data-step-index="' + i + '">'
+          html += '<div class="task-step-card ' + (st.success ? 'success' : st.success === false ? 'failed' : 'running') + '" data-step-number="' + st.step_number + '" data-step-index="' + i + '">'
             + '<div class="task-step-header">'
             + '<span>' + (st.success ? '\u2705' : st.success === false ? '\u274c' : '\u23f3') + '</span>'
             + '<span class="task-step-title">' + displayNum + '. ' + escapeHtml(st.tool_label || st.tool_name) + '</span>'
@@ -509,17 +509,17 @@ export async function openTaskDetail(taskId) {
           if (!steps.length) return;
           var container = content.querySelector('.task-detail-steps');
           if (!container) return;
-          // Get current highest index shown
+          // Track highest step_number seen (from DB, not array index)
           var existing = container.querySelectorAll('.task-step-card');
-          var maxShown = -1;
-          existing.forEach(function(c) { var n = parseInt(c.dataset.stepIndex); if (n > maxShown) maxShown = n; });
-          // Prepend any new steps (higher index than what we've seen, i.e. newer)
+          var highestStepNum = 0;
+          existing.forEach(function(c) { var n = parseInt(c.dataset.stepNumber); if (n > highestStepNum) highestStepNum = n; });
+          // Prepend any new steps (higher step_number than what we've seen)
           var prependHtml = '';
-          for (var si = steps.length - 1; si >= 0; si--) {
-            if (si > maxShown) {
-              var st = steps[si];
-              var displayNum = totalSteps - (_stepPage - 1) * 50 - si;
-              prependHtml += '<div class="task-step-card ' + (st.success ? 'success' : st.success === false ? 'failed' : 'running') + '" data-step-index="' + si + '">'
+          for (var si = 0; si < steps.length; si++) {
+            var st = steps[si];
+            if (st.step_number > highestStepNum) {
+              var displayNum = st.step_number;
+              prependHtml += '<div class="task-step-card ' + (st.success ? 'success' : st.success === false ? 'failed' : 'running') + '" data-step-number="' + st.step_number + '" data-step-index="' + si + '">'
                 + '<div class="task-step-header">'
                 + '<span>' + (st.success ? '✅' : st.success === false ? '❌' : '⏳') + '</span>'
                 + '<span class="task-step-title">' + displayNum + '. ' + escapeHtml(st.tool_label || st.tool_name) + '</span>'
@@ -537,8 +537,13 @@ export async function openTaskDetail(taskId) {
               if (c.dataset.stepClickWired) return;
               c.dataset.stepClickWired = '1';
               c.addEventListener('click', function() {
-                var idx = parseInt(c.dataset.stepIndex);
-                if (idx >= 0 && idx < steps.length) showTaskStepDetail(steps[idx]);
+                var sn = parseInt(c.dataset.stepNumber);
+                // Look up step by step_number (more reliable than array index)
+                var matched = null;
+                for (var s = 0; s < steps.length; s++) {
+                  if (steps[s].step_number === sn) { matched = steps[s]; break; }
+                }
+                if (matched) showTaskStepDetail(matched);
               });
             });
             // Update step count
@@ -610,9 +615,22 @@ export async function openTaskDetail(taskId) {
       }
       const extra = prompt('可选：输入附加指令，留空直接恢复执行');
       if (extra === null) return;
+
+      // Switch to the task's session first if needed
+      if (task.session_id && task.session_id !== state.currentSessionId) {
+        if (typeof switchSession === 'function') {
+          switchSession(task.session_id);
+        }
+      }
+
       state.ws.send(JSON.stringify({ type: 'resume', task_id: tid, extra_instruction: extra || '' }));
       this.textContent = '⏳ 已发送恢复请求...';
       this.disabled = true;
+
+      // Add visual feedback in chat
+      if (typeof appendMessage === 'function') {
+        appendMessage('⏳ **已请求恢复任务 #' + tid + '**' + (extra ? '\n附加指令: ' + extra : ''), 'system');
+      }
       window.switchView?.('chat');
     });
 
