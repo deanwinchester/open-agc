@@ -288,8 +288,11 @@ def generate_report(all_results, git_commit=None):
     return report
 
 
-def save_report(report):
-    """Save run report and update history."""
+def save_report(report, probes=None):
+    """Save run report and update history. Optionally includes probe results."""
+    if probes:
+        report["probes"] = probes
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_file = os.path.join(RESULTS_DIR, f"run_{timestamp}.json")
     with open(run_file, "w", encoding="utf-8") as f:
@@ -367,8 +370,16 @@ def main():
     parser.add_argument("--level", nargs="*", default=None, help="Filter by level (core advanced stress)")
     parser.add_argument("--tag", nargs="*", help="Filter by tag")
     parser.add_argument("--report", action="store_true", help="Show historical report")
+    parser.add_argument("--probes", action="store_true", help="Run advanced probes (memory recall, tool discovery, context retention)")
     parser.add_argument("--json", action="store_true", help="JSON output (machine-readable)")
     args = parser.parse_args()
+
+    if args.probes:
+        from eval.probes import run_all_probes
+        probe_results = run_all_probes()
+        if args.json:
+            print(json.dumps(probe_results, ensure_ascii=False, indent=2))
+        return
 
     if args.report:
         history = []
