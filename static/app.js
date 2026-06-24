@@ -219,6 +219,14 @@ function initApp() {
       updateInputState();
       refreshLlamaStatus();
       loadDownloadHistory();
+      // Clean up stale progress state after reconnect
+      if (progressInline && !progressInline.parentNode) {
+        progressInline = null;
+        progressStepsEl = null;
+        progressSteps = {};
+        progressStepData = {};
+        progressStepCount = 0;
+      }
     };
 
     state.ws.onmessage = (event) => {
@@ -1263,6 +1271,11 @@ function initApp() {
         if (msgs[i] && msgs[i].parentNode) msgs[i].remove();
       }
     }
+    // Cap progress cards at 5 to avoid clutter from long sessions
+    const progCards = chatContainer.querySelectorAll('.progress-inline');
+    for (let p = progCards.length - 1; p >= 5; p--) {
+      if (progCards[p] && progCards[p].parentNode) progCards[p].remove();
+    }
     if (role === 'tool_step') {
       messageDiv.querySelector('.tool-step-header')?.addEventListener('click', function() {
         var body = messageDiv.querySelector('.tool-step-body');
@@ -1821,10 +1834,41 @@ function initApp() {
           }
         }
       }
+      // Load recent task progress card for this session (if any)
+      await _loadRecentTaskProgress(state.currentSessionId);
     } catch (e) {
       console.error("Failed to load initial data", e);
     }
     console.log('[PERF] fetchInitialData done', (performance.now() - window._perf.start).toFixed(1), 'ms');
+  }
+
+  /** Load the most recent task for a session and render its steps as a progress card. */
+  async function _loadRecentTaskProgress(sessionId) {
+    try {
+      const resp = await fetch(`/api/tasks?session_id=${sessionId}&page=1&page_size=1`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (!data.tasks || data.tasks.length === 0) return;
+      const task = data.tasks[0];
+      // Only show for recently active or incomplete tasks
+      const isRecent = task.status === 'running' || task.status === 'interrupted' || task.status === 'backgrounded' || task.status === 'failed';
+      if (!isRecent) return;
+      const stepResp = await fetch(`/api/tasks/${task.id}/steps?page=1&page_size=100`);
+      if (!stepResp.ok) return;
+      const stepData = await stepResp.json();
+      if (!stepData.steps || stepData.steps.length === 0) return;
+      // Reuse renderHistorySteps which accepts a WS event-like object
+      renderHistorySteps({
+        type: 'history_steps',
+        task_id: task.id,
+        task_status: task.status,
+        steps: stepData.steps,
+        session_id: sessionId,
+        result_summary: task.result_summary,
+      });
+    } catch (e) {
+      // Silent — progress card is optional
+    }
   }
 
   // Version check + manual upgrade
