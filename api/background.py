@@ -788,6 +788,18 @@ def _guardian_resume_task(task_id: int) -> None:
                     _hb_c2.close()
                 except Exception:
                     pass
+
+        # Broadcast completion to the session's WebSocket clients
+        if resp:
+            try:
+                _broadcast_to_websockets({
+                    "type": "message",
+                    "role": "agent",
+                    "session_id": _hb_session,
+                    "content": f"**🔄 自动恢复任务完成**\n\n{resp[:500]}"
+                })
+            except Exception as _bc_e:
+                print(f"[Guardian] Broadcast error: {_bc_e}")
     except Exception as e:
         print(f"[Guardian] Resume #{task_id} error: {e}")
         try:
