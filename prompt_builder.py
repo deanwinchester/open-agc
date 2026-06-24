@@ -7,6 +7,7 @@ import os
 import platform
 import shutil
 from datetime import datetime
+from core.paths import get_data_path
 
 
 def detect_system_env() -> str:
@@ -138,19 +139,29 @@ class PromptBuilderMixin:
         if memory_context:
             prompt += f"\n--- 历史记忆回溯 (Episodic Memory) ---\n{memory_context}\n"
 
-        if self.sandbox_dir:
-            memory_file_path = os.path.join(self.sandbox_dir, "MEMORY.md")
-            if os.path.exists(memory_file_path):
-                try:
-                    with open(memory_file_path, "r", encoding="utf-8") as f:
-                        content = f.read().strip()
-                        if content:
-                            prompt += f"\n--- 全局核心设定与事实库 (MEMORY.md) ---\n{content}\n"
-                except Exception as e:
-                    print(f"Failed to read MEMORY.md: {e}")
-            else:
-                # Mention the path so the agent knows where to create it
-                prompt += f"\n持久化事实文件位于: {memory_file_path}（尚不存在，发现重要路径/配置后可创建）\n"
+        # ── MEMORY.md: persistent facts (discovered paths, configs) ──
+        memory_file_path = get_data_path("MEMORY.md")
+        if os.path.exists(memory_file_path):
+            try:
+                with open(memory_file_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if content:
+                        prompt += f"\n--- 全局核心设定与事实库 (MEMORY.md) ---\n{content}\n"
+            except Exception as e:
+                print(f"Failed to read MEMORY.md: {e}")
+        else:
+            prompt += f"\n持久化事实文件位于: {memory_file_path}（尚不存在，发现重要路径/配置后可创建）\n"
+
+        # ── soul.md: agent personality / style config ──
+        soul_path = get_data_path("soul.md")
+        if os.path.exists(soul_path):
+            try:
+                with open(soul_path, "r", encoding="utf-8") as f:
+                    soul = f.read().strip()
+                    if soul:
+                        prompt += f"\n--- 人格设定 (soul.md) ---\n{soul}\n"
+            except Exception as e:
+                print(f"Failed to read soul.md: {e}")
 
         if skill_context:
             prompt += f"\n{skill_context}"
