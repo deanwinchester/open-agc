@@ -326,23 +326,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception as _step_e:
                         print(f"[WS] Task step update error: {_step_e}")
 
-                # Save tool_step as a message in the chat flow (skip for heartbeats)
-                if ws_session_id and event.get("event") == "tool_done":
-                    try:
-                        import json as _js
-                        step_output = _step_outputs.pop(adjusted_step, "")
-                        ts_content = _js.dumps({
-                            "step": adjusted_step,
-                            "tool": event.get("tool", ""),
-                            "tool_label": event.get("tool_label", ""),
-                            "args_preview": event.get("args_preview", ""),
-                            "result_preview": event.get("result_preview", ""),
-                            "success": event.get("success", True),
-                            "output": step_output[:5000],
-                        }, ensure_ascii=False)
-                        save_message("tool_step", ts_content, ws_session_id)
-                    except Exception as e:
-                        print(f"[Task] Failed to save tool_step message: {e}")
+                # tool_step is persisted in task_steps table -- no need to duplicate in messages
 
                 # Attach task_id to the event so frontend can track it
                 if ws_task_id:
