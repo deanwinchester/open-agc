@@ -243,6 +243,12 @@ def _run_migrations(cursor):
     except Exception:
         pass  # Already exists
 
+    # Add task_id to messages for bidirectional chat-task binding
+    try:
+        cursor.execute("ALTER TABLE messages ADD COLUMN task_id INTEGER")
+    except Exception:
+        pass  # Already exists
+
 
 def create_indexes():
     """Create indexes for query performance."""
