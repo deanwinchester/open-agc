@@ -729,14 +729,47 @@ async def websocket_endpoint(websocket: WebSocket):
 
             return response
         except Exception as e:
+            error_msg = str(e)
+            # One automatic retry: give the agent a chance to recover
+            # by injecting the error and letting it try a different approach.
+            if agent and ws_task_id and not getattr(agent, '_auto_retried', False):
+                agent._auto_retried = True
+                print(f"[WS] Auto-retry: agent failed with '{error_msg[:100]}', giving one more chance...")
+                # Save current context before retry
+                try:
+                    save_task_context(ws_task_id, agent.messages[1:])
+                except Exception:
+                    pass
+                # Inject the error into the agent's context for self-correction
+                retry_prompt = (
+                    f"[系统通知] 你之前的操作遇到了意外错误，已被自动恢复。\n"
+                    f"错误信息：{error_msg[:300]}\n\n"
+                    f"请分析原因，不要重复同一操作，尝试完全不同的策略来完成原始任务。"
+                )
+                agent.messages.append({"role": "user", "content": retry_prompt})
+                try:
+                    # Re-run with skip_rag=True (context already loaded)
+                    response = agent.run_turn(
+                        user_input=None,  # None = resume, don't re-add user message
+                        verbose=False,
+                        progress_callback=progress_callback,
+                        task_id=ws_task_id,
+                        skip_rag=True,
+                    )
+                    # If retry succeeded, log and return (task already in "running" status)
+                    print(f"[WS] Auto-retry succeeded for task {ws_task_id}")
+                    return response
+                except Exception as retry_e:
+                    print(f"[WS] Auto-retry also failed for task {ws_task_id}: {retry_e}")
+
+            # Final failure — save context and mark failed
             if ws_task_id:
-                # Save context so failed tasks can also be resumed
                 if agent:
                     try:
                         save_task_context(ws_task_id, agent.messages[1:])
                     except Exception:
                         pass
-                update_task_status(ws_task_id, "failed", str(e)[:200], interruption_reason="error")
+                update_task_status(ws_task_id, "failed", error_msg[:200], interruption_reason="error")
             raise
         finally:
             agent_is_running = False
