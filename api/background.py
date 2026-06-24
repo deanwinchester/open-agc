@@ -12,7 +12,7 @@ from api.state import (
 )
 from api.task_core import (
     create_task, update_task_status, get_task_context, save_task_context,
-    save_message,
+    save_message, handle_task_completion,
     add_task_step, _extract_task_title, _record_task_deliverables,
     _load_session_context, _get_task_step_count, _check_goal_completeness,
 )
@@ -295,29 +295,12 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         except Exception:
             pass
 
-        is_max_iter = response and response.startswith("[MAX_ITERATIONS_REACHED]")
-        is_backgrounded = response and response.startswith("[TASK_BACKGROUNDED]")
-
-        summary = response[:200] if response else ""
-        if is_backgrounded:
-            # Agent auto-backgrounded (shell timeout) — save context for resume
-            save_task_context(task_id, agent.messages[msg_count_before:])
-            # Parse WAKE_IN=N for wake-up timer (same logic as ws.py)
-            _wake_match = re.search(r'WAKE_IN=(\d+)', response)
-            _wake_min = int(_wake_match.group(1)) if _wake_match else None
-            if _wake_min:
-                _wake_dt = (datetime.utcnow() + timedelta(minutes=_wake_min)).strftime('%Y-%m-%d %H:%M:%S')
-                try:
-                    _wk_conn = sqlite3.connect(DB_PATH)
-                    _wk_conn.execute("UPDATE tasks SET wake_at=? WHERE id=?", (_wake_dt, task_id))
-                    _wk_conn.commit()
-                    _wk_conn.close()
-                    print(f"[BgTask] Set wake_at={_wake_dt} for task {task_id} (after {_wake_min}min)")
-                except Exception as _wke:
-                    print(f"[BgTask] Failed to set wake_at: {_wke}")
-            update_task_status(task_id, "backgrounded",
-                response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台",
-                interruption_reason="backgrounded")
+        # Delegate state transitions to shared handler
+        _bg_result = handle_task_completion(
+            task_id, response, agent.messages[msg_count_before:] if agent else [],
+            bg_session_id,
+        )
+        if _bg_result == 'backgrounded':
             _broadcast_to_websockets({
                 "type": "task_backgrounded",
                 "task_id": task_id,
@@ -325,24 +308,6 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                 "session_id": bg_session_id,
             })
             return response
-        elif is_max_iter:
-            save_task_context(task_id, agent.messages[msg_count_before:])
-            update_task_status(task_id, "interrupted", summary, interruption_reason="max_iterations")
-        else:
-            save_task_context(task_id, agent.messages[msg_count_before:] if agent else [])
-            _record_task_deliverables(task_id)
-            update_task_status(task_id, "completed", summary)
-            _check_goal_completeness(task_id)
-        if response and not is_max_iter and not is_backgrounded:
-            title = _extract_task_title(response)
-            if title:
-                try:
-                    tconn = sqlite3.connect(DB_PATH)
-                    tconn.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
-                    tconn.commit()
-                    tconn.close()
-                except Exception:
-                    pass
 
         # Push final result to clients (skip heartbeat tasks entirely)
         if not _is_heartbeat:
@@ -793,48 +758,16 @@ def _guardian_resume_task(task_id: int) -> None:
         finally:
             _background_agents.pop(task_id, None)
 
-        # Update task status after run_turn completes
+        # Update task status after run_turn completes — delegate to shared handler
         _resp_str = str(resp or "")[:200]
         print(f"[Guardian] Resume #{task_id}: response prefix: {_resp_str[:100]}")
+
         if agent.is_interrupted:
             try:
                 save_task_context(task_id, agent.messages[1:])
             except Exception:
                 pass
             update_task_status(task_id, "interrupted", _resp_str, interruption_reason="user")
-        elif "MAX_ITERATIONS_REACHED" in _resp_str:
-            print(f"[Guardian] Resume #{task_id}: hit max_iterations again")
-            try:
-                save_task_context(task_id, agent.messages[1:])
-            except Exception:
-                pass
-            try:
-                _hb_c2 = sqlite3.connect(DB_PATH)
-                _hb_c2.execute("UPDATE tasks SET resume_count = resume_count + 1 WHERE id=?", (task_id,))
-                _hb_c2.commit()
-                _hb_c2.close()
-            except Exception:
-                pass
-            update_task_status(task_id, "interrupted", _resp_str, interruption_reason="max_iterations")
-        elif _resp_str.startswith("[TASK_BACKGROUNDED]"):
-            try:
-                save_task_context(task_id, agent.messages[1:])
-            except Exception:
-                pass
-            # Parse WAKE_IN=N for wake-up timer
-            try:
-                _wake_match = re.search(r'WAKE_IN=(\d+)', _resp_str)
-                if _wake_match:
-                    _wake_min = int(_wake_match.group(1))
-                    _wake_dt = (datetime.utcnow() + timedelta(minutes=_wake_min)).strftime('%Y-%m-%d %H:%M:%S')
-                    _wk_conn = sqlite3.connect(DB_PATH)
-                    _wk_conn.execute("UPDATE tasks SET wake_at=? WHERE id=?", (_wake_dt, task_id))
-                    _wk_conn.commit()
-                    _wk_conn.close()
-                    print(f"[Guardian] Set wake_at={_wake_dt} for task {task_id}")
-            except Exception as _wke:
-                print(f"[Guardian] Failed to set wake_at: {_wke}")
-            update_task_status(task_id, "backgrounded", _resp_str, interruption_reason="backgrounded")
         elif hasattr(agent, '_consecutive_failures') and agent._consecutive_failures >= 3:
             try:
                 save_task_context(task_id, agent.messages[1:])
@@ -842,10 +775,19 @@ def _guardian_resume_task(task_id: int) -> None:
                 pass
             update_task_status(task_id, "interrupted", _resp_str, interruption_reason="error")
         else:
-            save_task_context(task_id, agent.messages[1:])
-            _record_task_deliverables(task_id)
-            update_task_status(task_id, "completed", _resp_str)
-            _check_goal_completeness(task_id)
+            _g_result = handle_task_completion(
+                task_id, resp or "", agent.messages[1:] if agent else [],
+                update_title=False,
+            )
+            # Increment resume_count on max_iterations
+            if _g_result == 'interrupted':
+                try:
+                    _hb_c2 = sqlite3.connect(DB_PATH)
+                    _hb_c2.execute("UPDATE tasks SET resume_count = resume_count + 1 WHERE id=?", (task_id,))
+                    _hb_c2.commit()
+                    _hb_c2.close()
+                except Exception:
+                    pass
     except Exception as e:
         print(f"[Guardian] Resume #{task_id} error: {e}")
         try:

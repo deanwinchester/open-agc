@@ -595,98 +595,38 @@ async def websocket_endpoint(websocket: WebSocket):
                     print(f"[WS] Interjection reject error: {_rj_err}")
                 response = _remaining if '_remaining' in locals() else response
 
-            # Detect max_iterations / backgrounded (check AFTER stripping interjection prefix)
-            is_max_iter = response and response.startswith("[MAX_ITERATIONS_REACHED]")
-            is_backgrounded = response and response.startswith("[TASK_BACKGROUNDED]")
-            if response and not is_max_iter and not is_backgrounded:
-                print(f"[WS] run_agent response (first 80): {str(response)[:80]}")
+            if ws_task_id and response:
+                # Delegate state transitions to shared handler
+                _result = handle_task_completion(
+                    ws_task_id, response, agent.messages[1:], ws_session_id,
+                    wake_minutes=_bg_wake,
+                )
 
-            if ws_task_id and is_backgrounded:
-                # Agent voluntarily paused — save context, mark backgrounded
-                save_task_context(ws_task_id, agent.messages[1:])
-                # Check for WAKE_IN=N in response as fallback timer
-                _resp_body = response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台"
-                _wake_match = re.search(r'WAKE_IN=(\d+)', response)
-                _wake_min = int(_wake_match.group(1)) if _wake_match else _bg_wake
-                print(f"[Task] wake_at debug: response={response[:100]}, _wake_match={_wake_match.group(1) if _wake_match else None}, _bg_wake={_bg_wake}, _wake_min={_wake_min}")
-                if _wake_min:
-                    _wake_dt = (datetime.utcnow() + timedelta(minutes=_wake_min)).strftime('%Y-%m-%d %H:%M:%S')
-                    try:
-                        _wake_conn = sqlite3.connect(DB_PATH)
-                        _wake_conn.execute("UPDATE tasks SET wake_at=? WHERE id=?", (_wake_dt, ws_task_id))
-                        _wake_conn.commit()
-                        _wake_conn.close()
-                        print(f"[Task] Set wake_at={_wake_dt} for task {ws_task_id} (after {_wake_min}min)")
-                    except Exception as _wake_err:
-                        print(f"[Task] Failed to set wake_at: {_wake_err}")
-                else:
-                    print(f"[Task] wake_at NOT set: _wake_min is falsy")
-                update_task_status(ws_task_id, "backgrounded",
-                    _resp_body, interruption_reason="backgrounded")
-                # Register PID for BgMonitor tracking if available
-                if _bg_pid:
-                    try:
-                        from tools.shell import get_background_processes
-                        _bg_procs = get_background_processes()
-                        if str(ws_task_id) not in _bg_procs:
-                            from tools.shell import _background_process_info, _background_process_lock
-                            with _background_process_lock:
-                                _background_process_info[str(ws_task_id)] = {"pid": _bg_pid, "command": "", "started_at": _time.time()}
-                            print(f"[Task] Registered PID {_bg_pid} for BgMonitor tracking (task {ws_task_id})")
-                    except Exception as _bg_e:
-                        print(f"[WS] Background process registration error: {_bg_e}")
-                # Send notification to frontend
-                await _safe_send({
-                    "type": "task_backgrounded",
-                    "task_id": ws_task_id,
-                    "message": "任务已进入后台，完成后自动恢复",
-                    "session_id": ws_session_id
-                })
-                agent_is_running = False
-                return (response, ws_task_id)
-
-            if ws_task_id:
-                summary = response[:200] if response else ""
-                # Update task title from agent's first response line
-                if response and not response.startswith("[MAX_ITERATIONS_REACHED]") and not is_backgrounded:
-                    title = _extract_task_title(response)
-                    if title:
+                if _result == 'backgrounded':
+                    # Register PID for BgMonitor tracking (ws.py-specific)
+                    if _bg_pid:
                         try:
-                            tconn = sqlite3.connect(DB_PATH)
-                            tconn.execute("UPDATE tasks SET title=? WHERE id=?", (title, ws_task_id))
-                            tconn.commit()
-                            tconn.close()
-                        except Exception:
-                            pass
-                if is_max_iter:
-                    # Save context for potential resume
-                    save_task_context(ws_task_id, agent.messages[1:])
-                    update_task_status(ws_task_id, "interrupted", summary, interruption_reason="max_iterations")
-                    # Auto-detect as longrun if not already
-                    try:
-                        conn_tmp = sqlite3.connect(DB_PATH)
-                        cur_tmp = conn_tmp.cursor()
-                        cur_tmp.execute("SELECT task_type FROM tasks WHERE id=?", (ws_task_id,))
-                        row_tmp = cur_tmp.fetchone()
-                        conn_tmp.close()
-                        if row_tmp and row_tmp[0] == 'oneshot':
-                            update_task_type(ws_task_id, 'longrun')
-                    except Exception as _task_type_e:
-                        print(f"[WS] Task type update error: {_task_type_e}")
-                elif response and ("interrupted by user" in response.lower() or "interrupted" in response.lower()):
-                    # Don't save context on user interrupt — the current agent.messages
-                    # reflects only the interrupted turn (1-2 messages) which would
-                    # overwrite the full snapshot from previous successful turns.
-                    # Keep the last good snapshot intact for resume.
-                    print(f"[Task] User interrupt for task {ws_task_id}: keeping previous snapshot")
-                    update_task_status(ws_task_id, "interrupted", summary, interruption_reason="user")
-                else:
-                    save_task_context(ws_task_id, agent.messages[1:])
-                    _record_task_deliverables(ws_task_id)
-                    update_task_status(ws_task_id, "completed", summary)
-                    _check_goal_completeness(ws_task_id)
+                            from tools.shell import get_background_processes as _gbp
+                            _bg_procs = _gbp()
+                            if str(ws_task_id) not in _bg_procs:
+                                from tools.shell import _background_process_info as _bgi
+                                from tools.shell import _background_process_lock as _bgl
+                                with _bgl:
+                                    _bgi[str(ws_task_id)] = {"pid": _bg_pid, "command": "", "started_at": _time.time()}
+                                print(f"[Task] Registered PID {_bg_pid} for BgMonitor (task {ws_task_id})")
+                        except Exception as _bg_e:
+                            print(f"[WS] BgMonitor registration error: {_bg_e}")
+                    # Notify frontend
+                    await _safe_send({
+                        "type": "task_backgrounded",
+                        "task_id": ws_task_id,
+                        "message": "任务已进入后台，完成后自动恢复",
+                        "session_id": ws_session_id
+                    })
+                    agent_is_running = False
+                    return (response, ws_task_id)
 
-                # Update total tokens in tasks table from stats
+                # Update total tokens in tasks table from stats (ws.py-specific)
                 try:
                     stats = get_stats_manager().get_task_usage(ws_task_id)
                     if stats:
@@ -697,12 +637,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         conn_tmp.close()
                 except Exception:
                     pass
-            
-            # Persist final answer so it survives page refresh
-            try:
-                save_message("agent", response, ws_session_id)
-            except Exception as _final_e:
-                print(f"[WS] Save final message failed: {_final_e}")
+
+                # On user interrupt, don't save final message (preserves prior snapshot)
+                if _result != 'interrupted_user':
+                    try:
+                        save_message("agent", response, ws_session_id)
+                    except Exception as _final_e:
+                        print(f"[WS] Save final message failed: {_final_e}")
 
             return (response, ws_task_id)
         except Exception as e:

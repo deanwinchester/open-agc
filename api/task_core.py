@@ -322,6 +322,86 @@ def record_tool_step(task_id: int, step_number: int, event: dict, session_id: in
         print(f"[TaskCore] record_tool_step error: {_step_e}")
 
 
+def handle_task_completion(task_id: int, response: str, agent_messages: list,
+                           session_id: int = 1, update_title: bool = True,
+                           wake_minutes: int = None) -> str:
+    """Unified state transition handler after agent.run_turn() completes.
+
+    Called by ws.py, background.py _run_background_task, and guardian.
+    Parses the response for special prefixes and updates task status accordingly.
+
+    Returns: 'completed', 'interrupted', 'backgrounded', 'interrupted_user'
+    """
+    if not response:
+        update_task_status(task_id, "failed", "No response from agent", interruption_reason="error")
+        return 'failed'
+
+    is_max_iter = response.startswith("[MAX_ITERATIONS_REACHED]")
+    is_backgrounded = response.startswith("[TASK_BACKGROUNDED]")
+    is_user_int = "interrupted by user" in response.lower()
+    summary = response[:200]
+
+    # Extract and save title from first response line
+    if update_title and response and not is_max_iter and not is_backgrounded:
+        title = _extract_task_title(response)
+        if title:
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                conn.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+
+    # -- Backgrounded --
+    if is_backgrounded:
+        save_task_context(task_id, agent_messages)
+        # Parse WAKE_IN=N
+        _wake_match = re.search(r'WAKE_IN=(\d+)', response)
+        _wake_min = int(_wake_match.group(1)) if _wake_match else wake_minutes
+        if _wake_min:
+            _wake_dt = (datetime.utcnow() + timedelta(minutes=_wake_min)).strftime('%Y-%m-%d %H:%M:%S')
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                conn.execute("UPDATE tasks SET wake_at=? WHERE id=?", (_wake_dt, task_id))
+                conn.commit()
+                conn.close()
+                print(f"[TaskCore] Set wake_at={_wake_dt} for task {task_id}")
+            except Exception as _wke:
+                print(f"[TaskCore] Failed to set wake_at: {_wke}")
+        _body = response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台"
+        update_task_status(task_id, "backgrounded", _body, interruption_reason="backgrounded")
+        return 'backgrounded'
+
+    # -- User interrupted --
+    if is_user_int:
+        update_task_status(task_id, "interrupted", summary, interruption_reason="user")
+        return 'interrupted_user'
+
+    # -- Max iterations --
+    if is_max_iter:
+        save_task_context(task_id, agent_messages)
+        update_task_status(task_id, "interrupted", summary, interruption_reason="max_iterations")
+        # Promote oneshot to longrun
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            row = conn.execute("SELECT task_type FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row and row[0] == 'oneshot':
+                conn.execute("UPDATE tasks SET task_type='longrun' WHERE id=?", (task_id,))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+        return 'interrupted'
+
+    # -- Normal completion --
+    save_task_context(task_id, agent_messages)
+    _record_task_deliverables(task_id)
+    update_task_status(task_id, "completed", summary)
+    _check_goal_completeness(task_id)
+    return 'completed'
+
+
 def save_message(role: str, content: str, session_id: int = 1, task_id: int = None):
     """Save a chat message. If task_id is provided, links the message to its task."""
     try:
