@@ -12,6 +12,7 @@ from api.state import (
 )
 from api.task_core import (
     create_task, update_task_status, get_task_context, save_task_context,
+    save_message,
     add_task_step, _extract_task_title, _record_task_deliverables,
     _load_session_context, _get_task_step_count, _check_goal_completeness,
 )
@@ -22,14 +23,6 @@ from tools.shell import (
 )
 
 _time = __import__('time')
-
-
-def save_message(role: str, content: str, session_id: int = 1):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("INSERT INTO messages (role, content, session_id) VALUES (?, ?, ?)", (role, content, session_id))
-    conn.execute("UPDATE sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
-    conn.commit()
-    conn.close()
 
 
 def start_email_listener():

@@ -13,6 +13,7 @@ from api.state import (
 )
 from api.task_core import (
     create_task, update_task_status, update_task_type, get_task_context, save_task_context,
+    save_message,
     add_task_step, _extract_task_title, _record_task_deliverables, _load_session_context,
     _resolve_task_for_query, _resolve_goal_for_query, _check_goal_completeness, _get_task_step_count,
 )
@@ -23,14 +24,6 @@ from core.stats_manager import get_stats_manager
 from agent.agent import OpenAGCAgent
 # Import background helper for task history broadcast
 from api.state import _broadcast_task_history
-
-
-def save_message(role: str, content: str, session_id: int = 1):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("INSERT INTO messages (role, content, session_id) VALUES (?, ?, ?)", (role, content, session_id))
-    conn.execute("UPDATE sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
-    conn.commit()
-    conn.close()
 
 
 async def websocket_endpoint(websocket: WebSocket):
