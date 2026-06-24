@@ -288,6 +288,21 @@ class OpenAGCAgent(PromptBuilderMixin):
             f"- 插件开发（生成新插件脚手架、安装插件）——搜索「插件」\n"
             f"- 以及其他未默认启用的专用工具\n"
             f"搜索成功后，工具将在你的下一轮回复中可用。\n"
+            f"\n## 持久化事实与 MEMORY.md\n"
+            f"沙箱目录下的 MEMORY.md 文件是**最高优先级的持久化记忆库**，每次任务开头系统会自动将其内容注入给你的提示词。\n"
+            f"当你发现以下类型的信息时，**必须使用 write_file 写入 MEMORY.md**，以便后续任务复用：\n"
+            f"- 重要工具/软件的安装路径（如 ComfyUI、Python、Node.js 的准确位置）\n"
+            f"- 常用服务端口号（如 ComfyUI 127.0.0.1:8188、API 服务端口）\n"
+            f"- 用户的工作目录偏好和项目位置\n"
+            f"- 项目中不需要重复搜索确认的固定配置\n"
+            f"- 需要跨任务记住的路径、配置、命令模板\n\n"
+            f"写入格式示例（markdown 列表）：\n"
+            f"```markdown\n"
+            f"- ComfyUI 路径: D:\\ComfyUI_windows_portable_v0220\\ComfyUI\n"
+            f"- ComfyUI 端口: 127.0.0.1:8188\n"
+            f"- Python 路径: D:\\Apps\\Python312\\python.exe\n"
+            f"```\n"
+            f"⚠️ 每个 key 只写一次，覆盖更新即可。不要重复添加相同内容。\n"
         )
 
         self.messages: List[Dict[str, Any]] = [
