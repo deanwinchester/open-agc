@@ -145,9 +145,12 @@ class PromptBuilderMixin:
                     with open(memory_file_path, "r", encoding="utf-8") as f:
                         content = f.read().strip()
                         if content:
-                            prompt += f"\n--- 全局核心设定与事实库 (MEMORY.md) ---\n{content}\n(注意：这是最高优先级的持久化记忆。当用户想传授新规定、修改基础偏好时，请使用 write_file 覆写沙箱目录下的 MEMORY.md)\n"
+                            prompt += f"\n--- 全局核心设定与事实库 (MEMORY.md) ---\n{content}\n"
                 except Exception as e:
                     print(f"Failed to read MEMORY.md: {e}")
+            else:
+                # Mention the path so the agent knows where to create it
+                prompt += f"\n持久化事实文件位于: {memory_file_path}（尚不存在，发现重要路径/配置后可创建）\n"
 
         if skill_context:
             prompt += f"\n{skill_context}"
