@@ -319,6 +319,10 @@ async def list_processes():
     # Merge orphans into main list (orphan key prefix = no task_id assigned yet)
     for oid, info in orphans.items():
         procs[oid] = info
+    # Ensure 'alive' field exists for frontend filter
+    for info in procs.values():
+        if "alive" not in info:
+            info["alive"] = True
     return {"processes": procs}
 
 
