@@ -1,0 +1,69 @@
+[
+  {
+    "name": "shell_list_files",
+    "description": "列出当前目录文件",
+    "category": ["shell"],
+    "level": "core",
+    "prompt": "列出当前目录下的文件",
+    "expected": {
+      "tool_used": ["execute_shell"],
+      "output_contains": ["agent", "main"],
+      "max_steps": 3
+    },
+    "tags": ["basic"]
+  },
+  {
+    "name": "shell_find_python",
+    "description": "查找Python解释器路径",
+    "category": ["shell"],
+    "level": "core",
+    "prompt": "查找系统中 python 或 python3 的安装路径",
+    "expected": {
+      "tool_used": ["execute_shell"],
+      "output_contains": ["python"],
+      "max_steps": 5
+    },
+    "tags": ["basic"]
+  },
+  {
+    "name": "shell_pipe_grep",
+    "description": "使用管道组合命令",
+    "category": ["shell", "reasoning"],
+    "level": "core",
+    "prompt": "统计当前目录下有多少个 .py 文件",
+    "expected": {
+      "tool_used": ["execute_shell"],
+      "output_contains": [".py"],
+      "max_steps": 5
+    },
+    "tags": ["basic"]
+  },
+  {
+    "name": "shell_error_handling",
+    "description": "处理命令执行错误",
+    "category": ["shell", "reasoning"],
+    "level": "advanced",
+    "prompt": "运行一个不存在的命令 'nonexistent_cmd_xyz'，然后告诉我它为什么失败了，再试一个有效命令列出当前目录",
+    "expected": {
+      "tool_used": ["execute_shell"],
+      "tool_not_used": ["ask_user_question"],
+      "output_contains": ["not found", "agent"],
+      "max_steps": 8
+    },
+    "tags": ["error_handling"]
+  },
+  {
+    "name": "shell_timeout_handling",
+    "description": "长时间运行命令的超时处理",
+    "category": ["shell"],
+    "level": "advanced",
+    "prompt": "运行 'ping 127.0.0.1 -n 100' 只等3秒就停，然后告诉我结果",
+    "expected": {
+      "tool_used": ["execute_shell"],
+      "output_contains": ["127.0.0.1"],
+      "max_steps": 5
+    },
+    "timeout": 30,
+    "tags": ["timeout"]
+  }
+]
