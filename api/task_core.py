@@ -288,6 +288,27 @@ def _load_session_context(session_id: int, limit: int = 50) -> list:
         return []
 
 
+def save_message(role: str, content: str, session_id: int = 1, task_id: int = None):
+    """Save a chat message. If task_id is provided, links the message to its task."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        if task_id:
+            conn.execute(
+                "INSERT INTO messages (role, content, session_id, task_id) VALUES (?, ?, ?, ?)",
+                (role, content, session_id, task_id)
+            )
+        else:
+            conn.execute(
+                "INSERT INTO messages (role, content, session_id) VALUES (?, ?, ?)",
+                (role, content, session_id)
+            )
+        conn.execute("UPDATE sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
+        conn.commit()
+        conn.close()
+    except Exception as _e:
+        print(f"[TaskCore] save_message error: {_e}")
+
+
 def save_task_context(task_id: int, messages: list):
     """Save agent conversation messages as a JSON snapshot for resume.
 
