@@ -463,7 +463,42 @@ function initApp() {
   let progressStepData = {};
   let progressStepCount = 0;
 
+  // ── Per-session progress state cache ──
+  if (!window._perSessionProgress) window._perSessionProgress = {};
+
+  function _saveProgressState(sid) {
+    if (!sid) return;
+    window._perSessionProgress[sid] = {
+      progressInline: progressInline,
+      progressStepsEl: progressStepsEl,
+      progressSteps: progressSteps,
+      progressStepData: progressStepData,
+      progressStepCount: progressStepCount,
+    };
+  }
+
+  function _restoreProgressState(sid) {
+    const saved = window._perSessionProgress[sid];
+    if (saved && saved.progressInline && saved.progressInline.parentNode) {
+      progressInline = saved.progressInline;
+      progressStepsEl = saved.progressStepsEl;
+      progressSteps = saved.progressSteps || {};
+      progressStepData = saved.progressStepData || {};
+      progressStepCount = saved.progressStepCount || 0;
+      return true;
+    }
+    return false;
+  }
+
   function ensureProgressContainer() {
+    // Save current progress state to its session before creating new
+    if (progressInline && progressInline.dataset.sessionId) {
+      _saveProgressState(progressInline.dataset.sessionId);
+    }
+    // Try to restore cached progress for this session before creating new
+    if (!progressInline && state.currentSessionId) {
+      _restoreProgressState(state.currentSessionId);
+    }
     if (!progressInline) {
       // Remove any completed history card for this task before creating live progress
       if (state.currentTaskId) {
@@ -491,6 +526,7 @@ function initApp() {
         </div>`;
       progressStepsEl = progressInline.querySelector('.progress-inline-steps');
       if (state.currentTaskId) progressInline.dataset.taskId = state.currentTaskId;
+      if (state.currentSessionId) progressInline.dataset.sessionId = state.currentSessionId;
 
       // Toggle collapse/expand on header click
       const header = progressInline.querySelector('.progress-inline-header');
@@ -1266,6 +1302,8 @@ function initApp() {
   });
 
   window.appendMessage = appendMessage;
+  window._saveProgressState = _saveProgressState;
+  window._restoreProgressState = _restoreProgressState;
   window.scrollToBottom = scrollToBottom;
 
   let currentStatusBubble = null;

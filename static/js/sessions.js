@@ -50,6 +50,10 @@ export async function switchSession(sessionId) {
   if (!window._sessionChatCache) window._sessionChatCache = {};
   if (!window._sessionChatOrder) window._sessionChatOrder = [];
   if (prevId !== sessionId && chatContainer) {
+    // Save progress state before DOM is cleared
+    if (typeof window._saveProgressState === 'function') {
+      window._saveProgressState(prevId);
+    }
     window._sessionChatCache[prevId] = chatContainer.innerHTML;
     // Track LRU order
     var idx = window._sessionChatOrder.indexOf(prevId);
@@ -68,6 +72,11 @@ export async function switchSession(sessionId) {
 
   chatContainer.innerHTML = '';
   await loadHistoryPage(sessionId, true);
+
+  // Restore progress state for the target session if cached
+  if (typeof window._restoreProgressState === 'function') {
+    window._restoreProgressState(sessionId);
+  }
 
   // Remove the previous scroll handler before adding a new one
   if (window._sessionScrollHandler) {
