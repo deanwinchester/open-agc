@@ -328,7 +328,7 @@ function initApp() {
       if (data.role === 'tool_step') return;
       if (isForCurrentSession) {
         hideThinkingStatus(); hideProgressContainer();
-        appendMessage(data.content, data.role || 'agent');
+        appendMessage(data.content, data.role || 'agent', null, null, data.task_id);
         if (!isBackground && state.wasVoiceQuery) { speakText(data.content); state.wasVoiceQuery = false; }
         state.isAgentThinking = false; state.currentTaskId = null; updateInputState();
       }
@@ -967,6 +967,7 @@ function initApp() {
           ${['interrupted', 'backgrounded', 'background_failed', 'completed'].includes(data.task_status)
             ? `<button class="btn-resume-task" data-task-id="${data.task_id}" title="继续执行">▶ 继续</button>`
             : ''}
+          <button class="btn-open-task-detail" data-task-id="${data.task_id}" title="查看任务详情" style="margin-left:6px;background:transparent;border:1px solid var(--border-color);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.78rem;color:var(--text-secondary);">📋 详情</button>
           <span class="progress-toggle-icon collapsed">▸</span>
         </div>
       </div>
@@ -1061,7 +1062,7 @@ function initApp() {
 
     // Toggle collapse/expand
     historyCard.querySelector('.progress-inline-header').addEventListener('click', function(e) {
-      if (e.target.closest('.btn-resume-task')) return;
+      if (e.target.closest('.btn-resume-task') || e.target.closest('.btn-open-task-detail')) return;
       const st = historyCard.querySelector('.progress-inline-steps');
       const ic = historyCard.querySelector('.progress-toggle-icon');
       const isCurrentlyCollapsed = st.style.maxHeight === '0px';
@@ -1110,6 +1111,20 @@ function initApp() {
           var st = historyCard.querySelector('.progress-inline-steps');
           if (st) st.style.maxHeight = 'none';
           state.ws.send(JSON.stringify({ type: 'resume', task_id: parseInt(taskId) }));
+        }
+      });
+    }
+
+    // Detail button handler — open task in Task Manager
+    const detailBtn = historyCard.querySelector('.btn-open-task-detail');
+    if (detailBtn) {
+      detailBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        const taskId = parseInt(detailBtn.dataset.taskId);
+        if (window.openTaskDetail) {
+          window.openTaskDetail(taskId);
+        } else {
+          window.switchView('task-detail', '/' + taskId);
         }
       });
     }
@@ -1186,7 +1201,7 @@ function initApp() {
   // =============================================
   // UI Helpers
   // =============================================
-  function appendMessage(content, role, images, files) {
+  function appendMessage(content, role, images, files, taskId) {
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${role}`;
 
@@ -1258,7 +1273,13 @@ function initApp() {
     }
 
     formattedContent = formattedContent.replace(/<\/?(?:style|link|script|meta|base|iframe|object|embed)[^>]*>/gi, '');
-    messageDiv.innerHTML = `<div class="avatar">${avatarSvg}</div><div class="content">${imagesHtml}${filesHtml}${formattedContent}</div>`;
+
+    // Add task badge for agent messages with task_id
+    const taskBadge = taskId && (role === 'agent' || role === 'system')
+      ? ` <a href="task://${taskId}" class="task-badge-link" title="查看任务 #${taskId}" onclick="event.preventDefault(); window.openTaskDetail(${taskId}); window.switchView('task-detail', '/' + ${taskId});">#${taskId}</a>`
+      : '';
+
+    messageDiv.innerHTML = `<div class="avatar">${avatarSvg}</div><div class="content">${imagesHtml}${filesHtml}${formattedContent}${taskBadge}</div>`;
     if (progressInline && role === 'user') {
       chatContainer.insertBefore(messageDiv, progressInline);
     } else {

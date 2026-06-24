@@ -659,7 +659,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     "session_id": ws_session_id
                 })
                 agent_is_running = False
-                return response
+                return (response, ws_task_id)
 
             if ws_task_id:
                 summary = response[:200] if response else ""
@@ -720,7 +720,7 @@ async def websocket_endpoint(websocket: WebSocket):
             except Exception as _final_e:
                 print(f"[WS] Save final message failed: {_final_e}")
 
-            return response
+            return (response, ws_task_id)
         except Exception as e:
             error_msg = str(e)
             # One automatic retry: give the agent a chance to recover
@@ -751,7 +751,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
                     # If retry succeeded, log and return (task already in "running" status)
                     print(f"[WS] Auto-retry succeeded for task {ws_task_id}")
-                    return response
+                    return (response, ws_task_id)
                 except Exception as retry_e:
                     print(f"[WS] Auto-retry also failed for task {ws_task_id}: {retry_e}")
 
@@ -992,15 +992,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
 
                 # Run the agent
-                response = await run_agent_with_progress(query, retry_model, agent_profile_name, images=ws_images, resume_task_id=resume_id_for_run)
-
+                response, ws_task_id = await run_agent_with_progress(query, retry_model, agent_profile_name, images=ws_images, resume_task_id=resume_id_for_run)
 
                 # Send the final response (run_agent_with_progress already saved the message)
                 await _safe_send({
                     "type": "message",
                     "role": "agent",
                     "content": response,
-                    "session_id": ws_session_id
+                    "session_id": ws_session_id,
+                    "task_id": ws_task_id
                 })
                 
             except (WebSocketDisconnect, RuntimeError) as _ws_err:

@@ -362,7 +362,7 @@ export async function openTaskDetail(taskId) {
         <span class="task-meta-chip">🕐 ${formatTime(task.created_at)}</span>
         <span class="task-meta-chip">📊 <span class="task-step-count-label">${task.steps ? task.steps.length : '...'}</span> 步</span>
         ${tokenInfo}
-        ${task.session_id ? `<span class="task-meta-chip">💬 会话 #${task.session_id}${task.session_name ? ' · ' + escapeHtml(task.session_name) : ''}</span>` : ''}
+        ${task.session_id ? `<span class="task-meta-chip" style="cursor:pointer" onclick="window.switchToSession(${task.session_id})" title="切换到该会话">💬 会话 #${task.session_id}${task.session_name ? ' · ' + escapeHtml(task.session_name) : ''}</span>` : ''}
       </div>
       <div class="detail-section">
         <div class="detail-section-title">任务目标</div>
@@ -972,3 +972,9 @@ async function fetchLogs(taskId, viewerEl) {
 window.loadTasks = loadTasks;
 window.updateTaskBadge = updateTaskBadge;
 window.openTaskDetail = openTaskDetail;
+window.switchToSession = function(sessionId) {
+  if (sessionId !== state.currentSessionId && typeof switchSession === 'function') {
+    switchSession(sessionId);
+  }
+  window.switchView?.('chat');
+};
