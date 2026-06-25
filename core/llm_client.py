@@ -175,9 +175,9 @@ def _log_model_call(provider: str, model: str, prompt_tokens: int,
         _resp_path = _ml_os.path.join(_log_dir, f"{_base}_resp.json")
 
         with open(_req_path, "w", encoding="utf-8") as _f:
-            _f.write(request_data[:100000] if request_data else "")
+            _f.write(request_data[:500000] if request_data else "")
         with open(_resp_path, "w", encoding="utf-8") as _f:
-            _f.write(response_data[:100000] if response_data else "")
+            _f.write(response_data[:500000] if response_data else "")
 
         # Store file paths + summary in DB
         _init_model_logs_table()
@@ -661,15 +661,15 @@ class LLMClient:
                         pt = getattr(usage, "prompt_tokens", 0) if usage else 0
                         ct = getattr(usage, "completion_tokens", 0) if usage else 0
                         tt = pt + ct
-                        req_text = json.dumps(messages, ensure_ascii=False)[:50000] if messages else ""
+                        req_text = json.dumps(messages, ensure_ascii=False)[:500000] if messages else ""
                         resp_text = ""
                         if hasattr(response, "choices") and response.choices:
                             msg = response.choices[0].message
-                            resp_text = (getattr(msg, "content", "") or "")[:50000]
+                            resp_text = (getattr(msg, "content", "") or "")[:500000]
                             if not resp_text:
                                 tc = getattr(msg, "tool_calls", None)
                                 if tc:
-                                    resp_text = json.dumps([{"function": {"name": t.function.name, "arguments": t.function.arguments} if hasattr(t, 'function') and hasattr(t.function, 'name') else str(t)} for t in tc], ensure_ascii=False)[:50000]
+                                    resp_text = json.dumps([{"function": {"name": t.function.name, "arguments": t.function.arguments} if hasattr(t, 'function') and hasattr(t.function, 'name') else str(t)} for t in tc], ensure_ascii=False)[:500000]
                         _log_model_call(
                             provider=_infer_provider(attempt_model), model=attempt_model,
                             prompt_tokens=pt, completion_tokens=ct, total_tokens=tt,
@@ -781,8 +781,8 @@ class LLMClient:
                         prompt_tokens=pt,
                         completion_tokens=ct,
                         total_tokens=pt + ct,
-                        request_data=json.dumps(messages, ensure_ascii=False)[:50000] if messages else "",
-                        response_data=_stream_content[:50000],
+                        request_data=json.dumps(messages, ensure_ascii=False)[:500000] if messages else "",
+                        response_data=_stream_content[:500000],
                         cache_hit="hit" if _cached > 0 else "miss",
                         cached_tokens=_cached,
                         latency_ms=int((time.time() - _stream_start) * 1000),
