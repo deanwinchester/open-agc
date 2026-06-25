@@ -28,33 +28,22 @@ _pending_sandbox_approvals: dict = {}
 def check_protected_pid(pid: int) -> bool:
     """Check if a PID belongs to the Open-AGC server or its parent processes.
 
-    Returns True if the PID should NOT be killed (it's protected).
+    Only protects UPWARDS (server + its parent chain like VS Code debugger).
+    Child processes (agent-launched) are NOT protected — the agent can manage them.
     """
     if pid <= 0:
         return False
-    # 1. Server's own PID
     if pid == _server_pid:
         return True
-    # 2. Parent process (VS Code debugger, shell, etc.)
+    # Check parent chain (VS Code debugger, terminal, etc.)
     try:
         import psutil
         current = psutil.Process(_server_pid)
-        # Check parent chain
-        parent = current.parent()
-        if parent and parent.pid == pid:
-            return True
-        # Check all ancestors up to 3 levels
         ancestors = current.parents()
         for anc in ancestors[:3]:
             if anc.pid == pid:
                 return True
-        # Check if this PID is one of our subprocesses
-        children = current.children(recursive=True)
-        for child in children:
-            if child.pid == pid:
-                return True
     except ImportError:
-        # Without psutil, just check self PID
         pass
     except Exception:
         pass
