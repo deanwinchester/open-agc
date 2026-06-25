@@ -38,7 +38,7 @@ from tools.auto_tool import (DynamicTool, load_all_dynamic_tools,
 from agent.sub_agent import SubAgent, TOOL_SETS
 from tools.discovery import ToolDiscoveryTool
 from tools.mcp_tool import get_mcp_manager
-from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused, SearchHistoryTool
+from tools.interaction import AskUserQuestionTool, PauseAndWaitTool, TaskPaused, SearchHistoryTool, UserInterjectionResponseTool
 from tools.shell_interact import ShellSendTool
 from tools.sandbox import EnterWorktreeTool, ExitWorktreeTool
 from tools.self_review import SelfReviewTool
@@ -174,6 +174,9 @@ class OpenAGCAgent:
         self._pre_enabled_tools = pre_enabled_tools or set()
         self._session_sandbox_whitelist: set = set()
         self.pending_messages: list = []
+        self._processing_interjection: bool = False
+        self._rejected_interjection: Optional[dict] = None
+        self._interjection_stuck_count: int = 0
         self._session_sandbox_whitelist: set = set()  # One-time approved paths
         self._session_permission_whitelist: set = set()  # Session-approved command categories
         self._session_network_whitelist: set = set()  # Session-approved network domains
@@ -325,7 +328,7 @@ class OpenAGCAgent:
             f"- search → 按关键词搜索历史任务\n"
             f"- get → 查看任务详情、步骤和交付物\n"
             f"- record_deliverable → 记录任务交付物\n"
-            f"\n## 任务计划与待办管理\n"
+            f"\n## 任务计划与大目标管理\n"
             f"对于多步骤的复杂任务，使用 manage_task_plan 工具管理：\n"
             f"\n"
             f"### Plan（执行计划）\n"
@@ -336,11 +339,11 @@ class OpenAGCAgent:
             f"- 一个 task 只有一个 plan，多次 create 会复用同一个\n"
             f"- 中断恢复后先 plan.show() 了解进度\n"
             f"\n"
-            f"### Todo（大目标）\n"
-            f"- todo_add(desc) → 只添加大的目标（如\"完成翻译模型集成\"）\n"
-            f"- 不要将细分步骤加到 todo 中——细分步骤放在 plan 的 steps 里\n"
-            f"- todo_start(id) / todo_done(id) 标记大目标进展\n"
-            f"- 完成一个大目标关联的所有 plan 步骤后再标记 todo_done\n"
+            f"### Goal（大目标）\n"
+            f"- goal_add(desc) → 只添加大的目标（如\"完成翻译模型集成\"）\n"
+            f"- 不要将细分步骤加到 goal 中——细分步骤放在 plan 的 steps 里\n"
+            f"- goal_start(id) / goal_done(id) 标记大目标进展\n"
+            f"- 完成一个大目标关联的所有 plan 步骤后再标记 goal_done\n"
             f"\n"
             f"### 规则\n"
             f"- 先 plan.create 规划步骤，再按步骤执行\n"
@@ -350,13 +353,18 @@ class OpenAGCAgent:
             f"- 简单的一次性任务不需要创建计划\n"
             f"\n# 记忆与技能系统\n"
             f"\n## 记忆系统\n"
-            f"你拥有智能记忆系统。每次对话开始时，系统会自动检索并展示过去交互中的相关记忆。"
-            f"你也可以使用 manage_memory 工具主动管理记忆："
-            f"action='add' 保存重要事实、用户偏好和学到的知识；"
-            f"action='search' 搜索过去的特定记忆。\n"
+            f"你可以用 manage_memory 工具管理记忆，用 search_history 工具搜索记忆。\n\n"
+            f"记住信息：manage_memory(action='add', topic='话题', content='内容')\n"
+            f"  - topic 必填，用短名词指定话题（如 '车票'、'偏好'、'项目配置'）\n"
+            f"  - 同话题的记忆会按时效性自动排序，最新最相关的优先\n\n"
+            f"回忆信息：search_history(query='关键词', topic='可选限定话题')\n"
+            f"  - 搜到线索后可用 expand_id='mem:N' 查看完整内容\n"
+            f"  - 一年未使用的记忆会自动归档，搜不到时可尝试 include_archived=True\n\n"
+            f"查看全部记忆：manage_memory(action='read')\n"
+            f"修改记忆：manage_memory(action='update', query=ID, content='新内容')\n"
+            f"  - 先用 search_history 找到 ID，再用 update 修改\n"
             f"\n## 技能系统\n"
             f"在每次任务开始时，系统会根据任务内容自动检索并注入相关技能供你参考执行。"
-            f"你也可以主动使用 manage_memory 工具查询和管理技能。"
             f"如果你成功完成了一项之前未完成过的复杂任务，并且得到了用户的正面反馈，"
             f"必须主动询问用户是否需要将过程保存为新技能。"
             f"如用户同意，请使用 save_learned_skill 工具。\n"
@@ -407,6 +415,7 @@ class OpenAGCAgent:
             "send_email": SendEmailTool(),
             "queue_download": DownloadTool(),
             "ask_user_question": AskUserQuestionTool(),
+            "user_interjection_response": UserInterjectionResponseTool(),
             "search_history": SearchHistoryTool(),
             "pause_and_wait": PauseAndWaitTool(),
             "enter_sandbox_mode": EnterWorktreeTool(),
@@ -444,6 +453,7 @@ class OpenAGCAgent:
             "search_available_tools": "检索扩展工具",
             "compact_context": "清理上下文历史",
             "ask_user_question": "向用户提问",
+            "user_interjection_response": "响应中断消息",
             "search_history": "检索会话历史",
             "pause_and_wait": "暂停并等待后台完成",
             "enter_sandbox_mode": "进入沙箱模式",
@@ -488,7 +498,7 @@ class OpenAGCAgent:
         # Progressive Disclosure Setup
         CORE_TOOL_NAMES = {"execute_shell", "manage_memory", "read_file", "write_file", "edit_file",
                            "search_file_content", "find_files", "search_available_tools",
-                           "ask_user_question", "search_history", "queue_download", "pause_and_wait",
+                           "ask_user_question", "user_interjection_response", "search_history", "queue_download", "pause_and_wait",
                            "execute_python", "search_web", "self_review", "configure_system",
                            "manage_task_plan", "parse_html", "shell_send"}
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
@@ -546,13 +556,15 @@ class OpenAGCAgent:
         core_items = []
         ext_items = []
         for name, tool in sorted(self.full_available_tools.items()):
-            label = self.tool_display_names.get(name, name)
             is_core = name in CORE_NAMES
-            desc = getattr(tool, 'description', '')[:60]
-            item = f"  {'✅' if is_core else '🔧'} {label}"
-            if desc:
-                item += f" — {desc}"
-            (core_items if is_core else ext_items).append(item)
+            if is_core:
+                desc = getattr(tool, 'description', '')[:60]
+                item = f"  ✅ `{name}`"
+                if desc:
+                    item += f" — {desc}"
+                core_items.append(item)
+            else:
+                ext_items.append(f"  🔧 `{name}`")
         if core_items:
             lines.append("核心工具（已就绪）：")
             lines.extend(core_items)
@@ -699,26 +711,51 @@ class OpenAGCAgent:
         return words
 
     def _check_pending_messages(self, current_query: str = "") -> str:
-        """Poll pending message queue. Returns injected message or empty string."""
+        """Poll pending message queue.
+
+        New protocol: Returns injected message with `[用户插入: msg]` prefix and
+        system instruction to use `user_interjection_response` tool for judgment.
+
+        Returns:
+            Empty string if nothing to inject, or the interjection message.
+        """
         if not self.pending_messages:
             return ""
-        msg = self.pending_messages.pop(0)
-        if current_query:
-            cur_words = self._text_keywords(current_query)
-            new_words = self._text_keywords(msg)
-            if cur_words and new_words:
-                overlap = len(cur_words & new_words) / max(len(cur_words), len(new_words))
-                # Chinese text with bigram matching typically gets 0.05-0.2 overlap
-                # Even 5% overlap suggests they're related topics
-                if overlap > 0.05:
-                    return f"[用户追加指令] {msg}"
-        # If no current_query to compare against, always accept
-        # If word overlap was too low, still accept (don't drop user messages)
-        return f"[用户追加指令] {msg}"
+
+        # If already processing an interjection, check for stuck timeout
+        if self._processing_interjection:
+            self._interjection_stuck_count += 1
+            if self._interjection_stuck_count > 12:  # ~12 iterations = ~30s timeout
+                self._processing_interjection = False
+                self._interjection_stuck_count = 0
+                # Auto-pop and accept on timeout
+                msg = self.pending_messages.pop(0)
+                print(f"[Agent] Interjection timeout, auto-accepting: {msg[:60]}")
+                return ""
+            return ""
+
+        # New interjection: inject with protocol
+        msg = self.pending_messages[0]  # peek, don't pop
+        self._processing_interjection = True
+        self._interjection_stuck_count = 0
+        print(f"[Agent] Injected interjection for LLM judgment: {msg[:80]}")
+        return (
+            f"[用户插入: {msg}] "
+            f"【系统指令：请使用 user_interjection_response 工具判断是否处理此插入消息。"
+            f"如果与你当前任务相关（约束/反馈/补充信息），选择 accept；"
+            f"如果完全是新话题或无关内容，选择 reject（系统将自动为其创建新任务）；"
+            f"如果不确定，选择 ask 向用户提问。】"
+        )
 
     def queue_message(self, text: str):
-        """Add a message to the pending queue (non-blocking input)."""
+        """Add a message to the pending queue (non-blocking input).
+        Also unblocks any wait_for_user_input by putting into user_input_queue."""
         self.pending_messages.append(text)
+        # If agent is blocked on ask_user_question, unblock with the message
+        try:
+            self.user_input_queue.put_nowait(f"[用户消息] {text}")
+        except Exception:
+            pass
 
     def _handle_sandbox_blocked(self, sb, tool_name, tool_args, progress_callback):
         """Pause agent loop and wait for user to approve/deny sandbox path access."""
@@ -1474,12 +1511,67 @@ class OpenAGCAgent:
         pruned.extend(messages[keep_idx:])
         return pruned
 
-    def _llm_summarize_old_rounds(self, messages, max_rounds_to_summarize=10):
-        """Use LLM to summarize oldest rounds when context budget is critical.
-        Replaces heuristic folding with actual LLM understanding.
-        Returns (pruned_messages, did_summarize)."""
+    # ── LLM-based context compaction (Claude Code style) ──
+
+    # Compact prompt modeled on claude-code-source/src/services/compact/prompt.ts
+    _COMPACT_NO_TOOLS = (
+        "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n"
+        "- Do NOT use Read, Bash, Grep, Glob, Edit, Write, execute_shell, execute_python, or ANY other tool.\n"
+        "- You already have all the context you need in the conversation above.\n"
+        "- Tool calls will be REJECTED and will waste your only turn.\n"
+        "- Your entire response must be plain text: an <analysis> block followed by a <summary> block.\n\n"
+    )
+
+    _COMPACT_PROMPT_BASE = (
+        "Your task is to create a detailed summary of the conversation so far, "
+        "paying close attention to the user's explicit requests and your previous actions. "
+        "This summary should be thorough in capturing technical details, code patterns, "
+        "and decisions that would be essential for continuing work without losing context.\n\n"
+        "Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts. "
+        "In your analysis:\n"
+        "1. Chronologically analyze each message and section of the conversation. "
+        "For each section thoroughly identify:\n"
+        "   - The user's explicit requests and intents\n"
+        "   - Your approach to addressing the requests\n"
+        "   - Key decisions, technical concepts and code patterns\n"
+        "   - Specific details like file names, code snippets, function signatures\n"
+        "   - Errors that you ran into and how you fixed them\n"
+        "   - User feedback, especially if the user told you to do something differently\n"
+        "2. Double-check for technical accuracy and completeness.\n\n"
+        "Your summary should include the following sections:\n\n"
+        "1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail.\n"
+        "2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.\n"
+        "3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. "
+        "Include full code snippets where applicable.\n"
+        "4. Errors and fixes: List all errors that you ran into, and how you fixed them. "
+        "Pay special attention to user feedback.\n"
+        "5. Problem Solving: Document problems solved and any ongoing troubleshooting.\n"
+        "6. All user messages: List ALL user messages that are not tool results.\n"
+        "7. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.\n"
+        "8. Current Work: Describe precisely what was being worked on immediately before this summary request. "
+        "Include file names and code snippets where applicable.\n"
+        "9. Optional Next Step: List the next step that you will take related to the most recent work. "
+        "Ensure this step is directly in line with the user's most recent explicit requests.\n\n"
+        "Structure your output like this:\n"
+        "<analysis>\n[Your analysis]\n</analysis>\n\n"
+        "<summary>\n1. Primary Request and Intent:\n   ...\n2. Key Technical Concepts:\n   ...\n"
+        "...\n9. Optional Next Step:\n   ...\n</summary>\n\n"
+        "REMINDER: Do NOT call any tools. Respond with plain text only."
+    )
+
+    def _llm_compact_messages(self, messages, target_token_savings=None):
+        """Use LLM to produce a structured conversation summary (Claude Code style).
+
+        Identifies the oldest portion of the conversation by round-boundary,
+        sends it to the LLM with the compact prompt, and replaces it with the
+        structured summary. The most recent N rounds are kept intact.
+
+        Returns (new_messages, did_compact) where new_messages has the old
+        prefix replaced with a summary user-message, or (messages, False) if
+        compaction was not possible.
+        """
         try:
-            # Identify user-assistant round boundaries
+            # Identify user-assistant round boundaries (skip system prompt at [0])
             rounds = []
             i = 1
             while i < len(messages):
@@ -1500,54 +1592,97 @@ class OpenAGCAgent:
                         rounds.append((start, i))
                 else:
                     i += 1
-            import sys as _dbg3
-            print(f"[DBG] _llm_summarize: {len(rounds)} rounds, max_rounds={max_rounds_to_summarize}", file=_dbg3.stderr, flush=True)
-            if len(rounds) <= 3:
-                print(f"[DBG] _llm_summarize: only {len(rounds)} rounds, skipping", file=_dbg3.stderr, flush=True)
+
+            if len(rounds) <= 2:
+                print(f"[Agent] _llm_compact: only {len(rounds)} rounds, skipping")
                 return messages, False
-            keep = 2
-            n = min(max_rounds_to_summarize, len(rounds) - keep)
-            if n <= 0:
-                return messages, False
+
+            # Keep the last 5 rounds intact for recent tool call context; summarize everything older
+            keep_count = min(5, len(rounds) - 1)
+            n = len(rounds) - keep_count  # number of rounds to summarize
             old = rounds[:n]
             rest = rounds[n:]
+
+            # Build the conversation text for the LLM (truncate long tool results)
             parts = []
             for s, e in old:
                 for rm in messages[s:e]:
                     role = rm.get("role", "")
-                    content = str(rm.get("content", ""))[:300]
+                    content = str(rm.get("content", ""))
                     tc = rm.get("tool_calls")
                     if tc:
                         for t in tc:
                             fn = t.get("function", {})
-                            parts.append(f"[工具:{fn.get('name','')} {str(fn.get('arguments',''))[:100]}]")
+                            name = fn.get("name", "?")
+                            args_raw = str(fn.get("arguments", ""))[:200]
+                            parts.append(f"[Tool: {name}({args_raw})]")
                     elif content:
-                        parts.append(f"[{role}]: {content}")
+                        # Truncate very long tool results
+                        if role == "tool" and len(content) > 500:
+                            content = content[:500] + f"\n... (truncated {len(content)-500} chars)"
+                        parts.append(f"[{role}]: {content[:1000]}")
+
             text = "\n".join(parts)
             if not text.strip():
-                return self._fold_tool_calls(messages, force=True), True
-            prompt = (
-                "以下是AI助手与用户之间多轮对话的历史记录。\n"
-                "请用简洁的中文总结已完成的工作、关键发现和决定。\n"
-                "只总结事实，不要添加新信息。\n\n"
-                f"对话记录：\n{text[:6000]}\n\n总结："
+                # Nothing to summarize — fall back to folding
+                folded = self._fold_tool_calls(messages, force=True)
+                return folded, True
+
+            # Build the compact prompt
+            compact_prompt = (
+                self._COMPACT_NO_TOOLS
+                + self._COMPACT_PROMPT_BASE
+                + f"\n\nHere is the conversation portion to summarize:\n\n{text[:12000]}"
             )
-            resp, _ = self.llm.chat(messages=[{"role": "user", "content": prompt}])
+
+            print(f"[Agent] _llm_compact: summarizing {n} rounds ({len(text)} chars)...")
+
+            resp, _ = self.llm.chat(
+                messages=[{"role": "user", "content": compact_prompt}],
+                # No tools — force text-only response
+            )
             reply = (resp.choices[0].message.content or "").strip()
             if not reply:
-                return self._fold_tool_calls(messages, force=True), True
-            pruned = messages[:1]
+                print("[Agent] _llm_compact: empty response, falling back to fold")
+                folded = self._fold_tool_calls(messages, force=True)
+                return folded, True
+
+            # Extract <summary> block, strip <analysis> scratchpad
+            import re as _re_compact
+            summary_only = reply
+            # Remove analysis scratchpad
+            summary_only = _re_compact.sub(r'<analysis>.*?</analysis>', '', summary_only, flags=_re_compact.DOTALL)
+            # Extract summary content from tags, or use whole response
+            sm = _re_compact.search(r'<summary>(.*?)</summary>', summary_only, _re_compact.DOTALL)
+            if sm:
+                summary_text = sm.group(1).strip()
+            else:
+                # No tags — use entire response (strip analysis if present)
+                summary_text = _re_compact.sub(r'<analysis>.*?</analysis>', '', reply, flags=_re_compact.DOTALL).strip()
+
+            # Build the new messages:
+            # [system, compact_summary, ...kept_rounds...]
+            pruned = messages[:1]  # system prompt
             pruned.append({
                 "role": "user",
-                "content": f"[摘要 - 前{n}轮对话]\n{reply}\n[/摘要]"
+                "content": (
+                    "[会话摘要 — 以下是对较早对话的结构化总结，保留了最近的消息原文]\n\n"
+                    f"{summary_text}"
+                )
             })
             for s, e in rest:
                 pruned.extend(messages[s:e])
-            print(f"[Agent] LLM-compressed {n} rounds: {len(messages)} -> {len(pruned)} msgs")
+
+            print(f"[Agent] LLM compact: {len(messages)} -> {len(pruned)} msgs (summarized {n} rounds)")
             return pruned, True
+
         except Exception as e:
-            print(f"[Agent] LLM summarize error: {e}")
-            return self._fold_tool_calls(messages, force=True), True
+            print(f"[Agent] _llm_compact error: {e}")
+            try:
+                folded = self._fold_tool_calls(messages, force=True)
+                return folded, True
+            except Exception:
+                return messages, False
 
     def run_turn(self, user_input: str, verbose: bool = False,
                  progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -1661,13 +1796,13 @@ class OpenAGCAgent:
                         system_content += "\n\n" + _fmt_plan(_plan)
                 except Exception:
                     pass
-            # Inject todo list
+            # Inject goal list
             try:
-                from tools.task_plan import load_todos as _load_todos, format_todo_list_for_prompt as _fmt_todos
-                _todos = _load_todos()
-                _todo_text = _fmt_todos(_todos)
-                if _todo_text:
-                    system_content += "\n\n" + _todo_text
+                from tools.task_plan import load_goals as _load_goals, format_goal_list_for_prompt as _fmt_goals
+                _goals = _load_goals()
+                _goal_text = _fmt_goals(_goals)
+                if _goal_text:
+                    system_content += "\n\n" + _goal_text
             except Exception:
                 pass
             # Inject task title as goal reminder so agent stays focused
@@ -2109,10 +2244,12 @@ class OpenAGCAgent:
                                             "reason": str(tp),
                                             "pid": tp.pid,
                                             "output_file": tp.output_file,
+                                            "wake_in_minutes": tp.wake_in_minutes,
                                         })
                                     # Remove orphaned tool_calls message so API doesn't reject on next call
                                     del self.messages[_tool_call_insertion_idx:]
-                                    return f"[TASK_BACKGROUNDED] {tp}"
+                                    wake_tag = f"WAKE_IN={tp.wake_in_minutes} " if tp.wake_in_minutes else ""
+                                    return f"[TASK_BACKGROUNDED] {wake_tag}{tp}"
                                 except SandboxBlocked as sb:
                                     if attempt > 2:
                                         result = f"Sandbox blocked: {sb.path} (max retries exceeded)"
@@ -2228,6 +2365,68 @@ class OpenAGCAgent:
                         "content": result_str
                     })
 
+                    # Handle user_interjection_response results
+                    if function_name == "user_interjection_response":
+                        self._processing_interjection = False
+                        self._interjection_stuck_count = 0
+                        try:
+                            import json as _jj
+                            jr = _jj.loads(result_str)
+                            action = jr.get("action", "accept")
+                            if action == "accept":
+                                self.pending_messages.pop(0)
+                                # Re-inject as clean user message so LLM processes it naturally
+                                clean_msg = jr.get("response", "") or "已收到"
+                                self.messages[-2]["content"] = f"[用户插入已接受] {clean_msg}"
+                                if verbose:
+                                    print(f"[Agent] ✅ Interjection accepted: {clean_msg[:60]}")
+                            elif action == "reject":
+                                self.pending_messages.pop(0)
+                                reason = jr.get("reason", "")
+                                self._rejected_interjection = {
+                                    "message": self.messages[-2].get("content", ""),
+                                    "reason": reason,
+                                    "response": jr.get("response", ""),
+                                }
+                                # Remove injected interjection messages from context
+                                self.messages.pop()  # tool result
+                                self.messages.pop()  # assistant tool_call
+                                self.messages.pop()  # user interjection
+                                if verbose:
+                                    print(f"[Agent] ❌ Interjection rejected: {reason[:60]}")
+                                continue  # Skip rest of loop, go back to LLM
+                            elif action == "ask":
+                                self.pending_messages.pop(0)
+                                question = jr.get("question", "请澄清您的需求")
+                                if verbose:
+                                    print(f"[Agent] ❓ Interjection needs clarification: {question[:60]}")
+                                # Use ask_user_question to get clarification
+                                from tools.interaction import AskUserQuestionTool
+                                aqt = AskUserQuestionTool()
+                                # Create a fake context that stores the answer
+                                _fake_ctx = type('obj', (object,), {
+                                    'wait_for_user_input': lambda self, q, opts: None
+                                })()
+                                try:
+                                    answer = aqt.execute(
+                                        question_text=question,
+                                        _agent_context=self  # This triggers user_input_queue.wait
+                                    )
+                                    if answer:
+                                        clean_msg = jr.get("response", "") or ""
+                                        self.messages.append({
+                                            "role": "user",
+                                            "content": f"[用户澄清] {answer}"
+                                        })
+                                        if verbose:
+                                            print(f"[Agent] Got clarification: {answer[:60]}")
+                                except Exception:
+                                    pass
+                                continue
+                        except json.JSONDecodeError:
+                            self._processing_interjection = False
+                            print(f"[Agent] Failed to parse interjection response")
+
                     # Handle self_review results
                     if function_name == "self_review":
                         self._in_self_review = False
@@ -2326,12 +2525,12 @@ class OpenAGCAgent:
                         pruned = self.token_budget.prune_messages(self.messages)
 
                         if estimate_messages_tokens(pruned) > self.token_budget.max_tokens * 0.8:
-                            llm_pruned, did = self._llm_summarize_old_rounds(pruned)
+                            llm_pruned, did = self._llm_compact_messages(pruned)
                             if did and len(llm_pruned) < len(pruned):
                                 import sys as _dbg5
-                                print(f"[DBG] LLM summary SUCCESS: {len(pruned)} -> {len(llm_pruned)} msgs", file=_dbg5.stderr, flush=True)
+                                print(f"[DBG] LLM compact SUCCESS: {len(pruned)} -> {len(llm_pruned)} msgs", file=_dbg5.stderr, flush=True)
                                 if verbose:
-                                    print(f"[Agent] LLM partial compact: {len(pruned)} -> {len(llm_pruned)} msgs")
+                                    print(f"[Agent] LLM compact: {len(pruned)} -> {len(llm_pruned)} msgs")
                                 pruned = llm_pruned
                             else:
                                 folded = self._fold_tool_calls(pruned, force=True)
@@ -2370,13 +2569,8 @@ class OpenAGCAgent:
                 final_answer = message.content
                 if self.logger:
                     self.logger.log_agent_response(final_answer)
-                # Auto-extract & save memories in background thread
-                thread = threading.Thread(
-                    target=self._auto_save_memories,
-                    args=(user_input, final_answer),
-                    daemon=True
-                )
-                thread.start()
+                # [Removed] Auto-extract & save memories — was unreliable (no topic, noisy).
+                # Agent should use manage_memory(add) explicitly when needed.
                 # Extract knowledge graph entities from this turn's messages
                 try:
                     self.knowledge_graph.extract_from_messages(self.messages)
@@ -2396,6 +2590,12 @@ class OpenAGCAgent:
                         print(f"[Agent] Auto-generated tool: {tool_name}")
                 except Exception as e:
                     print(f"[Agent] Auto-tool generation error: {e}")
+                # If there are rejected interjections, attach them to the response
+                if self._rejected_interjection:
+                    import json as _rj
+                    reject_data = self._rejected_interjection
+                    self._rejected_interjection = None
+                    return f"[INTERJECTION_REJECTED] {_rj.dumps(reject_data, ensure_ascii=False)}\n{final_answer}"
                 return final_answer
 
         # Extract knowledge graph entities even on failure

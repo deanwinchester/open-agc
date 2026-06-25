@@ -1,210 +1,150 @@
-import os
-from core.memory_store import MemoryStore, migrate_from_markdown
-from core.paths import get_data_path
-
-
+from typing import Any, Dict
+from pydantic import PrivateAttr
 from tools.base import BaseTool
 
+
 class MemoryTool(BaseTool):
-    """
-    智能记忆管理工具。使用 FTS5 全文搜索来存储和检索相关记忆。
-    支持记忆层次：core（核心事实）、working（工作记忆）、episode（事件记录）。
-    """
-    model_config = {"extra": "allow", "arbitrary_types_allowed": True}
-    
     name: str = "manage_memory"
     description: str = (
-        "管理你的长期记忆系统。可以使用 'search' 通过语义相似度搜索相关记忆，"
-        "使用 'add' 保存重要事实或学到的知识，支持 core/working/episode 多层级存储。"
+        "管理长期记忆。\n\n"
+        "使用 'add' 保存重要信息（需指定 topic 话题标签，如 '车票'、'偏好'、'项目配置'）\n"
+        "使用 'read' 查看已记住的内容\n"
+        "使用 'update' 按 ID 替换记忆内容\n"
+        "使用 'forget' 按 ID 删除记忆\n\n"
+        "注意：查找记忆请用 search_history 工具（支持多源搜索和渐进展开），不要用 manage_memory 来搜索。"
     )
 
-    def __init__(self, db_path: str = None, session_id=None, **kwargs):
-        super().__init__(**kwargs)
-        if db_path is None:
-            db_path = get_data_path("memory.db")
-        self.session_id = session_id
-        self.store = MemoryStore(db_path=db_path, session_id=session_id)
+    _store: Any = PrivateAttr()
 
-        # Migrate from old markdown format if it exists
-        old_md_path = get_data_path("memory.md")
-        if os.path.exists(old_md_path):
-            migrate_from_markdown(old_md_path, self.store)
+    def __init__(self, db_path: str = None, session_id: int = None):
+        super().__init__()
+        from core.memory_store import MemoryStore
+        object.__setattr__(self, '_store', MemoryStore(db_path=db_path, session_id=session_id))
 
     def execute(self, action: str, content: str = "", query: str = "",
                 category: str = "", memory_type: str = "",
-                importance: int = 1, **kwargs) -> str:
+                topic: str = "", cross_session: int = None,
+                **kwargs) -> str:
         """
-        Execute memory operations.
-
         Args:
-            action: 'search', 'add', 'read', 'update', 'consolidate', 'categories', 'types'
-            content: Memory content to add (for 'add'/'update')
-            query: Search query (for 'search')
-            category: Optional category filter
-            memory_type: Memory type: 'core', 'working', or 'episode'
-            importance: Priority level 1-5 (for 'add')
+            action: 'add', 'read', 'update', 'forget'
+            content: 记忆内容（add/update 时必填）
+            query: 记忆 ID（update/forget 时必填）
+            topic: 话题标签（add 时建议填写，如 "车票"、"偏好"）
+            category: 类别（tech/user_pref/project/knowledge/system/general）
+            memory_type: core(长期核心事实)/working(工作记忆)/episode(事件经验)
         """
-        cross_session = kwargs.get("session_id")  # LLM can specify target session
+        if memory_type not in ("core", "working", "episode", ""):
+            return "错误：memory_type 必须是 'core'、'working' 或 'episode'。"
 
-        if action == "search":
-            search_query = query or content
-            if not search_query:
-                return "错误：请提供搜索关键词 'query'。"
+        # ── Add ──
+        if action == "add":
+            if not content:
+                return "错误：请提供记忆内容 'content'。"
+            if not topic:
+                topic = "general"
+            kwargs_for_add = {
+                "content": content,
+                "category": category or None,
+                "memory_type": memory_type or "working",
+                "topic": topic,
+                "source": "manual",
+            }
+            mid = self._store.add_memory(**kwargs_for_add)
+            return f"✅ 记忆已添加（ID: {mid}，话题: {topic}，类型: {memory_type or 'working'}）"
 
-            results = self.store.search_memories(
-                search_query, top_k=5,
+        # ── Read ──
+        elif action == "read":
+            memories = self._store.get_all_memories(
                 category=category or None,
                 memory_type=memory_type or None,
-                session_id=cross_session
+                limit=20,
+                session_id=cross_session,
             )
-            if not results:
-                return "没有找到相关记忆。"
-
+            if not memories:
+                return "还没有存储任何记忆。"
             formatted = []
-            for m in results:
+            for m in memories:
                 type_label = {"core": "核心", "working": "工作", "episode": "事件"}.get(
                     m.get("memory_type", ""), ""
                 )
+                topic_tag = f" [{m.get('topic', '')}]" if m.get('topic') else ""
+                status_tag = " [归档]" if m.get('status') == 'archived' else ""
                 formatted.append(
-                    f"[{m['category']}/{type_label}] (相关度: {m['relevance']}) {m['content']}"
+                    f"[ID:{m['id']}]{topic_tag} ({m['category']}/{type_label}){status_tag} {m['content']}"
                 )
-            return "找到相关记忆：\n" + "\n".join(formatted)
+            return "所有记忆：\n" + "\n".join(formatted)
 
-        elif action in ("add", "append"):
-            if not content:
-                return "错误：请提供要添加的 'content'。"
-            mid = self.store.add_memory(
-                content, category=category or None,
-                importance=importance,
-                memory_type=memory_type or "episode"
-            )
-            cat = category or "自动检测"
-            mt = memory_type or "episode"
-            return f"记忆已添加（ID: {mid}，类别: {cat}，类型: {mt}）。"
-
+        # ── Update ──
         elif action == "update":
-            if not query and not content:
-                return "错误：请提供要更新的记忆 ID（query）和新内容（content）。"
+            if not query:
+                return "错误：请提供要更新的记忆 ID（query 参数）。"
             try:
                 memory_id = int(query)
             except (ValueError, TypeError):
                 return "错误：请在 'query' 中提供记忆 ID（数字）。"
             if not content:
                 return "错误：请提供更新后的 'content'。"
-            self.store.update_memory(memory_id, content)
-            return f"记忆 ID {memory_id} 已更新。"
+            # Read old content first for reference
+            old = self._store.get_memory(memory_id)
+            self._store.update_memory(memory_id, content)
+            old_preview = f" （原: {old['content'][:80]}）" if old else ""
+            return f"✅ 记忆 ID {memory_id} 已更新{old_preview}。"
 
-        elif action == "read":
-            memories = self.store.get_all_memories(
-                category=category or None,
-                memory_type=memory_type or None,
-                limit=20,
-                session_id=cross_session
-            )
-            if not memories:
-                return "还没有存储任何记忆。"
-
-            formatted = []
-            for m in memories:
-                type_label = {"core": "核心", "working": "工作", "episode": "事件"}.get(
-                    m.get("memory_type", ""), ""
-                )
-                formatted.append(f"[{m['category']}/{type_label}] {m['content']}")
-            return "所有记忆：\n" + "\n".join(formatted)
-
-        elif action == "consolidate":
-            result = self.store.consolidate()
-            return result
-
-        elif action == "categories":
-            cats = self.store.get_categories_summary()
-            if not cats:
-                return "还没有存储任何记忆。"
-            lines = [f"  {cat}: {count} 条" for cat, count in cats.items()]
-            return "记忆分类统计：\n" + "\n".join(lines)
-
-        elif action == "types":
-            types = self.store.get_type_summary()
-            if not types:
-                return "还没有存储任何记忆。"
-            type_names = {"core": "核心事实", "working": "工作记忆", "episode": "事件记录"}
-            lines = [f"  {type_names.get(mt, mt)}: {count} 条" for mt, count in types.items()]
-            return "记忆类型统计：\n" + "\n".join(lines)
-
-        elif action == "overwrite":
-            if content:
-                all_mems = self.store.get_all_memories(limit=1000)
-                for m in all_mems:
-                    self.store.delete_memory(m["id"])
-                self.store.add_memory(content)
-                return "记忆已全部替换为新内容。"
-            return "错误：未提供内容。"
-
+        # ── Forget ──
         elif action == "forget":
             if not query:
-                return "错误：请提供要删除的记忆 ID（query）。"
+                return "错误：请提供要删除的记忆 ID（query 参数）。"
             try:
                 memory_id = int(query)
             except (ValueError, TypeError):
                 return "错误：请在 'query' 中提供记忆 ID（数字）。"
-            self.store.delete_memory(memory_id)
-            return f"记忆 ID {memory_id} 已删除。"
+            old = self._store.get_memory(memory_id)
+            if self._store.delete_memory(memory_id):
+                return f"✅ 记忆 ID {memory_id} 已删除。"
+            return f"错误：未找到 ID {memory_id} 的记忆。"
 
-        else:
-            return (
-                f"错误：未知操作 '{action}'。"
-                "可用操作：'search'、'add'、'read'、'update'、'forget'、"
-                "'consolidate'、'categories'、'types'。"
-            )
+        return (
+            f"错误：未知操作 '{action}'。"
+            "可用操作：'add'（添加）、'read'（列表）、'update'（按 ID 更新）、'forget'（按 ID 删除）。"
+        )
 
-    def get_openai_schema(self) -> dict:
+    def get_openai_schema(self) -> Dict[str, Any]:
         return {
             "type": "function",
             "function": {
-                "name": "manage_memory",
-                "description": (
-                    "管理你的长期记忆系统。"
-                    "使用 'search' 通过语义相似度搜索相关记忆。"
-                    "使用 'add' 保存重要事实、用户偏好或学到的知识。"
-                    "使用 'read' 列出所有记忆。"
-                    "使用 'update' 更新已有记忆。"
-                    "使用 'forget' 删除某条记忆。"
-                    "使用 'consolidate' 整理去重。"
-                    "使用 'categories' 查看分类统计，'types' 查看类型统计。"
-                ),
+                "name": self.name,
+                "description": self.description,
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["search", "add", "read", "update", "forget",
-                                     "consolidate", "categories", "types"],
-                            "description": "要执行的操作。",
+                            "enum": ["add", "read", "update", "forget"],
+                            "description": "操作类型：'add'=添加，'read'=查看全部，'update'=按ID更新，'forget'=按ID删除"
                         },
                         "content": {
                             "type": "string",
-                            "description": "记忆内容（用于 'add'、'update'）。",
+                            "description": "记忆内容（add/update 时必填，最长 2000 字）。"
                         },
                         "query": {
                             "type": "string",
-                            "description": "搜索关键词（用于 'search'），或记忆 ID（用于 'update'、'forget'）。",
+                            "description": "记忆 ID（update/forget 时必填，数字）。"
+                        },
+                        "topic": {
+                            "type": "string",
+                            "description": "话题标签（add 时建议填写，如 '车票'、'偏好'、'项目配置'）。"
+                                   "同话题的记忆会按相关性排序返回。"
                         },
                         "category": {
                             "type": "string",
-                            "description": "分类过滤（可选）。值：tech, user_pref, project, knowledge, system, general。",
+                            "enum": ["", "tech", "user_pref", "project", "knowledge", "system", "general"],
+                            "description": "类别（可选）"
                         },
                         "memory_type": {
                             "type": "string",
-                            "enum": ["core", "working", "episode"],
-                            "description": "记忆类型：core=长期核心事实，working=近期工作记忆，episode=事件记录。",
-                        },
-                        "importance": {
-                            "type": "integer",
-                            "description": "优先级 1-5（用于 'add'，默认 1）。",
-                        },
-                        "session_id": {
-                            "type": "integer",
-                            "description": "跨会话查询时指定目标会话ID。留空则默认搜索当前会话。",
+                            "enum": ["", "core", "working", "episode"],
+                            "description": "记忆类型：core=长期核心事实，working=短期工作记忆（默认），episode=事件经验"
                         },
                     },
                     "required": ["action"],
