@@ -745,6 +745,24 @@ body {
 [data-theme="dark"] .message.user .content { color: #000; font-weight: 500; }
 .message.agent .content { border-top-left-radius: 6px; }
 
+/* Chat-task binding badge */
+.task-badge-link {
+  display: inline-block;
+  font-size: 0.7rem;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--bg-inner);
+  color: var(--accent-color, var(--theme-color));
+  text-decoration: none;
+  margin-left: 6px;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.task-badge-link:hover {
+  background: var(--theme-color);
+  color: #fff;
+}
+
 /* Markdown Styles */
 .content h1, .content h2, .content h3 { margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-primary); }
 .message.user .content h1, .message.user .content h2, .message.user .content p { color: inherit; }

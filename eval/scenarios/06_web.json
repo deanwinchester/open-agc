@@ -1,0 +1,31 @@
+[
+  {
+    "name": "web_search_basic",
+    "description": "基本网页搜索",
+    "category": ["web"],
+    "level": "core",
+    "prompt": "搜索「2024年诺贝尔物理学奖」的获奖者是谁",
+    "expected": {
+      "tool_used": ["search_web"],
+      "max_steps": 10,
+      "max_tokens": 20000
+    },
+    "timeout": 60,
+    "tags": ["basic"]
+  },
+  {
+    "name": "web_source_attribution",
+    "description": "搜索结果需注明来源",
+    "category": ["web", "reasoning"],
+    "level": "advanced",
+    "prompt": "查一下 Python 3.13 的新特性，告诉我至少3个新特性并注明信息来源",
+    "expected": {
+      "tool_used": ["search_web"],
+      "output_contains": ["http"],
+      "max_steps": 10,
+      "max_tokens": 20000
+    },
+    "timeout": 60,
+    "tags": ["source"]
+  }
+]

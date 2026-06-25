@@ -28,10 +28,12 @@ function _activateView(viewId) {
   if (targetView) targetView.classList.add('active');
   if (targetNav) targetNav.classList.add('active');
 
-  // Clear chat unread badge when entering chat
+  // Clear chat unread badge when entering chat and scroll to bottom
   if (viewId === 'chat') {
     const badge = document.getElementById('chat-unread-badge');
     if (badge) { badge.textContent = '0'; badge.style.display = 'none'; }
+    // Scroll to bottom (deferred so DOM has time to render)
+    setTimeout(() => { if (typeof window.scrollToBottom === 'function') window.scrollToBottom(true, false); }, 50);
   }
 
   // Load view-specific data — these are attached to window by app.js

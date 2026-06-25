@@ -1,0 +1,48 @@
+[
+  {
+    "name": "memory_save_and_recall",
+    "description": "保存记忆并检索",
+    "category": ["memory"],
+    "level": "core",
+    "prompt": "记住我喜欢吃火锅，然后搜索记忆告诉我我喜欢吃什么",
+    "expected": {
+      "tool_used": ["manage_memory", "search_history"],
+      "output_contains": ["火锅"],
+      "max_steps": 10,
+      "max_tokens": 20000
+    },
+    "timeout": 60,
+    "tags": ["basic"]
+  },
+  {
+    "name": "memory_update",
+    "description": "更新已有记忆",
+    "category": ["memory"],
+    "level": "advanced",
+    "setup": "import sys; sys.path.insert(0,'.'); from core.memory_store import MemoryStore; from core.paths import get_data_path; ms=MemoryStore(db_path=get_data_path('memory.db')); ms.add_memory('用户喜欢喝咖啡', category='user_pref', memory_type='core')",
+    "prompt": "我之前说喜欢喝咖啡，现在改一下——其实我更喜欢喝茶。更新你的记忆并确认",
+    "expected": {
+      "tool_used": ["manage_memory"],
+      "output_contains": ["茶"],
+      "max_steps": 10,
+      "max_tokens": 20000
+    },
+    "timeout": 60,
+    "tags": ["update"]
+  },
+  {
+    "name": "memory_multi_topic",
+    "description": "多话题记忆管理",
+    "category": ["memory"],
+    "level": "advanced",
+    "prompt": "分别记住以下三件事：1. 我最喜欢的编程语言是Python 2. 我的项目目录在 D:\\GitHub 3. 我常用的模型是 DeepSeek。然后搜索跟「开发」相关的记忆",
+    "expected": {
+      "tool_used": ["manage_memory", "search_history"],
+      "output_contains": ["Python"],
+      "max_steps": 15,
+      "max_tokens": 30000
+    },
+    "timeout": 90,
+    "tags": ["multi_topic"]
+  }
+]

@@ -1,0 +1,46 @@
+[
+  {
+    "name": "context_follow_up",
+    "description": "上下文延续 — 基于之前的操作做补充",
+    "category": ["reasoning", "shell"],
+    "level": "advanced",
+    "prompt": "先用Shell创建一个名为 _eval_ctx.txt 的文件，内容为'第一步完成'。然后告诉我这个文件的内容，再在后面追加一行'第二步完成'",
+    "expected": {
+      "tool_used": ["execute_shell", "read_file"],
+      "output_contains": ["第一步", "第二步"],
+      "max_steps": 10,
+      "max_tokens": 15000
+    },
+    "tags": ["context"],
+    "teardown": "import os; [os.remove(f) for f in ['_eval_ctx.txt'] if os.path.exists(f)]"
+  },
+  {
+    "name": "context_search_history",
+    "description": "从历史记忆中检索信息",
+    "category": ["memory", "reasoning"],
+    "level": "advanced",
+    "setup": "import sys; sys.path.insert(0,'.'); from core.memory_store import MemoryStore; from core.paths import get_data_path; ms=MemoryStore(db_path=get_data_path('memory.db')); ms.add_memory('用户的API密钥保存在 config.json 中', category='tech', memory_type='core')",
+    "prompt": "我不记得我的 API 密钥放哪了，帮我查一下之前有没有记录过相关位置信息",
+    "expected": {
+      "tool_used": ["search_history"],
+      "output_contains": ["config.json"],
+      "max_steps": 8,
+      "max_tokens": 15000
+    },
+    "timeout": 60,
+    "tags": ["context", "search"]
+  },
+  {
+    "name": "context_task_plan_reuse",
+    "description": "复用之前任务的结果",
+    "category": ["reasoning"],
+    "level": "stress",
+    "prompt": "先运行 `dir /b *.py 2>nul || ls *.py 2>/dev/null` 列出python文件，然后统计一下这些文件的平均大小",
+    "expected": {
+      "tool_used": ["execute_shell"],
+      "max_steps": 8,
+      "max_tokens": 20000
+    },
+    "tags": ["context", "reuse"]
+  }
+]

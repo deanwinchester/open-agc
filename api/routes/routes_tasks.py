@@ -18,7 +18,7 @@ from api.task_core import (
     save_task_context, add_task_step, _extract_task_title,
     _record_task_deliverables, increment_task_resume, _check_goal_completeness,
 )
-from tools.shell import interrupt_shell, get_background_processes, cleanup_background_process
+from tools.shell import interrupt_shell, get_background_processes, get_orphan_processes, cleanup_background_process, adopt_orphan_processes
 
 router = APIRouter()
 
@@ -313,16 +313,38 @@ async def update_schedule(task_id: int, req: ScheduleTaskRequest):
 
 @router.get("/api/processes")
 async def list_processes():
-    """List all running background shell processes."""
-    procs = get_background_processes()
+    """List all running background shell processes (including orphans).
+
+    Each process includes:
+    - alive: whether the PID is actually still running (os.kill check)
+    - uptime: seconds since process started
+    """
+    from tools.shell_interact import _is_pid_alive
+    procs = {}
+    for tid, info in get_background_processes().items():
+        pinfo = dict(info)
+        pid = pinfo.get("pid")
+        pinfo["alive"] = _is_pid_alive(pid) if pid else False
+        pinfo["uptime"] = _time.time() - pinfo.get("started_at", _time.time()) if pinfo.get("started_at") else 0
+        procs[tid] = pinfo
+    for oid, info in get_orphan_processes().items():
+        pinfo = dict(info)
+        pid = pinfo.get("pid")
+        pinfo["alive"] = _is_pid_alive(pid) if pid else False
+        pinfo["uptime"] = _time.time() - pinfo.get("started_at", _time.time()) if pinfo.get("started_at") else 0
+        procs[oid] = pinfo
     return {"processes": procs}
 
 
 @router.get("/api/tasks/{task_id}/process")
 async def get_task_process(task_id: int):
-    """Get process info for a task."""
+    """Get process info for a task. Also adopts orphan processes if found."""
+    # Try to adopt any orphans that might belong to this task
+    adopt_orphan_processes(task_id)
     procs = get_background_processes()
     pinfo = procs.get(str(task_id))
+    if not pinfo:
+        pinfo = get_orphan_processes().get(str(task_id))
     if not pinfo:
         return {"process": None}
     uptime = _time.time() - pinfo.get("started_at", _time.time())
@@ -399,3 +421,23 @@ async def reset_task_resume_count(task_id: int):
     from api.config import log_agent_error
     log_agent_error(f"Task #{task_id}: resume_count manually reset to 0")
     return {"status": "success"}
+
+
+@router.post("/api/tasks/{task_id}/reply")
+async def reply_to_background_task(task_id: int, body: dict):
+    """Reply to a background task that called ask_user_question.
+    Puts the answer into the agent's user_input_queue to unblock it.
+    """
+    answer = body.get("answer", "")
+    if not answer:
+        raise HTTPException(status_code=400, detail="answer is required")
+    from api.state import _background_agents
+    agent = _background_agents.get(task_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Task not found or not running in background")
+    try:
+        from queue import Queue
+        agent.user_input_queue.put_nowait(answer)
+        return {"status": "success", "message": f"Answer delivered to task #{task_id}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to deliver answer: {e}")

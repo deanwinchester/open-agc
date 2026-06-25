@@ -33,10 +33,10 @@ class DownloadTool(BaseTool):
         """
         try:
             from core.llamacpp_manager import get_llamacpp_manager
-            from api.server import (
-                create_download_record, update_download_progress,
-                log_download_event, _llamacpp_download_state,
-                _broadcast_to_websockets, get_data_path
+            from core.paths import get_data_path
+            from api.state import _llamacpp_download_state, _broadcast_to_websockets
+            from api.routes.routes_settings import (
+                create_download_record, update_download_progress, log_download_event,
             )
         except ImportError as e:
             return f"Error: Cannot access download system: {e}"
@@ -141,7 +141,7 @@ class DownloadTool(BaseTool):
                 def progress_cb(pct):
                     if _llamacpp_download_state.get("cancelled"):
                         return
-                    from api.server import update_download_progress
+                    from api.routes.routes_settings import update_download_progress
                     _llamacpp_download_state[slot_key]["progress"] = pct
                     update_download_progress(record_id, pct, status='downloading')
                     _broadcast_to_websockets({
@@ -197,7 +197,7 @@ class DownloadTool(BaseTool):
                     return
 
                 if success:
-                    from api.server import update_download_progress
+                    from api.routes.routes_settings import update_download_progress
                     update_download_progress(record_id, 1.0, status='completed')
                     _llamacpp_download_state[slot_key].update({
                         "active": False, "progress": 1.0,
@@ -220,7 +220,7 @@ class DownloadTool(BaseTool):
                     return
                 err_msg = str(e)
                 print(f"[Download] EXCEPTION in download thread #{record_id}: {err_msg}")
-                from api.server import update_download_progress
+                from api.routes.routes_settings import update_download_progress
                 update_download_progress(record_id, None, status='failed', error_message=err_msg)
                 # Also notify session directly if pending task link exists
                 try:

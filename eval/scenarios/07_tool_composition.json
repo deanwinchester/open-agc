@@ -1,0 +1,62 @@
+[
+  {
+    "name": "composition_multi_tool",
+    "description": "多工具组合：创建Python脚本并执行",
+    "category": ["python", "filesystem"],
+    "level": "core",
+    "prompt": "用 write_file 创建一个Python脚本 greet.py，它接受一个名字参数并打印 '你好, {name}!'。然后用 execute_python 或 execute_shell 运行它，参数是你的名字",
+    "expected": {
+      "tool_used": ["write_file", "execute_python", "execute_shell"],
+      "output_contains": ["你好"],
+      "max_steps": 10,
+      "max_tokens": 15000
+    },
+    "tags": ["composition"],
+    "teardown": "import os; [os.remove(f) for f in ['greet.py'] if os.path.exists(f)]"
+  },
+  {
+    "name": "composition_memory_to_file",
+    "description": "记忆 → 文件的跨系统组合",
+    "category": ["memory", "filesystem"],
+    "level": "stress",
+    "prompt": "记住当前时间是『测试时间』，然后把这个记忆导出到一个名为 _eval_memory_export.txt 的文件中",
+    "expected": {
+      "tool_used": ["manage_memory", "write_file"],
+      "output_contains": ["测试时间"],
+      "max_steps": 12,
+      "max_tokens": 20000
+    },
+    "timeout": 60,
+    "tags": ["composition"],
+    "teardown": "import os; [os.remove(f) for f in ['_eval_memory_export.txt'] if os.path.exists(f)]"
+  },
+  {
+    "name": "composition_shell_to_python",
+    "description": "Shell输出作为Python的输入",
+    "category": ["shell", "python", "reasoning"],
+    "level": "stress",
+    "prompt": "先用Shell命令找出当前目录下所有 .py 文件的总行数，然后用Python将这些行数转换成可读的格式并分析",
+    "expected": {
+      "tool_used": ["execute_shell", "execute_python"],
+      "output_contains": ["行"],
+      "max_steps": 12,
+      "max_tokens": 25000
+    },
+    "tags": ["composition", "pipeline"]
+  },
+  {
+    "name": "composition_file_create_read_delete",
+    "description": "完整文件生命周期",
+    "category": ["filesystem", "reasoning"],
+    "level": "advanced",
+    "prompt": "创建一个文件 _eval_lifecycle.txt，写入一些内容，读取它确认，然后删除它。最后确认文件已被成功删除",
+    "expected": {
+      "tool_used": ["write_file", "read_file", "execute_shell"],
+      "output_contains": ["删除"],
+      "max_steps": 12,
+      "max_tokens": 20000
+    },
+    "tags": ["lifecycle"],
+    "teardown": "import os; [os.remove(f) for f in ['_eval_lifecycle.txt'] if os.path.exists(f)]"
+  }
+]

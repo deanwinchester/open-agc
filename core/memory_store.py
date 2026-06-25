@@ -166,8 +166,8 @@ class MemoryStore:
                     )
                 """)
                 conn.commit()
-            except Exception:
-                pass  # Already exists or not supported
+            except Exception as _fts_e:
+                print(f"[Memory] FTS5 table creation failed: {_fts_e}")
 
             # Sync FTS index with existing data
             self._sync_fts(conn)
@@ -183,8 +183,8 @@ class MemoryStore:
             try:
                 rows = conn.execute("SELECT rowid FROM memories_fts").fetchall()
                 fts_ids = {r[0] for r in rows}
-            except Exception:
-                pass
+            except Exception as _fts_q_e:
+                print(f"[Memory] FTS query error during sync: {_fts_q_e}")
 
             # Get memory IDs — scoped to current session when applicable
             if self.session_id is not None:
@@ -264,8 +264,8 @@ class MemoryStore:
                     "INSERT INTO memories_fts(rowid, content, keywords) VALUES (?, ?, ?)",
                     (mid, fts_text, _tokenize_for_fts(keywords))
                 )
-            except Exception:
-                pass
+            except Exception as _m_e:
+                print(f"[Memory] FTS insert error (mid={mid}): {_m_e}")
 
             conn.commit()
 
@@ -296,8 +296,8 @@ class MemoryStore:
                     "INSERT INTO memories_fts(rowid, content, keywords) VALUES (?, ?, ?)",
                     (memory_id, fts_text, fts_kw)
                 )
-            except Exception:
-                pass
+            except Exception as _upd_e:
+                print(f"[Memory] FTS update error (id={memory_id}): {_upd_e}")
 
             conn.commit()
         return True
@@ -340,8 +340,8 @@ class MemoryStore:
                             "access_count": row[6], "importance": row[7],
                             "score": round(row[8], 3)
                         }
-        except Exception:
-            pass
+        except Exception as _find_e:
+            print(f"[Memory] find_similar query error: {_find_e}")
 
         return None
 
@@ -547,8 +547,8 @@ class MemoryStore:
             conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             try:
                 conn.execute("DELETE FROM memories_fts WHERE rowid = ?", (memory_id,))
-            except Exception:
-                pass
+            except Exception as _del_e:
+                print(f"[Memory] FTS delete error (id={memory_id}): {_del_e}")
             conn.commit()
         return True
 
@@ -665,8 +665,8 @@ class MemoryStore:
                 for did in duplicates:
                     try:
                         conn.execute("DELETE FROM memories_fts WHERE rowid = ?", (did,))
-                    except Exception:
-                        pass
+                    except Exception as _dedup_e:
+                        print(f"[Memory] FTS dedup delete error (id={did}): {_dedup_e}")
                 conn.commit()
             return f"记忆整理完成：移除了 {len(duplicates)} 条重复记忆。"
 

@@ -180,12 +180,14 @@ function initApp() {
       _lastDownloadBannerId = null;
       loadDownloadHistory();
     } else {
-      // Persistent banner: keep visible during active download
-      if (banner) {
+      // Show banner only at download start (first event per download), auto-hide after 3s
+      if (banner && dlId !== _lastDownloadBannerId) {
+        _lastDownloadBannerId = dlId;
         clearTimeout(downloadBannerTimer);
         banner.style.display = 'block';
         bannerIcon.textContent = data.stage === 'extracting' ? '📦' : '📥';
         bannerLabel.textContent = data.label || '下载中...';
+        downloadBannerTimer = setTimeout(function() { if (banner) banner.style.display = 'none'; }, 3000);
       }
       if (bannerPct) bannerPct.textContent = pctText;
       if (bannerBar) { bannerBar.style.width = (ratio * 100) + '%'; bannerBar.style.background = 'var(--theme-color)'; }
@@ -219,6 +221,14 @@ function initApp() {
       updateInputState();
       refreshLlamaStatus();
       loadDownloadHistory();
+      // Clean up stale progress state after reconnect
+      if (progressInline && !progressInline.parentNode) {
+        progressInline = null;
+        progressStepsEl = null;
+        progressSteps = {};
+        progressStepData = {};
+        progressStepCount = 0;
+      }
     };
 
     state.ws.onmessage = (event) => {
@@ -320,7 +330,7 @@ function initApp() {
       if (data.role === 'tool_step') return;
       if (isForCurrentSession) {
         hideThinkingStatus(); hideProgressContainer();
-        appendMessage(data.content, data.role || 'agent');
+        appendMessage(data.content, data.role || 'agent', null, null, data.task_id);
         if (!isBackground && state.wasVoiceQuery) { speakText(data.content); state.wasVoiceQuery = false; }
         state.isAgentThinking = false; state.currentTaskId = null; updateInputState();
       }
@@ -339,8 +349,12 @@ function initApp() {
       }
       updateTaskBadge();
     } else if (data.type === 'task_backgrounded') {
+      hideThinkingStatus();
       appendMessage(`⏸️ **任务已进入后台**\n\n${data.message || '后台任务处理中...'}\n\n完成后将自动恢复执行。`, 'system');
       hideProgressContainer();
+      state.isAgentThinking = false;
+      state.currentTaskId = null;
+      updateInputState();
       updateTaskBadge();
     } else if (data.type === 'download_success') {
       appendMessage(
@@ -459,7 +473,42 @@ function initApp() {
   let progressStepData = {};
   let progressStepCount = 0;
 
+  // ── Per-session progress state cache ──
+  if (!window._perSessionProgress) window._perSessionProgress = {};
+
+  function _saveProgressState(sid) {
+    if (!sid) return;
+    window._perSessionProgress[sid] = {
+      progressInline: progressInline,
+      progressStepsEl: progressStepsEl,
+      progressSteps: progressSteps,
+      progressStepData: progressStepData,
+      progressStepCount: progressStepCount,
+    };
+  }
+
+  function _restoreProgressState(sid) {
+    const saved = window._perSessionProgress[sid];
+    if (saved && saved.progressInline && saved.progressInline.parentNode) {
+      progressInline = saved.progressInline;
+      progressStepsEl = saved.progressStepsEl;
+      progressSteps = saved.progressSteps || {};
+      progressStepData = saved.progressStepData || {};
+      progressStepCount = saved.progressStepCount || 0;
+      return true;
+    }
+    return false;
+  }
+
   function ensureProgressContainer() {
+    // Save current progress state to its session before creating new
+    if (progressInline && progressInline.dataset.sessionId) {
+      _saveProgressState(progressInline.dataset.sessionId);
+    }
+    // Try to restore cached progress for this session before creating new
+    if (!progressInline && state.currentSessionId) {
+      _restoreProgressState(state.currentSessionId);
+    }
     if (!progressInline) {
       // Remove any completed history card for this task before creating live progress
       if (state.currentTaskId) {
@@ -487,6 +536,7 @@ function initApp() {
         </div>`;
       progressStepsEl = progressInline.querySelector('.progress-inline-steps');
       if (state.currentTaskId) progressInline.dataset.taskId = state.currentTaskId;
+      if (state.currentSessionId) progressInline.dataset.sessionId = state.currentSessionId;
 
       // Toggle collapse/expand on header click
       const header = progressInline.querySelector('.progress-inline-header');
@@ -542,6 +592,10 @@ function initApp() {
   function finishProgressContainer() {
     if (!progressInline) return;
     var card = progressInline;  // Capture before nulling
+    // Clear per-session cache so next query creates a fresh card
+    if (card.dataset.sessionId) {
+      delete window._perSessionProgress[card.dataset.sessionId];
+    }
     var title = card.querySelector('.progress-title');
     var spinner = card.querySelector('.progress-spinner');
     var currentStepEl = card.querySelector('.progress-current-step');
@@ -673,8 +727,15 @@ function initApp() {
       scrollToBottom();
       
       const submitAnswer = (ans) => {
-          if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
-          state.ws.send(JSON.stringify({ type: 'tool_reply', answer: ans }));
+          if (data.background && data.task_id) {
+              fetch(`/api/tasks/${data.task_id}/reply`, {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({answer: ans})
+              }).catch(() => {});
+          } else if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+              state.ws.send(JSON.stringify({ type: 'tool_reply', answer: ans }));
+          }
           stepEl.querySelector('.ask-user-form').innerHTML = `<span style="color: var(--success, #2ecc71); font-size: 0.9rem;">✓ 您的回答：<strong>${escapeHtml(ans)}</strong></span>`;
       };
 
@@ -912,6 +973,7 @@ function initApp() {
           ${['interrupted', 'backgrounded', 'background_failed', 'completed'].includes(data.task_status)
             ? `<button class="btn-resume-task" data-task-id="${data.task_id}" title="继续执行">▶ 继续</button>`
             : ''}
+          <button class="btn-open-task-detail" data-task-id="${data.task_id}" title="查看任务详情" style="margin-left:6px;background:transparent;border:1px solid var(--border-color);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.78rem;color:var(--text-secondary);">📋 详情</button>
           <span class="progress-toggle-icon collapsed">▸</span>
         </div>
       </div>
@@ -1006,7 +1068,7 @@ function initApp() {
 
     // Toggle collapse/expand
     historyCard.querySelector('.progress-inline-header').addEventListener('click', function(e) {
-      if (e.target.closest('.btn-resume-task')) return;
+      if (e.target.closest('.btn-resume-task') || e.target.closest('.btn-open-task-detail')) return;
       const st = historyCard.querySelector('.progress-inline-steps');
       const ic = historyCard.querySelector('.progress-toggle-icon');
       const isCurrentlyCollapsed = st.style.maxHeight === '0px';
@@ -1055,6 +1117,20 @@ function initApp() {
           var st = historyCard.querySelector('.progress-inline-steps');
           if (st) st.style.maxHeight = 'none';
           state.ws.send(JSON.stringify({ type: 'resume', task_id: parseInt(taskId) }));
+        }
+      });
+    }
+
+    // Detail button handler — open task in Task Manager
+    const detailBtn = historyCard.querySelector('.btn-open-task-detail');
+    if (detailBtn) {
+      detailBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        const taskId = parseInt(detailBtn.dataset.taskId);
+        if (window.openTaskDetail) {
+          window.openTaskDetail(taskId);
+        } else {
+          window.switchView('task-detail', '/' + taskId);
         }
       });
     }
@@ -1131,7 +1207,7 @@ function initApp() {
   // =============================================
   // UI Helpers
   // =============================================
-  function appendMessage(content, role, images, files) {
+  function appendMessage(content, role, images, files, taskId) {
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${role}`;
 
@@ -1203,7 +1279,13 @@ function initApp() {
     }
 
     formattedContent = formattedContent.replace(/<\/?(?:style|link|script|meta|base|iframe|object|embed)[^>]*>/gi, '');
-    messageDiv.innerHTML = `<div class="avatar">${avatarSvg}</div><div class="content">${imagesHtml}${filesHtml}${formattedContent}</div>`;
+
+    // Add task badge for agent messages with task_id
+    const taskBadge = taskId && (role === 'agent' || role === 'system')
+      ? ` <a href="task://${taskId}" class="task-badge-link" title="查看任务 #${taskId}" onclick="event.preventDefault(); window.openTaskDetail(${taskId}); window.switchView('task-detail', '/' + ${taskId});">#${taskId}</a>`
+      : '';
+
+    messageDiv.innerHTML = `<div class="avatar">${avatarSvg}</div><div class="content">${imagesHtml}${filesHtml}${formattedContent}${taskBadge}</div>`;
     if (progressInline && role === 'user') {
       chatContainer.insertBefore(messageDiv, progressInline);
     } else {
@@ -1215,6 +1297,11 @@ function initApp() {
       for (let i = 0; i < 50; i++) {
         if (msgs[i] && msgs[i].parentNode) msgs[i].remove();
       }
+    }
+    // Cap progress cards at 5 to avoid clutter from long sessions
+    const progCards = chatContainer.querySelectorAll('.progress-inline');
+    for (let p = progCards.length - 1; p >= 5; p--) {
+      if (progCards[p] && progCards[p].parentNode) progCards[p].remove();
     }
     if (role === 'tool_step') {
       messageDiv.querySelector('.tool-step-header')?.addEventListener('click', function() {
@@ -1255,6 +1342,8 @@ function initApp() {
   });
 
   window.appendMessage = appendMessage;
+  window._saveProgressState = _saveProgressState;
+  window._restoreProgressState = _restoreProgressState;
   window.scrollToBottom = scrollToBottom;
 
   let currentStatusBubble = null;
@@ -1311,7 +1400,7 @@ function initApp() {
     const atBottom = chatContainer.scrollTop + chatContainer.clientHeight >= chatContainer.scrollHeight - threshold;
     if (atBottom) {
       hideScrollHint();
-    } else if (!state.isAgentThinking && !scrollHintEl) {
+    } else if (!scrollHintEl) {
       showScrollHint();
     }
   });
@@ -1772,10 +1861,41 @@ function initApp() {
           }
         }
       }
+      // Load recent task progress card for this session (if any)
+      await _loadRecentTaskProgress(state.currentSessionId);
     } catch (e) {
       console.error("Failed to load initial data", e);
     }
     console.log('[PERF] fetchInitialData done', (performance.now() - window._perf.start).toFixed(1), 'ms');
+  }
+
+  /** Load the most recent task for a session and render its steps as a progress card. */
+  async function _loadRecentTaskProgress(sessionId) {
+    try {
+      const resp = await fetch(`/api/tasks?session_id=${sessionId}&page=1&page_size=1`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (!data.tasks || data.tasks.length === 0) return;
+      const task = data.tasks[0];
+      // Only show for recently active or incomplete tasks
+      const isRecent = task.status === 'running' || task.status === 'interrupted' || task.status === 'backgrounded' || task.status === 'failed';
+      if (!isRecent) return;
+      const stepResp = await fetch(`/api/tasks/${task.id}/steps?page=1&page_size=100`);
+      if (!stepResp.ok) return;
+      const stepData = await stepResp.json();
+      if (!stepData.steps || stepData.steps.length === 0) return;
+      // Reuse renderHistorySteps which accepts a WS event-like object
+      renderHistorySteps({
+        type: 'history_steps',
+        task_id: task.id,
+        task_status: task.status,
+        steps: stepData.steps,
+        session_id: sessionId,
+        result_summary: task.result_summary,
+      });
+    } catch (e) {
+      // Silent — progress card is optional
+    }
   }
 
   // Version check + manual upgrade
