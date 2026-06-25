@@ -260,8 +260,9 @@ class ShellTool(BaseTool):
                                 new_text = _decode_shell_output(out_path, last_pos, fsize)
                                 last_pos = fsize
                                 if new_text and progress_cb:
-                                    new_text = _clean_cr(new_text)
-                                    if not new_text:
+                                    # Keep raw text (with \r) for frontend progress display.
+                                    # _clean_cr is only used for final output reads.
+                                    if not new_text.strip():
                                         continue
                                     elapsed = time.time() - _t0
                                     # Truncate to last 2000 chars for progress
