@@ -107,6 +107,22 @@ class ShellTool(BaseTool):
                     f"而非终止全部 python 进程。"
                 )
 
+        # Check PID-based kills against the server process family
+        pid_match = re.search(r'taskkill\b.*/pid\s+(\d+)', cmd_lower, re.IGNORECASE)
+        if pid_match:
+            target_pid = int(pid_match.group(1))
+            try:
+                from api.state import check_protected_pid
+                if check_protected_pid(target_pid):
+                    return (
+                        f"⛔ 该命令被阻止执行：PID {target_pid} 是 Open-AGC 服务进程或其子进程，"
+                        f"终止它会导致服务崩溃。\n\n"
+                        f"被阻止的命令: {command[:200]}\n"
+                        f"如果你需要终止某个特定程序，请确认其 PID 不属于 Open-AGC 服务。"
+                    )
+            except ImportError:
+                pass
+
         return ""
 
     def execute(self, **kwargs) -> str:

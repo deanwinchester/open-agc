@@ -4,11 +4,16 @@ All shared mutable state lives here so it can be imported by any module
 without circular dependency issues.
 """
 import asyncio
+import os
 import threading
 from datetime import datetime, timezone
 
 # Store the main event loop for cross-thread WebSocket broadcasts
 _main_event_loop: asyncio.AbstractEventLoop = None
+
+# Server PID — set at startup so agent tools can protect against self-kill
+_server_pid: int = os.getpid()
+_SERVER_START_TIME = datetime.now(timezone.utc)
 
 # Connected WebSocket clients (for background task push)
 connected_websockets: list = []  # List of active WebSocket connections
@@ -18,6 +23,42 @@ _sandbox_waits: dict = {}
 
 # Pending sandbox approvals: {session_id: [paths]} — late approvals applied on task resume
 _pending_sandbox_approvals: dict = {}
+
+
+def check_protected_pid(pid: int) -> bool:
+    """Check if a PID belongs to the Open-AGC server or its parent processes.
+
+    Returns True if the PID should NOT be killed (it's protected).
+    """
+    if pid <= 0:
+        return False
+    # 1. Server's own PID
+    if pid == _server_pid:
+        return True
+    # 2. Parent process (VS Code debugger, shell, etc.)
+    try:
+        import psutil
+        current = psutil.Process(_server_pid)
+        # Check parent chain
+        parent = current.parent()
+        if parent and parent.pid == pid:
+            return True
+        # Check all ancestors up to 3 levels
+        ancestors = current.parents()
+        for anc in ancestors[:3]:
+            if anc.pid == pid:
+                return True
+        # Check if this PID is one of our subprocesses
+        children = current.children(recursive=True)
+        for child in children:
+            if child.pid == pid:
+                return True
+    except ImportError:
+        # Without psutil, just check self PID
+        pass
+    except Exception:
+        pass
+    return False
 
 
 def _apply_pending_sandbox_approvals(agent, session_id):
