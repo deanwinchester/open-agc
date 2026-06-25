@@ -180,12 +180,13 @@ function initApp() {
       _lastDownloadBannerId = null;
       loadDownloadHistory();
     } else {
-      // Persistent banner: keep visible during active download
+      // Transient banner: show briefly, auto-hide after 3s
       if (banner) {
         clearTimeout(downloadBannerTimer);
         banner.style.display = 'block';
         bannerIcon.textContent = data.stage === 'extracting' ? '📦' : '📥';
         bannerLabel.textContent = data.label || '下载中...';
+        downloadBannerTimer = setTimeout(function() { if (banner) banner.style.display = 'none'; }, 3000);
       }
       if (bannerPct) bannerPct.textContent = pctText;
       if (bannerBar) { bannerBar.style.width = (ratio * 100) + '%'; bannerBar.style.background = 'var(--theme-color)'; }
