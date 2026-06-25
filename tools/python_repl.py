@@ -77,8 +77,15 @@ class PythonREPLTool(BaseTool):
                 output += f"STDOUT:\n{result.stdout}\n"
             if result.stderr:
                 output += f"STDERR:\n{result.stderr}\n"
-            
+
             output += f"Exit Code: {result.returncode}"
+
+            # Detect background service launches (Popen/start in the code)
+            import re as _re_ps
+            if _re_ps.search(r'\b(Popen|run\b.*start|subprocess\b.*start)', code):
+                output += "\n[SERVER_PROCESS] Python代码通过 Popen/start 启动了后台进程，"
+                output += "进程可能仍在运行中。如需等待，可调用 pause_and_wait 工具。"
+
             return output
             
         except subprocess.TimeoutExpired:

@@ -22,6 +22,8 @@ export const state = {
   taskPage: 1,
   totalTaskCount: 0,
   taskRefreshInterval: null,
+  goalSearchQuery: '',
+  goalRefreshInterval: null,
   editingAgentName: null,
   aiDesignResult: null,
   aiDesignAbort: null,

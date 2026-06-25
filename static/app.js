@@ -9,6 +9,7 @@ import { loadPlugins, loadPluginManager, loadMarketplace } from './js/plugins.js
 import { loadSessions, createSession, switchSession, deleteSession, renameSession } from './js/sessions.js';
 import { initSettingsListeners, loadSkillsConfig, loadAgents, openAIDesignModal, closeAIDesignModal, initAIDesignListeners } from './js/settings.js';
 import { initTaskFilters, initScheduleModal, loadTasks, updateTaskBadge, openTaskDetail } from './js/tasks.js';
+import { initGoalFilters, loadGoals } from './js/goals.js';
 import { refreshLlamaStatus, loadDownloadHistory, initLlamaListeners, renderSearchResults } from './js/llama.js';
 import { refreshSearXNGStatus, initSearXNGListeners } from './js/searxng.js';
 
@@ -18,6 +19,7 @@ window.onViewChange = onViewChange;
 window.toggleSidebar = toggleSidebar;
 window.closeSidebar = closeSidebar;
 window.showStatus = showStatus;
+window.loadGoals = loadGoals;
 window.loadPluginManager = loadPluginManager;
 window.loadMarketplace = loadMarketplace;
 window.loadSkillsConfig = loadSkillsConfig;
@@ -82,6 +84,7 @@ function initApp() {
   initSettingsListeners();
   initAIDesignListeners();
   initTaskFilters();
+  initGoalFilters();
   initScheduleModal();
   initLlamaListeners();
   initSearXNGListeners();
@@ -1829,19 +1832,23 @@ function initApp() {
     if (e.target.closest('#log-refresh-btn')) loadLogs();
   });
 
-  // ── Logs sub-tab switching ──
-  document.querySelectorAll('.sub-tab-logs').forEach(tab => {
+  // ── Debug sub-tab switching ──
+  document.querySelectorAll('.sub-tab-debug').forEach(tab => {
     tab.addEventListener('click', () => {
-      document.querySelectorAll('.sub-tab-logs').forEach(t => {
+      document.querySelectorAll('.sub-tab-debug').forEach(t => {
         t.style.color = 'var(--text-secondary)';
         t.style.borderBottomColor = 'transparent';
       });
       tab.style.color = 'var(--text-primary)';
       tab.style.borderBottomColor = 'var(--accent-color)';
-      const sub = tab.dataset.logsub;
-      document.getElementById('logs-system').style.display = sub === 'system' ? 'flex' : 'none';
-      document.getElementById('logs-model').style.display = sub === 'model' ? 'flex' : 'none';
+      const sub = tab.dataset.debugsub;
+      document.getElementById('debug-system').style.display = sub === 'system' ? 'flex' : 'none';
+      document.getElementById('debug-model').style.display = sub === 'model' ? 'flex' : 'none';
+      document.getElementById('debug-tools').style.display = sub === 'tools' ? 'flex' : 'none';
+      document.getElementById('debug-auto').style.display = sub === 'auto' ? 'flex' : 'none';
       if (sub === 'model') loadModelLogs();
+      if (sub === 'tools') loadToolStats();
+      if (sub === 'auto') loadAutoTools();
     });
   });
 
@@ -2086,6 +2093,74 @@ function initApp() {
   document.getElementById('ml-detail-modal')?.addEventListener('click', (e) => {
     if (e.target === e.currentTarget) e.target.style.display = 'none';
   });
+
+  // ── Tool Stats tab ──
+  window.loadToolStats = async function() {
+    const tbody = document.getElementById('tool-stats-body');
+    const summary = document.getElementById('tool-stats-summary');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--text-secondary);">加载中...</td></tr>';
+    try {
+      const res = await fetch('/api/tools/stats');
+      const data = await res.json();
+      if (!data.tools || data.tools.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--text-secondary);">暂无统计数据</td></tr>';
+        summary.textContent = '暂无数据';
+        return;
+      }
+      summary.textContent = `共 ${data.summary.total_tools} 个工具，总调用 ${data.summary.total_calls} 次`;
+      tbody.innerHTML = data.tools.map(t => {
+        const icon = t.type === 'auto_tool' ? '⚙️' : t.type === 'mcp' ? '🔌' : '🔧';
+        const lastUsed = t.last_used || '-';
+        return `<tr>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-family:monospace;">${icon} ${escapeHtml(t.name)}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:right;">${t.calls || 0}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:right;">${t.sessions || 0}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;"><span style="background:var(--bg-inner);padding:2px 6px;border-radius:4px;font-size:0.7rem;">${escapeHtml(t.type || 'builtin')}</span></td>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:right;font-size:0.75rem;color:var(--text-secondary);">${escapeHtml(lastUsed)}</td>
+        </tr>`;
+      }).join('');
+    } catch(e) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:2rem;color:#ef4444;">加载失败: ' + escapeHtml(e.message) + '</td></tr>';
+      summary.textContent = '加载失败';
+    }
+  };
+
+  // ── Auto Tools tab ──
+  window.loadAutoTools = async function() {
+    const tbody = document.getElementById('auto-tools-body');
+    const summary = document.getElementById('auto-tools-summary');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-secondary);">加载中...</td></tr>';
+    try {
+      const res = await fetch('/api/tools/auto-tools');
+      const data = await res.json();
+      if (!data.tools || data.tools.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-secondary);">暂未生成自动工具</td></tr>';
+        summary.textContent = '暂无自动工具';
+        return;
+      }
+      const totalCalls = data.tools.reduce((s, t) => s + (t.calls || 0), 0);
+      const withCalls = data.tools.filter(t => t.calls > 0).length;
+      summary.textContent = `共 ${data.tools.length} 个自动工具，${withCalls} 个被调用过，总调用 ${totalCalls} 次`;
+      tbody.innerHTML = data.tools.map(t => {
+        const lastUsed = t.last_used || '-';
+        const callCount = t.calls || 0;
+        const sessionCount = t.sessions || 0;
+        return `<tr>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-family:monospace;">⚙️ ${escapeHtml(t.name)}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">${escapeHtml(t.session)}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:right;">${callCount}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:right;">${sessionCount}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:right;font-size:0.75rem;color:var(--text-secondary);">${escapeHtml(lastUsed)}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;"><span style="background:${t.type === 'auto_tool' ? 'var(--accent-color)' : 'var(--bg-inner)'};padding:2px 6px;border-radius:4px;font-size:0.7rem;color:${t.type === 'auto_tool' ? 'white' : 'var(--text-primary)'};">${escapeHtml(t.type || 'auto')}</span></td>
+        </tr>`;
+      }).join('');
+    } catch(e) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;color:#ef4444;">加载失败: ' + escapeHtml(e.message) + '</td></tr>';
+      summary.textContent = '加载失败';
+    }
+  };
 
   // ── Load model logs when the view becomes active ──
   // Extend loadLogs to also load model log filters on first visit

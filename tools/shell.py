@@ -90,7 +90,7 @@ class ShellTool(BaseTool):
         server_pid = os.getpid()
 
         suicidal_patterns = [
-            (r'taskkill\b.*(?:/im\s+python\b|/im\s+python3?\b)', "禁止终止 python.exe（会杀死 Open-AGC 自身）"),
+            (r'taskkill\b.*(?:/im\s+python\b|/im\s+python3?\b|/fi\s+["\']?\s*imagename\s+eq\s+python\b)', "禁止终止 python.exe（会杀死 Open-AGC 自身）"),
             (r'taskkill\b.*/pid\s+' + str(server_pid), "禁止终止 Open-AGC 进程自身"),
             (r'tskill\s+python\b', "禁止终止 python 进程"),
             (r'wmic\s+process\s+where.*delete', "禁止通过 WMI 终止进程"),
@@ -249,38 +249,6 @@ class ShellTool(BaseTool):
                         except Exception:
                             return raw.decode("utf-8", errors="replace")
 
-                def _clean_cr(text: str) -> str:
-                    """Process carriage returns: keep only final content after \r overwrites.
-
-                    Handles:
-                      - \r (standalone): clear current line (progress bar overwrite)
-                      - \r\n (CRLF): newline, keep line content
-                    """
-                    lines = []
-                    cur = []
-                    i = 0
-                    while i < len(text):
-                        ch = text[i]
-                        if ch == '\r':
-                            if i + 1 < len(text) and text[i + 1] == '\n':
-                                lines.append(''.join(cur) + '\n')
-                                cur = []
-                                i += 2
-                            else:
-                                cur = []
-                                i += 1
-                        elif ch == '\n':
-                            cur.append(ch)
-                            lines.append(''.join(cur))
-                            cur = []
-                            i += 1
-                        else:
-                            cur.append(ch)
-                            i += 1
-                    if cur:
-                        lines.append(''.join(cur))
-                    return ''.join(lines)
-
                 def _poll_output():
                     nonlocal last_pos
                     while not poll_stop.is_set():
@@ -373,7 +341,7 @@ class ShellTool(BaseTool):
                         tail = _read_tail(out_path, 3000)
                         hint = ""
                         server_tag = ""
-                        if detach or _looks_like_server(command, tail):
+                        if detach or _looks_like_server(command, tail) or _detect_background_launcher(command):
                             server_tag = f"\n[SERVER_PROCESS] pid={proc.pid}"
                             tag = "（用户指定）" if detach else ""
                             hint += (
@@ -564,7 +532,14 @@ def _looks_like_server(command: str, output: str) -> bool:
         r'\bpython\s+-m\s+http\.server\b', r'\bpython\s+-m\s+https\.server\b',
         r'\bgunicorn\b', r'\bcelery\s+worker\b', r'\bairflow\s+(scheduler|webserver)\b',
         r'\bjupyter (notebook|lab|server)\b', r'\bstreamlit run\b', r'\bgradio\b',
-        r'\bcomfyui\b', r'\boobabooga\b', r'\btext-generation-webui\b',
+        # Services — note: no trailing \b because paths often have _ after the name
+        r'\bcomfyui', r'\boobabooga', r'\btext-generation-webui',
+        r'\boobabooga', r'\bllamacpp', r'\bsglang', r'\bvllm',
+        r'\boobabooga', r'\binvokeai', r'\bautomatic1111', r'\bforge',
+        r'\bvladmandic', r'\bswarmui', r'\bkoboldcpp',
+        # Service launcher batch files
+        r'run_nvidia_gpu\.bat', r'run_cpu\.bat', r'run\.bat',
+        r'start.*\.bat', r'start.*\.sh',
         # Container/VM
         r'\bdocker (run|compose up|start)\b',
         r'\bminikube\b', r'\bkubectl\b',
@@ -590,6 +565,58 @@ def _looks_like_server(command: str, output: str) -> bool:
     if timestamped >= 1:
         return True
     return False
+
+
+def _detect_background_launcher(command: str) -> bool:
+    """Detect if a command is explicitly launching a background/daemon process
+    using OS-level mechanisms (start, &, nohup) regardless of the process name.
+    Works alongside _looks_like_server which checks process names and output."""
+    cmd_lower = command.lower().strip()
+    # Windows: `start /min cmd /c "..."` or `start "" "program"`
+    if re.search(r'\bstart\s+(/[\w]+\s+)?(cmd|""|".")?\s*/(c|min|max|b|wait)', cmd_lower):
+        return True
+    if re.search(r'\bstart\s+(/[\w]+\s+)?["\']', cmd_lower):
+        return True
+    # Unix: & at end of command (background)
+    if re.search(r'&\s*$', cmd_lower):
+        return True
+    # Unix: nohup, setsid, disown
+    if re.search(r'\b(nohup|setsid|disown)\b', cmd_lower):
+        return True
+    return False
+
+
+def _clean_cr(text: str) -> str:
+    """Process carriage returns: keep only final content after \\r overwrites.
+
+    Handles:
+      - \\r (standalone): clear current line (progress bar overwrite)
+      - \\r\\n (CRLF): newline, keep line content
+    """
+    lines = []
+    cur = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == '\r':
+            if i + 1 < len(text) and text[i + 1] == '\n':
+                lines.append(''.join(cur) + '\n')
+                cur = []
+                i += 2
+            else:
+                cur = []
+                i += 1
+        elif ch == '\n':
+            cur.append(ch)
+            lines.append(''.join(cur))
+            cur = []
+            i += 1
+        else:
+            cur.append(ch)
+            i += 1
+    if cur:
+        lines.append(''.join(cur))
+    return ''.join(lines)
 
 
 def _read_tail(path: str, max_chars: int) -> str:
