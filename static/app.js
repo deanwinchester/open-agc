@@ -180,8 +180,9 @@ function initApp() {
       _lastDownloadBannerId = null;
       loadDownloadHistory();
     } else {
-      // Transient banner: show briefly, auto-hide after 3s
-      if (banner) {
+      // Show banner only at download start (first event per download), auto-hide after 3s
+      if (banner && dlId !== _lastDownloadBannerId) {
+        _lastDownloadBannerId = dlId;
         clearTimeout(downloadBannerTimer);
         banner.style.display = 'block';
         bannerIcon.textContent = data.stage === 'extracting' ? '📦' : '📥';
