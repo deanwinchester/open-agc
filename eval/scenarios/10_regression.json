@@ -1,0 +1,56 @@
+[
+  {
+    "name": "regression_tool_call_json",
+    "description": "回归: tool_call JSON 格式容错",
+    "category": ["reasoning"],
+    "level": "stress",
+    "prompt": "运行 echo hello 并告诉我输出结果",
+    "expected": {
+      "tool_used": ["execute_shell"],
+      "output_contains": ["hello"],
+      "max_steps": 5
+    },
+    "tags": ["regression"]
+  },
+  {
+    "name": "regression_repeated_tool_call",
+    "description": "回归: 重复工具调用检测",
+    "category": ["reasoning"],
+    "level": "stress",
+    "prompt": "运行 dir 命令两次（不要只运行一次）",
+    "expected": {
+      "tool_used": ["execute_shell"],
+      "max_steps": 10,
+      "max_tokens": 20000
+    },
+    "tags": ["regression"]
+  },
+  {
+    "name": "regression_step_numbering",
+    "description": "回归: task_steps 编号正确性",
+    "category": ["filesystem", "reasoning"],
+    "level": "stress",
+    "prompt": "先创建一个文件 a.txt，再创建一个文件 b.txt，然后分别读取它们的内容",
+    "expected": {
+      "tool_used": ["write_file", "read_file"],
+      "max_steps": 12,
+      "max_tokens": 20000
+    },
+    "tags": ["regression"],
+    "teardown": "import os; [os.remove(f) for f in ['a.txt','b.txt'] if os.path.exists(f)]"
+  },
+  {
+    "name": "regression_error_recovery",
+    "description": "回归: 错误后自动恢复",
+    "category": ["reasoning"],
+    "level": "stress",
+    "prompt": "先执行一个会失败的命令（比如读取不存在的文件），然后从中恢复并成功运行 echo recovery_ok",
+    "expected": {
+      "tool_used": ["execute_shell"],
+      "output_contains": ["recovery_ok"],
+      "max_steps": 10,
+      "max_errors": 3
+    },
+    "tags": ["regression", "error_handling"]
+  }
+]

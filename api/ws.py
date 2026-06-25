@@ -13,6 +13,7 @@ from api.state import (
 )
 from api.task_core import (
     create_task, update_task_status, update_task_type, get_task_context, save_task_context,
+    save_message, handle_task_completion,
     add_task_step, _extract_task_title, _record_task_deliverables, _load_session_context,
     _resolve_task_for_query, _resolve_goal_for_query, _check_goal_completeness, _get_task_step_count,
 )
@@ -23,14 +24,6 @@ from core.stats_manager import get_stats_manager
 from agent.agent import OpenAGCAgent
 # Import background helper for task history broadcast
 from api.state import _broadcast_task_history
-
-
-def save_message(role: str, content: str, session_id: int = 1):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("INSERT INTO messages (role, content, session_id) VALUES (?, ?, ?)", (role, content, session_id))
-    conn.execute("UPDATE sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
-    conn.commit()
-    conn.close()
 
 
 async def websocket_endpoint(websocket: WebSocket):
@@ -51,18 +44,18 @@ async def websocket_endpoint(websocket: WebSocket):
             "error": _llamacpp_download_state.get("error", "")
         })
 
-    # Broadcast history_steps if this session has a recent interrupted/completed task
+    # Broadcast history_steps if this session has a recent or in-progress task
     try:
         _hb_conn = sqlite3.connect(DB_PATH)
         _hb_row = _hb_conn.execute(
-            "SELECT id, status FROM tasks WHERE session_id=? AND status IN ('interrupted','completed') ORDER BY updated_at DESC LIMIT 1",
+            "SELECT id, status FROM tasks WHERE session_id=? AND status IN ('interrupted','completed','running','backgrounded') ORDER BY updated_at DESC LIMIT 1",
             (ws_session_id,)
         ).fetchone()
         _hb_conn.close()
         if _hb_row:
             _broadcast_task_history(_hb_row[0], ws_session_id, _hb_row[1])
-    except Exception:
-        pass
+    except Exception as _hb_e:
+        print(f"[WS] Broadcast task history error: {_hb_e}")
 
     # Flag to track whether this connection is still alive
     ws_alive = True
@@ -330,26 +323,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                         _conn_step.commit()
                         _conn_step.close()
-                    except Exception:
-                        pass
+                    except Exception as _step_e:
+                        print(f"[WS] Task step update error: {_step_e}")
 
-                # Save tool_step as a message in the chat flow (skip for heartbeats)
-                if ws_session_id and event.get("event") == "tool_done":
-                    try:
-                        import json as _js
-                        step_output = _step_outputs.pop(adjusted_step, "")
-                        ts_content = _js.dumps({
-                            "step": adjusted_step,
-                            "tool": event.get("tool", ""),
-                            "tool_label": event.get("tool_label", ""),
-                            "args_preview": event.get("args_preview", ""),
-                            "result_preview": event.get("result_preview", ""),
-                            "success": event.get("success", True),
-                            "output": step_output[:5000],
-                        }, ensure_ascii=False)
-                        save_message("tool_step", ts_content, ws_session_id)
-                    except Exception as e:
-                        print(f"[Task] Failed to save tool_step message: {e}")
+                # tool_step is persisted in task_steps table -- no need to duplicate in messages
 
                 # Attach task_id to the event so frontend can track it
                 if ws_task_id:
@@ -434,8 +411,8 @@ async def websocket_endpoint(websocket: WebSocket):
             # Save the first user query so it survives crashes in the messages table
             try:
                 save_message("user", query, ws_session_id)
-            except Exception:
-                pass
+            except Exception as _msg_e:
+                print(f"[WS] Save user message failed: {_msg_e}")
 
             loop = asyncio.get_event_loop()
             
@@ -483,6 +460,13 @@ async def websocket_endpoint(websocket: WebSocket):
                                 })
                         elif user_msg.get("type") == "tool_reply":
                             agent.user_input_queue.put(user_msg.get("answer"))
+                            # Also unblock any background agents waiting for user input
+                            _answer = user_msg.get("answer", "")
+                            for _tid, _bg_a in list(_background_agents.items()):
+                                try:
+                                    _bg_a.user_input_queue.put_nowait(_answer)
+                                except Exception as _queue_e:
+                                    print(f"[WS] Background agent queue error (task {_tid}): {_queue_e}")
                         elif user_msg.get("type") == "sandbox_response":
                             sid = user_msg.get("session_id", ws_session_id)
                             action = user_msg.get("action", "deny_once")
@@ -556,7 +540,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         _active_agents.pop(ws_session_id, None)
                         receive_task = None
                         # Don't raise — ws_alive=False will let outer loop break
-                    except Exception:
+                    except Exception as _recv_e:
+                        print(f"[WS] Receive task cleanup error: {_recv_e}")
                         receive_task = None
 
                 # Drain the thread-safe queue (no cross-thread race)
@@ -579,7 +564,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         "type": "progress",
                         **event
                     })
-                except Exception:
+                except Exception as _prog_e:
+                    print(f"[WS] Progress send error, breaking loop: {_prog_e}")
                     break
             
             response = await agent_future
@@ -609,95 +595,38 @@ async def websocket_endpoint(websocket: WebSocket):
                     print(f"[WS] Interjection reject error: {_rj_err}")
                 response = _remaining if '_remaining' in locals() else response
 
-            # Detect max_iterations / backgrounded (check AFTER stripping interjection prefix)
-            is_max_iter = response and response.startswith("[MAX_ITERATIONS_REACHED]")
-            is_backgrounded = response and response.startswith("[TASK_BACKGROUNDED]")
-            if response and not is_max_iter and not is_backgrounded:
-                print(f"[WS] run_agent response (first 80): {str(response)[:80]}")
+            if ws_task_id and response:
+                # Delegate state transitions to shared handler
+                _result = handle_task_completion(
+                    ws_task_id, response, agent.messages[1:], ws_session_id,
+                    wake_minutes=_bg_wake,
+                )
 
-            if ws_task_id and is_backgrounded:
-                # Agent voluntarily paused — save context, mark backgrounded
-                save_task_context(ws_task_id, agent.messages[1:])
-                # Check for WAKE_IN=N in response as fallback timer
-                _resp_body = response[len("[TASK_BACKGROUNDED] "):].strip() or "任务进入后台"
-                _wake_match = re.search(r'WAKE_IN=(\d+)', response)
-                _wake_min = int(_wake_match.group(1)) if _wake_match else _bg_wake
-                if _wake_min:
-                    _wake_dt = (datetime.utcnow() + timedelta(minutes=_wake_min)).strftime('%Y-%m-%d %H:%M:%S')
-                    try:
-                        _wake_conn = sqlite3.connect(DB_PATH)
-                        _wake_conn.execute("UPDATE tasks SET wake_at=? WHERE id=?", (_wake_dt, ws_task_id))
-                        _wake_conn.commit()
-                        _wake_conn.close()
-                        print(f"[Task] Set wake_at={_wake_dt} for task {ws_task_id} (after {_wake_min}min)")
-                    except Exception as _wake_err:
-                        print(f"[Task] Failed to set wake_at: {_wake_err}")
-                update_task_status(ws_task_id, "backgrounded",
-                    _resp_body, interruption_reason="backgrounded")
-                # Register PID for BgMonitor tracking if available
-                if _bg_pid:
-                    try:
-                        from tools.shell import get_background_processes
-                        _bg_procs = get_background_processes()
-                        if str(ws_task_id) not in _bg_procs:
-                            from tools.shell import _background_process_info, _background_process_lock
-                            with _background_process_lock:
-                                _background_process_info[str(ws_task_id)] = {"pid": _bg_pid, "command": "", "started_at": _time.time()}
-                            print(f"[Task] Registered PID {_bg_pid} for BgMonitor tracking (task {ws_task_id})")
-                    except Exception:
-                        pass
-                # Send notification to frontend
-                await _safe_send({
-                    "type": "task_backgrounded",
-                    "task_id": ws_task_id,
-                    "message": "任务已进入后台，完成后自动恢复",
-                    "session_id": ws_session_id
-                })
-                agent_is_running = False
-                return response
-
-            if ws_task_id:
-                summary = response[:200] if response else ""
-                # Update task title from agent's first response line
-                if response and not response.startswith("[MAX_ITERATIONS_REACHED]") and not is_backgrounded:
-                    title = _extract_task_title(response)
-                    if title:
+                if _result == 'backgrounded':
+                    # Register PID for BgMonitor tracking (ws.py-specific)
+                    if _bg_pid:
                         try:
-                            tconn = sqlite3.connect(DB_PATH)
-                            tconn.execute("UPDATE tasks SET title=? WHERE id=?", (title, ws_task_id))
-                            tconn.commit()
-                            tconn.close()
-                        except Exception:
-                            pass
-                if is_max_iter:
-                    # Save context for potential resume
-                    save_task_context(ws_task_id, agent.messages[1:])
-                    update_task_status(ws_task_id, "interrupted", summary, interruption_reason="max_iterations")
-                    # Auto-detect as longrun if not already
-                    try:
-                        conn_tmp = sqlite3.connect(DB_PATH)
-                        cur_tmp = conn_tmp.cursor()
-                        cur_tmp.execute("SELECT task_type FROM tasks WHERE id=?", (ws_task_id,))
-                        row_tmp = cur_tmp.fetchone()
-                        conn_tmp.close()
-                        if row_tmp and row_tmp[0] == 'oneshot':
-                            update_task_type(ws_task_id, 'longrun')
-                    except Exception:
-                        pass
-                elif response and ("interrupted by user" in response.lower() or "interrupted" in response.lower()):
-                    # Don't save context on user interrupt — the current agent.messages
-                    # reflects only the interrupted turn (1-2 messages) which would
-                    # overwrite the full snapshot from previous successful turns.
-                    # Keep the last good snapshot intact for resume.
-                    print(f"[Task] User interrupt for task {ws_task_id}: keeping previous snapshot")
-                    update_task_status(ws_task_id, "interrupted", summary, interruption_reason="user")
-                else:
-                    save_task_context(ws_task_id, agent.messages[1:])
-                    _record_task_deliverables(ws_task_id)
-                    update_task_status(ws_task_id, "completed", summary)
-                    _check_goal_completeness(ws_task_id)
+                            from tools.shell import get_background_processes as _gbp
+                            _bg_procs = _gbp()
+                            if str(ws_task_id) not in _bg_procs:
+                                from tools.shell import _background_process_info as _bgi
+                                from tools.shell import _background_process_lock as _bgl
+                                with _bgl:
+                                    _bgi[str(ws_task_id)] = {"pid": _bg_pid, "command": "", "started_at": _time.time()}
+                                print(f"[Task] Registered PID {_bg_pid} for BgMonitor (task {ws_task_id})")
+                        except Exception as _bg_e:
+                            print(f"[WS] BgMonitor registration error: {_bg_e}")
+                    # Notify frontend
+                    await _safe_send({
+                        "type": "task_backgrounded",
+                        "task_id": ws_task_id,
+                        "message": "任务已进入后台，完成后自动恢复",
+                        "session_id": ws_session_id
+                    })
+                    agent_is_running = False
+                    return (response, ws_task_id)
 
-                # Update total tokens in tasks table from stats
+                # Update total tokens in tasks table from stats (ws.py-specific)
                 try:
                     stats = get_stats_manager().get_task_usage(ws_task_id)
                     if stats:
@@ -708,23 +637,57 @@ async def websocket_endpoint(websocket: WebSocket):
                         conn_tmp.close()
                 except Exception:
                     pass
-            
-            # Persist final answer so it survives page refresh
-            try:
-                save_message("agent", response, ws_session_id)
-            except Exception:
-                pass
 
-            return response
+                # On user interrupt, don't save final message (preserves prior snapshot)
+                if _result != 'interrupted_user':
+                    try:
+                        save_message("agent", response, ws_session_id)
+                    except Exception as _final_e:
+                        print(f"[WS] Save final message failed: {_final_e}")
+
+            return (response, ws_task_id)
         except Exception as e:
+            error_msg = str(e)
+            # One automatic retry: give the agent a chance to recover
+            # by injecting the error and letting it try a different approach.
+            if agent and ws_task_id and not getattr(agent, '_auto_retried', False):
+                agent._auto_retried = True
+                print(f"[WS] Auto-retry: agent failed with '{error_msg[:100]}', giving one more chance...")
+                # Save current context before retry
+                try:
+                    save_task_context(ws_task_id, agent.messages[1:])
+                except Exception:
+                    pass
+                # Inject the error into the agent's context for self-correction
+                retry_prompt = (
+                    f"[系统通知] 你之前的操作遇到了意外错误，已被自动恢复。\n"
+                    f"错误信息：{error_msg[:300]}\n\n"
+                    f"请分析原因，不要重复同一操作，尝试完全不同的策略来完成原始任务。"
+                )
+                agent.messages.append({"role": "user", "content": retry_prompt})
+                try:
+                    # Re-run with skip_rag=True (context already loaded)
+                    response = agent.run_turn(
+                        user_input=None,  # None = resume, don't re-add user message
+                        verbose=False,
+                        progress_callback=progress_callback,
+                        task_id=ws_task_id,
+                        skip_rag=True,
+                    )
+                    # If retry succeeded, log and return (task already in "running" status)
+                    print(f"[WS] Auto-retry succeeded for task {ws_task_id}")
+                    return (response, ws_task_id)
+                except Exception as retry_e:
+                    print(f"[WS] Auto-retry also failed for task {ws_task_id}: {retry_e}")
+
+            # Final failure — save context and mark failed
             if ws_task_id:
-                # Save context so failed tasks can also be resumed
                 if agent:
                     try:
                         save_task_context(ws_task_id, agent.messages[1:])
                     except Exception:
                         pass
-                update_task_status(ws_task_id, "failed", str(e)[:200], interruption_reason="error")
+                update_task_status(ws_task_id, "failed", error_msg[:200], interruption_reason="error")
             raise
         finally:
             agent_is_running = False
@@ -738,8 +701,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         "content": _resp, "session_id": ws_session_id
                     })
                     print(f"[WS] Broadcast final response after disconnect (session {ws_session_id})")
-            except Exception:
-                pass
+            except Exception as _resp_e:
+                print(f"[WS] Broadcast final response error: {_resp_e}")
             # Clean up finished agent from _active_agents so new messages
             # can start a fresh agent loop (instead of being queued to a dead agent)
             try:
@@ -748,8 +711,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 for k in _keys_to_remove:
                     del _aa_sess[k]
                     print(f"[WS] Removed finished agent (task_id={k}) from _active_agents")
-            except Exception:
-                pass
+            except Exception as _clean_e:
+                print(f"[WS] Agent cleanup error: {_clean_e}")
 
     try:
         while True:
@@ -786,6 +749,45 @@ async def websocket_endpoint(websocket: WebSocket):
                 user_msg = json.loads(data)
                 msg_type = user_msg.get("type", "query")
                 resume_id_for_run = None
+
+                if msg_type == "switch_session":
+                    # Switch to a different session without reconnecting WebSocket
+                    new_sid = int(user_msg.get("session_id", 1))
+                    if new_sid != ws_session_id:
+                        ws_session_id = new_sid
+                        # Reload session_history for the new session's LLM context
+                        try:
+                            _ss_conn = sqlite3.connect(DB_PATH)
+                            _ss_conn.row_factory = sqlite3.Row
+                            _ss_cursor = _ss_conn.cursor()
+                            _ss_cursor.execute(
+                                "SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? AND role != 'tool_step' ORDER BY id DESC LIMIT 20) ORDER BY id ASC",
+                                (ws_session_id,))
+                            _ss_rows = _ss_cursor.fetchall()
+                            _ss_conn.close()
+                            session_history = []
+                            for _ss_row in _ss_rows:
+                                _ss_role = _ss_row["role"]
+                                if _ss_role in ("tool_step",): continue
+                                if _ss_role == "agent": _ss_role = "assistant"
+                                session_history.append({"role": _ss_role, "content": _ss_row["content"]})
+                        except Exception as _ss_e:
+                            print(f"[WS] Session switch: failed to reload history: {_ss_e}")
+                            session_history = []
+                        # Broadcast history_steps for the new session's most recent task
+                        try:
+                            _ss_conn2 = sqlite3.connect(DB_PATH)
+                            _ss_conn2.row_factory = sqlite3.Row
+                            _ss_last = _ss_conn2.execute(
+                                "SELECT id, status FROM tasks WHERE session_id=? AND status IN ('interrupted','completed','running','backgrounded') ORDER BY updated_at DESC LIMIT 1",
+                                (ws_session_id,)
+                            ).fetchone()
+                            _ss_conn2.close()
+                            if _ss_last:
+                                _broadcast_task_history(_ss_last[0], ws_session_id, _ss_last[1])
+                        except Exception as _ss_e2:
+                            print(f"[WS] Session switch: failed to broadcast history: {_ss_e2}")
+                    continue
 
                 if msg_type == "sandbox_response":
                     # Resolve a pending sandbox auth wait
@@ -839,6 +841,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Resume an interrupted task
                     task_id = user_msg.get("task_id")
                     if task_id and not agent_is_running:
+                        # Don't resume if this task is already running in background
+                        if task_id in _background_agents:
+                            _bg_agent = _background_agents.get(task_id)
+                            if _bg_agent and not getattr(_bg_agent, 'is_interrupted', False):
+                                # Queue to the existing background agent instead
+                                _extra = user_msg.get("extra_instruction", "").strip()
+                                _msg = f"[用户继续指令] {_extra}" if _extra else "继续执行未完成的任务"
+                                _bg_agent.queue_message(_msg)
+                                print(f"[WS] Task #{task_id} is already running in background — queued resume message")
+                                continue
                         resume_id_for_run = task_id
                         try:
                             ctx = get_task_context(task_id)
@@ -944,15 +956,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
 
                 # Run the agent
-                response = await run_agent_with_progress(query, retry_model, agent_profile_name, images=ws_images, resume_task_id=resume_id_for_run)
-
+                response, ws_task_id = await run_agent_with_progress(query, retry_model, agent_profile_name, images=ws_images, resume_task_id=resume_id_for_run)
 
                 # Send the final response (run_agent_with_progress already saved the message)
                 await _safe_send({
                     "type": "message",
                     "role": "agent",
                     "content": response,
-                    "session_id": ws_session_id
+                    "session_id": ws_session_id,
+                    "task_id": ws_task_id
                 })
                 
             except (WebSocketDisconnect, RuntimeError) as _ws_err:
@@ -984,7 +996,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         "session_id": ws_session_id
                     })
                 else:
-                    # Non-actionable errors: just a brief notification, no full stack in chat
+                    # Non-actionable errors: notify frontend to stop thinking animation
+                    await _safe_send({
+                        "type": "error",
+                        "content": "Agent 执行出错，任务已标记为失败。",
+                        "session_id": ws_session_id
+                    })
                     print(f"[Agent Error] Full traceback above. Hiding from chat to avoid clutter.")
                 
     except WebSocketDisconnect:

@@ -107,6 +107,22 @@ class ShellTool(BaseTool):
                     f"而非终止全部 python 进程。"
                 )
 
+        # Check PID-based kills against the server process family
+        pid_match = re.search(r'taskkill\b.*/pid\s+(\d+)', cmd_lower, re.IGNORECASE)
+        if pid_match:
+            target_pid = int(pid_match.group(1))
+            try:
+                from api.state import check_protected_pid
+                if check_protected_pid(target_pid):
+                    return (
+                        f"⛔ 该命令被阻止执行：PID {target_pid} 是 Open-AGC 服务进程或其子进程，"
+                        f"终止它会导致服务崩溃。\n\n"
+                        f"被阻止的命令: {command[:200]}\n"
+                        f"如果你需要终止某个特定程序，请确认其 PID 不属于 Open-AGC 服务。"
+                    )
+            except ImportError:
+                pass
+
         return ""
 
     def execute(self, **kwargs) -> str:
@@ -204,6 +220,7 @@ class ShellTool(BaseTool):
                             "command": command[:200],
                             "started_at": _t0,
                             "timeout": 0,
+                        "alive": True,
                         }
                 return f"[Background] Command started with PID {proc.pid}." 
             else:
@@ -259,8 +276,9 @@ class ShellTool(BaseTool):
                                 new_text = _decode_shell_output(out_path, last_pos, fsize)
                                 last_pos = fsize
                                 if new_text and progress_cb:
-                                    new_text = _clean_cr(new_text)
-                                    if not new_text:
+                                    # Keep raw text (with \r) for frontend progress display.
+                                    # _clean_cr is only used for final output reads.
+                                    if not new_text.strip():
                                         continue
                                     elapsed = time.time() - _t0
                                     # Truncate to last 2000 chars for progress
@@ -337,6 +355,7 @@ class ShellTool(BaseTool):
                                     "command": command[:200],
                                     "started_at": _t0,
                                     "timeout": timeout,
+                                    "alive": True,
                                 }
                         tail = _read_tail(out_path, 3000)
                         hint = ""

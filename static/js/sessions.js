@@ -50,6 +50,10 @@ export async function switchSession(sessionId) {
   if (!window._sessionChatCache) window._sessionChatCache = {};
   if (!window._sessionChatOrder) window._sessionChatOrder = [];
   if (prevId !== sessionId && chatContainer) {
+    // Save progress state before DOM is cleared
+    if (typeof window._saveProgressState === 'function') {
+      window._saveProgressState(prevId);
+    }
     window._sessionChatCache[prevId] = chatContainer.innerHTML;
     // Track LRU order
     var idx = window._sessionChatOrder.indexOf(prevId);
@@ -68,6 +72,11 @@ export async function switchSession(sessionId) {
 
   chatContainer.innerHTML = '';
   await loadHistoryPage(sessionId, true);
+
+  // Restore progress state for the target session if cached
+  if (typeof window._restoreProgressState === 'function') {
+    window._restoreProgressState(sessionId);
+  }
 
   // Remove the previous scroll handler before adding a new one
   if (window._sessionScrollHandler) {
@@ -92,21 +101,10 @@ export async function switchSession(sessionId) {
   };
   window._sessionScrollHandler = onScroll;
   chatContainer.addEventListener('scroll', onScroll);
-  // Reconnect WebSocket to the new session so history_steps are replayed
-  if (prevId !== sessionId && window.connectWebSocket) {
-    window._intentionalClose = true;
-    if (state.ws) {
-      // Detach old handlers so they don't fire reconnect after we close
-      state.ws.onclose = null;
-      state.ws.onerror = null;
-      state.ws.close();
-    }
-    // Clear any pending reconnect timer
-    if (window._wsReconnectTimer) {
-      clearTimeout(window._wsReconnectTimer);
-      window._wsReconnectTimer = null;
-    }
-    window.connectWebSocket();
+  // Tell the server to switch session context via existing WebSocket
+  // (no reconnect needed — avoids disconnect/reconnect cycle)
+  if (prevId !== sessionId && state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify({ type: 'switch_session', session_id: sessionId }));
   }
   renderSessionList();
 }

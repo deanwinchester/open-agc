@@ -1,8 +1,11 @@
 @echo off
-setlocal
+REM ===========================================
+REM  Build Open-AGC.exe for Windows
+REM  Usage: build_win.bat
+REM  Note: replaces the earlier build_windows.bat
+REM ===========================================
 
-:: Navigate to script directory
-cd /d "%~dp0"
+setlocal enabledelayedexpansion
 
 set APP_NAME=Open-AGC
 
@@ -14,54 +17,168 @@ if exist VERSION (
 )
 
 echo =============================================
-echo   🐼 Building %APP_NAME% v%VERSION% (Windows)
+echo   Build %APP_NAME% v%VERSION% for Windows
 echo =============================================
 
+REM Navigate to project root
+cd /d "%~dp0"
+
+REM ---- 1. Prepare build environment ----
 echo.
 echo [1/4] Preparing build environment...
 
-if not exist build_venv (
-    python.exe -m venv build_venv
+if not exist "build_venv" (
+    python -m venv build_venv
 )
-
 call build_venv\Scripts\activate.bat
 
-echo Upgrading pip and installing tools...
-python.exe -m pip install --upgrade pip -q
-python.exe -m pip install pyinstaller -q
-python.exe -m pip install -r requirements.txt -q
-python.exe -m pip install httptools websockets pywebview pyautogui Pillow opencv-python pywin32 -q
+pip install --upgrade pip -q
+pip install pyinstaller -q
+pip install -r requirements.txt -q
+pip install pywebview -q
 
-echo.
-echo [2/4] Building application...
+REM ---- 1.5 Prepare clean data for bundling ----
+echo [1.5/4] Preparing clean data for bundling...
+if exist "build_data" rd /s /q "build_data"
+mkdir build_data
+copy "data\config.json.template" "build_data\config.json"
+if exist "data\browser_profile" xcopy "data\browser_profile" "build_data\browser_profile" /E /I /Y
 
-:: Ensure fresh build
-if exist "dist\%APP_NAME%" rmdir /s /q "dist\%APP_NAME%"
-if exist "build\win" rmdir /s /q "build\win"
+REM ---- 2. Build with PyInstaller ----
+echo [2/4] Building with PyInstaller...
 
-pyinstaller open_agc.spec --clean --noconfirm ^
-    --distpath "dist" ^
-    --workpath "build\win" 
+REM Create a Windows-specific spec on the fly
+pyinstaller ^
+    --name "%APP_NAME%" ^
+    --noconsole ^
+    --noconfirm ^
+    --clean ^
+    --icon "static\icon.ico" ^
+    --add-data "static;static" ^
+    --add-data "build_data;data" ^
+    --add-data "skills;skills" ^
+    --add-data "agent;agent" ^
+    --add-data "core;core" ^
+    --add-data "tools;tools" ^
+    --add-data "api;api" ^
+    --hidden-import uvicorn ^
+    --hidden-import uvicorn.logging ^
+    --hidden-import uvicorn.loops ^
+    --hidden-import uvicorn.loops.auto ^
+    --hidden-import uvicorn.protocols ^
+    --hidden-import uvicorn.protocols.http ^
+    --hidden-import uvicorn.protocols.http.auto ^
+    --hidden-import uvicorn.protocols.websockets ^
+    --hidden-import uvicorn.protocols.websockets.auto ^
+    --hidden-import uvicorn.lifespan ^
+    --hidden-import uvicorn.lifespan.on ^
+    --hidden-import fastapi ^
+    --hidden-import starlette ^
+    --hidden-import starlette.routing ^
+    --hidden-import starlette.middleware ^
+    --hidden-import starlette.responses ^
+    --hidden-import starlette.staticfiles ^
+    --hidden-import starlette.websockets ^
+    --hidden-import litellm ^
+    --hidden-import pydantic ^
+    --hidden-import dotenv ^
+    --hidden-import rich ^
+    --hidden-import duckduckgo_search ^
+    --hidden-import requests ^
+    --hidden-import bs4 ^
+    --hidden-import httptools ^
+    --hidden-import websockets ^
+    --hidden-import tiktoken ^
+    --hidden-import tiktoken_ext ^
+    --hidden-import tiktoken_ext.openai_public ^
+    --hidden-import api.server ^
+    --hidden-import agent.agent ^
+    --hidden-import core.llm_client ^
+    --hidden-import core.sglang_manager ^
+    --hidden-import tools.shell ^
+    --hidden-import tools.filesystem ^
+    --hidden-import tools.python_repl ^
+    --hidden-import tools.computer ^
+    --hidden-import tools.memory ^
+    --hidden-import tools.web_search ^
+    --hidden-import tools.system_mac ^
+    --hidden-import webview ^
+    --hidden-import webview.platforms.winforms ^
+    gui_app.py
 
-echo   ✅ Build complete: dist\%APP_NAME%
+if errorlevel 1 (
+    echo ERROR: PyInstaller build failed!
+    exit /b 1
+)
 
-echo.
-echo [3/4] Creating ZIP package...
-:: We use PowerShell to create a zip file
-set ZIP_NAME=%APP_NAME%-%VERSION%-Windows-x64.zip
-if exist "dist\%ZIP_NAME%" del "dist\%ZIP_NAME%"
+echo   Build complete: dist\%APP_NAME%\
 
-powershell -Command "Compress-Archive -Path 'dist\%APP_NAME%' -DestinationPath 'dist\%ZIP_NAME%'"
+REM ---- 3. Create installer with NSIS (if available) ----
+echo [3/4] Creating installer...
 
-echo   ✅ ZIP created: dist\%ZIP_NAME%
+where makensis >nul 2>&1
+if %errorlevel% equ 0 (
+    echo   NSIS found — building installer...
+    
+    REM Generate NSIS script
+    (
+        echo !include "MUI2.nsh"
+        echo.
+        echo Name "%APP_NAME%"
+        echo OutFile "dist\%APP_NAME%-%VERSION%-Setup.exe"
+        echo InstallDir "$PROGRAMFILES\%APP_NAME%"
+        echo RequestExecutionLevel admin
+        echo.
+        echo !insertmacro MUI_PAGE_DIRECTORY
+        echo !insertmacro MUI_PAGE_INSTFILES
+        echo !insertmacro MUI_LANGUAGE "SimpChinese"
+        echo.
+        echo Section "Install"
+        echo   SetOutPath "$INSTDIR"
+        echo   File /r "dist\%APP_NAME%\*.*"
+        echo   CreateShortCut "$DESKTOP\%APP_NAME%.lnk" "$INSTDIR\%APP_NAME%.exe"
+        echo   CreateDirectory "$SMPROGRAMS\%APP_NAME%"
+        echo   CreateShortCut "$SMPROGRAMS\%APP_NAME%\%APP_NAME%.lnk" "$INSTDIR\%APP_NAME%.exe"
+        echo   CreateShortCut "$SMPROGRAMS\%APP_NAME%\Uninstall.lnk" "$INSTDIR\uninstall.exe"
+        echo   WriteUninstaller "$INSTDIR\uninstall.exe"
+        echo SectionEnd
+        echo.
+        echo Section "Uninstall"
+        echo   RMDir /r "$INSTDIR"
+        echo   Delete "$DESKTOP\%APP_NAME%.lnk"
+        echo   RMDir /r "$SMPROGRAMS\%APP_NAME%"
+        echo SectionEnd
+    ) > "dist\installer.nsi"
+    
+    makensis "dist\installer.nsi"
+    del "dist\installer.nsi"
+    
+    echo   Installer created: dist\%APP_NAME%-%VERSION%-Setup.exe
+) else (
+    echo   NSIS not found — creating simple ZIP instead...
+    
+    REM Use PowerShell to create a ZIP
+    powershell -Command "Compress-Archive -Path 'dist\%APP_NAME%\*' -DestinationPath 'dist\%APP_NAME%-%VERSION%-Windows.zip' -Force"
+    
+    echo   ZIP created: dist\%APP_NAME%-%VERSION%-Windows.zip
+)
 
-echo.
+REM ---- 4. Clean up ----
 echo [4/4] Cleaning up...
-rmdir /s /q build\win
+rd /s /q build 2>nul
 
 echo.
 echo =============================================
-echo   ✅ Windows Build complete!
-echo   📦 dist\%ZIP_NAME%
+echo   Build complete!
+echo   App: dist\%APP_NAME%\%APP_NAME%.exe
+if exist "dist\%APP_NAME%-%VERSION%-Setup.exe" (
+    echo   Installer: dist\%APP_NAME%-%VERSION%-Setup.exe
+) else (
+    echo   ZIP: dist\%APP_NAME%-%VERSION%-Windows.zip
+)
 echo =============================================
+echo.
+echo To install: Run the Setup.exe or extract the ZIP.
+echo To run: Double-click %APP_NAME%.exe
+
 pause
