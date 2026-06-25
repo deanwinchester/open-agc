@@ -665,6 +665,12 @@ def start_background_monitor():
                             ).fetchone()
                             user_query = task_row["user_query"] if task_row else ""
                             print(f"[BgMonitor] Task {tid}: shell process done — resuming")
+                            # Broadcast steps before resuming so frontend shows live card
+                            try:
+                                _bg_sess = conn.execute("SELECT session_id FROM tasks WHERE id=?", (tid,)).fetchone()
+                                _broadcast_task_history(tid, _bg_sess[0] if _bg_sess else 1, "running")
+                            except Exception:
+                                pass
                             threading.Thread(
                                 target=lambda _tid=tid, _uq=user_query, _ctx=ctx: (
                                     update_task_status(_tid, "interrupted",
