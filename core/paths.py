@@ -76,3 +76,10 @@ def get_models_dir() -> str:
     dir_path = os.path.join(get_data_dir(), "models")
     os.makedirs(dir_path, exist_ok=True)
     return dir_path
+
+
+def get_user_plugins_dir() -> str:
+    """Get the directory for user-installed plugins (under data/ for Docker persistence)."""
+    dir_path = os.path.join(get_data_dir(), "plugins")
+    os.makedirs(dir_path, exist_ok=True)
+    return dir_path
