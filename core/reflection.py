@@ -32,16 +32,19 @@ Execution Summary:
 
 Result: {result}
 
-{'The task SUCCEEDED. Extract 1-2 key insights: what patterns worked well, what decisions were critical.' if success else 'The task FAILED. Identify the root cause, what went wrong, and how to fix it next time.'}
+{'The task SUCCEEDED. Extract the key commands/approaches that worked.' if success else 'The task FAILED. Identify the root cause and what to do differently.'}
 
 Respond in JSON format:
 ```json
 {{
-  "insight": "One-sentence summary of what was learned",
-  "detail": "2-3 sentence detailed explanation",
-  "actionable": "What to do differently next time or what pattern to repeat"
+  "insight": "One-sentence summary",
+  "detail": "What exactly happened and what was learned",
+  "actionable": "The EXACT commands, paths, code or steps to use next time (be specific, include file paths, ports, parameters)"
 }}
-```"""
+```
+
+Important: "actionable" must contain the SPECIFIC commands or code needed, not just general advice. If a shell command worked, include it. If a Python approach worked, include the key code. If a file path was discovered, include it. The goal is that next time the agent can follow the actionable directly without re-discovery.
+"""
 
 
 class ReflectionEngine:
@@ -93,7 +96,7 @@ class ReflectionEngine:
             conn.commit()
 
     def _extract_tool_sequence(self, messages: List[Dict]) -> str:
-        """Extract a concise tool-call sequence from messages."""
+        """Extract a tool-call sequence with key command details preserved."""
         steps = []
         for msg in messages:
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
@@ -105,16 +108,46 @@ class ReflectionEngine:
                             args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
                         except Exception:
                             args = {}
-                        # Show first 2 args as preview
-                        preview = ", ".join(f"{k}={str(v)[:50]}" for k, v in list(args.items())[:2])
-                        steps.append(f"→ {name}({preview})")
+                        # Preserve key details: shell commands, file paths, Python logic
+                        detail = ""
+                        if "command" in args:
+                            detail = str(args["command"])[:200]
+                        elif "code" in args:
+                            code = str(args["code"])
+                            # Extract Popen paths and key patterns
+                            import re as _re
+                            _popen = _re.search(r"Popen\(\[(.*?)\]", code, _re.DOTALL)
+                            if _popen:
+                                detail = f"Popen([{_popen.group(1)[:200]}])"
+                            else:
+                                _paths = _re.findall(r'[\"\\\']([A-Z]:\\\\.*?)[\"\\\']', code)
+                                if _paths:
+                                    detail = "; ".join(_paths[:3])
+                                else:
+                                    detail = code[:150]
+                        elif "file_path" in args:
+                            detail = str(args["file_path"])[:150]
+                        elif "path" in args:
+                            detail = str(args["path"])[:150]
+                        elif "url" in args:
+                            detail = str(args["url"])[:150]
+                        elif "query" in args:
+                            detail = str(args["query"])[:100]
+                        else:
+                            # Show first arg as general preview
+                            for k, v in list(args.items())[:1]:
+                                detail = f"{k}={str(v)[:100]}"
+                        steps.append(f"→ {name}: {detail}")
             elif msg.get("role") == "tool":
                 content = str(msg.get("content", ""))
-                # Just note error/success, don't dump full content
                 is_error = content.startswith("Error") or "traceback" in content.lower()
+                is_success = "Exit Code: 0" in content
                 if is_error:
                     if steps:
                         steps[-1] += " ❌"
+                elif is_success:
+                    if steps:
+                        steps[-1] += " ✅"
         if not steps:
             return "No tool calls"
         return "\n".join(steps)
@@ -156,7 +189,7 @@ class ReflectionEngine:
                 ),
                 category="reflection",
                 memory_type="episode",
-                importance=3 if not success else 1,
+                importance=3 if not success else 2,
                 keywords=kw
             )
 
@@ -309,7 +342,7 @@ class ReflectionEngine:
                 content = r.get("content", "")
                 # Clean up the reflection prefix for display
                 content = content.replace("[Reflection] ", "")
-                parts.append(f"- {content[:300]}")
+                parts.append(f"- {content[:500]}")
 
         if experience.get("trajectories"):
             parts.append("【相似成功轨迹参考】")
