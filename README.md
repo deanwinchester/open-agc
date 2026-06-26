@@ -2,7 +2,7 @@
 
 > **Open-AGC (Agency) — 熊猫事务所**，一款基于本地电脑操作环境构建的全能型 AI 智能体框架。
 
-![Panda Logo](/static/icon_rounded.png)
+<img src="/static/icon_rounded.png" width="64" alt="Panda Logo">
 
 Open-AGC 能够自主规划、思考并执行终端命令、文件系统操作、Python 脚本、浏览器自动化以及键鼠控制。项目包含强大的抽象核心与极具现代感的 **Panda Theme（熊猫流光主题）** 网页交互界面。
 
@@ -10,11 +10,7 @@ Open-AGC 能够自主规划、思考并执行终端命令、文件系统操作�
 
 ## 📸 界面预览
 
-| 聊天界面 | 任务管理 | 进程管理 |
-|:---:|:---:|:---:|
-| ![聊天界面](assets/screenshot_home.png) | ![任务管理](assets/screenshot_tasks.png) | 截图待更新 |
-| **设置面板** | **模型调用日志** | **下载管理** |
-| 截图待更新 | 截图待更新 | 截图待更新 |
+![主界面](assets/screenshot_home.png)
 
 ## 🌟 核心特性 (Features)
 
