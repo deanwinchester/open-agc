@@ -2292,20 +2292,17 @@ class OpenAGCAgent(PromptBuilderMixin):
                     self.knowledge_graph.extract_from_messages(self.messages)
                 except Exception as e:
                     print(f"[Agent] KG extraction error: {e}")
-                self._record_skill_feedback(success=True, task_input=user_input,
-                                            duration=_time.time() - _task_start)
-                # Save runtime stats for adaptive tuning
+                # Save runtime stats (fast, synchronous)
                 cat = self._classify_task_category(user_input)
                 self._save_task_stats(cat, current_iter, True)
-                # Auto-generate tool from successful complex trajectory
-                try:
-                    tool_seq = self.reflection_engine._extract_tool_sequence(self.messages)
-                    traj = {"tool_sequence": tool_seq}
-                    tool_name = self._auto_generate_tool(user_input, traj, self.llm)
-                    if tool_name:
-                        print(f"[Agent] Auto-generated tool: {tool_name}")
-                except Exception as e:
-                    print(f"[Agent] Auto-tool generation error: {e}")
+                # Defer reflection + auto-tool to background thread
+                if self.reflection_engine:
+                    import threading as _post_thr
+                    _post_thr.Thread(
+                        target=self._background_post_process,
+                        args=(user_input, _time.time() - _task_start, True),
+                        daemon=True,
+                    ).start()
                 # If there are rejected interjections, attach them to the response
                 if self._rejected_interjection:
                     import json as _rj
