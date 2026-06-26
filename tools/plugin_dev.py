@@ -77,12 +77,17 @@ class DevelopPluginTool(BaseTool):
             },
         }
 
+    def _plugins_base(self) -> str:
+        """Return the base directory for user-developed plugins (data/ for Docker persistence)."""
+        from core.paths import get_user_plugins_dir
+        return get_user_plugins_dir()
+
     def _scaffold(self, **kwargs) -> str:
         name = kwargs.get("plugin_name", "").strip()
         if not name:
             return "插件名称不能为空"
         mod_name = _to_python_module(name)
-        plugin_dir = os.path.join("plugins", name)
+        plugin_dir = os.path.join(self._plugins_base(), name)
         if os.path.exists(plugin_dir):
             return f"插件目录 {plugin_dir} 已存在"
 
@@ -207,7 +212,7 @@ def init_plugin(context: PluginContext) -> PluginInstance:
 </html>"""
 
     def _install(self, name: str) -> str:
-        plugin_dir = os.path.join("plugins", name)
+        plugin_dir = os.path.join(self._plugins_base(), name)
         if not os.path.exists(plugin_dir):
             return f"插件目录 {plugin_dir} 不存在，请先执行 scaffold"
 
@@ -219,15 +224,13 @@ def init_plugin(context: PluginContext) -> PluginInstance:
 
         # Trigger plugin reload via import
         import sys
-        plugins_parent = os.path.abspath("plugins")
+        plugins_parent = os.path.abspath(self._plugins_base())
         if plugins_parent not in sys.path:
+            sys.path.insert(0, sys.path.pop(0) if sys.path[0] == plugins_parent else plugins_parent)
             sys.path.insert(0, plugins_parent)
 
         mod_name = _to_python_module(name)
         try:
-            # Try importing the plugin module
-            import importlib
-            full_mod = f"plugins.{name}.{mod_name}"
             # Actually the module name is just the mod_name within plugins package
             # First try direct import
             spec = importlib.util.spec_from_file_location(
