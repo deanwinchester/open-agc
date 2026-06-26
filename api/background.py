@@ -310,7 +310,12 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
             return response
 
         # Push final result to clients (skip heartbeat tasks entirely)
-        if not _is_heartbeat:
+        if not _is_heartbeat and response:
+            from api.task_core import save_message as _bg_save_msg
+            try:
+                _bg_save_msg("agent", response, bg_session_id, task_id=task_id)
+            except Exception as _bg_save_e:
+                print(f"[BgTask] Save message error: {_bg_save_e}")
             _broadcast_to_websockets({
                 "type": "message",
                 "role": "agent",
@@ -797,6 +802,11 @@ def _guardian_resume_task(task_id: int) -> None:
 
         # Broadcast completion to the session's WebSocket clients
         if resp:
+            from api.task_core import save_message as _gd_save
+            try:
+                _gd_save("agent", resp, _hb_session, task_id=task_id)
+            except Exception as _gd_save_e:
+                print(f"[Guardian] Save message error: {_gd_save_e}")
             try:
                 _broadcast_to_websockets({
                     "type": "message",
