@@ -602,8 +602,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     wake_minutes=_bg_wake,
                 )
 
+                # Save agent response before any return path (including backgrounded)
+                if _result != 'interrupted_user':
+                    try:
+                        save_message("agent", response, ws_session_id)
+                    except Exception as _final_e:
+                        print(f"[WS] Save final message failed: {_final_e}")
+
                 if _result == 'backgrounded':
-                    # Register PID for BgMonitor tracking (ws.py-specific)
                     if _bg_pid:
                         try:
                             from tools.shell import get_background_processes as _gbp
@@ -616,7 +622,6 @@ async def websocket_endpoint(websocket: WebSocket):
                                 print(f"[Task] Registered PID {_bg_pid} for BgMonitor (task {ws_task_id})")
                         except Exception as _bg_e:
                             print(f"[WS] BgMonitor registration error: {_bg_e}")
-                    # Notify frontend
                     await _safe_send({
                         "type": "task_backgrounded",
                         "task_id": ws_task_id,
@@ -626,7 +631,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     agent_is_running = False
                     return (response, ws_task_id)
 
-                # Update total tokens in tasks table from stats (ws.py-specific)
                 try:
                     stats = get_stats_manager().get_task_usage(ws_task_id)
                     if stats:
@@ -637,13 +641,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         conn_tmp.close()
                 except Exception:
                     pass
-
-                # On user interrupt, don't save final message (preserves prior snapshot)
-                if _result != 'interrupted_user':
-                    try:
-                        save_message("agent", response, ws_session_id)
-                    except Exception as _final_e:
-                        print(f"[WS] Save final message failed: {_final_e}")
 
             return (response, ws_task_id)
         except Exception as e:
@@ -674,7 +671,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         task_id=ws_task_id,
                         skip_rag=True,
                     )
-                    # If retry succeeded, log and return (task already in "running" status)
+                    # If retry succeeded, log and return
+                    try:
+                        save_message("agent", response, ws_session_id)
+                    except Exception as _retry_save_e:
+                        print(f"[WS] Save retry message failed: {_retry_save_e}")
                     print(f"[WS] Auto-retry succeeded for task {ws_task_id}")
                     return (response, ws_task_id)
                 except Exception as retry_e:
