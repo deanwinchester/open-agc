@@ -60,36 +60,53 @@ class PythonREPLTool(BaseTool):
             import sys
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
-            
-            result = subprocess.run(
+
+            proc = subprocess.Popen(
                 [sys.executable, temp_path],
-                capture_output=True,
-                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 encoding="utf-8",
                 errors="replace",
-                timeout=60,
                 cwd=cwd,
-                env=env
+                env=env,
             )
-            
-            output = ""
-            if result.stdout:
-                output += f"STDOUT:\n{result.stdout}\n"
-            if result.stderr:
-                output += f"STDERR:\n{result.stderr}\n"
 
-            output += f"Exit Code: {result.returncode}"
+            try:
+                stdout, stderr = proc.communicate(timeout=60)
+                output = ""
+                if stdout:
+                    output += f"STDOUT:\n{stdout}\n"
+                if stderr:
+                    output += f"STDERR:\n{stderr}\n"
+                output += f"Exit Code: {proc.returncode}"
 
-            # Detect background service launches (Popen/start in the code)
-            import re as _re_ps
-            if _re_ps.search(r'\b(Popen|run\b.*start|subprocess\b.*start)', code):
-                output += "\n[SERVER_PROCESS] Python代码通过 Popen/start 启动了后台进程，"
-                output += "进程可能仍在运行中。如需等待，可调用 pause_and_wait 工具。"
+                # Detect background service launches
+                import re as _re_ps
+                if _re_ps.search(r'\b(Popen|run\b.*start|subprocess\b.*start)', code):
+                    output += ("\n[SERVER_PROCESS] Python代码启动了后台进程，"
+                               "进程可能仍在运行。如需等待可调用 pause_and_wait。")
+                return output
 
-            return output
-            
-        except subprocess.TimeoutExpired:
-            return "Error: Python execution timed out after 60 seconds."
+            except subprocess.TimeoutExpired:
+                # Kill the entire process tree (avoids orphan ffmpeg etc.)
+                try:
+                    if sys.platform == "win32":
+                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                       capture_output=True, timeout=5)
+                    else:
+                        import signal
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+                proc.kill()
+                proc.wait(timeout=3)
+                output = (proc.stdout.read() or "") if proc.stdout else ""
+                output += "\n\nError: Python execution timed out after 60 seconds. "
+                output += "后台进程（如 ffmpeg/Popen）的资源句柄阻止了脚本退出，已强制终止。"
+                output += "\n如需启动长期运行的进程，请使用 execute_shell + detach=True，"
+                output += "或在 Python 中将 stdout/stderr 重定向到 subprocess.DEVNULL。"
+                return output
+
         except Exception as e:
             return f"Error executing python code: {str(e)}"
         finally:
