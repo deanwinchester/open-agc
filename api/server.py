@@ -144,9 +144,15 @@ def _plugin_broadcast(data):
     if f:
         f(data)
 
-# ── Plugin Discovery ──
+# ── Plugin Discovery (built-in + user-installed) ──
 _plugins_dir = os.path.abspath(os.path.join(os.path.dirname(DB_PATH), "..", "plugins"))
-_plugins = discover_plugins(plugins_dir=_plugins_dir, broadcast_fn=_plugin_broadcast, server_config=load_config() if "load_config" in dir() else {})
+_user_plugins_dir = os.path.join(os.path.dirname(DB_PATH), "plugins")
+os.makedirs(_user_plugins_dir, exist_ok=True)
+_plugins = []
+for _pd in [_plugins_dir, _user_plugins_dir]:
+    if os.path.isdir(_pd) or _pd == _user_plugins_dir:
+        _plugins.extend(discover_plugins(plugins_dir=_pd, broadcast_fn=_plugin_broadcast,
+                          server_config=load_config() if "load_config" in dir() else {}))
 
 def _mount_plugins(app, plugins):
     for p in plugins:

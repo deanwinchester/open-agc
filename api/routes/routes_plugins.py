@@ -52,14 +52,35 @@ async def remove_tool_permission(body: dict):
 
 # ── Plugins API ──
 
-_plugins_dir = os.path.abspath(os.path.join(
+_builtin_plugins_dir = os.path.abspath(os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "plugins"))
+_user_plugins_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "plugins")
+os.makedirs(_user_plugins_dir, exist_ok=True)
+
+
+def _all_plugin_dirs():
+    """Return both built-in and user-installed plugin directories."""
+    dirs = [_builtin_plugins_dir]
+    if _user_plugins_dir != _builtin_plugins_dir:
+        dirs.append(_user_plugins_dir)
+    return dirs
+
+
+def _find_plugin_dir(name: str) -> str:
+    """Find which plugin directory a plugin lives in."""
+    for d in _all_plugin_dirs():
+        if os.path.isdir(os.path.join(d, name)):
+            return d
+    return _user_plugins_dir  # default to user dir for installs
 
 
 @router.get("/api/plugins")
 async def get_plugins():
     from core.plugin_manager import list_all_plugins
-    return {"plugins": list_all_plugins(_plugins_dir), "plugins_dir": os.path.abspath(_plugins_dir)}
+    all_plugins = []
+    for d in _all_plugin_dirs():
+        all_plugins.extend(list_all_plugins(d))
+    return {"plugins": all_plugins, "plugins_dir": str(_all_plugin_dirs())}
 
 
 @router.post("/api/plugins/scan")
@@ -67,9 +88,12 @@ async def scan_plugins():
     """Re-scan and mount plugins."""
     import api.server as _srv
     from core.plugin_manager import discover_plugins, list_plugins
-    _srv._plugins = discover_plugins(plugins_dir=_plugins_dir,
-                                      broadcast_fn=_srv._broadcast_to_websockets,
-                                      server_config=load_config())
+    all_plugins = []
+    for d in _all_plugin_dirs():
+        all_plugins.extend(discover_plugins(plugins_dir=d,
+                                             broadcast_fn=_srv._broadcast_to_websockets,
+                                             server_config=load_config()))
+    _srv._plugins = all_plugins
     _srv._mount_plugins(_srv.app, _srv._plugins)
     return {"status": "ok", "count": len(_srv._plugins), "plugins": list_plugins()}
 
@@ -77,7 +101,8 @@ async def scan_plugins():
 @router.post("/api/plugins/{name}/toggle")
 async def plugin_toggle(name: str):
     from core.plugin_manager import toggle_plugin
-    new_state = toggle_plugin(name, _plugins_dir)
+    pdir = _find_plugin_dir(name)
+    new_state = toggle_plugin(name, pdir)
     return {"status": "ok", "enabled": new_state.get("enabled", True)}
 
 
@@ -89,16 +114,17 @@ async def plugin_install(req: Request):
     if not name or not url:
         raise HTTPException(status_code=400, detail="name and url required")
     from core.plugin_manager import install_from_git
-    ok = install_from_git(name, url, _plugins_dir)
+    ok = install_from_git(name, url, _user_plugins_dir)
     if not ok:
         raise HTTPException(status_code=500, detail="Install failed")
-    return {"status": "ok", "message": f"Plugin {name} installed"}
+    return {"status": "ok", "message": f"Plugin {name} installed in data/plugins/"}
 
 
 @router.delete("/api/plugins/{name}")
 async def plugin_delete(name: str):
     import shutil
-    d = os.path.join(_plugins_dir, name)
+    pdir = _find_plugin_dir(name)
+    d = os.path.join(pdir, name)
     if not os.path.isdir(d):
         raise HTTPException(status_code=404, detail=f"Plugin not found: {name}")
     from core.plugin_manager import unload_plugin
