@@ -136,7 +136,6 @@ async def get_task_steps(task_id: int, page: int = 1, page_size: int = 50):
 @router.post("/api/tasks/{task_id}/interrupt")
 async def interrupt_task(task_id: int):
     """Mark a task as interrupted by user and stop its agent."""
-    from api.state import _agent_log_file
     for _agents in _active_agents.values():
         for _aid, _a in list(_agents.items()):
             if _aid == task_id or _aid == 0:
