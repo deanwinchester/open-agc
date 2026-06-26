@@ -193,7 +193,7 @@ class OpenAGCAgent(PromptBuilderMixin):
             f"```python\n"
             f"subprocess.Popen([\"ffmpeg\", \"...\"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
             f"```\n"
-            f"启动后调用 pause_and_wait 让任务进入后台，避免阻塞。\n"
+            f"启动后**不要 pause_and_wait**，继续执行后续任务。需要停止时再用 shell 命令杀掉进程。\n"
             f"\n## 交互式命令\n"
             f"如果 shell 返回 [Interactive] PID xxx，说明该命令已进入交互模式（如 python、mysql 等）。"
             f"此时进程并未超时，而是等待你的输入。你可以：\n"
