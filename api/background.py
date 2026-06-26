@@ -316,7 +316,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                 "role": "agent",
                 "background": True,
                 "session_id": bg_session_id,
-                "content": f"**{'🔄 自动恢复' if is_resume else '⏰ 定时'}任务完成**: {user_query[:40]}...\n\n{response[:500]}"
+                "content": f"**{'🔄 自动恢复' if is_resume else '⏰ 定时'}任务完成**: {user_query[:40]}...\n\n{response}"
             })
 
         return response
@@ -802,7 +802,7 @@ def _guardian_resume_task(task_id: int) -> None:
                     "type": "message",
                     "role": "agent",
                     "session_id": _hb_session,
-                    "content": f"**🔄 自动恢复任务完成**\n\n{resp[:500]}"
+                    "content": f"**🔄 自动恢复任务完成**\n\n{resp}"
                 })
             except Exception as _bc_e:
                 print(f"[Guardian] Broadcast error: {_bc_e}")
