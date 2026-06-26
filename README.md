@@ -1,11 +1,20 @@
-# Open-AGC (Agency)
+# 🐼 Open-AGC · 熊猫事务所
+
+> **Open-AGC (Agency) — 熊猫事务所**，一款基于本地电脑操作环境构建的全能型 AI 智能体框架。
 
 ![Panda Logo](/static/icon-panda.svg)
-![Open-AGC Home](assets/screenshot_home.png)
 
-Open-AGC 是一款基于本地电脑操作环境构建的全能型智能体框架。它能够自主规划、思考并执行终端命令、文件系统操作、Python 脚本、浏览器自动化以及键鼠控制。项目包含强大的抽象核心与极具现代感的 Panda Theme（熊猫流光主题）网页交互界面。
+Open-AGC 能够自主规划、思考并执行终端命令、文件系统操作、Python 脚本、浏览器自动化以及键鼠控制。项目包含强大的抽象核心与极具现代感的 **Panda Theme（熊猫流光主题）** 网页交互界面。
 
 *Read this in other languages: [English](README_en.md)*
+
+## 📸 界面预览
+
+| 聊天界面 | 任务管理 | 进程管理 |
+|:---:|:---:|:---:|
+| ![聊天界面](assets/screenshot_home.png) | ![任务管理](assets/screenshot_tasks.png) | 截图待更新 |
+| **设置面板** | **模型调用日志** | **下载管理** |
+| 截图待更新 | 截图待更新 | 截图待更新 |
 
 ## 🌟 核心特性 (Features)
 
@@ -27,6 +36,9 @@ Open-AGC 是一款基于本地电脑操作环境构建的全能型智能体框�
   - **死循环检测 (Tool Loop Detection)**: 自动识别重复无效调用并在连续出错时强制注入新思路。
   - **上下文字段动态压缩**: 单次工具返回超 15K 字符自动截断。
   - **最大迭代次数硬保险 (Max Iterations)**: 可配置的全局回合数上限，防范意外 Token 账单。
+  - **PID 自保护机制**: 自动记录服务进程 PID，拦截对服务本身及其父进程（VS Code Debugger）的误杀操作。
+  - **tool_call JSON 自动修复**: LLM 返回格式不标准的 JSON 参数时自动修复并继续。
+  - **异常自动恢复**: 未预期异常时自动重试一次，注入错误上下文让 Agent 换策略。
 - **MCP 协议支持 (MCP Tool)**: 支持 Model Context Protocol，可集成外部 MCP 工具服务。
 - **Docker 部署**: 提供 `Dockerfile` 和 `docker-compose.yml`，一键容器化运行（含 xvfb 无头显示支持）。
 
