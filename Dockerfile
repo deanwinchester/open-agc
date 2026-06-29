@@ -79,7 +79,7 @@ COPY api ./api
 COPY skills ./skills
 COPY plugins ./plugins
 COPY static ./static
-COPY main.py launcher.py gui_app.py ./
+COPY main.py launcher.py gui_app.py prompt_builder.py ./
 
 # ── Frontend build output from Stage 1 ──
 COPY --from=frontend-builder /build/static/dist ./static/dist
