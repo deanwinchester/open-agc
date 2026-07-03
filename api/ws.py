@@ -931,22 +931,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         except Exception:
                             pass
 
-                        if not resume_id_for_run:
-                            try:
-                                conn_cont = sqlite3.connect(DB_PATH)
-                                conn_cont.row_factory = sqlite3.Row
-                                latest_task = conn_cont.execute(
-                                    "SELECT id FROM tasks "
-                                    "WHERE session_id=? AND status IN ('interrupted','backgrounded','background_failed')"
-                                    "ORDER BY id DESC LIMIT 1",
-                                    (ws_session_id,)
-                                ).fetchone()
-                                if latest_task:
-                                    resume_id_for_run = latest_task["id"]
-                                    session_history = get_task_context(resume_id_for_run)
-                                conn_cont.close()
-                            except Exception as e:
-                                print(f"[WS] Continuation context error: {e}")
+                        # Do NOT load old task context here.
+                        # The goal description appended above is sufficient.
+                        # Loading previous task context injects irrelevant
+                        # tool calls and responses that confuse the agent.
 
 
                 # Send thinking status
