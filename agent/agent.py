@@ -1396,7 +1396,10 @@ class OpenAGCAgent(PromptBuilderMixin):
         self.task_id = task_id
         self._consecutive_failures = 0
         self.progress_callback = progress_callback
-        
+        # Check if user marked this task as completed while agent was idle
+        if getattr(self, '_completed_by_user', False):
+            return "用户已将任务标记为已完成。"
+
         # Only append user message if it's not None (None means we are resuming from ask_user_question)
         if user_input is not None:
             self.messages.append(build_user_message(user_input, images))
