@@ -227,12 +227,28 @@ async def reset_task_resume(task_id: int):
 
 @router.post("/api/tasks/{task_id}/complete")
 async def complete_task(task_id: int):
-    """Manually mark a task as completed."""
+    """Manually mark a task as completed — also stops the running agent."""
+    from api.state import _active_agents, _background_agents
+    from tools.shell import interrupt_shell
+    # Stop any running agent for this task
+    for _agents in list(_active_agents.values()):
+        for _aid, _a in list(_agents.items()):
+            if _aid == task_id:
+                _a.is_interrupted = True
+                _a._should_stop = True
+                _a._pending_final_answer = True
+    # Stop any background agent
+    for _tid, _bg_a in list(_background_agents.items()):
+        if _tid == task_id:
+            _bg_a.is_interrupted = True
+    # Kill shell process
+    interrupt_shell()
+    # Update DB
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE tasks SET status='completed', updated_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
     conn.commit()
     conn.close()
-    return {"status": "success"}
+    return {"status": "success", "message": "任务已标记为完成，agent 已停止"}
 
 
 # ── Schedule ──
