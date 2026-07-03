@@ -140,9 +140,11 @@ async def interrupt_task(task_id: int):
         for _aid, _a in list(_agents.items()):
             if _aid == task_id or _aid == 0:
                 _a.is_interrupted = True
+                _a._completed_by_user = True
     for _tid, _bg_a in list(_background_agents.items()):
         if _tid == task_id:
             _bg_a.is_interrupted = True
+            _bg_a._completed_by_user = True
     interrupt_shell()
     _llamacpp = globals().get('_llamacpp_download_state')
     if _llamacpp:
@@ -235,8 +237,7 @@ async def complete_task(task_id: int):
         for _aid, _a in list(_agents.items()):
             if _aid == task_id:
                 _a.is_interrupted = True
-                _a._should_stop = True
-                _a._pending_final_answer = True
+                _a._completed_by_user = True
     # Stop any background agent
     for _tid, _bg_a in list(_background_agents.items()):
         if _tid == task_id:
