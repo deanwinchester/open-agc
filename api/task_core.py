@@ -561,8 +561,9 @@ def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: st
         print(f"[Task] Add step error: {e}")
 
 
-def _resolve_goal_for_query(query: str) -> int:
+def _resolve_goal_for_query(query: str, recent_context: str = "") -> int:
     """Determine which goal (if any) this query is continuing.
+    recent_context: last 2-3 conversation turns to distinguish follow-up from goal.
     Returns goal_id, or 0 for new task.
     """
     q = query.strip().lower()
@@ -597,10 +598,15 @@ def _resolve_goal_for_query(query: str) -> int:
         model = load_config().get("default_model", "moonshot/kimi-latest")
 
         goal_lines = "\n".join(f"{i['id']}. {i['desc']} ({i['status']})" for i in active)
+        _nl = "\n"
         prompt = (
-            f"当前大目标：\n{goal_lines}\n\n"
-            f"用户新输入：「{query[:200]}」\n\n"
-            f"回答：如果是续接某个大目标，仅回复数字 id；如果无关或全新任务，仅回复 0。"
+            f"当前大目标：{_nl}{goal_lines}{_nl}{_nl}"
+            + (f"最近对话：{_nl}{recent_context[:500]}{_nl}{_nl}" if recent_context else "")
+            + f"用户新输入：\u300c{query[:200]}\u300d{_nl}{_nl}"
+            + f"分析：用户输入是对最近对话的延续，还是对大目标的续接？{_nl}"
+            + f"如果是最近对话的延续 \u2192 回复 0（全新任务）{_nl}"
+            + f"如果是明确续接某个大目标 \u2192 仅回复该目标数字 id{_nl}"
+            + f"不确定 \u2192 回复 0"
         )
         llm = LLMClient(default_model=model)
         resp, _ = llm.chat([{"role": "user", "content": prompt}])
@@ -614,7 +620,6 @@ def _resolve_goal_for_query(query: str) -> int:
         pass
 
     return 0
-
 
 def _check_goal_completeness(task_id: int) -> int:
     """Check if the goal containing this task_id has all tasks completed.

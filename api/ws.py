@@ -919,22 +919,37 @@ async def websocket_endpoint(websocket: WebSocket):
                             continue
 
                     # Auto-reconstruct context for continuation queries
-                    _resolved_goal = _resolve_goal_for_query(query)
+                    # Pass recent conversation context for accurate classification
+                    _recent_ctx = "\n".join(
+                        f"{m.get('role','?')}: {str(m.get('content',''))[:100]}"
+                        for m in (session_history[-4:] if session_history else [])
+                    ) if session_history else ""
+                    _resolved_goal = _resolve_goal_for_query(query, recent_context=_recent_ctx)
                     if _resolved_goal > 0:
                         try:
                             from tools.task_plan import load_goals as _ct_load
                             _ct_goals = _ct_load()
+                            _matched_goal = None
                             for _ct_item in _ct_goals.get("items", []):
                                 if _ct_item["id"] == _resolved_goal:
+                                    _matched_goal = _ct_item
                                     query += f"\n\n[关联大目标 #{_resolved_goal}] {_ct_item['desc']}"
                                     break
+                            # Load the last task associated with this goal
+                            if _matched_goal and _matched_goal.get("task_ids") and not resume_id_for_run:
+                                _goal_tids = sorted(_matched_goal["task_ids"], reverse=True)
+                                for _goal_tid in _goal_tids:
+                                    try:
+                                        _ctx = get_task_context(_goal_tid)
+                                        if _ctx:
+                                            resume_id_for_run = _goal_tid
+                                            session_history = _ctx
+                                            print(f"[WS] Loaded goal #{_resolved_goal} task #{_goal_tid} context ({len(_ctx)} msgs)")
+                                            break
+                                    except Exception:
+                                        continue
                         except Exception:
                             pass
-
-                        # Do NOT load old task context here.
-                        # The goal description appended above is sufficient.
-                        # Loading previous task context injects irrelevant
-                        # tool calls and responses that confuse the agent.
 
 
                 # Send thinking status
