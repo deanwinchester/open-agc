@@ -238,7 +238,7 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
                 except Exception:
                     is_recent = False
 
-                if is_recent and len(query.strip()) > 15 and _resolve_goal_for_query(query) > 0:
+                if is_recent and len(query.strip()) > 10:
                     print(f"[Task] Continuing task {tid} for session {session_id}")
                     update_task_status(tid, "running")
                     return tid
