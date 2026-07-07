@@ -32,7 +32,7 @@ function formatSize(bytes) {
 }
 
 function renderSkills(skills) {
-  const container = document.getElementById('skills-list');
+  const container = document.getElementById('skills-list') || document.getElementById('skills-config-container');
   if (!container) return;
   if (!skills.length) {
     container.innerHTML = '<p class="empty-state">暂无技能</p>';
