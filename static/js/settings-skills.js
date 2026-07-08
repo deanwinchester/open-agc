@@ -39,13 +39,13 @@ function renderSkills(skills) {
     return;
   }
   container.innerHTML = skills.map(s => `
-    <div class="skill-card">
+    <div class="skill-row">
       <div class="skill-info">
         <strong>${escapeHtml(s.filename || s.name || '未命名')}</strong>
-        ${s.description ? `<p>${escapeHtml(s.description)}</p>` : ''}
-        ${s.usage_count ? `<span class="skill-stat">使用 ${s.usage_count} 次</span>` : ''}
+        ${s.description ? `<p style="margin:0.25rem 0 0;font-size:0.85rem;color:var(--text-secondary);">${escapeHtml(s.description)}</p>` : ''}
+        ${s.usage_count ? `<span style="font-size:0.78rem;color:var(--text-secondary);margin-left:0.5rem;">📊 使用 ${s.usage_count} 次</span>` : ''}
       </div>
-      <div class="skill-actions">
+      <div style="display:flex;gap:0.4rem;">
         <button class="btn-mini edit-skill-btn" data-filename="${escapeHtml(s.filename || s.name)}">编辑</button>
         <button class="btn-mini btn-danger delete-skill-btn" data-filename="${escapeHtml(s.filename || s.name)}">删除</button>
       </div>
