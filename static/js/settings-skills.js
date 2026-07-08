@@ -53,6 +53,7 @@ function openEditSkillModal(filename) {
   if (!modal || !contentEl) return;
   if (nameEl) nameEl.textContent = filename;
   contentEl.value = '加载中...';
+  modal.style.display = 'flex';
   modal.classList.add('active');
   cachedFetch(`/api/skills?filename=${encodeURIComponent(filename)}`, {}, 10000)
     .then(data => {
@@ -64,7 +65,7 @@ function openEditSkillModal(filename) {
 
 function closeEditSkillModal() {
   const modal = document.getElementById('edit-skill-modal');
-  if (modal) modal.classList.remove('active');
+  if (modal) { modal.style.display = 'none'; modal.classList.remove('active'); }
 }
 
 async function saveSkillEdit() {
@@ -99,12 +100,13 @@ function openDeleteSkillModal(filename) {
   if (!modal || !confirmBtn) return;
   if (nameEl) nameEl.textContent = filename;
   confirmBtn.dataset.filename = filename;
+  modal.style.display = 'flex';
   modal.classList.add('active');
 }
 
 function closeDeleteSkillModal() {
   const modal = document.getElementById('delete-skill-modal');
-  if (modal) modal.classList.remove('active');
+  if (modal) { modal.style.display = 'none'; modal.classList.remove('active'); }
 }
 
 async function confirmDeleteSkill() {
