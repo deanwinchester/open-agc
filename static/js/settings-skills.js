@@ -18,19 +18,6 @@ export async function loadSkillsConfig() {
   }
 }
 
-function initSkillsUI() {
-  // No standalone init needed — functions are called from settings.js
-}
-
-function formatSize(bytes) {
-  if (!bytes) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let i = 0;
-  let size = bytes;
-  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
-  return `${size.toFixed(1)} ${units[i]}`;
-}
-
 function renderSkills(skills) {
   const container = document.getElementById('skills-list') || document.getElementById('skills-config-container');
   if (!container) return;
@@ -45,9 +32,9 @@ function renderSkills(skills) {
         ${s.description ? `<p style="margin:0.25rem 0 0;font-size:0.85rem;color:var(--text-secondary);">${escapeHtml(s.description)}</p>` : ''}
         ${s.usage_count ? `<span style="font-size:0.78rem;color:var(--text-secondary);margin-left:0.5rem;">📊 使用 ${s.usage_count} 次</span>` : ''}
       </div>
-      <div style="display:flex;gap:0.4rem;">
-        <button class="btn-mini edit-skill-btn" data-filename="${escapeHtml(s.filename || s.name)}">编辑</button>
-        <button class="btn-mini btn-danger delete-skill-btn" data-filename="${escapeHtml(s.filename || s.name)}">删除</button>
+      <div class="skill-actions" style="display:flex;gap:0.4rem;align-items:center;flex-shrink:0;">
+        <button class="btn-secondary edit-skill-btn" data-filename="${escapeHtml(s.filename || s.name)}" style="padding:0.3rem 0.7rem;font-size:0.82rem;border-radius:4px;cursor:pointer;">编辑</button>
+        <button class="btn-danger delete-skill-btn" data-filename="${escapeHtml(s.filename || s.name)}" style="padding:0.3rem 0.7rem;font-size:0.82rem;border-radius:4px;cursor:pointer;background:var(--error,#e74c3c);color:#fff;border:none;">删除</button>
       </div>
     </div>
   `).join('');
@@ -61,10 +48,10 @@ function renderSkills(skills) {
 // ---- Edit Skill ----
 function openEditSkillModal(filename) {
   const modal = document.getElementById('edit-skill-modal');
-  const nameEl = document.getElementById('edit-skill-name');
+  const nameEl = document.getElementById('edit-skill-filename');
   const contentEl = document.getElementById('edit-skill-content');
-  if (!modal || !nameEl || !contentEl) return;
-  nameEl.value = filename;
+  if (!modal || !contentEl) return;
+  if (nameEl) nameEl.textContent = filename;
   contentEl.value = '加载中...';
   modal.classList.add('active');
   cachedFetch(`/api/skills?filename=${encodeURIComponent(filename)}`, {}, 10000)
@@ -81,14 +68,15 @@ function closeEditSkillModal() {
 }
 
 async function saveSkillEdit() {
-  const name = document.getElementById('edit-skill-name')?.value;
+  const nameEl = document.getElementById('edit-skill-filename');
   const content = document.getElementById('edit-skill-content')?.value;
-  if (!name || !content) return;
+  const filename = nameEl?.textContent;
+  if (!filename || !content) return;
   try {
     const resp = await fetch('/api/skills', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: name, content })
+      body: JSON.stringify({ filename, content })
     });
     if (resp.ok) {
       showStatus('技能已保存', 'success');
@@ -106,10 +94,10 @@ async function saveSkillEdit() {
 // ---- Delete Skill ----
 function openDeleteSkillModal(filename) {
   const modal = document.getElementById('delete-skill-modal');
-  const msg = document.getElementById('delete-skill-msg');
-  const confirmBtn = document.getElementById('confirm-delete-skill');
-  if (!modal || !msg || !confirmBtn) return;
-  msg.textContent = `确定要删除技能 "${filename}" 吗？`;
+  const nameEl = document.getElementById('delete-skill-name');
+  const confirmBtn = document.getElementById('delete-skill-confirm');
+  if (!modal || !confirmBtn) return;
+  if (nameEl) nameEl.textContent = filename;
   confirmBtn.dataset.filename = filename;
   modal.classList.add('active');
 }
@@ -120,7 +108,7 @@ function closeDeleteSkillModal() {
 }
 
 async function confirmDeleteSkill() {
-  const btn = document.getElementById('confirm-delete-skill');
+  const btn = document.getElementById('delete-skill-confirm');
   const filename = btn?.dataset.filename;
   if (!filename) return;
   try {
@@ -136,6 +124,22 @@ async function confirmDeleteSkill() {
     showStatus('删除技能失败', 'error');
   }
 }
+
+// ---- Wire up modal buttons on init ----
+// Edit modal
+document.getElementById('edit-skill-close')?.addEventListener('click', closeEditSkillModal);
+document.getElementById('edit-skill-close2')?.addEventListener('click', closeEditSkillModal);
+document.getElementById('edit-skill-save')?.addEventListener('click', saveSkillEdit);
+document.getElementById('edit-skill-modal')?.addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeEditSkillModal();
+});
+
+// Delete modal
+document.getElementById('delete-skill-cancel')?.addEventListener('click', closeDeleteSkillModal);
+document.getElementById('delete-skill-confirm')?.addEventListener('click', confirmDeleteSkill);
+document.getElementById('delete-skill-modal')?.addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeDeleteSkillModal();
+});
 
 // ═══════════════ Agent Profiles ═══════════════
 
@@ -184,7 +188,7 @@ async function loadAvailableModels() {
     if (!sel) return;
     sel.innerHTML = models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
   } catch (e) {
-    // Silently fail — model selector is optional
+    // Silently fail
   }
 }
 
@@ -231,7 +235,6 @@ async function saveAgentFromModal() {
 }
 
 // ═══════════════ Expose to window ═══════════════
-// These are called from settings.js DOM event handlers
 window.openEditSkillModal = openEditSkillModal;
 window.closeEditSkillModal = closeEditSkillModal;
 window.saveSkillEdit = saveSkillEdit;
