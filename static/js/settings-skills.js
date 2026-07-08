@@ -55,7 +55,7 @@ function openEditSkillModal(filename) {
   contentEl.value = '加载中...';
   modal.style.display = 'flex';
   modal.classList.add('active');
-  cachedFetch(`/api/skills?filename=${encodeURIComponent(filename)}`, {}, 10000)
+  fetch(`/api/skills/${encodeURIComponent(filename)}`).then(r => r.json())
     .then(data => {
       if (data?.content) contentEl.value = data.content;
       else contentEl.value = '// 无法加载技能内容';
@@ -114,7 +114,7 @@ async function confirmDeleteSkill() {
   const filename = btn?.dataset.filename;
   if (!filename) return;
   try {
-    const resp = await fetch(`/api/skills?filename=${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    const resp = await fetch(`/api/skills/${encodeURIComponent(filename)}`, { method: 'DELETE' });
     if (resp.ok) {
       showStatus('技能已删除', 'success');
       closeDeleteSkillModal();
