@@ -2043,6 +2043,79 @@ textarea {
     gap: 0.75rem;
 }
 
+.api-key-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    background: var(--card-bg, rgba(255,255,255,0.05));
+    border: 1px solid var(--border-color, rgba(255,255,255,0.1));
+    border-radius: 8px;
+    padding: 0.75rem;
+    transition: border-color 0.2s;
+}
+
+.api-key-row:hover {
+    border-color: var(--primary, #4a90e2);
+}
+
+.api-key-row label {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.2rem;
+}
+
+.api-key-input-group {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.api-key-input {
+    flex: 1;
+    background: var(--input-bg, rgba(0,0,0,0.2));
+    border: 1px solid var(--border-color, rgba(255,255,255,0.15));
+    border-radius: 6px;
+    padding: 0.5rem 0.6rem;
+    color: var(--text-primary);
+    font-size: 0.82rem;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    outline: none;
+    transition: border-color 0.2s;
+    min-width: 0;
+}
+
+.api-key-input:focus {
+    border-color: var(--primary, #4a90e2);
+}
+
+.api-key-input::placeholder {
+    color: var(--text-secondary, rgba(255,255,255,0.4));
+    font-family: inherit;
+}
+
+.toggle-key-btn,
+.test-key-btn,
+.stats-key-btn {
+    background: none;
+    border: 1px solid var(--border-color, rgba(255,255,255,0.1));
+    border-radius: 6px;
+    padding: 0.4rem 0.5rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    opacity: 0.6;
+    transition: opacity 0.2s, background 0.2s;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+.toggle-key-btn:hover,
+.test-key-btn:hover,
+.stats-key-btn:hover {
+    opacity: 1;
+    background: var(--hover-bg, rgba(255,255,255,0.08));
+}
+
 .key-field {
     display: flex;
     flex-direction: column;

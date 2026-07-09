@@ -7,6 +7,7 @@ import asyncio
 import os
 import threading
 from datetime import datetime, timezone
+from typing import Dict, Optional
 
 # Store the main event loop for cross-thread WebSocket broadcasts
 _main_event_loop: asyncio.AbstractEventLoop = None
@@ -17,6 +18,10 @@ _SERVER_START_TIME = datetime.now(timezone.utc)
 
 # Connected WebSocket clients (for background task push)
 connected_websockets: list = []  # List of active WebSocket connections
+
+# Final responses waiting to be delivered to reconnecting clients
+# Maps session_id -> {"content": str, "task_id": int}
+_pending_final_responses: Dict[int, dict] = {}
 
 # Sandbox auth waits: {session_id: {"event": threading.Event, "result": dict}}
 _sandbox_waits: dict = {}

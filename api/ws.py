@@ -9,7 +9,7 @@ from api.state import (
     connected_websockets, _main_event_loop, _active_agents, _background_agents,
     _sandbox_waits, _pending_sandbox_approvals, _session_enabled_tools,
     _llamacpp_download_state, _apply_pending_sandbox_approvals,
-    _broadcast_to_websockets, _ws_send_safe,
+    _broadcast_to_websockets, _ws_send_safe, _pending_final_responses,
 )
 from api.task_core import (
     create_task, update_task_status, update_task_type, get_task_context, save_task_context,
@@ -56,6 +56,23 @@ async def websocket_endpoint(websocket: WebSocket):
             _broadcast_task_history(_hb_row[0], ws_session_id, _hb_row[1])
     except Exception as _hb_e:
         print(f"[WS] Broadcast task history error: {_hb_e}")
+
+    # Deliver any pending final response that wasn't sent due to WS disconnect
+    _pending = _pending_final_responses.get(ws_session_id)
+    if _pending:
+        try:
+            await websocket.send_json({
+                "type": "message",
+                "role": "agent",
+                "content": _pending["content"],
+                "session_id": ws_session_id,
+                "task_id": _pending.get("task_id"),
+            })
+            # Clear after successful delivery
+            _pending_final_responses.pop(ws_session_id, None)
+            print(f"[WS] Delivered pending final response to reconnected client (session {ws_session_id})")
+        except Exception as _pend_e:
+            print(f"[WS] Failed to deliver pending response: {_pend_e}")
 
     # Flag to track whether this connection is still alive
     ws_alive = True
@@ -565,13 +582,21 @@ async def websocket_endpoint(websocket: WebSocket):
                         **event
                     })
                 except Exception as _prog_e:
-                    print(f"[WS] Progress send error, breaking loop: {_prog_e}")
-                    break
+                    print(f"[WS] Progress send error: {_prog_e}")
+                    # Continue draining remaining events — don't break
             
             response = await agent_future
             session_history = agent.messages[1:]
             # Persist enabled tools for next turn (avoid re-discovering)
             _session_enabled_tools[ws_session_id] = getattr(agent, 'active_tool_names', set())
+
+            # ── Store response for reconnecting clients (before heavy DB) ──
+            # Only skip [TASK_BACKGROUNDED] (internal protocol, not user-facing)
+            if response and not response.startswith("[TASK_BACKGROUNDED]"):
+                _pending_final_responses[ws_session_id] = {
+                    "content": response,
+                    "task_id": ws_task_id,
+                }
 
             # Handle [INTERJECTION_REJECTED] prefix (strips it from response)
             if response and response.startswith("[INTERJECTION_REJECTED]"):
@@ -596,51 +621,65 @@ async def websocket_endpoint(websocket: WebSocket):
                 response = _remaining if '_remaining' in locals() else response
 
             if ws_task_id and response:
-                # Delegate state transitions to shared handler
-                _result = handle_task_completion(
-                    ws_task_id, response, agent.messages[1:], ws_session_id,
-                    wake_minutes=_bg_wake,
-                )
+                # Run task completion in a background thread so it doesn't block the
+                # event loop with heavy json.dumps(agent.messages[1:]) serialization.
+                _bg_messages = agent.messages[1:]  # capture before thread
+                _tb_ws_task_id = ws_task_id
+                _tb_response = response
+                _tb_session_id = ws_session_id
+                _tb_wake = _bg_wake
 
-                # Save agent response before any return path (including backgrounded)
-                if _result != 'interrupted_user':
+                def _do_completion():
                     try:
-                        save_message("agent", response, ws_session_id)
-                    except Exception as _final_e:
-                        print(f"[WS] Save final message failed: {_final_e}")
+                        _r = handle_task_completion(
+                            _tb_ws_task_id, _tb_response, _bg_messages, _tb_session_id,
+                            wake_minutes=_tb_wake,
+                        )
+                        # Save agent response (fast DB write)
+                        if _r != 'interrupted_user':
+                            try:
+                                save_message("agent", _tb_response, _tb_session_id)
+                            except Exception:
+                                pass
 
-                if _result == 'backgrounded':
-                    if _bg_pid:
+                        if _r == 'backgrounded':
+                            if _bg_pid:
+                                try:
+                                    from tools.shell import get_background_processes as _gbp
+                                    _bg_procs = _gbp()
+                                    if str(_tb_ws_task_id) not in _bg_procs:
+                                        from tools.shell import _background_process_info as _bgi
+                                        from tools.shell import _background_process_lock as _bgl
+                                        with _bgl:
+                                            _bgi[str(_tb_ws_task_id)] = {"pid": _bg_pid, "command": "", "started_at": _time.time()}
+                                except Exception:
+                                    pass
+                            # Send task_backgrounded notification from background thread
+                            _broadcast_to_websockets({
+                                "type": "task_backgrounded",
+                                "task_id": _tb_ws_task_id,
+                                "message": "后台命令执行中，完成后自动恢复",
+                                "session_id": _tb_session_id,
+                            })
+                            return
+
+                        # Update stats (fast DB writes)
                         try:
-                            from tools.shell import get_background_processes as _gbp
-                            _bg_procs = _gbp()
-                            if str(ws_task_id) not in _bg_procs:
-                                from tools.shell import _background_process_info as _bgi
-                                from tools.shell import _background_process_lock as _bgl
-                                with _bgl:
-                                    _bgi[str(ws_task_id)] = {"pid": _bg_pid, "command": "", "started_at": _time.time()}
-                                print(f"[Task] Registered PID {_bg_pid} for BgMonitor (task {ws_task_id})")
-                        except Exception as _bg_e:
-                            print(f"[WS] BgMonitor registration error: {_bg_e}")
-                    await _safe_send({
-                        "type": "task_backgrounded",
-                        "task_id": ws_task_id,
-                        "message": "任务已进入后台，完成后自动恢复",
-                        "session_id": ws_session_id
-                    })
-                    agent_is_running = False
-                    return (response, ws_task_id)
+                            stats = get_stats_manager().get_task_usage(_tb_ws_task_id)
+                            if stats:
+                                _conn_tmp = sqlite3.connect(DB_PATH)
+                                _conn_tmp.execute(
+                                    "UPDATE tasks SET total_tokens=?, total_cost=?, prompt_tokens=?, completion_tokens=?, cached_tokens=? WHERE id=?",
+                                    (stats["total"], stats.get("cost", 0.0), stats.get("prompt", 0), stats.get("completion", 0), stats.get("cached", 0), _tb_ws_task_id))
+                                _conn_tmp.commit()
+                                _conn_tmp.close()
+                        except Exception:
+                            pass
+                    except Exception as _bg_comp_e:
+                        print(f"[WS] Background completion error: {_bg_comp_e}")
 
-                try:
-                    stats = get_stats_manager().get_task_usage(ws_task_id)
-                    if stats:
-                        conn_tmp = sqlite3.connect(DB_PATH)
-                        conn_tmp.execute("UPDATE tasks SET total_tokens = ?, total_cost = ?, prompt_tokens = ?, completion_tokens = ?, cached_tokens = ? WHERE id = ?",
-                                         (stats["total"], stats.get("cost", 0.0), stats.get("prompt", 0), stats.get("completion", 0), stats.get("cached", 0), ws_task_id))
-                        conn_tmp.commit()
-                        conn_tmp.close()
-                except Exception:
-                    pass
+                import threading as _comp_thr
+                _comp_thr.Thread(target=_do_completion, daemon=True).start()
 
             return (response, ws_task_id)
         except Exception as e:
@@ -693,13 +732,15 @@ async def websocket_endpoint(websocket: WebSocket):
         finally:
             agent_is_running = False
             # If ws_alive is False (WS disconnected mid-execution), broadcast the
-            # response to any reconnected client so the final message appears.
+            # response to any reconnected client via the pending response mechanism.
+            # The main loop handles sending for the normal (alive) case.
             try:
                 _resp = locals().get('response')
-                if not ws_alive and _resp:
+                if not ws_alive and _resp and not _resp.startswith("[TASK_BACKGROUNDED]"):
                     _broadcast_to_websockets({
                         "type": "message", "role": "agent",
-                        "content": _resp, "session_id": ws_session_id
+                        "content": _resp, "session_id": ws_session_id,
+                        "task_id": locals().get('ws_task_id'),
                     })
                     print(f"[WS] Broadcast final response after disconnect (session {ws_session_id})")
             except Exception as _resp_e:
@@ -962,14 +1003,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Run the agent
                 response, ws_task_id = await run_agent_with_progress(query, retry_model, agent_profile_name, images=ws_images, resume_task_id=resume_id_for_run)
 
-                # Send the final response (run_agent_with_progress already saved the message)
-                await _safe_send({
-                    "type": "message",
-                    "role": "agent",
-                    "content": response,
-                    "session_id": ws_session_id,
-                    "task_id": ws_task_id
+                # Send the final response via broadcast (reaches ALL connected
+                # sockets, bypasses ws_alive poison). This is the single send point.
+                _broadcast_to_websockets({
+                    "type": "message", "role": "agent",
+                    "content": response, "session_id": ws_session_id,
+                    "task_id": ws_task_id,
                 })
+                # Clear pending response — successfully dispatched to all sockets
+                _pending_final_responses.pop(ws_session_id, None)
                 
             except (WebSocketDisconnect, RuntimeError) as _ws_err:
                 # WebSocketDisconnect doesn't contain "disconnect" in str() output.
@@ -1014,6 +1056,7 @@ async def websocket_endpoint(websocket: WebSocket):
             connected_websockets.remove(websocket)
         _active_agents.pop(ws_session_id, None)  # nested dict cleaned up
         _session_enabled_tools.pop(ws_session_id, None)
+        # Keep _pending_final_responses for reconnecting clients (cleared after delivery)
     except Exception as e:
         print(f"WebSocket error: {e}")
         if websocket in connected_websockets:
