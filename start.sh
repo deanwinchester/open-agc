@@ -78,14 +78,35 @@ if [ -z "$PYTHON" ]; then
     }
     rm /tmp/python.tar.gz
     echo "Python 3.12 extracted to .python/"
-    PYTHON=".python/bin/python3"
+    # The binary may be "python3" or "python" depending on the build
+    if [ -f ".python/bin/python3" ]; then
+        PYTHON=".python/bin/python3"
+    elif [ -f ".python/bin/python" ]; then
+        PYTHON=".python/bin/python"
+    else
+        echo "ERROR: Extracted Python binary not found in .python/bin/"
+        ls -la .python/bin/ 2>/dev/null || echo "  (bin/ directory missing)"
+        exit 1
+    fi
 fi
 
-if [ -z "$PYTHON" ] || ! $PYTHON -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)" 2>/dev/null; then
+if [ -z "$PYTHON" ] || ! $PYTHON -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)"; then
     echo "================================================"
-    echo " Cannot find or install Python 3.9+."
-    echo " Please install Python 3.9 or later manually:"
-    echo "   https://www.python.org/downloads/"
+    echo " ERROR: Cannot find or install Python 3.9+."
+    if [ -n "$PYTHON" ]; then
+        echo " The binary at $PYTHON failed to execute."
+        echo " This may be due to incompatible glibc (system library) version."
+        echo " System glibc version:"
+        ldd --version 2>&1 | head -1
+        echo ""
+        echo " Try installing Python 3.9+ via your system package manager:"
+        if command -v apt-get &> /dev/null; then
+            echo "   sudo apt-get install python3"
+        elif command -v yum &> /dev/null; then
+            echo "   sudo yum install python3"
+        fi
+    fi
+    echo " Or download manually from: https://www.python.org/downloads/"
     echo "================================================"
     exit 1
 fi
