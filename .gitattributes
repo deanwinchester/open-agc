@@ -1,0 +1,9 @@
+# Force CRLF for Windows batch files (CMD requires CRLF)
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# Shell scripts should use LF
+*.sh    text eol=lf
+
+# All other text files use native line endings
+*       text=auto
