@@ -38,7 +38,7 @@ if exist "requirements.txt" (
 
 :: Build frontend assets with Vite (Node.js required)
 if exist "static\dist\open-agc.css" if exist "static\dist\open-agc.min.js" (
-    echo Frontend assets found (static\dist\), skipping build.
+    echo Frontend assets found in static\dist, skipping build.
 ) else (
     where npm >nul 2>&1
     if not errorlevel 1 (
