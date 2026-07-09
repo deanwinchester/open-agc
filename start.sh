@@ -47,19 +47,37 @@ fi
 if [ -z "$PYTHON" ]; then
     # Download prebuilt Python from python-build-standalone (no compile, no sudo)
     echo "Downloading prebuilt Python 3.12 to .python/..."
+    echo "  (about 25 MB, may take a moment)"
     mkdir -p .python
     PKG="cpython-3.12.13+20260623-x86_64-unknown-linux-gnu-install_only.tar.gz"
     URL="https://github.com/astral-sh/python-build-standalone/releases/download/20260623/$PKG"
     if command -v curl &> /dev/null; then
-        curl -fsSL "$URL" -o /tmp/python.tar.gz
+        curl -fL --progress-bar "$URL" -o /tmp/python.tar.gz || {
+            echo "ERROR: Download failed (curl exit code $?)"
+            echo "URL: $URL"
+            echo "Try downloading manually and extracting to .python/"
+            exit 1
+        }
     elif command -v wget &> /dev/null; then
-        wget -q "$URL" -O /tmp/python.tar.gz
+        wget --show-progress "$URL" -O /tmp/python.tar.gz || {
+            echo "ERROR: Download failed (wget exit code $?)"
+            echo "URL: $URL"
+            echo "Try downloading manually and extracting to .python/"
+            exit 1
+        }
     else
-        echo "Need curl or wget to download Python."
+        echo "ERROR: Need curl or wget to download Python."
         exit 1
     fi
-    tar -xzf /tmp/python.tar.gz -C .python --strip-components=1
+    echo "Extracting..."
+    tar -xzf /tmp/python.tar.gz -C .python --strip-components=1 || {
+        echo "ERROR: Failed to extract Python archive."
+        echo "The download may be corrupted. Try deleting .python/ and re-running."
+        rm -f /tmp/python.tar.gz
+        exit 1
+    }
     rm /tmp/python.tar.gz
+    echo "Python 3.12 extracted to .python/"
     PYTHON=".python/bin/python3"
 fi
 
@@ -101,17 +119,31 @@ else
         export PATH="$PWD/.node/bin:$PATH"
     elif ! command -v npm &> /dev/null; then
         echo "npm not found. Downloading portable Node.js to .node/..."
+        echo "  (about 45 MB, may take a moment)"
         mkdir -p .node
         if command -v curl &> /dev/null; then
-            curl -fsSL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz -o /tmp/node.tar.xz
+            curl -fL --progress-bar https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz -o /tmp/node.tar.xz || {
+                echo "ERROR: Node.js download failed (curl exit code $?)"
+                exit 1
+            }
         elif command -v wget &> /dev/null; then
-            wget -q https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz -O /tmp/node.tar.xz
+            wget --show-progress https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz -O /tmp/node.tar.xz || {
+                echo "ERROR: Node.js download failed (wget exit code $?)"
+                exit 1
+            }
         else
-            echo "Cannot download Node.js. Install manually: https://nodejs.org/"
+            echo "ERROR: curl or wget required to download Node.js."
+            echo "Install Node.js manually: https://nodejs.org/"
             exit 1
         fi
-        tar -xf /tmp/node.tar.xz -C .node --strip-components=1
+        echo "Extracting..."
+        tar -xf /tmp/node.tar.xz -C .node --strip-components=1 || {
+            echo "ERROR: Failed to extract Node.js archive."
+            rm -f /tmp/node.tar.xz
+            exit 1
+        }
         rm /tmp/node.tar.xz
+        echo "Node.js extracted to .node/"
         export PATH="$PWD/.node/bin:$PATH"
     fi
 
