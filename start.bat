@@ -1,76 +1,112 @@
 @echo off
 setlocal
 
-:: Navigate to the script's directory
+:: Open-AGC startup script — auto-installs dependencies on Windows
+
 cd /d "%~dp0"
 
 echo ===================================
 echo      Starting Open-AGC (Panda)
 echo ===================================
 
-:: Check if Python is available
+:: ── 1. Python ──────────────────────────────────────────────
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo Error: Python is not installed or not in your PATH.
-    echo Please install Python 3 from https://www.python.org/downloads/
-    pause
-    exit /b 1
+    echo Python not found. Attempting to install via winget...
+    winget install Python.Python.3.12 --silent --accept-package-agreements >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo ===============================================
+        echo  Cannot auto-install Python.
+        echo  Please install Python 3 manually from:
+        echo  https://www.python.org/downloads/
+        echo  Then re-run this script.
+        echo ===============================================
+        pause
+        exit /b 1
+    )
+    echo Python installed. Refreshing PATH...
+    :: Refresh PATH from registry for current session
+    for /f "tokens=2*" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v PATH 2^>nul') do set "PATH=%%b"
+    python --version >nul 2>&1
+    if %errorlevel% neq 0 (
+        :: Try common install location
+        set "PATH=%PATH%;%LocalAppData%\Programs\Python\Python312;%LocalAppData%\Programs\Python\Python312\Scripts"
+        python --version >nul 2>&1
+        if %errorlevel% neq 0 (
+            echo Python installed but not in PATH. Please restart your terminal and re-run.
+            pause
+            exit /b 1
+        )
+    )
 )
 
-:: Ensure virtual environment exists
+:: ── 2. Virtual environment ─────────────────────────────────
 if not exist "venv\" (
     echo Virtual environment not found. Creating one...
     call python -m venv venv
 )
 
-:: Activate virtual environment
 echo Activating virtual environment...
 call venv\Scripts\activate.bat
 
 :: Upgrade pip inside venv
 python -m pip install --upgrade pip --quiet 2>nul
 
-:: Install dependencies
+:: ── 3. Python dependencies ─────────────────────────────────
 if exist "requirements.txt" (
-    echo Checking / Installing dependencies...
+    echo Installing Python dependencies...
     call python -m pip install -r requirements.txt
 )
 
-:: Build frontend assets with Vite (Node.js required)
+:: ── 4. Node.js / frontend build ────────────────────────────
 if exist "static\dist\open-agc.css" if exist "static\dist\open-agc.min.js" (
     echo Frontend assets found in static\dist, skipping build.
-) else (
+    goto :start_server
+)
+
+where npm >nul 2>&1
+if %errorlevel% neq 0 (
+    echo npm not found. Attempting to install Node.js via winget...
+    winget install OpenJS.NodeJS --silent --accept-package-agreements >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo ===============================================
+        echo  Cannot auto-install Node.js via winget.
+        echo  Please install Node.js manually from:
+        echo  https://nodejs.org/
+        echo  Then re-run this script.
+        echo ===============================================
+        pause
+        exit /b 1
+    )
+    echo Node.js installed. Refreshing PATH...
+    :: Refresh PATH for Node.js
+    for /f "tokens=2*" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v PATH 2^>nul') do set "PATH=%%b"
+    set "PATH=%PATH%;%ProgramFiles%\Nodejs;%ProgramFiles(x86)%\Nodejs"
     where npm >nul 2>&1
-    if not errorlevel 1 (
-        if exist "package.json" (
-            echo Building frontend assets with Vite...
-            if exist "node_modules" (
-                echo node_modules found, skipping install.
-            ) else (
-                echo Installing Node.js dependencies...
-                call npm install
-            )
-            call npm run build
-            echo Frontend build complete.
-        )
-    ) else (
-        echo ===============================================
-        echo  WARNING: npm not found.
-        echo  Frontend assets will not be built.
-        echo  The page may load without CSS/styles.
-        echo  To fix: install Node.js and run:
-        echo    npm install ^&^& npm run build
-        echo ===============================================
+    if %errorlevel% neq 0 (
+        echo Node.js was installed but npm not found in PATH.
+        echo Please restart your terminal and re-run.
+        pause
+        exit /b 1
     )
 )
 
-:: Start the server
+if exist "package.json" (
+    echo Building frontend assets with Vite...
+    if not exist "node_modules" (
+        echo Installing Node.js dependencies...
+        call npm install
+    )
+    call npm run build
+    echo Frontend build complete.
+)
+
+:: ── 5. Start server ────────────────────────────────────────
+:start_server
 if "%PORT%"=="" (
-    :: Default to 8000, if occupied, find a free one
     python -c "import socket; s=socket.socket(); s.bind(('', 8000)); s.close()" >nul 2>&1
     if errorlevel 1 (
         echo Port 8000 is occupied, finding a free port...
-        :: Use temporary Python script to avoid batch for/f parsing issues
         python -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()" > "%TEMP%\openagc_port.txt"
         set /p PORT=<"%TEMP%\openagc_port.txt"
         del "%TEMP%\openagc_port.txt" 2>nul
