@@ -1,13 +1,16 @@
 #!/bin/bash
 
-# Navigate to the script's directory
+# Open-AGC startup script — auto-installs dependencies on macOS & Linux
+
+set -e
+
 cd "$(dirname "$0")"
 
 echo "==================================="
 echo "     Starting Open-AGC (Panda)     "
 echo "==================================="
 
-# Detect Python command (python3 on some distros, python on others)
+# ── 1. Python ────────────────────────────────────────────────
 PYTHON=""
 for cmd in python3 python; do
     if command -v "$cmd" &> /dev/null; then
@@ -17,60 +20,94 @@ for cmd in python3 python; do
 done
 
 if [ -z "$PYTHON" ]; then
-    echo "Error: Python 3 is not installed or not in your PATH."
-    echo "Please install Python 3 from https://www.python.org/downloads/"
-    exit 1
+    echo "Python not found. Attempting to install..."
+    if command -v brew &> /dev/null; then
+        brew install python@3.12
+    elif command -v apt-get &> /dev/null; then
+        sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-pip python3-venv
+    elif command -v yum &> /dev/null; then
+        sudo yum install -y -q python3 python3-pip
+    elif command -v pacman &> /dev/null; then
+        sudo pacman -S --noconfirm python python-pip
+    else
+        echo "Cannot auto-install Python. Please install Python 3 manually:"
+        echo "  https://www.python.org/downloads/"
+        exit 1
+    fi
+    PYTHON="python3"
+    if ! command -v python3 &> /dev/null; then
+        # Re-check after install
+        PYTHON=""
+        for cmd in python3 python; do
+            if command -v "$cmd" &> /dev/null; then
+                PYTHON="$cmd"
+                break
+            fi
+        done
+        if [ -z "$PYTHON" ]; then
+            echo "Python was installed but not found in PATH. Please restart your terminal."
+            exit 1
+        fi
+    fi
 fi
 
 echo "Using: $($PYTHON --version)"
 
-# Check for virtual environment
+# ── 2. Virtual environment ─────────────────────────────────
 if [ ! -d "venv" ]; then
     echo "Virtual environment not found. Creating one..."
     $PYTHON -m venv venv
 fi
 
-# Activate virtual environment
 echo "Activating virtual environment..."
 source venv/bin/activate
 
-# Upgrade pip inside venv to avoid install issues
+# Upgrade pip inside venv
 $PYTHON -m pip install --upgrade pip --quiet 2>/dev/null
 
-# Install dependencies if requirements.txt exists
+# ── 3. Python dependencies ─────────────────────────────────
 if [ -f "requirements.txt" ]; then
-    echo "Checking / Installing dependencies..."
+    echo "Installing Python dependencies..."
     $PYTHON -m pip install -r requirements.txt
 fi
 
-# Build frontend assets with Vite (Node.js required)
+# ── 4. Node.js / frontend build ─────────────────────────────
 if [ -d "static/dist" ] && [ -f "static/dist/open-agc.css" ] && [ -f "static/dist/open-agc.min.js" ]; then
     echo "Frontend assets found (static/dist/), skipping build."
 else
+    if ! command -v npm &> /dev/null; then
+        echo "npm not found. Attempting to install Node.js..."
+        if command -v brew &> /dev/null; then
+            brew install node
+        elif command -v apt-get &> /dev/null; then
+            sudo apt-get install -y -qq nodejs npm
+        elif command -v yum &> /dev/null; then
+            sudo yum install -y -q nodejs npm
+        elif command -v pacman &> /dev/null; then
+            sudo pacman -S --noconfirm nodejs npm
+        else
+            echo "==============================================="
+            echo " Cannot auto-install Node.js."
+            echo " Please install Node.js manually, then run:"
+            echo "   npm install && npm run build"
+            echo "==============================================="
+            exit 1
+        fi
+    fi
+
     if command -v npm &> /dev/null && [ -f "package.json" ]; then
         echo "Building frontend assets with Vite..."
-        if [ -f "node_modules/.package-lock.json" ] || [ -d "node_modules" ]; then
-            echo "node_modules found, skipping install."
-        else
+        if [ ! -d "node_modules" ]; then
             echo "Installing Node.js dependencies..."
             npm install
         fi
         npm run build
         echo "Frontend build complete."
-    else
-        echo "==============================================="
-        echo " WARNING: npm not found or package.json missing."
-        echo " Frontend assets will not be built."
-        echo " The page may load without CSS/styles."
-        echo " To fix: install Node.js and run:"
-        echo "   npm install && npm run build"
-        echo "==============================================="
     fi
 fi
 
-# Start the server
+# ── 5. Start server ────────────────────────────────────────
 if [ -z "$PORT" ]; then
-    # Default to 8000, if occupied, find a free one
     if command -v lsof &> /dev/null; then
         if lsof -Pi :8000 -sTCP:LISTEN -t &>/dev/null ; then
             echo "Port 8000 is occupied, finding a free port..."
