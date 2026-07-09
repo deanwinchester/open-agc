@@ -48,11 +48,37 @@ if [ -z "$PYTHON" ]; then
 fi
 
 if [ -z "$PYTHON" ]; then
+    # Try apt-get install python3 on Debian-based (may work on UOS)
+    if command -v apt-get &> /dev/null; then
+        echo "Python 3.9+ not found. Trying apt-get install python3..."
+        if sudo apt-get install -y -qq python3 python3-pip python3-venv 2>/dev/null; then
+            if python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)" 2>/dev/null; then
+                PYTHON="python3"
+            fi
+        fi
+    fi
+fi
+
+if [ -z "$PYTHON" ]; then
     # Download prebuilt Python from python-build-standalone (no compile, no sudo)
+    echo "Detecting system architecture..."
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)  PKG_ARCH="x86_64-unknown-linux-gnu" ;;
+        aarch64) PKG_ARCH="aarch64-unknown-linux-gnu" ;;
+        armv7l)  PKG_ARCH="armv7-unknown-linux-gnueabi" ;;
+        *)
+            echo "ERROR: Unsupported architecture: $ARCH"
+            echo "Please install Python 3.9+ manually: https://www.python.org/downloads/"
+            exit 1
+            ;;
+    esac
+    echo "  Architecture: $ARCH -> $PKG_ARCH"
+
     echo "Downloading prebuilt Python 3.12 to .python/..."
     echo "  (about 25 MB, may take a moment)"
     mkdir -p .python
-    PKG="cpython-3.12.13+20260623-x86_64-unknown-linux-gnu-install_only.tar.gz"
+    PKG="cpython-3.12.13+20260623-${PKG_ARCH}-install_only.tar.gz"
     URL="https://github.com/astral-sh/python-build-standalone/releases/download/20260623/$PKG"
     if command -v curl &> /dev/null; then
         curl -fL --progress-bar "$URL" -o /tmp/python.tar.gz || {
