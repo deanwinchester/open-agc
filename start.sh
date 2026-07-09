@@ -23,11 +23,14 @@ for cmd in python3.12 python3.11 python3.10 python3.9 python3 python; do
     fi
 done
 
-# Check for local .python/ (prebuilt binary)
-if [ -z "$PYTHON" ] && [ -f ".python/bin/python3" ]; then
-    if .python/bin/python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)" 2>/dev/null; then
-        PYTHON=".python/bin/python3"
-    fi
+# Check for local .python/ (prebuilt binary, may be python3 or python)
+if [ -z "$PYTHON" ]; then
+    for cmd in ".python/bin/python3" ".python/bin/python"; do
+        if [ -f "$cmd" ] && "$cmd" -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)" 2>/dev/null; then
+            PYTHON="$cmd"
+            break
+        fi
+    done
 fi
 
 if [ -z "$PYTHON" ]; then
