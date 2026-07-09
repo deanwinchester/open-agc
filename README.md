@@ -42,6 +42,16 @@ Open-AGC 能够自主规划、思考并执行终端命令、文件系统操作�
 
 ## 🚀 快速开始
 
+### 前置依赖
+
+| 依赖 | 版本要求 | 说明 |
+|------|----------|------|
+| **Python** | ≥ 3.9 | 项目运行核心环境 |
+| **Node.js** | ≥ 18 (可选) | 用于前端 Vite 构建（自带预构建产物时可跳过） |
+| **npm** | ≥ 9 (可选) | 随 Node.js 一同安装 |
+
+> 启动脚本（`start.sh` / `start.bat`）会自动检测并尝试通过系统包管理器（apt/brew/winget）安装缺失的 Python 及 Node.js。如果自动安装失败，请根据上方表格手动安装。
+
 ### 1. 克隆项目
 ```bash
 git clone https://github.com/deanwinchester/open-agc.git
@@ -49,7 +59,7 @@ cd open-agc
 ```
 
 ### 2. 一键启动
-自动化脚本会处理虚拟环境创建、依赖安装并启动服务：
+自动化脚本会处理虚拟环境创建、Node.js 依赖安装（如需要）、前端 Vite 构建并启动服务：
 
 - **macOS / Linux**: 运行 `./start.sh`
 - **Windows**: 双击运行 `start.bat`
