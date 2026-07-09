@@ -30,23 +30,21 @@ if %errorlevel% equ 0 (
     )
 )
 
-:: No suitable Python found — download portable to .python\
+:: No suitable Python found - download portable to .python\
 echo Python 3.9+ not found. Downloading portable Python to .python\...
+echo   (about 30 MB, may take a moment)
 if not exist ".python\" mkdir ".python\"
 
-:: Download Python embeddable package
-powershell -Command "& { param($url, $out) try { $wc = New-Object System.Net.WebClient; $wc.DownloadFile($url, $out) } catch { exit 1 } }" ^
-  -url "https://www.python.org/ftp/python/3.12.5/python-3.12.5-embed-amd64.zip" ^
-  -out "%TEMP%\python-embed.zip" 2>nul
-
+:: Download Python embeddable package with progress
+powershell -Command "try { Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.12.5/python-3.12.5-embed-amd64.zip' -OutFile '%TEMP%\python-embed.zip' -UseBasicParsing } catch { exit 1 }"
 if %errorlevel% neq 0 (
-    echo Download failed. Please install Python 3.9+ manually:
-    echo   https://www.python.org/downloads/
+    echo ERROR: Python download failed.
+    echo Try downloading manually from: https://www.python.org/downloads/
     pause
     exit /b 1
 )
 
-:: Extract
+echo Extracting...
 powershell -Command "Expand-Archive -Path '%TEMP%\python-embed.zip' -DestinationPath '.python\' -Force" >nul 2>&1
 
 :: Enable pip (remove the ._pth file that disables site-packages)
@@ -58,9 +56,9 @@ if exist ".python\python312._pth" (
 set PYTHON=%~dp0.python\python.exe
 
 echo Bootstrapping pip...
-%PYTHON% -c "import urllib.request; urllib.request.urlretrieve('https://bootstrap.pypa.io/get-pip.py', '%TEMP%\get-pip.py')" >nul 2>&1
+%PYTHON% -c "import urllib.request; urllib.request.urlretrieve('https://bootstrap.pypa.io/get-pip.py', r'%TEMP%\get-pip.py')"
 if %errorlevel% equ 0 (
-    %PYTHON% "%TEMP%\get-pip.py" --quiet >nul 2>&1
+    %PYTHON% "%TEMP%\get-pip.py"
 )
 
 :python_ok
@@ -110,25 +108,20 @@ if %errorlevel% equ 0 (
     goto :npm_ok
 )
 
-:: No Node.js found — download portable to .node\
+:: No Node.js found - download portable to .node\
 echo Node.js not found. Downloading portable Node.js to .node\...
+echo   (about 45 MB, may take a moment)
 if not exist ".node\" mkdir ".node\"
 
-powershell -Command "& { param($url, $out) try { $wc = New-Object System.Net.WebClient; $wc.DownloadFile($url, $out) } catch { exit 1 } }" ^
-  -url "https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip" ^
-  -out "%TEMP%\node.zip" 2>nul
-
+powershell -Command "try { Invoke-WebRequest -Uri 'https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip' -OutFile '%TEMP%\node.zip' -UseBasicParsing } catch { exit 1 }"
 if %errorlevel% neq 0 (
-    echo ===============================================
-    echo  Download failed. Please install Node.js manually:
-    echo    https://nodejs.org/
-    echo  Then re-run this script.
-    echo ===============================================
+    echo ERROR: Node.js download failed.
+    echo Try downloading manually from: https://nodejs.org/
     pause
     exit /b 1
 )
 
-:: Extract
+echo Extracting...
 powershell -Command "Expand-Archive -Path '%TEMP%\node.zip' -DestinationPath '.node\' -Force" >nul 2>&1
 
 :: Move files from the versioned subdir up (e.g. .node\node-v22.14.0-win-x64\* -> .node\)
