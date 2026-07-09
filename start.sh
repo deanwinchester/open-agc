@@ -14,7 +14,7 @@ echo "==================================="
 # Search for a suitable Python (3.9+) — prefer higher versions first,
 # since the system default (python3) may be too old (e.g. UOS has 3.7).
 PYTHON=""
-for cmd in python3.11 python3.10 python3.9 python3 python; do
+for cmd in python3.12 python3.11 python3.10 python3.9 python3 python; do
     if command -v "$cmd" &> /dev/null; then
         if "$cmd" -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)" 2>/dev/null; then
             PYTHON="$cmd"
@@ -23,8 +23,15 @@ for cmd in python3.11 python3.10 python3.9 python3 python; do
     fi
 done
 
+# Check for local .python/ (prebuilt binary)
+if [ -z "$PYTHON" ] && [ -f ".python/bin/python3" ]; then
+    if .python/bin/python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)" 2>/dev/null; then
+        PYTHON=".python/bin/python3"
+    fi
+fi
+
 if [ -z "$PYTHON" ]; then
-    # No suitable Python found — try installing via brew (macOS, user-local)
+    # macOS: use brew (user-local, no sudo)
     if command -v brew &> /dev/null; then
         echo "Python 3.9+ not found. Installing via brew..."
         brew install python@3.12
@@ -35,37 +42,42 @@ if [ -z "$PYTHON" ]; then
             fi
         done
     fi
-    # Try pyenv (Linux/macOS, user-local, no sudo)
-    if [ -z "$PYTHON" ]; then
-        if ! command -v pyenv &> /dev/null; then
-            echo "Installing pyenv..."
-            curl -fsSL https://pyenv.run | bash
-            export PYENV_ROOT="$HOME/.pyenv"
-            export PATH="$PYENV_ROOT/bin:$PATH"
-            eval "$(pyenv init -)"
-        fi
-        if command -v pyenv &> /dev/null; then
-            echo "Installing Python 3.12 via pyenv..."
-            pyenv install 3.12 -s
-            PYTHON="$HOME/.pyenv/versions/$(pyenv versions --bare | grep '^3\.12' | tail -1)/bin/python"
-            if [ ! -x "$PYTHON" ]; then
-                # Fallback: let pyenv set version and find python
-                PYENV_VERSION=3.12 pyenv exec python3 --version &>/dev/null && {
-                    PYTHON="$(PYENV_VERSION=3.12 pyenv which python3)"
-                }
-            fi
-        fi
+fi
+
+if [ -z "$PYTHON" ]; then
+    # Linux: try apt-get first (UOS/Debian may have python3.11 in repos)
+    if command -v apt-get &> /dev/null; then
+        echo "Python 3.9+ not found. Trying apt-get..."
+        sudo apt-get install -y -qq python3.11 python3.11-venv 2>/dev/null && PYTHON="python3.11"
     fi
-    if [ -z "$PYTHON" ]; then
-        echo "================================================"
-        echo " Python 3.9+ is required but not found."
-        echo " Please install manually via pyenv:"
-        echo "   curl https://pyenv.run | bash"
-        echo "   pyenv install 3.12"
-        echo "   pyenv local 3.12"
-        echo "================================================"
+fi
+
+if [ -z "$PYTHON" ]; then
+    # Download prebuilt Python from python-build-standalone (no compile needed)
+    echo "Downloading prebuilt Python 3.12 to .python/..."
+    mkdir -p .python
+    PKG="cpython-3.12.13+20260623-x86_64-unknown-linux-gnu-install_only.tar.gz"
+    URL="https://github.com/astral-sh/python-build-standalone/releases/download/20260623/$PKG"
+    if command -v curl &> /dev/null; then
+        curl -fsSL "$URL" -o /tmp/python.tar.gz
+    elif command -v wget &> /dev/null; then
+        wget -q "$URL" -O /tmp/python.tar.gz
+    else
+        echo "Need curl or wget to download Python."
         exit 1
     fi
+    tar -xzf /tmp/python.tar.gz -C .python --strip-components=1
+    rm /tmp/python.tar.gz
+    PYTHON=".python/bin/python3"
+fi
+
+if [ -z "$PYTHON" ] || ! $PYTHON -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)" 2>/dev/null; then
+    echo "================================================"
+    echo " Cannot find or install Python 3.9+."
+    echo " Please install Python 3.9 or later manually:"
+    echo "   https://www.python.org/downloads/"
+    echo "================================================"
+    exit 1
 fi
 
 echo "Using: $($PYTHON --version)"
