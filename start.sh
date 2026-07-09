@@ -11,66 +11,48 @@ echo "     Starting Open-AGC (Panda)     "
 echo "==================================="
 
 # ── 1. Python ────────────────────────────────────────────────
+# Search for a suitable Python (3.9+) — prefer higher versions first,
+# since the system default (python3) may be too old (e.g. UOS has 3.7).
 PYTHON=""
-for cmd in python3 python; do
+for cmd in python3.11 python3.10 python3.9 python3 python; do
     if command -v "$cmd" &> /dev/null; then
-        PYTHON="$cmd"
-        break
+        if "$cmd" -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)" 2>/dev/null; then
+            PYTHON="$cmd"
+            break
+        fi
     fi
 done
 
 if [ -z "$PYTHON" ]; then
-    echo "Python not found. Attempting to install Python 3.11+..."
+    # No suitable Python found — try installing via brew (macOS, user-local)
     if command -v brew &> /dev/null; then
+        echo "Python 3.9+ not found. Installing via brew..."
         brew install python@3.12
-    elif command -v apt-get &> /dev/null; then
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq python3.11 python3.11-venv python3.11-dev 2>/dev/null ||
-        sudo apt-get install -y -qq python3 python3-pip python3-venv
-    elif command -v yum &> /dev/null; then
-        sudo yum install -y -q python3.11 python3.11-devel 2>/dev/null ||
-        sudo yum install -y -q python3 python3-pip
-    elif command -v pacman &> /dev/null; then
-        sudo pacman -S --noconfirm python python-pip
-    else
-        echo "Cannot auto-install Python. Please install Python 3.9+ manually:"
-        echo "  https://www.python.org/downloads/"
-        exit 1
+        for cmd in python3.12 python3.11 python3.10 python3; do
+            if command -v "$cmd" &> /dev/null; then
+                PYTHON="$cmd"
+                break
+            fi
+        done
     fi
-    # Re-check after install
-    PYTHON=""
-    for cmd in python3.11 python3 python; do
-        if command -v "$cmd" &> /dev/null; then
-            PYTHON="$cmd"
-            break
-        fi
-    done
     if [ -z "$PYTHON" ]; then
-        echo "Python was installed but not found in PATH. Please restart your terminal."
+        echo "================================================"
+        echo " Python 3.9+ is required but not found."
+        echo " Your system Python version is too old."
+        echo ""
+        echo " Options:"
+        echo "   1. Use pyenv to install a newer Python:"
+        echo "      curl https://pyenv.run | bash"
+        echo "      pyenv install 3.12"
+        echo "      pyenv local 3.12"
+        echo "   2. Install Python 3.12 manually:"
+        echo "      https://www.python.org/downloads/"
+        echo "================================================"
         exit 1
     fi
 fi
 
 echo "Using: $($PYTHON --version)"
-
-# Check Python version (need 3.9+ for modern package support)
-PYTHON_VER=$($PYTHON -c "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}')")
-if ! $PYTHON -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)"; then
-    echo "Python $PYTHON_VER is too old. Need 3.9+."
-    echo "Attempting to install Python 3.11..."
-    if command -v apt-get &> /dev/null; then
-        sudo apt-get install -y -qq python3.11 python3.11-venv 2>/dev/null && PYTHON="python3.11"
-    elif command -v yum &> /dev/null; then
-        sudo yum install -y -q python3.11 2>/dev/null && PYTHON="python3.11"
-    fi
-    PYTHON_VER=$($PYTHON -c "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}')")
-    if ! $PYTHON -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)"; then
-        echo "Cannot install Python 3.9+. Please manually install Python 3.9 or later:"
-        echo "  https://www.python.org/downloads/"
-        exit 1
-    fi
-    echo "Now using Python $PYTHON_VER"
-fi
 
 # ── 2. Virtual environment ─────────────────────────────────
 if [ ! -d "venv" ]; then
