@@ -30,7 +30,10 @@ export async function loadSettingsConfig() {
     }
     const data = await cachedFetch(`/api/settings?session_id=${sid}`);
 
-    buildApiKeysGrid(data.api_keys_masked || {});
+    const apiKeysContainer = document.getElementById('api-keys-container');
+    if (apiKeysContainer) {
+      apiKeysContainer.innerHTML = buildApiKeysGrid(data.api_keys_masked || {});
+    }
     buildModelSelection(data);
 
     document.getElementById('sandbox-mode-toggle').checked = data.sandbox_mode ?? true;
