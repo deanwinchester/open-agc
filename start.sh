@@ -35,18 +35,34 @@ if [ -z "$PYTHON" ]; then
             fi
         done
     fi
+    # Try pyenv (Linux/macOS, user-local, no sudo)
+    if [ -z "$PYTHON" ]; then
+        if ! command -v pyenv &> /dev/null; then
+            echo "Installing pyenv..."
+            curl -fsSL https://pyenv.run | bash
+            export PYENV_ROOT="$HOME/.pyenv"
+            export PATH="$PYENV_ROOT/bin:$PATH"
+            eval "$(pyenv init -)"
+        fi
+        if command -v pyenv &> /dev/null; then
+            echo "Installing Python 3.12 via pyenv..."
+            pyenv install 3.12 -s
+            PYTHON="$HOME/.pyenv/versions/$(pyenv versions --bare | grep '^3\.12' | tail -1)/bin/python"
+            if [ ! -x "$PYTHON" ]; then
+                # Fallback: let pyenv set version and find python
+                PYENV_VERSION=3.12 pyenv exec python3 --version &>/dev/null && {
+                    PYTHON="$(PYENV_VERSION=3.12 pyenv which python3)"
+                }
+            fi
+        fi
+    fi
     if [ -z "$PYTHON" ]; then
         echo "================================================"
         echo " Python 3.9+ is required but not found."
-        echo " Your system Python version is too old."
-        echo ""
-        echo " Options:"
-        echo "   1. Use pyenv to install a newer Python:"
-        echo "      curl https://pyenv.run | bash"
-        echo "      pyenv install 3.12"
-        echo "      pyenv local 3.12"
-        echo "   2. Install Python 3.12 manually:"
-        echo "      https://www.python.org/downloads/"
+        echo " Please install manually via pyenv:"
+        echo "   curl https://pyenv.run | bash"
+        echo "   pyenv install 3.12"
+        echo "   pyenv local 3.12"
         echo "================================================"
         exit 1
     fi
