@@ -66,11 +66,14 @@ if exist "static\dist\open-agc.css" if exist "static\dist\open-agc.min.js" (
 
 :: Start the server
 if "%PORT%"=="" (
-    :: Check if port 8000 is in use
+    :: Default to 8000, if occupied, find a free one
     python -c "import socket; s=socket.socket(); s.bind(('', 8000)); s.close()" >nul 2>&1
     if errorlevel 1 (
         echo Port 8000 is occupied, finding a free port...
-        for /f %%i in ('python -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()"') do set PORT=%%i
+        :: Use temporary Python script to avoid batch for/f parsing issues
+        python -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()" > "%TEMP%\openagc_port.txt"
+        set /p PORT=<"%TEMP%\openagc_port.txt"
+        del "%TEMP%\openagc_port.txt" 2>nul
     ) else (
         set PORT=8000
     )
