@@ -1,7 +1,7 @@
-@echo off
+﻿@echo off
 setlocal
 
-:: Open-AGC startup script — auto-installs dependencies on Windows
+:: Open-AGC startup script - auto-installs dependencies on Windows
 
 cd /d "%~dp0"
 
@@ -9,7 +9,7 @@ echo ===================================
 echo      Starting Open-AGC (Panda)
 echo ===================================
 
-:: ── 1. Python ──────────────────────────────────────────────
+:: -- 1. Python -------------------------------------------------
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo Python not found. Attempting to install via winget...
@@ -35,7 +35,7 @@ if %errorlevel% neq 0 (
     )
 )
 
-:: ── 2. Virtual environment ─────────────────────────────────
+:: -- 2. Virtual environment ------------------------------------
 if not exist "venv\" (
     echo Virtual environment not found. Creating one...
     call python -m venv venv
@@ -47,13 +47,13 @@ call venv\Scripts\activate.bat
 :: Upgrade pip inside venv
 python -m pip install --upgrade pip --quiet 2>nul
 
-:: ── 3. Python dependencies ─────────────────────────────────
+:: -- 3. Python dependencies ------------------------------------
 if exist "requirements.txt" (
     echo Installing Python dependencies...
     call python -m pip install -r requirements.txt
 )
 
-:: ── 4. Node.js / frontend build ────────────────────────────
+:: -- 4. Node.js / frontend build --------------------------------
 if exist "static\dist\open-agc.css" if exist "static\dist\open-agc.min.js" (
     echo Frontend assets found in static\dist, skipping build.
     goto :start_server
@@ -94,7 +94,7 @@ if exist "package.json" (
     echo Frontend build complete.
 )
 
-:: ── 5. Start server ────────────────────────────────────────
+:: -- 5. Start server -------------------------------------------
 :start_server
 if "%PORT%"=="" (
     python -c "import socket; s=socket.socket(); s.bind(('', 8000)); s.close()" >nul 2>&1
