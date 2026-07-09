@@ -92,24 +92,23 @@ fi
 if [ -d "static/dist" ] && [ -f "static/dist/open-agc.css" ] && [ -f "static/dist/open-agc.min.js" ]; then
     echo "Frontend assets found (static/dist/), skipping build."
 else
-    if ! command -v npm &> /dev/null; then
-        echo "npm not found. Attempting to install Node.js..."
-        if command -v brew &> /dev/null; then
-            brew install node
-        elif command -v apt-get &> /dev/null; then
-            sudo apt-get install -y -qq nodejs npm
-        elif command -v yum &> /dev/null; then
-            sudo yum install -y -q nodejs npm
-        elif command -v pacman &> /dev/null; then
-            sudo pacman -S --noconfirm nodejs npm
+    # Prefer local .node/ first, then check PATH
+    if [ -f ".node/bin/npm" ]; then
+        export PATH="$PWD/.node/bin:$PATH"
+    elif ! command -v npm &> /dev/null; then
+        echo "npm not found. Downloading portable Node.js to .node/..."
+        mkdir -p .node
+        if command -v curl &> /dev/null; then
+            curl -fsSL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz -o /tmp/node.tar.xz
+        elif command -v wget &> /dev/null; then
+            wget -q https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz -O /tmp/node.tar.xz
         else
-            echo "==============================================="
-            echo " Cannot auto-install Node.js."
-            echo " Please install Node.js manually, then run:"
-            echo "   npm install && npm run build"
-            echo "==============================================="
+            echo "Cannot download Node.js. Install manually: https://nodejs.org/"
             exit 1
         fi
+        tar -xf /tmp/node.tar.xz -C .node --strip-components=1
+        rm /tmp/node.tar.xz
+        export PATH="$PWD/.node/bin:$PATH"
     fi
 
     if command -v npm &> /dev/null && [ -f "package.json" ]; then
