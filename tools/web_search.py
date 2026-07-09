@@ -400,7 +400,7 @@ def _extract_spa_embedded_text(soup) -> str:
 
 
 def _js_str_unescape(s: str) -> str:
-    """Unescape a JS string that contains \escaped quotes and backslashes.
+    """Unescape a JS string that contains \\escaped quotes and backslashes.
 
     Handles:
       - \\" -> " (escaped quote)
