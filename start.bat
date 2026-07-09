@@ -13,7 +13,7 @@ echo ===================================
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo Python not found. Attempting to install via winget...
-    winget install Python.Python.3.12 --silent --accept-package-agreements >nul 2>&1
+    winget install "Python 3.12" --silent --accept-package-agreements >nul 2>&1
     if %errorlevel% neq 0 (
         echo ===============================================
         echo  Cannot auto-install Python.
@@ -24,19 +24,14 @@ if %errorlevel% neq 0 (
         pause
         exit /b 1
     )
-    echo Python installed. Refreshing PATH...
-    :: Refresh PATH from registry for current session
-    for /f "tokens=2*" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v PATH 2^>nul') do set "PATH=%%b"
+    echo Python installed. Checking common paths...
+    set "PATH=%PATH%;%LOCALAPPDATA%\Programs\Python\Python312;%LOCALAPPDATA%\Programs\Python\Python312\Scripts"
+    set "PATH=%PATH%;%ProgramFiles%\Python312;%ProgramFiles%\Python312\Scripts"
     python --version >nul 2>&1
     if %errorlevel% neq 0 (
-        :: Try common install location
-        set "PATH=%PATH%;%LocalAppData%\Programs\Python\Python312;%LocalAppData%\Programs\Python\Python312\Scripts"
-        python --version >nul 2>&1
-        if %errorlevel% neq 0 (
-            echo Python installed but not in PATH. Please restart your terminal and re-run.
-            pause
-            exit /b 1
-        )
+        echo Python was installed but not found in PATH. Please restart your terminal and re-run.
+        pause
+        exit /b 1
     )
 )
 
@@ -78,14 +73,12 @@ if %errorlevel% neq 0 (
         pause
         exit /b 1
     )
-    echo Node.js installed. Refreshing PATH...
-    :: Refresh PATH for Node.js
-    for /f "tokens=2*" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v PATH 2^>nul') do set "PATH=%%b"
-    set "PATH=%PATH%;%ProgramFiles%\Nodejs;%ProgramFiles(x86)%\Nodejs"
+    echo Node.js installed. Checking common paths...
+    set "PATH=%PATH%;%ProgramFiles%\Nodejs;%ProgramFiles(x86)%\Nodejs;%LOCALAPPDATA%\Programs\nodejs"
     where npm >nul 2>&1
     if %errorlevel% neq 0 (
         echo Node.js was installed but npm not found in PATH.
-        echo Please restart your terminal and re-run.
+        echo Please restart your terminal and re-run, or add npm to PATH manually.
         pause
         exit /b 1
     )
@@ -107,9 +100,7 @@ if "%PORT%"=="" (
     python -c "import socket; s=socket.socket(); s.bind(('', 8000)); s.close()" >nul 2>&1
     if errorlevel 1 (
         echo Port 8000 is occupied, finding a free port...
-        python -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()" > "%TEMP%\openagc_port.txt"
-        set /p PORT=<"%TEMP%\openagc_port.txt"
-        del "%TEMP%\openagc_port.txt" 2>nul
+        for /f %%i in ('python -c "import socket; s=socket.socket(); s.bind((chr(39)*2,0)); print(s.getsockname()[1]); s.close()"') do set PORT=%%i
     ) else (
         set PORT=8000
     )
