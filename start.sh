@@ -45,15 +45,7 @@ if [ -z "$PYTHON" ]; then
 fi
 
 if [ -z "$PYTHON" ]; then
-    # Linux: try apt-get first (UOS/Debian may have python3.11 in repos)
-    if command -v apt-get &> /dev/null; then
-        echo "Python 3.9+ not found. Trying apt-get..."
-        sudo apt-get install -y -qq python3.11 python3.11-venv 2>/dev/null && PYTHON="python3.11"
-    fi
-fi
-
-if [ -z "$PYTHON" ]; then
-    # Download prebuilt Python from python-build-standalone (no compile needed)
+    # Download prebuilt Python from python-build-standalone (no compile, no sudo)
     echo "Downloading prebuilt Python 3.12 to .python/..."
     mkdir -p .python
     PKG="cpython-3.12.13+20260623-x86_64-unknown-linux-gnu-install_only.tar.gz"
