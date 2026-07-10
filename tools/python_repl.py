@@ -28,47 +28,46 @@ class PythonREPLTool(BaseTool):
         }
 
     def _check_dangerous_python(self, code: str) -> str:
-        """Block Python code that would kill the Open-AGC server process itself."""
+        """Block Python code that would kill the Open-AGC server process itself.
+
+        Only blocks when the target is the server/parent (suicide) or when the
+        command would kill ALL python processes (pkill/killall python).
+        Ordinary kill commands targeting non-protected processes are allowed.
+        """
         import re
         cmd_lower = code.lower()
 
-        # Check for kill commands in subprocess.run/call/Popen/os.system
-        kill_patterns = [
-            # subprocess.run with kill
-            (r'''["\']kill["\']\s*,\s*["\']-?\d*9?["\']''', "Python 代码中禁止执行 kill -9 命令"),
-            (r'''["\']kill["\'][\s\S]{0,20}["\']-\d+["\']''', "Python 代码中禁止执行 kill 命令"),
-            (r'''["\']killall["\']\s*,\s*["\'][^"\']*python[^"\']*["\']''', "禁止通过 Python 终止 python 进程"),
-            (r'''["\']pkill["\']''', "禁止通过 Python 执行 pkill 命令"),
-            (r'''os\.kill\s*\(\s*\d+''', "禁止通过 Python 的 os.kill 终止进程"),
-            (r'''signal\.sigkill''', "禁止通过 Python 发送 SIGKILL 信号"),
-            (r'''subprocess\.run\(.*["\']kill["\']''', "禁止在 Python 中调用 kill 命令"),
-            (r'''subprocess\.Popen\(.*["\']kill["\']''', "禁止在 Python 中调用 kill 命令"),
-            (r'''os\.system\s*\(.*kill''', "禁止在 Python 中通过 os.system 执行 kill 命令"),
-            (r'''os\.popen\s*\(.*kill''', "禁止在 Python 中通过 os.popen 执行 kill 命令"),
+        # ── Block only mass-kill commands that hit all python processes ──
+        mass_kill_patterns = [
+            (r'''["\']pkill["\'].*["\']python["\']''', "禁止 pkill python（会杀死所有 python 进程，包括 Open-AGC 自身）"),
+            (r'''["\']killall["\'].*["\']python["\']''', "禁止 killall python（会杀死所有 python 进程）"),
+            (r'''["\']pkill["\'].*-f.*["\'](?:uvicorn|open.agc|api\.server)["\']''', "禁止按进程名批量终止服务器进程"),
         ]
+        for pattern, reason in mass_kill_patterns:
+            if re.search(pattern, code, re.IGNORECASE):
+                return f"⛔ 该 Python 代码被阻止执行：{reason}\n\n被阻止的代码：{code[:300]}\n"
 
-        for pattern, reason in kill_patterns:
-            if re.search(pattern, code):
-                return (
-                    f"⛔ 该 Python 代码被阻止执行：{reason}\n\n"
-                    f"被阻止的代码被截断显示：{code[:300]}\n"
-                )
+        # ── Scan PIDs in kill commands ──
+        # Extract PIDs from: subprocess.run(["kill", "-9", "PID"]) or os.kill(PID, ...)
+        pid_sources = []
+        # From subprocess.run/call/Popen with kill command
+        pid_sources += re.findall(r'''["\']kill["\'][\s\S]{0,60}?["\'](\d+)["\']''', code, re.IGNORECASE)
+        # From os.kill(PID, ...)
+        pid_sources += re.findall(r'''os\.kill\s*\(\s*(\d+)''', code, re.IGNORECASE)
 
-        # Check for PID-based kills against the server process family
-        # Scan ALL PIDs that appear near kill commands
-        pid_matches = re.finditer(r'''["\']kill["\'][\s\S]{0,50}?["\'](\d+)["\']''', code, re.IGNORECASE)
-        from api.state import check_protected_pid
-        for m in pid_matches:
-            try:
-                target_pid = int(m.group(1))
-                if target_pid > 0 and check_protected_pid(target_pid):
-                    return (
-                        f"⛔ 该 Python 代码被阻止执行：PID {target_pid} "
-                        f"是 Open-AGC 服务进程或其父进程，终止它会导致服务崩溃。\n\n"
-                        f"被阻止的代码被截断显示：{code[:300]}\n"
-                    )
-            except (ImportError, ValueError, Exception):
-                pass
+        if pid_sources:
+            from api.state import check_protected_pid
+            for pid_str in pid_sources:
+                try:
+                    target_pid = int(pid_str)
+                    if target_pid > 0 and check_protected_pid(target_pid):
+                        return (
+                            f"⛔ 该 Python 代码被阻止执行：PID {target_pid} "
+                            f"是 Open-AGC 服务进程或其父进程，终止它会导致服务崩溃。\n\n"
+                            f"被阻止的代码：{code[:300]}\n"
+                        )
+                except Exception:
+                    pass
 
         return ""
 
