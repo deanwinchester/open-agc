@@ -110,7 +110,6 @@ a = Analysis(
         'webview',
         'webview.platforms.cocoa',
         'webview.platforms.winforms',
-        'webview.platforms.qt',
     ] + litellm_submodules + tiktoken_submodules + httpx_submodules + httpcore_submodules + anyio_submodules + aiohttp_submodules + ['tiktoken_ext.openai_public'],
     hookspath=[],
     hooksconfig={},
