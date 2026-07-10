@@ -50,6 +50,19 @@ build_single_arch() {
 echo ""
 echo "[1/5] Preparing build environment..."
 
+# Build frontend with Vite (if Node.js available)
+if [ -d "static/dist" ] && [ -f "static/dist/open-agc.css" ] && [ -f "static/dist/open-agc.min.js" ]; then
+    echo "  Frontend assets found, skipping Vite build."
+else
+    if command -v npm &> /dev/null; then
+        echo "  Building frontend with Vite..."
+        [ ! -d "node_modules" ] && npm install
+        npm run build
+    else
+        echo "  WARNING: npm not found — frontend will not be built!"
+    fi
+fi
+
 if [ ! -d "build_venv" ]; then
     python3 -m venv build_venv
 fi
@@ -58,7 +71,7 @@ source build_venv/bin/activate
 pip install --upgrade pip -q 2>/dev/null
 pip install pyinstaller -q 2>/dev/null
 pip install -r requirements.txt -q 2>/dev/null
-pip install httptools websockets pywebview pyautogui Pillow opencv-python -q 2>/dev/null || true
+pip install httptools websockets pywebview -q 2>/dev/null || true
 
 # ---- 2. Build ----
 echo "[2/5] Building application..."

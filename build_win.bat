@@ -27,6 +27,20 @@ REM ---- 1. Prepare build environment ----
 echo.
 echo [1/4] Preparing build environment...
 
+:: Build frontend with Vite (if Node.js available)
+if exist "static\dist\open-agc.css" if exist "static\dist\open-agc.min.js" (
+    echo   Frontend assets found, skipping Vite build.
+) else (
+    where npm >nul 2>&1
+    if !errorlevel! equ 0 (
+        echo   Building frontend with Vite...
+        if not exist "node_modules" call npm install
+        call npm run build
+    ) else (
+        echo   WARNING: npm not found — frontend will not be built!
+    )
+)
+
 if not exist "build_venv" (
     python -m venv build_venv
 )
@@ -35,10 +49,6 @@ call build_venv\Scripts\activate.bat
 pip install --upgrade pip -q
 pip install pyinstaller -q
 pip install -r requirements.txt -q
-pip install pywebview -q
-
-REM ---- 1.5 Prepare clean data for bundling ----
-echo [1.5/4] Preparing clean data for bundling...
 if exist "build_data" rd /s /q "build_data"
 mkdir build_data
 copy "data\config.json.template" "build_data\config.json"
