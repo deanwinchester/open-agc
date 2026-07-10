@@ -89,6 +89,8 @@ class OpenAGCAgent(PromptBuilderMixin):
         self._session_sandbox_whitelist: set = set()  # One-time approved paths
         self._session_permission_whitelist: set = set()  # Session-approved command categories
         self._session_network_whitelist: set = set()  # Session-approved network domains
+        self._session_sudo_password: str = ""  # Cached sudo password for session (never sent to LLM)
+        self._pending_sudo_password: str = ""  # One-shot password for next tool call
         # Load config to check disabled skills
         disabled_skills = []
         config_path = get_data_path("config.json")
@@ -826,26 +828,44 @@ class OpenAGCAgent(PromptBuilderMixin):
             elif action in ("approve_once", "approve_session"):
                 self._session_permission_whitelist.add(category)
                 print(f"[Agent] Permission approved (session): {category}")
+                if category == "sudo":
+                    _sudo_pw = result_holder.get("password", "")
+                    if not _sudo_pw:
+                        return "Operation denied: sudo requires a password but none was provided."
+                    self._session_sudo_password = _sudo_pw
+                    self._pending_sudo_password = _sudo_pw
                 return None  # Retry
             elif action == "approve_always":
-                try:
-                    config_path = get_data_path("config.json")
-                    config = {}
-                    if os.path.exists(config_path):
-                        with open(config_path, "r", encoding="utf-8") as f:
-                            config = _json.load(f)
-                    perms = config.get("tool_permissions", {})
-                    if isinstance(perms, str):
-                        perms = _json.loads(perms)
-                    if category not in perms:
-                        perms[category] = {}
-                    perms[category]["allow"] = "allow"
-                    config["tool_permissions"] = perms
-                    with open(config_path, "w", encoding="utf-8") as f:
-                        _json.dump(config, f, ensure_ascii=False, indent=2)
-                    print(f"[Agent] Permission approved (always): {category}")
-                except Exception as e:
-                    print(f"[Agent] Permission persist error: {e}")
+                if category != "sudo":
+                    try:
+                        config_path = get_data_path("config.json")
+                        config = {}
+                        if os.path.exists(config_path):
+                            with open(config_path, "r", encoding="utf-8") as f:
+                                config = _json.load(f)
+                        perms = config.get("tool_permissions", {})
+                        if isinstance(perms, str):
+                            perms = _json.loads(perms)
+                        if category not in perms:
+                            perms[category] = {}
+                        perms[category]["allow"] = "allow"
+                        config["tool_permissions"] = perms
+                        with open(config_path, "w", encoding="utf-8") as f:
+                            _json.dump(config, f, ensure_ascii=False, indent=2)
+                        print(f"[Agent] Permission approved (always): {category}")
+                    except Exception as e:
+                        print(f"[Agent] Permission persist error: {e}")
+                else:
+                    # Sudo: don't persist to config (password is per-session only).
+                    # Use session whitelist so subsequent sudo calls don't re-trigger popup.
+                    self._session_permission_whitelist.add(category)
+                    print(f"[Agent] Sudo approved (session, password cached): {category}")
+                if category == "sudo":
+                    _sudo_pw = result_holder.get("password", "")
+                    if not _sudo_pw:
+                        return "Operation denied: sudo requires a password but none was provided."
+                    self._session_sudo_password = _sudo_pw
+                    self._pending_sudo_password = _sudo_pw
                 return None  # Retry
             return f"Operation denied by user: {desc}"
 
@@ -1928,6 +1948,11 @@ class OpenAGCAgent(PromptBuilderMixin):
                                         "_permission_whitelist": self._session_permission_whitelist,
                                         "_session_id": self.session_id,
                                     }
+                                    # Pass sudo password to shell tool (never logged, never sent to LLM)
+                                    _sudo_pw = self._pending_sudo_password or self._session_sudo_password
+                                    if _sudo_pw:
+                                        extra_kwargs["_sudo_password"] = _sudo_pw
+                                        self._pending_sudo_password = ""  # Clear one-shot after passing
                                     if 'interrupt_check' in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
                                         result = tool_instance.execute(
                                             interrupt_check=lambda: self.is_interrupted,

@@ -491,6 +491,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             if wait:
                                 wait["result"]["action"] = action
                                 wait["result"]["path"] = user_msg.get("path", "")
+                                if user_msg.get("password"):
+                                    wait["result"]["password"] = user_msg["password"]
                                 wait["event"].set()
                                 print(f"[WS] Sandbox response: {action} for {sid}")
                             elif action in ("approve_once", "approve_dir", "approve_always", "approve_session"):
@@ -839,6 +841,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     if wait:
                         wait["result"]["action"] = action
                         wait["result"]["path"] = user_msg.get("path", "")
+                        if user_msg.get("password"):
+                            wait["result"]["password"] = user_msg["password"]
                         wait["event"].set()
                         print(f"[WS] Sandbox response: {action} for session {sid}")
                     elif action in ("approve_once", "approve_dir", "approve_always", "approve_session"):

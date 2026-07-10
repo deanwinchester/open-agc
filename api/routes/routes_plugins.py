@@ -18,6 +18,8 @@ async def approve_sandbox_request(body: dict):
         action = body.get("action", "deny_once")
         wait["result"]["action"] = action
         wait["result"]["path"] = body.get("path", "")
+        if body.get("password"):
+            wait["result"]["password"] = body["password"]
         wait["event"].set()
     return {"status": "ok"}
 
