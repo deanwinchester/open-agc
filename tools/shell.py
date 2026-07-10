@@ -90,12 +90,22 @@ class ShellTool(BaseTool):
         server_pid = os.getpid()
 
         suicidal_patterns = [
+            # Windows
             (r'taskkill\b.*(?:/im\s+python\b|/im\s+python3?\b|/fi\s+["\']?\s*imagename\s+eq\s+python\b)', "禁止终止 python.exe（会杀死 Open-AGC 自身）"),
             (r'taskkill\b.*/pid\s+' + str(server_pid), "禁止终止 Open-AGC 进程自身"),
             (r'tskill\s+python\b', "禁止终止 python 进程"),
             (r'wmic\s+process\s+where.*delete', "禁止通过 WMI 终止进程"),
-            (r'(?:^|[|&;]\s*)(?:sudo\s+)?(?:kill\s+-9\s+' + str(server_pid) + r'|pkill\s+(?:-9\s+)?python|killall\s+(?:-9\s+)?python)', "禁止终止 python 进程（会杀死 Open-AGC 自身）"),
-            (r'(?:stop|kill|terminate)\s+(?:uvicorn|open-agc|server)', "禁止停止服务器进程"),
+            # Linux: pkill/killall with -f flag targeting server processes
+            (r'(?:^|[|&;]\s*)(?:sudo\s+)?pkill\s+(?:-[^\s]*)?\s*(?:python|uvicorn|open.agc)\b', "禁止终止 python/uvicorn 进程（会杀死 Open-AGC 自身）"),
+            (r'(?:^|[|&;]\s*)(?:sudo\s+)?killall\s+(?:-[^\s]*)?\s*(?:python|uvicorn)\b', "禁止终止 python/uvicorn 进程（会杀死 Open-AGC 自身）"),
+            (r'(?:^|[|&;]\s*)(?:sudo\s+)?(?:kill\s+-9\s+' + str(server_pid) + r'|kill\s+(?:-9\s+)?' + str(server_pid) + r')', "禁止终止 Open-AGC 进程自身"),
+            (r'(?:^|[|&;]\s*)(?:sudo\s+)?pkill\s+(?:-[^\s]*\s+)?-f\s+["\']?(?:uvicorn|open.agc|api\.server)["\']?', "禁止通过进程名模式终止服务器进程"),
+            # Cross-platform: dangerous patterns
+            (r'(?:^|[|&;]\s*)(?:sudo\s+)?kill\s+(?:-\d+\s+)?\$\(.*(?:pgrep|pidof|ps\s+aux).*\)', "禁止通过命令替换方式批量终止进程"),
+            (r'(?:^|[|&;]\s*)(?:sudo\s+)?pgrep\s+(?:-[^\s]*\s+)?(?:python|uvicorn)\s*\|', "禁止通过管道方式终止 python/uvicorn 进程"),
+            (r'fuser\s+-\d*\s*k\b', "禁止通过 fuser 终止占用端口的进程"),
+            (r'(?:stop|kill|terminate|restart)\s+(?:uvicorn|open.agc|api\.server)\b', "禁止停止服务器进程"),
+            (r'systemctl\s+(?:stop|kill|restart)\s+(?:open.agc|uvicorn)\b', "禁止通过 systemctl 停止服务器"),
         ]
 
         for pattern, reason in suicidal_patterns:
@@ -107,13 +117,29 @@ class ShellTool(BaseTool):
                     f"而非终止全部 python 进程。"
                 )
 
-        # Check PID-based kills against the server process family
+        # Check PID-based kill on Linux (kill PID) against server process family
+        pid_match = re.search(r'(?:^|[|&;\s])(?:sudo\s+)?kill\s+(?:-\d+\s+)?(\d+)', cmd_lower)
+        if pid_match:
+            target_pid = int(pid_match.group(1))
+            try:
+                from api.state import check_protected_pid
+                if target_pid > 0 and check_protected_pid(target_pid):
+                    return (
+                        f"⛔ 该命令被阻止执行：PID {target_pid} 是 Open-AGC 服务进程或其父进程，"
+                        f"终止它会导致服务崩溃。\n\n"
+                        f"被阻止的命令: {command[:200]}\n"
+                        f"如果你需要终止某个特定程序，请确认其 PID 不属于 Open-AGC 服务。"
+                    )
+            except ImportError:
+                pass
+
+        # Check PID-based kill on Windows (taskkill)
         pid_match = re.search(r'taskkill\b.*/pid\s+(\d+)', cmd_lower, re.IGNORECASE)
         if pid_match:
             target_pid = int(pid_match.group(1))
             try:
                 from api.state import check_protected_pid
-                if check_protected_pid(target_pid):
+                if target_pid > 0 and check_protected_pid(target_pid):
                     return (
                         f"⛔ 该命令被阻止执行：PID {target_pid} 是 Open-AGC 服务进程或其子进程，"
                         f"终止它会导致服务崩溃。\n\n"
