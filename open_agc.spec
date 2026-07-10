@@ -153,7 +153,7 @@ a = Analysis(
         'sentencepiece',
         'sklearn', 'scikit-learn',
         # Not needed for packaging
-        'pip', 'setuptools', 'wheel', 'distutils',
+        'pip', 'wheel',
         'unittest', 'pytest', 'nose', 'doctest',
     ],
     win_no_prefer_redirects=False,
