@@ -61,13 +61,6 @@ else
     exit 1
 fi
 
-# Prepare build_data (API-key-free config template for first launch)
-echo "  Preparing build_data..."
-rm -rf build_data
-mkdir -p build_data
-cp data/config.json.template build_data/config.json 2>/dev/null || echo "  (no config template found)"
-[ -d "data/browser_profile" ] && cp -r data/browser_profile build_data/ 2>/dev/null
-
 if [ ! -d "build_venv" ]; then
     python3 -m venv build_venv
 fi

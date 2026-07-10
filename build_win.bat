@@ -48,10 +48,6 @@ call build_venv\Scripts\activate.bat
 pip install --upgrade pip -q
 pip install pyinstaller -q
 pip install -r requirements.txt -q
-if exist "build_data" rd /s /q "build_data"
-mkdir build_data
-copy "data\config.json.template" "build_data\config.json"
-if exist "data\browser_profile" xcopy "data\browser_profile" "build_data\browser_profile" /E /I /Y
 
 REM ---- 2. Build with PyInstaller ----
 echo [2/4] Building with PyInstaller...

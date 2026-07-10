@@ -37,13 +37,13 @@ datas = [
     ('api', 'api'),
 ]
 
-# Bundle build_data/ as data/ (only contains API-key-free config template).
+# Bundle API-key-free config template as data/config.json.
 # Real data/config.json with user API keys is NEVER bundled.
-if os.path.exists('build_data'):
-    datas.append(('build_data', 'data'))
+_config_tmpl = 'data/config.json.template'
+if os.path.exists(_config_tmpl):
+    datas.append((_config_tmpl, 'data'))
 
 # Do NOT bundle data/ directory as it may contain sensitive user data (API keys).
-# The initial config template is provided via build_data/ above.
 
 # Add .env.example
 if os.path.exists('.env.example'):
