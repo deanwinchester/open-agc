@@ -50,17 +50,15 @@ build_single_arch() {
 echo ""
 echo "[1/5] Preparing build environment..."
 
-# Build frontend with Vite (if Node.js available)
-if [ -d "static/dist" ] && [ -f "static/dist/open-agc.css" ] && [ -f "static/dist/open-agc.min.js" ]; then
-    echo "  Frontend assets found, skipping Vite build."
+# Build frontend with Vite (required for packaging)
+echo "  Building frontend with Vite..."
+if command -v npm &> /dev/null; then
+    [ ! -d "node_modules" ] && npm install
+    npm run build
 else
-    if command -v npm &> /dev/null; then
-        echo "  Building frontend with Vite..."
-        [ ! -d "node_modules" ] && npm install
-        npm run build
-    else
-        echo "  WARNING: npm not found — frontend will not be built!"
-    fi
+    echo "  ERROR: npm not found — frontend build required for packaging!"
+    echo "  Please install Node.js from https://nodejs.org/"
+    exit 1
 fi
 
 if [ ! -d "build_venv" ]; then

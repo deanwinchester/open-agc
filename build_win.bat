@@ -27,18 +27,17 @@ REM ---- 1. Prepare build environment ----
 echo.
 echo [1/4] Preparing build environment...
 
-:: Build frontend with Vite (if Node.js available)
-if exist "static\dist\open-agc.css" if exist "static\dist\open-agc.min.js" (
-    echo   Frontend assets found, skipping Vite build.
+:: Build frontend with Vite (required for packaging)
+echo   Building frontend with Vite...
+where npm >nul 2>&1
+if !errorlevel! equ 0 (
+    if not exist "node_modules" call npm install
+    call npm run build
 ) else (
-    where npm >nul 2>&1
-    if !errorlevel! equ 0 (
-        echo   Building frontend with Vite...
-        if not exist "node_modules" call npm install
-        call npm run build
-    ) else (
-        echo   WARNING: npm not found — frontend will not be built!
-    )
+    echo   ERROR: npm not found — frontend build required for packaging!
+    echo   Please install Node.js from https://nodejs.org/
+    pause
+    exit /b 1
 )
 
 if not exist "build_venv" (
