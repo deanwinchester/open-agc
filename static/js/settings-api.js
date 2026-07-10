@@ -75,7 +75,7 @@ export async function showProviderStats(provider) {
 }
 
 export async function buildModelSelection(data) {
-  const sel = document.getElementById('model-select');
+  const sel = document.getElementById('model-name-select');
   if (!sel) return;
   let html = '<option value="">-- 选择模型 --</option>';
   const model = data?.default_model || '';
@@ -90,7 +90,7 @@ export async function buildModelSelection(data) {
 export async function fetchModels(provider, modelToSelect = null) {
   try {
     const data = await cachedFetch(`/api/provider-models?provider=${provider}`, {}, 60000);
-    const sel = document.getElementById('model-select');
+    const sel = document.getElementById('model-name-select');
     if (!sel) return;
     let html = '<option value="">-- 选择模型 --</option>';
     const models = data?.models || [];
