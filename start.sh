@@ -166,18 +166,33 @@ if [ -d "static/dist" ] && [ -f "static/dist/open-agc.css" ] && [ -f "static/dis
 else
     # Prefer local .node/ first, then check PATH
     if [ -f ".node/bin/npm" ]; then
-        export PATH="$PWD/.node/bin:$PATH"
-    elif ! command -v npm &> /dev/null; then
+        # Verify the existing node binary works (may be wrong architecture)
+        if .node/bin/node --version &>/dev/null; then
+            export PATH="$PWD/.node/bin:$PATH"
+        else
+            echo "Existing .node/ binary is not executable (wrong architecture?), re-downloading..."
+            rm -rf .node
+        fi
+    fi
+    if ! command -v npm &> /dev/null; then
         echo "npm not found. Downloading portable Node.js to .node/..."
         echo "  (about 45 MB, may take a moment)"
         mkdir -p .node
+        # Detect architecture for Node.js
+        NODE_ARCH="linux-x64"
+        case "$(uname -m)" in
+            aarch64) NODE_ARCH="linux-arm64" ;;
+            armv7l)  NODE_ARCH="linux-armv7l" ;;
+        esac
+        echo "  Architecture: $(uname -m) -> ${NODE_ARCH}"
+        NODE_URL="https://nodejs.org/dist/v22.14.0/node-v22.14.0-${NODE_ARCH}.tar.xz"
         if command -v curl &> /dev/null; then
-            curl -fL --progress-bar https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz -o /tmp/node.tar.xz || {
+            curl -fL --progress-bar "$NODE_URL" -o /tmp/node.tar.xz || {
                 echo "ERROR: Node.js download failed (curl exit code $?)"
                 exit 1
             }
         elif command -v wget &> /dev/null; then
-            wget --show-progress https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz -O /tmp/node.tar.xz || {
+            wget --show-progress "$NODE_URL" -O /tmp/node.tar.xz || {
                 echo "ERROR: Node.js download failed (wget exit code $?)"
                 exit 1
             }
@@ -194,6 +209,13 @@ else
         }
         rm /tmp/node.tar.xz
         echo "Node.js extracted to .node/"
+        # Verify the binary works
+        if ! .node/bin/node --version &>/dev/null; then
+            echo "ERROR: Downloaded Node.js binary cannot execute (wrong architecture?)"
+            echo "  Please install Node.js manually: https://nodejs.org/"
+            rm -rf .node
+            exit 1
+        fi
         export PATH="$PWD/.node/bin:$PATH"
     fi
 
