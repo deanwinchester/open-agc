@@ -487,12 +487,15 @@ def save_message(role: str, content: str, session_id: int = 1):
     conn.commit()
     conn.close()
 
-# Mount the static directory
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Mount the static directory (handle PyInstaller bundle path)
+import sys as _sys
+_static_dir = os.path.join(getattr(_sys, '_MEIPASS', os.getcwd()), "static")
+app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 @app.get("/")
 async def read_index():
-    return FileResponse("static/index.html")
+    _idx = os.path.join(getattr(_sys, '_MEIPASS', os.getcwd()), "static", "index.html")
+    return FileResponse(_idx)
 
 @app.get("/api/files/{file_path:path}")
 async def get_sandbox_file(file_path: str):
@@ -552,7 +555,8 @@ app.websocket("/ws")(websocket_endpoint)
 # SPA fallback: serve index.html for all unmatched frontend routes
 @app.get("/{full_path:path}")
 async def spa_fallback(full_path: str):
-    return FileResponse("static/index.html")
+    _idx = os.path.join(getattr(_sys, '_MEIPASS', os.getcwd()), "static", "index.html")
+    return FileResponse(_idx)
 
 # Start background systems
 import api.state as _state_mod
