@@ -46,8 +46,8 @@ def _check_hardware() -> tuple:
             return False, f"内存不足（{mem.total // (1024**3)}GB），Reader-lm 需要至少 2GB 内存"
         if mem.available < 500_000_000:  # 500MB minimum available
             return False, f"可用内存不足（{mem.available // (1024**2)}MB），Reader-lm 需要至少 500MB 可用内存"
-    except ImportError:
-        pass  # psutil not installed, skip memory check
+    except Exception:
+        pass  # psutil unavailable or failed, skip memory check
 
     # 3. CPU check -- at least 2 cores
     try:
