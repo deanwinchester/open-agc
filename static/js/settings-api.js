@@ -89,7 +89,7 @@ export async function buildModelSelection(data) {
 
 export async function fetchModels(provider, modelToSelect = null) {
   try {
-    const data = await cachedFetch(`/api/settings/available-models?provider=${provider}`, {}, 60000);
+    const data = await cachedFetch(`/api/provider-models?provider=${provider}`, {}, 60000);
     const sel = document.getElementById('model-select');
     if (!sel) return;
     let html = '<option value="">-- 选择模型 --</option>';
