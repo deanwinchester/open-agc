@@ -489,7 +489,15 @@ def save_message(role: str, content: str, session_id: int = 1):
 
 # Mount the static directory (handle PyInstaller bundle path)
 import sys as _sys
-_static_dir = os.path.join(getattr(_sys, '_MEIPASS', os.getcwd()), "static")
+_MEIPASS = getattr(_sys, '_MEIPASS', None)
+_cwd = os.getcwd()
+_static_dir = os.path.join(_MEIPASS or _cwd, "static")
+print(f"[Server] Serving static from: {_static_dir} (MEIPASS={_MEIPASS}, CWD={_cwd})")
+if not os.path.isdir(_static_dir):
+    print(f"[Server] WARNING: static directory not found at {_static_dir}")
+    # Fallback: try project root relative path
+    _static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "static")
+    print(f"[Server] Falling back to: {os.path.abspath(_static_dir)}")
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 @app.get("/")
