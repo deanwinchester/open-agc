@@ -29,6 +29,13 @@ export async function loadSettingsConfig() {
       label.textContent = sn ? sn.name : ('会话 ' + sid);
     }
     const data = await cachedFetch(`/api/settings?session_id=${sid}`);
+    // Fetch available model list separately (not included in settings response)
+    try {
+      const modelsData = await cachedFetch('/api/models/available');
+      data.available_models = modelsData?.models || [];
+    } catch (e) {
+      data.available_models = [];
+    }
 
     const apiKeysContainer = document.getElementById('api-keys-container');
     if (apiKeysContainer) {
