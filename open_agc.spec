@@ -35,8 +35,13 @@ datas = [
     ('api', 'api'),
 ]
 
-# Do NOT bundle data/config.json or data/memory.md as they contain sensitive user data.
-# These will be created in the user's data directory on first launch.
+# Bundle build_data/ as data/ (only contains API-key-free config template).
+# Real data/config.json with user API keys is NEVER bundled.
+if os.path.exists('build_data'):
+    datas.append(('build_data', 'data'))
+
+# Do NOT bundle data/ directory as it may contain sensitive user data (API keys).
+# The initial config template is provided via build_data/ above.
 
 # Add .env.example
 if os.path.exists('.env.example'):

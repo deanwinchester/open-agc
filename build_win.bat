@@ -55,65 +55,13 @@ if exist "data\browser_profile" xcopy "data\browser_profile" "build_data\browser
 
 REM ---- 2. Build with PyInstaller ----
 echo [2/4] Building with PyInstaller...
+echo   Using spec file: open_agc.spec
 
-REM Create a Windows-specific spec on the fly
-pyinstaller ^
-    --name "%APP_NAME%" ^
-    --noconsole ^
-    --noconfirm ^
-    --clean ^
-    --icon "static\icon.ico" ^
-    --add-data "static;static" ^
-    --add-data "build_data;data" ^
-    --add-data "skills;skills" ^
-    --add-data "agent;agent" ^
-    --add-data "core;core" ^
-    --add-data "tools;tools" ^
-    --add-data "api;api" ^
-    --hidden-import uvicorn ^
-    --hidden-import uvicorn.logging ^
-    --hidden-import uvicorn.loops ^
-    --hidden-import uvicorn.loops.auto ^
-    --hidden-import uvicorn.protocols ^
-    --hidden-import uvicorn.protocols.http ^
-    --hidden-import uvicorn.protocols.http.auto ^
-    --hidden-import uvicorn.protocols.websockets ^
-    --hidden-import uvicorn.protocols.websockets.auto ^
-    --hidden-import uvicorn.lifespan ^
-    --hidden-import uvicorn.lifespan.on ^
-    --hidden-import fastapi ^
-    --hidden-import starlette ^
-    --hidden-import starlette.routing ^
-    --hidden-import starlette.middleware ^
-    --hidden-import starlette.responses ^
-    --hidden-import starlette.staticfiles ^
-    --hidden-import starlette.websockets ^
-    --hidden-import litellm ^
-    --hidden-import pydantic ^
-    --hidden-import dotenv ^
-    --hidden-import rich ^
-    --hidden-import duckduckgo_search ^
-    --hidden-import requests ^
-    --hidden-import bs4 ^
-    --hidden-import httptools ^
-    --hidden-import websockets ^
-    --hidden-import tiktoken ^
-    --hidden-import tiktoken_ext ^
-    --hidden-import tiktoken_ext.openai_public ^
-    --hidden-import api.server ^
-    --hidden-import agent.agent ^
-    --hidden-import core.llm_client ^
-    --hidden-import core.sglang_manager ^
-    --hidden-import tools.shell ^
-    --hidden-import tools.filesystem ^
-    --hidden-import tools.python_repl ^
-    --hidden-import tools.computer ^
-    --hidden-import tools.memory ^
-    --hidden-import tools.web_search ^
-    --hidden-import tools.system_mac ^
-    --hidden-import webview ^
-    --hidden-import webview.platforms.winforms ^
-    gui_app.py
+:: The spec file handles all data files. build_data/config.json.template
+:: is bundled as data/config.json (API-key-free template only).
+:: Real config.json with user API keys is NEVER bundled.
+pyinstaller open_agc.spec --clean --noconfirm ^
+    --icon "static\icon.ico"
 
 if errorlevel 1 (
     echo ERROR: PyInstaller build failed!
