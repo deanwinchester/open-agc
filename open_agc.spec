@@ -116,6 +116,15 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
+        # Qt/PySide (pulled by pywebview but we use WinForms/Cocoa, not Qt)
+        'PySide6', 'PySide2', 'PyQt5', 'PyQt6',
+        'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.QtPositioning', 'PySide6.QtWebEngine',
+        'PySide6.QtWebEngineWidgets', 'PySide6.QtWebChannel',
+        'PySide6.QtNetwork', 'PySide6.QtSensors', 'PySide6.QtSvg',
+        'PySide6.QtMultimedia', 'PySide6.QtPrintSupport', 'PySide6.QtXml',
+        'shiboken6',
+        # Heavy ML frameworks (not needed for agent/server)
+        'modelscope',
         'tkinter',
         'matplotlib',
         'numpy',
