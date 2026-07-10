@@ -8,6 +8,8 @@ import os
 import glob
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
+import sys ; sys.setrecursionlimit(sys.getrecursionlimit() * 5)
+
 block_cipher = None
 
 # Collect data files from packages that need them at runtime
