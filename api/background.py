@@ -900,11 +900,19 @@ def start_guardian_loop():
                                 f"AND status='interrupted' AND (interruption_reason IS NULL OR interruption_reason != 'user') "
                                 f"ORDER BY id DESC LIMIT 1", _task_ids
                             ).fetchone()
+                            _bg_active = _conn_g.execute(
+                                f"SELECT id FROM tasks WHERE id IN ({','.join('?' for _ in _task_ids)}) "
+                                f"AND status='backgrounded' "
+                                f"ORDER BY id DESC LIMIT 1", _task_ids
+                            ).fetchone()
                             _conn_g.close()
                             if _resumable:
                                 print(f"[Guardian] Goal patrol: resuming task #{_resumable[0]} for goal #{_gid}")
                                 _guardian_resume_task(_resumable[0])
                                 break
+                            if _bg_active:
+                                print(f"[Guardian] Goal patrol: goal #{_gid} has backgrounded task #{_bg_active[0]}, skipping new task creation")
+                                continue
                             if _incomplete > 0:
                                 _desc = _goal.get("desc", "")
                                 _new_tid = create_task(f"继续目标: {_desc[:80]}",
