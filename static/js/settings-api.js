@@ -29,7 +29,7 @@ export function buildApiKeysGrid(maskedKeys) {
     return `<div class="api-key-row">
       <label>${p.label}</label>
       <div class="api-key-input-group">
-        <input type="password" class="api-key-input" data-provider="${p.key}" value=""
+        <input type="password" class="api-key-input" id="key-${p.key}" value=""
           placeholder="${masked ? escapeHtml(displayVal) : '未配置'}" />
         <button class="btn-icon toggle-key-btn" title="显示/隐藏密钥">👁️</button>
         ${masked && !masked.startsWith('http') ? `<button class="btn-icon test-key-btn" data-provider="${p.key}" title="测试连接">🔍</button>
