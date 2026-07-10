@@ -323,7 +323,16 @@ function initApp() {
     } else if (data.type === 'progress') {
       if (data.task_id && isForCurrentSession) state.currentTaskId = data.task_id;
       if (isForCurrentSession) handleProgressEvent(data);
-      if (isBackground) updateTaskBadge();
+      if (isBackground) {
+        updateTaskBadge();
+        // Background task asks a question: auto-switch to chat view
+        if (data.event === 'ask_user' && isForCurrentSession) {
+          const chatView = document.getElementById('view-chat');
+          if (chatView && !chatView.classList.contains('active')) {
+            switchView('chat');
+          }
+        }
+      }
     } else if (data.type === 'message') {
       // Skip individual tool_step messages — they are rendered inside the
       // history_steps summary card and during live execution via progress events.
@@ -644,6 +653,44 @@ function initApp() {
     if (event === 'sandbox_blocked') {
       showSandboxBlockedModal(data);
       return;
+    }
+
+    // background ask_user: append reply UI as system message
+    if (event === 'ask_user' && data.background && data.task_id) {
+      const askId = 'bg-ask-' + data.task_id;
+      const msg = `<div id="${askId}">❓ **Agent 提问**\n\n${escapeHtml(data.question)}</div>`;
+      appendMessage(msg, 'system', null, null, data.task_id);
+      // Add reply input after the system message
+      setTimeout(() => {
+        const container = document.getElementById(askId);
+        if (!container) return;
+        const form = document.createElement('div');
+        form.innerHTML = `
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <input type="text" id="${askId}-input" class="input-styled" placeholder="请输入您的回答..." style="flex:1" />
+            <button class="btn-primary" id="${askId}-btn">提交</button>
+          </div>`;
+        container.parentElement.appendChild(form);
+        document.getElementById(askId + '-btn').onclick = () => {
+          const val = document.getElementById(askId + '-input').value.trim();
+          if (!val) return;
+          fetch('/api/tasks/' + data.task_id + '/reply', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({answer: val})
+          }).then(r => r.json()).then(d => {
+            if (d.status === 'success') {
+              form.innerHTML = '<span style="color:var(--success)">✓ 您的回答已提交</span>';
+            } else {
+              form.innerHTML = '<span style="color:var(--error)">✗ ' + (d.detail || '提交失败') + '</span>';
+            }
+          }).catch(() => {
+            form.innerHTML = '<span style="color:var(--error)">✗ 网络错误，请重试</span>';
+          });
+        };
+        document.getElementById(askId + '-input').addEventListener('keypress', (e) => {
+          if (e.key === 'Enter') document.getElementById(askId + '-btn').click();
+        });
+      }, 100);
     }
 
     // Set task_id on state so ensureProgressContainer can clean up stale cards
