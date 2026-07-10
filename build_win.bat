@@ -60,8 +60,7 @@ echo   Using spec file: open_agc.spec
 :: The spec file handles all data files. build_data/config.json.template
 :: is bundled as data/config.json (API-key-free template only).
 :: Real config.json with user API keys is NEVER bundled.
-pyinstaller open_agc.spec --clean --noconfirm ^
-    --icon "static\icon.ico"
+pyinstaller open_agc.spec --clean --noconfirm
 
 if errorlevel 1 (
     echo ERROR: PyInstaller build failed!
