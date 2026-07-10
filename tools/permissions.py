@@ -34,6 +34,8 @@ DESTRUCTIVE_PATTERNS = [
     # Database destructive
     (r'\bDROP\s+(?:TABLE|DATABASE)\b', 'DROP TABLE/DATABASE', 'db_destroy'),
     (r'\bTRUNCATE\s+(?:TABLE\s+)?\S+', 'TRUNCATE TABLE', 'db_destroy'),
+    # Sudo (privileged execution)
+    (r'(?:^|[|&;]\s*)sudo\s+', 'sudo (需要授权才能执行特权命令)', 'sudo'),
 ]
 
 
