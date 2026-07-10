@@ -161,9 +161,20 @@ if [ -f "requirements.txt" ]; then
 fi
 
 # ── 4. Node.js / frontend build ─────────────────────────────
-if [ -d "static/dist" ] && [ -f "static/dist/open-agc.css" ] && [ -f "static/dist/open-agc.min.js" ]; then
-    echo "Frontend assets found (static/dist/), skipping build."
+# Rebuild frontend if source files are newer than dist, or dist doesn't exist
+NEED_BUILD=0
+if [ ! -f "static/dist/open-agc.min.js" ] || [ ! -f "static/dist/open-agc.css" ]; then
+    NEED_BUILD=1
 else
+    # Check if any source file is newer than the dist
+    for src in static/app.js static/js/*.js static/style.css package.json vite.config.mjs; do
+        if [ "$src" -nt "static/dist/open-agc.min.js" ] 2>/dev/null; then
+            NEED_BUILD=1
+            break
+        fi
+    done
+fi
+if [ $NEED_BUILD -eq 1 ]; then
     # Prefer local .node/ first, then check PATH
     if [ -f ".node/bin/npm" ]; then
         # Verify the existing node binary works (may be wrong architecture)

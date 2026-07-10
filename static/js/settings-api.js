@@ -24,15 +24,15 @@ export const providers = [
 export function buildApiKeysGrid(maskedKeys) {
   const keys = maskedKeys || {};
   return providers.map(p => {
-    const val = keys[p.key] || '';
-    const masked = val ? (val.startsWith('http') ? val : val.substring(0, 8) + '••••' + val.slice(-4)) : '';
+    const masked = keys[p.key] || '';
+    const displayVal = masked ? (masked.startsWith('http') ? masked : masked.substring(0, 8) + '••••' + masked.slice(-4)) : '';
     return `<div class="api-key-row">
       <label>${p.label}</label>
       <div class="api-key-input-group">
-        <input type="password" class="api-key-input" data-provider="${p.key}" value="${escapeHtml(val)}"
-          placeholder="${val ? escapeHtml(masked) : '未配置'}" />
+        <input type="password" class="api-key-input" data-provider="${p.key}" value=""
+          placeholder="${masked ? escapeHtml(displayVal) : '未配置'}" />
         <button class="btn-icon toggle-key-btn" title="显示/隐藏密钥">👁️</button>
-        ${val && !val.startsWith('http') ? `<button class="btn-icon test-key-btn" data-provider="${p.key}" title="测试连接">🔍</button>
+        ${masked && !masked.startsWith('http') ? `<button class="btn-icon test-key-btn" data-provider="${p.key}" title="测试连接">🔍</button>
         <button class="btn-icon stats-key-btn" data-provider="${p.key}" title="消耗统计">📊</button>` : ''}
       </div>
     </div>`;

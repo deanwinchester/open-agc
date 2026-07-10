@@ -101,10 +101,8 @@ if exist "requirements.txt" (
 )
 
 :: ── 4. Node.js / frontend build ────────────────────────────
-if exist "static\dist\open-agc.css" if exist "static\dist\open-agc.min.js" (
-    echo Frontend assets found in static\dist, skipping build.
-    goto :start_server
-)
+:: Always rebuild if dist files are missing (build is fast, ~200ms)
+if exist "static\dist\open-agc.css" if exist "static\dist\open-agc.min.js" goto :start_server
 
 :: Prefer local Node.js first, then check system
 set "LOCAL_NODE=%~dp0.node\node.exe"
