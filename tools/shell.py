@@ -193,6 +193,13 @@ class ShellTool(BaseTool):
             raise SandboxBlocked(command, sandbox_dir="permission", tool_name="execute_shell",
                                  category=perm_cat, description=perm_desc)
 
+        # -- Sudo handling: use sudo -n to avoid password prompt hang --
+        # Password never enters LLM context. User pre-authenticates via sudo -v.
+        _is_sudo = re.match(r'^\s*(sudo\s+)', command)
+        if _is_sudo:
+            command = command[:_is_sudo.start(1)] + 'sudo -n ' + command[_is_sudo.end(1):]
+            print(f"[ShellTool] Sudo command rewritten to use -n: {command[:120]}...")
+
         # Check network domain whitelist — raise SandboxBlocked for popup
         network_whitelist = kwargs.get("_network_whitelist", set())
         for url in extract_urls_from_command(command):
@@ -463,6 +470,20 @@ class ShellTool(BaseTool):
                     result += f"[Sandbox: {cwd}]\n"
                 result += full_output
                 result += f"\nExit Code: {proc.returncode}  |  Time: {elapsed}s"
+
+                # -- Sudo password prompt detection --
+                import re as _sudo_re
+                if _sudo_re.search(r'(?:sudo|a password is required|no password was provided|sorry, try again)', full_output, _sudo_re.IGNORECASE):
+                    result += (
+                        "\n\n"
+                        "\u2501" * 50 + "\n"
+                        "\u26a0\ufe0f 此命令需要 sudo 权限，但当前没有可用的 sudo 会话。\n"
+                        "密码不会传递给 AI 智能体。请手动执行：\n"
+                        "  sudo -v\n"
+                        "（输入一次密码后，sudo 凭证会在 15 分钟内有效）\n"
+                        "然后告诉智能体「继续执行」即可。\n"
+                        "\u2501" * 50
+                    )
                 return result
 
         except Exception as e:
