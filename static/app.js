@@ -434,6 +434,16 @@ function initApp() {
       descLine = `<div style="color:var(--warning,#e67e22);font-size:0.85rem;margin-bottom:0.5rem;">⚠️ ${data.description}</div>`;
     }
 
+    // Sudo password input (only for sudo category)
+    var isSudo = data.category === 'sudo';
+    var sudoPwHtml = '';
+    if (isSudo) {
+      sudoPwHtml = `<div style="margin-bottom:1rem;">
+        <label style="font-size:0.85rem;color:var(--text-secondary);display:block;margin-bottom:0.3rem;">🔑 输入 sudo 密码（密码不会经过 AI，仅直接传给 sudo -S）：</label>
+        <input type="password" id="sb-sudo-password" class="input-styled" placeholder="输入密码..." style="width:100%;box-sizing:border-box;" autocomplete="off" />
+      </div>`;
+    }
+
     modal.innerHTML = `
       <div class="modal-box" style="max-width:480px;width:90%;">
         <div class="modal-header"><h3>${headerIcon} ${headerTitle}</h3></div>
@@ -441,6 +451,7 @@ function initApp() {
           <p style="margin:0 0 0.5rem">Agent 工具 <b id="sb-tool"></b> ${descText}</p>
           ${descLine}
           <div id="sb-path" style="background:var(--bg-secondary);padding:0.5rem 0.75rem;border-radius:6px;font-family:monospace;font-size:0.82rem;word-break:break-all;margin-bottom:1rem;"></div>
+          ${sudoPwHtml}
           <div style="display:flex;flex-wrap:wrap;gap:0.5rem;">${buttonsHtml}</div>
         </div>
       </div>`;
@@ -450,14 +461,26 @@ function initApp() {
     document.getElementById('sb-path').textContent = data.path || '';
 
     function respond(action) {
+      var pw = '';
+      if (isSudo && action.startsWith('approve')) {
+        var pwInput = document.getElementById('sb-sudo-password');
+        pw = pwInput ? pwInput.value : '';
+        if (!pw) {
+          pwInput.style.borderColor = 'red';
+          pwInput.focus();
+          return;
+        }
+      }
       modal.style.display = 'none';
       if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-        state.ws.send(JSON.stringify({
+        var msg = {
           type: 'sandbox_response',
           action: action,
           path: data.path,
           session_id: state.currentSessionId
-        }));
+        };
+        if (pw) msg.password = pw;
+        state.ws.send(JSON.stringify(msg));
       }
     }
 

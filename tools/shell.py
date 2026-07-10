@@ -52,7 +52,11 @@ def interrupt_shell() -> bool:
 
 class ShellTool(BaseTool):
     name: str = "execute_shell"
-    description: str = "Execute a bash environment shell command on the local machine."
+    description: str = ("Execute a bash environment shell command on the local machine. "
+                        "Note: sudo commands will trigger a permission popup with a password "
+                        "input field. The password is sent directly to sudo -S via stdin and "
+                        "never appears in the conversation. If sudo fails with 'a password is "
+                        "required', simply retry the command to trigger the popup again.")
 
     def get_openai_schema(self) -> Dict[str, Any]:
         return {
@@ -193,12 +197,16 @@ class ShellTool(BaseTool):
             raise SandboxBlocked(command, sandbox_dir="permission", tool_name="execute_shell",
                                  category=perm_cat, description=perm_desc)
 
-        # -- Sudo handling: use sudo -n to avoid password prompt hang --
-        # Password never enters LLM context. User pre-authenticates via sudo -v.
+        # -- Sudo handling: use sudo -S to read password from stdin --
+        # Password comes from user via popup (never from LLM). Written to proc.stdin after Popen.
+        _sudo_password = kwargs.get("_sudo_password", "")
         _is_sudo = re.match(r'^\s*(sudo\s+)', command)
         if _is_sudo:
-            command = command[:_is_sudo.start(1)] + 'sudo -n ' + command[_is_sudo.end(1):]
-            print(f"[ShellTool] Sudo command rewritten to use -n: {command[:120]}...")
+            if _sudo_password:
+                command = command[:_is_sudo.start(1)] + 'sudo -S ' + command[_is_sudo.end(1):]
+            else:
+                command = command[:_is_sudo.start(1)] + 'sudo -n ' + command[_is_sudo.end(1):]
+            print(f"[ShellTool] Sudo command rewritten: {command[:120]}...")
 
         # Check network domain whitelist — raise SandboxBlocked for popup
         network_whitelist = kwargs.get("_network_whitelist", set())
@@ -275,6 +283,20 @@ class ShellTool(BaseTool):
                     popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 _t0 = time.time()
                 proc = subprocess.Popen(command, **popen_kwargs)
+
+                # Feed sudo password via stdin (for sudo -S). Password never appears in
+                # command line, process listing, or LLM context. stdin closed after writing.
+                if _is_sudo and _sudo_password and proc.stdin:
+                    try:
+                        proc.stdin.write((_sudo_password + "\n").encode())
+                        proc.stdin.flush()
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            proc.stdin.close()
+                        except Exception:
+                            pass
 
                 global _current_process
                 with _current_process_lock:
@@ -471,19 +493,14 @@ class ShellTool(BaseTool):
                 result += full_output
                 result += f"\nExit Code: {proc.returncode}  |  Time: {elapsed}s"
 
-                # -- Sudo password prompt detection --
-                import re as _sudo_re
-                if _sudo_re.search(r'(?:sudo|a password is required|no password was provided|sorry, try again)', full_output, _sudo_re.IGNORECASE):
-                    result += (
-                        "\n\n"
-                        "\u2501" * 50 + "\n"
-                        "\u26a0\ufe0f 此命令需要 sudo 权限，但当前没有可用的 sudo 会话。\n"
-                        "密码不会传递给 AI 智能体。请手动执行：\n"
-                        "  sudo -v\n"
-                        "（输入一次密码后，sudo 凭证会在 15 分钟内有效）\n"
-                        "然后告诉智能体「继续执行」即可。\n"
-                        "\u2501" * 50
-                    )
+                # -- Sudo failure detection --
+                # If sudo -n was used (no password available) and it failed, inform the LLM
+                if _is_sudo and not _sudo_password and proc.returncode != 0:
+                    if re.search(r'(?:a password is required|no password was provided|sorry, try again|sudo:)', full_output, re.IGNORECASE):
+                        result += (
+                            "\n\n⚠️ sudo 命令执行失败：需要密码但未提供。"
+                            "请重新尝试该 sudo 命令，系统会弹出密码输入框供用户输入。"
+                        )
                 return result
 
         except Exception as e:
