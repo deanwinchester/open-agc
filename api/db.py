@@ -6,6 +6,19 @@ from core.paths import get_data_path
 DB_PATH = get_data_path("chat_history.db")
 
 
+def db_connect():
+    """Open a connection to the main DB with busy_timeout and Row factory.
+
+    Use this instead of bare ``sqlite3.connect(DB_PATH)`` so that writers
+    wait on locks (up to 5s) instead of failing with "database is locked".
+    ``sqlite3.Row`` supports both index (``row[0]``) and name access.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def init_db():
     """Create all tables and run schema migrations."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -159,6 +172,7 @@ def init_db():
     _run_migrations(cursor)
     conn.commit()
     conn.close()
+    create_indexes()
 
 
 def _run_migrations(cursor):
@@ -252,7 +266,7 @@ def _run_migrations(cursor):
 
 def create_indexes():
     """Create indexes for query performance."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = db_connect()
     cursor = conn.cursor()
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_task_steps_task_id ON task_steps(task_id)",

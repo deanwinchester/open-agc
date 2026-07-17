@@ -2,6 +2,7 @@
 // Open-AGC Frontend — Main Entry Point
 // =============================================
 import './style.css';
+import DOMPurify from 'dompurify';
 import { state } from './js/state.js';
 import { escapeHtml, showStatus, t, initI18n, formatTimeAgo, formatTime } from './js/utils.js';
 import { switchView, initNavigation, toggleSidebar, closeSidebar, onViewChange } from './js/navigation.js';
@@ -1323,7 +1324,7 @@ function initApp() {
         formattedContent = content;
       }
     } else if (role === 'agent' || role === 'system') {
-      formattedContent = marked.parse(content);
+      formattedContent = DOMPurify.sanitize(marked.parse(content));
     }
 
     let imagesHtml = '';

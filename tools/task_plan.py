@@ -7,6 +7,14 @@ from typing import Any, Dict, List, Optional
 from tools.base import BaseTool
 
 
+def _atomic_json_write(path: str, data) -> None:
+    """Write JSON atomically (tmp file + os.replace), always UTF-8."""
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+
+
 def _get_plans_dir():
     from core.paths import get_data_dir
     d = os.path.join(get_data_dir(), "plans")
@@ -37,7 +45,7 @@ def load_plan(goal: str = None, plan_id: str = None, task_id: int = None) -> Opt
             for fn in os.listdir(plans_dir):
                 if fn.startswith("plan_") and fn.endswith(".json"):
                     try:
-                        with open(os.path.join(plans_dir, fn), "r") as f:
+                        with open(os.path.join(plans_dir, fn), "r", encoding="utf-8") as f:
                             p = json.load(f)
                         if task_id in p.get("task_ids", []) or p.get("current_task_id") == task_id:
                             return p
@@ -58,8 +66,7 @@ def load_plan(goal: str = None, plan_id: str = None, task_id: int = None) -> Opt
 def save_plan(plan: dict) -> bool:
     path = _plan_path_by_id(plan["plan_id"])
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(plan, f, ensure_ascii=False, indent=2)
+        _atomic_json_write(path, plan)
         return True
     except Exception:
         return False
@@ -145,8 +152,7 @@ def load_goals() -> dict:
                     migrated = True
             if migrated:
                 try:
-                    with open(path, "w", encoding="utf-8") as f:
-                        json.dump(data, f, ensure_ascii=False, indent=2)
+                    _atomic_json_write(path, data)
                 except Exception:
                     pass
             # Migration 2: task_id (int) → task_ids (list)
@@ -159,21 +165,22 @@ def load_goals() -> dict:
                     migrated_ids = True
             if migrated_ids:
                 try:
-                    with open(path, "w", encoding="utf-8") as f:
-                        json.dump(data, f, ensure_ascii=False, indent=2)
+                    _atomic_json_write(path, data)
                 except Exception:
                     pass
             return data
-        except Exception:
-            pass
+        except Exception as e:
+            # Never silently fall back to an empty list: the next save_goals
+            # would wipe every goal. Keep the original file and fail loudly.
+            print(f"[TaskPlan] ERROR: 解析 goals.json 失败 ({path}): {e} — 已保留原文件，请手动检查修复。")
+            raise RuntimeError(f"goals.json 解析失败: {path}: {e}") from e
     return {"items": []}
 
 
 def save_goals(data: dict) -> bool:
     path = _get_goals_path()
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        _atomic_json_write(path, data)
         return True
     except Exception:
         return False
@@ -485,7 +492,7 @@ class TaskPlanTool(BaseTool):
                     if not fn.startswith("plan_") or not fn.endswith(".json"):
                         continue
                     try:
-                        with open(os.path.join(_plans_dir, fn), "r") as _f:
+                        with open(os.path.join(_plans_dir, fn), "r", encoding="utf-8") as _f:
                             _p = json.load(_f)
                         _tids = _p.get("task_ids", [])
                         if _tids:
@@ -520,7 +527,7 @@ class TaskPlanTool(BaseTool):
                 for fn in os.listdir(plans_dir):
                     if fn.startswith("plan_") and fn.endswith(".json"):
                         try:
-                            with open(os.path.join(plans_dir, fn), "r") as f:
+                            with open(os.path.join(plans_dir, fn), "r", encoding="utf-8") as f:
                                 p = json.load(f)
                             if task_id in p.get("task_ids", []) or p.get("current_task_id") == task_id:
                                 return p

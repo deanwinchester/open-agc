@@ -46,7 +46,18 @@ async def get_history(session_id: int = None, before_id: int = 0, limit: int = 1
     cursor.execute(sql, params + [limit])
     rows = cursor.fetchall()
     history = [{"id": r["id"], "role": r["role"], "content": r["content"]} for r in reversed(rows)]
-    conn.close()
     oldest_id = history[0]["id"] if history else 0
-    has_more = oldest_id > 1
+    has_more = False
+    if oldest_id:
+        if session_id:
+            has_more = bool(cursor.execute(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=? AND id < ?)",
+                (session_id, oldest_id)
+            ).fetchone()[0])
+        else:
+            has_more = bool(cursor.execute(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE id < ?)",
+                (oldest_id,)
+            ).fetchone()[0])
+    conn.close()
     return {"history": history, "oldest_id": oldest_id, "has_more": has_more}

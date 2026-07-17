@@ -131,6 +131,10 @@ async def get_model_log_filters():
 @router.get("/api/model-logs")
 async def get_model_logs(page: int = 1, page_size: int = 50, provider: str = None,
                          model: str = None, session_id: int = None):
+    if page < 1:
+        page = 1
+    if page_size < 1 or page_size > 200:
+        page_size = 50
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     where = []

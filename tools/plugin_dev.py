@@ -1,4 +1,5 @@
 """Tool for the agent to scaffold and develop new plugins."""
+import importlib.util
 import json
 import os
 from typing import Any, Dict

@@ -1,6 +1,7 @@
 """Tool for the agent to read/write system configuration, manage MCP, plugins, and skills."""
 import json
 import os
+import sqlite3
 from typing import Any, Dict, Optional
 
 from tools.base import BaseTool
@@ -34,6 +35,18 @@ def _mask_keys(api_keys: dict) -> dict:
         else:
             masked[k] = ""
     return masked
+
+
+_SENSITIVE_KEY_PARTS = ("password", "secret", "token")
+
+
+def _mask_sensitive(key: str, value):
+    """Mask values whose key name looks sensitive (password/secret/token), recursively for dicts."""
+    if any(part in str(key).lower() for part in _SENSITIVE_KEY_PARTS):
+        return "***"
+    if isinstance(value, dict):
+        return {k: _mask_sensitive(k, v) for k, v in value.items()}
+    return value
 
 
 class ConfigureSystemTool(BaseTool):
@@ -131,7 +144,7 @@ class ConfigureSystemTool(BaseTool):
         for k, v in config.items():
             if k in skip:
                 continue
-            lines.append(f"{k}: {json.dumps(v, ensure_ascii=False)}")
+            lines.append(f"{k}: {json.dumps(_mask_sensitive(k, v), ensure_ascii=False)}")
         lines.append(f"\n配置文件路径: {CONFIG_PATH}")
         return "\n".join(lines)
 
@@ -220,7 +233,11 @@ class ConfigureSystemTool(BaseTool):
 
     def _remove_plugin(self, name: str) -> str:
         import shutil
-        target = os.path.join("plugins", name)
+        from core.security import resolve_under
+        try:
+            target = resolve_under("plugins", name)
+        except ValueError:
+            return f"非法插件名: {name}"
         if not os.path.exists(target):
             return f"插件目录 {target} 不存在"
         shutil.rmtree(target)
@@ -310,7 +327,11 @@ class ConfigureSystemTool(BaseTool):
     def _delete_skill(self, filename: str) -> str:
         from core.skill_store import SkillStore
         from core.paths import get_skills_dir
-        path = os.path.join(get_skills_dir(), filename)
+        from core.security import resolve_under
+        try:
+            path = resolve_under(get_skills_dir(), filename)
+        except ValueError:
+            return f"非法技能文件名: {filename}"
         if not os.path.exists(path):
             return f"技能 {filename} 不存在"
         os.remove(path)

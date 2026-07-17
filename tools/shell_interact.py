@@ -9,11 +9,9 @@ from tools.base import BaseTool
 _interact_positions: Dict[int, int] = {}
 
 def _is_pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    # os.kill(pid, 0) would TERMINATE the process on Windows — use psutil instead.
+    from core.process import pid_alive
+    return pid_alive(pid)
 
 
 class ShellSendTool(BaseTool):

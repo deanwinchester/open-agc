@@ -110,7 +110,12 @@ class LlamaCppManager:
 
     def download_model(self, url: str, filename: str, progress_callback=None, resume: bool = True) -> bool:
         """Download a GGUF model from a URL. Supports HTTP Range resume when resume=True."""
-        target_path = os.path.join(self.models_dir, filename)
+        from core.security import resolve_under
+        try:
+            target_path = resolve_under(self.models_dir, filename)
+        except ValueError:
+            print(f"[LlamaCPP] Invalid model filename: {filename!r}")
+            return False
         partial_path = target_path + ".partial"
 
         try:
@@ -304,6 +309,10 @@ class LlamaCppManager:
         if self.is_running():
             print(f"[LlamaCPP] Already running on port {self.port}")
             return True
+
+        # Reset stop flag so the log-reader thread of a previous stop() doesn't
+        # immediately kill output reading for this new process.
+        self._stop_event.clear()
 
         model_path = os.path.join(self.models_dir, model_filename)
         if not os.path.exists(model_path):

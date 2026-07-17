@@ -8,5 +8,8 @@
   "devDependencies": {
     "terser": "^5.47.1",
     "vite": "^6.3.5"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.12"
   }
 }

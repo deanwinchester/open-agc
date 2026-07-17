@@ -9,6 +9,7 @@ import { cachedFetch } from './cache.js';
 export const providers = [
   { key: "deepseek", label: "DeepSeek" },
   { key: "kimi", label: "Kimi (Moonshot)" },
+  { key: "kimi_code", label: "Kimi Code (订阅)" },
   { key: "llamacpp", label: "Llama.cpp (本地/Local)" },
   { key: "openai", label: "OpenAI" },
   { key: "anthropic", label: "Anthropic" },
@@ -30,6 +31,7 @@ export function buildApiKeysGrid(maskedKeys) {
       <label>${p.label}</label>
       <div class="api-key-input-group">
         <input type="password" class="api-key-input" id="key-${p.key}" value=""
+          autocomplete="new-password"
           placeholder="${masked ? escapeHtml(displayVal) : '未配置'}" />
         <button class="btn-icon toggle-key-btn" title="显示/隐藏密钥">👁️</button>
         ${masked && !masked.startsWith('http') ? `<button class="btn-icon test-key-btn" data-provider="${p.key}" title="测试连接">🔍</button>

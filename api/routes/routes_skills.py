@@ -2,6 +2,7 @@
 import os
 from fastapi import APIRouter, HTTPException
 from core.paths import get_data_path, get_skills_dir
+from core.security import resolve_under
 from api.config import load_config
 
 router = APIRouter()
@@ -30,6 +31,10 @@ async def import_skill(data: dict):
     force = data.get("force", False)
     if not filename or not content:
         raise HTTPException(status_code=400, detail="filename and content are required")
+    try:
+        resolve_under(get_skills_dir(), filename)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid filename: {filename}")
     result = manager.import_skill(filename, content, force=force)
     return result
 
@@ -46,7 +51,10 @@ async def validate_skill(data: dict):
 @router.get("/api/skills/{filename}")
 async def get_skill_content(filename: str):
     """Get the content of a specific skill."""
-    filepath = os.path.join(get_skills_dir(), filename)
+    try:
+        filepath = resolve_under(get_skills_dir(), filename)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid filename: {filename}")
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="Skill not found")
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -57,6 +65,10 @@ async def get_skill_content(filename: str):
 async def delete_skill(filename: str):
     """Delete a skill file."""
     from core.skill_manager import SkillManager
+    try:
+        resolve_under(get_skills_dir(), filename)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid filename: {filename}")
     manager = SkillManager()
     if manager.delete_skill(filename):
         try:

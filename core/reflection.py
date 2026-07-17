@@ -32,7 +32,7 @@ Execution Summary:
 
 Result: {result}
 
-{'The task SUCCEEDED. Extract the key commands/approaches that worked.' if success else 'The task FAILED. Identify the root cause and what to do differently.'}
+{outcome_hint}
 
 Respond in JSON format:
 ```json
@@ -198,11 +198,16 @@ class ReflectionEngine:
     def _llm_reflection(self, task_input: str, tool_sequence: str, success: bool) -> Optional[str]:
         """Call LLM to generate a structured reflection."""
         try:
+            outcome_hint = (
+                "The task SUCCEEDED. Extract the key commands/approaches that worked."
+                if success else
+                "The task FAILED. Identify the root cause and what to do differently."
+            )
             prompt = REFLECTION_PROMPT.format(
                 task_input=task_input[:300],
                 tool_sequence=tool_sequence[:2000],
                 result="Success" if success else "Failed",
-                success=str(success).lower()
+                outcome_hint=outcome_hint
             )
             response, _ = self.llm_client.chat(
                 messages=[{"role": "user", "content": prompt}]

@@ -115,6 +115,10 @@ export async function loadDownloadHistory() {
             <span>${progressPct}</span>
             <span>${formatTimeAgo(dl.created_at)}</span>
           </div>
+          ${dl.status === 'completed' && dl.target_path ? `
+          <div class="download-item-path" title="${escapeHtml(dl.target_path)}">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-1px;margin-right:3px;opacity:0.6"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>${escapeHtml(dl.target_path)}
+          </div>` : ''}
           ${showProgress ? `
           <div class="download-item-progress">
             <div class="download-item-progress-bar ${dl.status === 'failed' ? 'failed' : ''}"

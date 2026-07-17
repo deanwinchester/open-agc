@@ -47,6 +47,11 @@ class DownloadTool(BaseTool):
         if not filename:
             return "Error: Please provide a filename for the download."
 
+        # Sanitize: strip any directory components, reject separators/traversal
+        filename = os.path.basename(filename.replace("\\", "/"))
+        if not filename or filename in (".", "..") or "/" in filename or "\\" in filename:
+            return "Error: Invalid filename."
+
         # Check for existing download
         try:
             import sqlite3

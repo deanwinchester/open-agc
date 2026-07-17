@@ -284,32 +284,35 @@ router = APIRouter()
 
 
 class ConfigUpdate(BaseModel):
-    api_keys: Dict[str, str]
-    default_model: str
-    fallback_models: List[str]
-    disabled_skills: List[str]
-    sandbox_mode: bool
-    sandbox_dir: str
-    llamacpp_ctx_size: int = 32768
-    browser_headless: bool = False
-    http_proxy: str = ""
-    heartbeat_enabled: bool
-    heartbeat_interval: int
-    email_listener_enabled: bool
-    email_account: str
-    email_password: str
-    email_imap_server: str
-    email_smtp_server: str
-    owner_email: str
+    # All fields optional: POST /api/settings is incremental — only fields
+    # explicitly provided (non-None) are written to config, so partial
+    # payloads (e.g. MCP-only save) never clobber unrelated settings.
+    api_keys: Optional[Dict[str, str]] = None
+    default_model: Optional[str] = None
+    fallback_models: Optional[List[str]] = None
+    disabled_skills: Optional[List[str]] = None
+    sandbox_mode: Optional[bool] = None
+    sandbox_dir: Optional[str] = None
+    llamacpp_ctx_size: Optional[int] = None
+    browser_headless: Optional[bool] = None
+    http_proxy: Optional[str] = None
+    heartbeat_enabled: Optional[bool] = None
+    heartbeat_interval: Optional[int] = None
+    email_listener_enabled: Optional[bool] = None
+    email_account: Optional[str] = None
+    email_password: Optional[str] = None
+    email_imap_server: Optional[str] = None
+    email_smtp_server: Optional[str] = None
+    owner_email: Optional[str] = None
     mcp_servers: Optional[Dict[str, Any]] = None
     session_id: Optional[int] = None
     tool_permissions: Optional[Dict[str, Any]] = None
-    searxng_url: str = ""
-    searxng_port: int = 8888
-    max_correction_attempts: int = 5
-    cold_cache_ttl: int = 3600
-    max_resume_count: int = 10
-    max_total_tokens: int = 128000
+    searxng_url: Optional[str] = None
+    searxng_port: Optional[int] = None
+    max_correction_attempts: Optional[int] = None
+    cold_cache_ttl: Optional[int] = None
+    max_resume_count: Optional[int] = None
+    max_total_tokens: Optional[int] = None
 
 
 
@@ -460,6 +463,8 @@ async def update_settings(config_update: ConfigUpdate):
 
         "kimi": "MOONSHOT_API_KEY",
 
+        "kimi_code": "KIMI_CODE_API_KEY",
+
         "glm": "ZAI_API_KEY",
 
         "minimax": "MINIMAX_API_KEY",
@@ -484,17 +489,21 @@ async def update_settings(config_update: ConfigUpdate):
 
         current_keys = config.get("api_keys", {})
 
-        for provider, new_key in config_update.api_keys.items():
+        if config_update.api_keys is not None:
 
-            if new_key and not new_key.endswith("***"):
+            for provider, new_key in config_update.api_keys.items():
 
-                current_keys[provider] = new_key
+                # Reject masked values ("xxx...xxx" from GET, or "***") so a
+                # mask can never be persisted as a real key.
+                if new_key and not new_key.endswith("***") and "..." not in new_key:
 
-                env_key_name = PROVIDER_ENV_MAP.get(provider, f"{provider.upper()}_API_KEY")
+                    current_keys[provider] = new_key
 
-                set_key(env_file, env_key_name, new_key)
+                    env_key_name = PROVIDER_ENV_MAP.get(provider, f"{provider.upper()}_API_KEY")
 
-                os.environ[env_key_name] = new_key
+                    set_key(env_file, env_key_name, new_key)
+
+                    os.environ[env_key_name] = new_key
 
 
 
@@ -516,39 +525,71 @@ async def update_settings(config_update: ConfigUpdate):
 
         config["api_keys"] = current_keys
 
-        config["default_model"] = config_update.default_model
+        # Incremental update: only write fields explicitly provided (non-None).
 
-        config["fallback_models"] = config_update.fallback_models
+        if config_update.default_model is not None:
 
-        config["disabled_skills"] = config_update.disabled_skills
+            config["default_model"] = config_update.default_model
 
-        config["sandbox_mode"] = config_update.sandbox_mode
+        if config_update.fallback_models is not None:
 
-        config["sandbox_dir"] = os.path.abspath(config_update.sandbox_dir) if config_update.sandbox_dir else os.path.abspath(os.path.join(os.getcwd(), "workspace"))
+            config["fallback_models"] = config_update.fallback_models
 
-        config["llamacpp_ctx_size"] = config_update.llamacpp_ctx_size
+        if config_update.disabled_skills is not None:
 
-        config["browser_headless"] = config_update.browser_headless
+            config["disabled_skills"] = config_update.disabled_skills
 
-        config["http_proxy"] = config_update.http_proxy
+        if config_update.sandbox_mode is not None:
 
-        config["heartbeat_enabled"] = config_update.heartbeat_enabled
+            config["sandbox_mode"] = config_update.sandbox_mode
 
-        config["heartbeat_interval"] = config_update.heartbeat_interval
+        if config_update.sandbox_dir is not None:
 
-        config["email_listener_enabled"] = config_update.email_listener_enabled
+            config["sandbox_dir"] = os.path.abspath(config_update.sandbox_dir) if config_update.sandbox_dir else os.path.abspath(os.path.join(os.getcwd(), "workspace"))
 
-        config["email_account"] = config_update.email_account
+        if config_update.llamacpp_ctx_size is not None:
 
-        if config_update.email_password != "***":
+            config["llamacpp_ctx_size"] = config_update.llamacpp_ctx_size
+
+        if config_update.browser_headless is not None:
+
+            config["browser_headless"] = config_update.browser_headless
+
+        if config_update.http_proxy is not None:
+
+            config["http_proxy"] = config_update.http_proxy
+
+        if config_update.heartbeat_enabled is not None:
+
+            config["heartbeat_enabled"] = config_update.heartbeat_enabled
+
+        if config_update.heartbeat_interval is not None:
+
+            config["heartbeat_interval"] = config_update.heartbeat_interval
+
+        if config_update.email_listener_enabled is not None:
+
+            config["email_listener_enabled"] = config_update.email_listener_enabled
+
+        if config_update.email_account is not None:
+
+            config["email_account"] = config_update.email_account
+
+        if config_update.email_password is not None and config_update.email_password != "***":
 
             config["email_password"] = config_update.email_password
 
-        config["email_imap_server"] = config_update.email_imap_server
+        if config_update.email_imap_server is not None:
 
-        config["email_smtp_server"] = config_update.email_smtp_server
+            config["email_imap_server"] = config_update.email_imap_server
 
-        config["owner_email"] = config_update.owner_email
+        if config_update.email_smtp_server is not None:
+
+            config["email_smtp_server"] = config_update.email_smtp_server
+
+        if config_update.owner_email is not None:
+
+            config["owner_email"] = config_update.owner_email
 
         if config_update.mcp_servers is not None:
 
@@ -558,35 +599,52 @@ async def update_settings(config_update: ConfigUpdate):
 
             config["tool_permissions"] = config_update.tool_permissions
 
-        config["searxng_url"] = config_update.searxng_url
+        if config_update.searxng_url is not None:
 
-        config["searxng_port"] = config_update.searxng_port
+            config["searxng_url"] = config_update.searxng_url
 
-        set_key(env_file, "SEARXNG_URL", config_update.searxng_url)
+            set_key(env_file, "SEARXNG_URL", config_update.searxng_url)
 
-        config["max_correction_attempts"] = config_update.max_correction_attempts
+            os.environ["SEARXNG_URL"] = config_update.searxng_url
 
-        config["cold_cache_ttl"] = config_update.cold_cache_ttl
+        if config_update.searxng_port is not None:
 
-        config["max_resume_count"] = config_update.max_resume_count
+            config["searxng_port"] = config_update.searxng_port
 
-        _budget = config.get("context_budget", {})
+        if config_update.max_correction_attempts is not None:
 
-        if not isinstance(_budget, dict):
+            config["max_correction_attempts"] = config_update.max_correction_attempts
 
-            _budget = {}
+        if config_update.cold_cache_ttl is not None:
 
-        _budget["max_total_tokens"] = config_update.max_total_tokens
+            config["cold_cache_ttl"] = config_update.cold_cache_ttl
 
-        config["context_budget"] = _budget
+        if config_update.max_resume_count is not None:
 
-        os.environ["SEARXNG_URL"] = config_update.searxng_url
+            config["max_resume_count"] = config_update.max_resume_count
+
+        if config_update.max_total_tokens is not None:
+
+            _budget = config.get("context_budget", {})
+
+            if not isinstance(_budget, dict):
+
+                _budget = {}
+
+            _budget["max_total_tokens"] = config_update.max_total_tokens
+
+            config["context_budget"] = _budget
 
 
 
-        # Save per-session email config when session_id is provided
+        # Save per-session email config when session_id is provided — but only
+        # when the payload actually carries email fields; partial saves (e.g.
+        # MCP-only) must not write NULLs into the sessions row.
+        _email_fields = (config_update.email_listener_enabled, config_update.email_account,
+                         config_update.email_password, config_update.email_imap_server,
+                         config_update.email_smtp_server, config_update.owner_email)
 
-        if config_update.session_id is not None:
+        if config_update.session_id is not None and any(f is not None for f in _email_fields):
 
             try:
 
@@ -634,23 +692,21 @@ async def update_settings(config_update: ConfigUpdate):
 
         
 
-        set_key(env_file, "DEFAULT_MODEL", config_update.default_model)
+        if config_update.default_model is not None:
 
-        os.environ["DEFAULT_MODEL"] = config_update.default_model
+            set_key(env_file, "DEFAULT_MODEL", config_update.default_model)
+
+            os.environ["DEFAULT_MODEL"] = config_update.default_model
 
 
 
-        # Save to JSON
+        # Save to JSON (atomic write via save_config)
 
-        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-
-            json.dump(config, f, indent=4)
+        save_config(config)
 
             
 
-        load_dotenv(override=True)
+        load_dotenv(env_file, override=True)
 
         return {"status": "success", "message": "Settings updated successfully"}
 
@@ -759,6 +815,8 @@ async def get_provider_models(provider: str):
             'gemini': ['gemini/gemini-1.5-pro', 'gemini/gemini-2.5-pro-preview-05-06'],
 
             'kimi': ['moonshot/kimi-k2.6', 'moonshot/kimi-k2.5', 'moonshot/kimi-latest', 'moonshot/moonshot-v1-8k', 'moonshot/moonshot-v1-32k', 'moonshot/moonshot-v1-128k'],
+
+            'kimi_code': ['kimi_code/kimi-for-coding', 'kimi_code/kimi-for-coding-highspeed', 'kimi_code/k3', 'kimi_code/k3[1m]'],
 
             'glm': ['zai/glm-4.7', 'zai/glm-4.5', 'zai/glm-4.5-flash', 'zai/glm-4.5-air'],
 
@@ -1903,7 +1961,10 @@ async def agent_design(body: dict = {}):
 
         ]
 
-        response, actual_model = client.chat(messages=messages, tools=None)
+        # client.chat 是同步网络调用，直接 await 会冻结事件循环 —— 移入线程池
+        loop = asyncio.get_running_loop()
+        response, actual_model = await loop.run_in_executor(
+            None, lambda: client.chat(messages=messages, tools=None))
 
         reply = response.choices[0].message.content or ""
 
