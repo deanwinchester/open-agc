@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import re
+import signal
 import threading
 import tempfile
 from typing import Any, Dict, Optional, Callable
@@ -241,6 +242,7 @@ class ShellTool(BaseTool):
                              or command.strip().endswith('&'))
 
         try:
+            _t0 = time.time()
             if is_background:
                 popen_kwargs: Dict = {
                     "shell": True,

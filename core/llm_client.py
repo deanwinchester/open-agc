@@ -57,6 +57,7 @@ def _infer_provider(model_name: str) -> str:
         return "unknown"
     ml = model_name.lower()
     if "deepseek" in ml: return "deepseek"
+    if "kimi_code" in ml: return "kimi_code"
     if "gpt" in ml or "openai" in ml: return "openai"
     if "claude" in ml or "anthropic" in ml: return "anthropic"
     if "gemini" in ml or "google" in ml: return "gemini"
@@ -331,6 +332,7 @@ class LLMClient:
             "gemini": "GEMINI_API_KEY",
             "deepseek": "DEEPSEEK_API_KEY",
             "kimi": "MOONSHOT_API_KEY",
+            "kimi_code": "KIMI_CODE_API_KEY",
             "glm": "ZAI_API_KEY",
             "minimax": "MINIMAX_API_KEY",
             "llamacpp": "LLAMACPP_API_BASE",
@@ -351,6 +353,10 @@ class LLMClient:
         self.llamacpp_api_base = config.get("api_keys", {}).get("llamacpp", "http://localhost:8080/v1")
         os.environ["LLAMACPP_API_BASE"] = self.llamacpp_api_base
         self.llamacpp_ctx_size = config.get("llamacpp_ctx_size", 32768)
+
+        # Kimi Code subscription endpoint (Anthropic-compatible)
+        self.kimi_code_api_key = config.get("api_keys", {}).get("kimi_code", "") or os.environ.get("KIMI_CODE_API_KEY", "")
+        self.kimi_code_api_base = "https://api.kimi.com/coding/"
 
         # Ensure local connections bypass proxy
         for var in ["no_proxy", "NO_PROXY"]:
@@ -595,7 +601,15 @@ class LLMClient:
         if stream:
             kwargs["stream"] = True
 
-        if "llamacpp/" in model:
+        if "kimi_code/" in model:
+            # Kimi Code 订阅渠道：Anthropic 兼容端点，模型名映射到 anthropic/ 前缀。
+            # 与正式 Anthropic key 隔离，api_key/api_base 按调用传入。
+            kwargs["model"] = f"anthropic/{model.split('/', 1)[1]}"
+            kwargs["api_key"] = self.kimi_code_api_key
+            kwargs["api_base"] = self.kimi_code_api_base
+            kwargs.setdefault("max_tokens", 8192)  # Anthropic Messages API 必填
+            kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
+        elif "llamacpp/" in model:
             kwargs["api_base"] = self.llamacpp_api_base
             if not model.startswith("openai/"):
                 kwargs["model"] = f"openai/{model.replace('llamacpp/', '')}"

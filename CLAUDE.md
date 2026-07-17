@@ -151,3 +151,12 @@ Single-page app: `index.html` + `app.js` + `style.css`. Panda theme with glass-m
 ### Dev docs (dev_docs/)
 
 - 重要优化文档：Agent优化方案.md，关于Agent的优化，随时更新到该文档，执行时也要注意本文档已经优化好的功能，不要受到影响。
+
+## Conventions (阶段 0 起生效)
+
+- **DB 访问**：一律用 `api.db.db_connect()`（自带 busy_timeout + row_factory），不要裸 `sqlite3.connect(DB_PATH)`；连接用 `with closing(...)` 确保关闭。
+- **用户可控路径**：任何把用户/LLM 输入拼进文件系统路径的地方，先过 `core.security.resolve_under(base, name)` / `is_safe_name(name)`。
+- **进程活性/终止**：用 `core.process.pid_alive()` / `kill_tree()`；**禁止** `os.kill(pid, 0)`（Windows 上会真的杀死进程）。
+- **JSON 状态文件**：写入必须原子化（tmp + `os.replace`），读取统一 `encoding="utf-8"`；config 走 `api.config.save_config()`，goals/plan 走 `tools.task_plan._atomic_json_write()`。
+- **/api/settings 是增量语义**：只更新请求中非 None 的字段；客户端不要回传 GET 到的掩码值（`xxx...xxx` 会被拒绝）。
+- **kimi-code 订阅渠道**：模型前缀 `kimi_code/`（如 `kimi_code/kimi-for-coding`、`kimi_code/k3`），key 存 `api_keys.kimi_code`；底层走 Anthropic 兼容端点 `https://api.kimi.com/coding/`，与 `moonshot/`（开放平台按量 key）是两套体系，不要混用。

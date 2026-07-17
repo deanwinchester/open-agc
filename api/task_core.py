@@ -7,7 +7,7 @@ import threading
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from api.db import DB_PATH
+from api.db import DB_PATH, db_connect
 from api.config import load_config
 from api.state import _pending_sandbox_approvals, _active_agents, _guardian_resume_lock
 
@@ -36,7 +36,7 @@ def create_task(title: str, user_query: str, task_type: str = 'oneshot',
                 schedule_cron: str = None, schedule_enabled: bool = False,
                 session_id: int = 1) -> int:
     """Insert a new task row and return its ID."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = db_connect()
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO tasks (title, user_query, task_type, schedule_cron, schedule_enabled, session_id) "
@@ -67,7 +67,7 @@ def _generate_task_goal_background(task_id: int, query: str, session_id: int):
         )}])
         goal = (resp.choices[0].message.content or "").strip()
         if goal and len(goal) > 10:
-            conn = sqlite3.connect(DB_PATH)
+            conn = db_connect()
             conn.execute("UPDATE tasks SET task_goal=? WHERE id=?", (goal[:500], task_id))
             conn.commit()
             conn.close()
@@ -78,7 +78,7 @@ def _generate_task_goal_background(task_id: int, query: str, session_id: int):
 def _record_task_deliverables(task_id: int):
     """Extract deliverables from task_steps and update task's result_summary and output_files."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         conn.row_factory = sqlite3.Row
         steps = conn.execute(
             "SELECT tool_name, args_preview, full_result, generated_files, result_preview "
@@ -141,7 +141,7 @@ def update_task_status(task_id: int, status: str,
                        interruption_reason: str = None):
     """Update task status and optional result_summary/interruption_reason."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         fields = ["status=?", "updated_at=CURRENT_TIMESTAMP"]
         params = [status]
         if result_summary is not None:
@@ -164,7 +164,7 @@ def update_task_status(task_id: int, status: str,
 def update_task_type(task_id: int, task_type: str):
     """Change the task_type column."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         conn.execute("UPDATE tasks SET task_type=? WHERE id=?", (task_type, task_id))
         conn.commit()
         conn.close()
@@ -172,10 +172,34 @@ def update_task_type(task_id: int, task_type: str):
         print(f"[Task] Update type error: {e}")
 
 
+def claim_task_for_resume(task_id: int, allowed_statuses: tuple) -> bool:
+    """Atomically claim a task for resume (compare-and-set).
+
+    Flips status to 'running' only when the task's current status is in
+    ``allowed_statuses``. SQLite serializes writers, so under concurrent
+    resume paths exactly one caller gets True. Every resume path must call
+    this BEFORE spawning its worker thread; losers must skip the resume.
+    """
+    try:
+        conn = db_connect()
+        placeholders = ",".join("?" for _ in allowed_statuses)
+        cursor = conn.execute(
+            f"UPDATE tasks SET status='running', updated_at=CURRENT_TIMESTAMP "
+            f"WHERE id=? AND status IN ({placeholders})",
+            (task_id, *allowed_statuses))
+        claimed = cursor.rowcount == 1
+        conn.commit()
+        conn.close()
+        return claimed
+    except Exception as e:
+        print(f"[Task] Claim resume error: {e}")
+        return False
+
+
 def _resolve_task_goal_via_llm(session_id: int, query: str) -> str:
     """When user confirms a proposal (agent last msg ends with ?), ask LLM to extract the goal."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         conn.row_factory = sqlite3.Row
         last_agent = conn.execute(
             "SELECT content FROM messages WHERE session_id=? AND role='agent' ORDER BY id DESC LIMIT 1",
@@ -191,7 +215,7 @@ def _resolve_task_goal_via_llm(session_id: int, query: str) -> str:
         from core.llm_client import LLMClient
         cfg = load_config()
         llm = LLMClient(default_model=cfg.get("default_model", "moonshot/kimi-latest"))
-        conn2 = sqlite3.connect(DB_PATH)
+        conn2 = db_connect()
         conn2.row_factory = sqlite3.Row
         recent_msgs = conn2.execute(
             "SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 10) ORDER BY id ASC",
@@ -217,7 +241,7 @@ def _resolve_task_goal_via_llm(session_id: int, query: str) -> str:
 def _resolve_task_for_query(session_id: int, query: str) -> int:
     """Determine the task_id for an incoming query BEFORE agent execution."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         existing = conn.execute(
             "SELECT id, status, created_at FROM tasks WHERE session_id=? ORDER BY id DESC LIMIT 1",
             (session_id,)
@@ -267,7 +291,7 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
 def _load_session_context(session_id: int, limit: int = 50) -> list:
     """Load the last N messages for a session as conversation context."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT role, content FROM ("
@@ -307,7 +331,7 @@ def record_tool_step(task_id: int, step_number: int, event: dict, session_id: in
                 full_args=event.get("tool_args")
             )
         elif event.get("event") == "tool_done":
-            conn = sqlite3.connect(DB_PATH)
+            conn = db_connect()
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=?",
@@ -346,7 +370,7 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
         title = _extract_task_title(response)
         if title:
             try:
-                conn = sqlite3.connect(DB_PATH)
+                conn = db_connect()
                 conn.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
                 conn.commit()
                 conn.close()
@@ -362,7 +386,7 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
         if _wake_min:
             _wake_dt = (datetime.utcnow() + timedelta(minutes=_wake_min)).strftime('%Y-%m-%d %H:%M:%S')
             try:
-                conn = sqlite3.connect(DB_PATH)
+                conn = db_connect()
                 conn.execute("UPDATE tasks SET wake_at=? WHERE id=?", (_wake_dt, task_id))
                 conn.commit()
                 conn.close()
@@ -384,7 +408,7 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
         update_task_status(task_id, "interrupted", summary, interruption_reason="max_iterations")
         # Promote oneshot to longrun
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = db_connect()
             row = conn.execute("SELECT task_type FROM tasks WHERE id=?", (task_id,)).fetchone()
             if row and row[0] == 'oneshot':
                 conn.execute("UPDATE tasks SET task_type='longrun' WHERE id=?", (task_id,))
@@ -405,7 +429,7 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
 def save_message(role: str, content: str, session_id: int = 1, task_id: int = None):
     """Save a chat message. If task_id is provided, links the message to its task."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         if task_id:
             conn.execute(
                 "INSERT INTO messages (role, content, session_id, task_id) VALUES (?, ?, ?, ?)",
@@ -430,7 +454,7 @@ def save_task_context(task_id: int, messages: list):
     AND is less than half the size of the existing one.
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         cursor = conn.cursor()
         existing = cursor.execute(
             "SELECT context_snapshot FROM tasks WHERE id=?", (task_id,)
@@ -461,7 +485,7 @@ def save_task_context(task_id: int, messages: list):
 def get_task_context(task_id: int) -> Optional[list]:
     """Load saved context with fallback reconstruction from task_steps + messages."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT context_snapshot, user_query, status FROM tasks WHERE id=?", (task_id,)
@@ -518,7 +542,7 @@ def get_task_context(task_id: int) -> Optional[list]:
 def _get_task_step_count(task_id: int) -> int:
     """Count the number of steps for a task."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         count = conn.execute(
             "SELECT COUNT(*) FROM task_steps WHERE task_id=?", (task_id,)
         ).fetchone()[0]
@@ -531,7 +555,7 @@ def _get_task_step_count(task_id: int) -> int:
 def increment_task_resume(task_id: int):
     """Increment the resume_count for a task."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         conn.execute("UPDATE tasks SET resume_count = resume_count + 1 WHERE id=?", (task_id,))
         conn.commit()
         conn.close()
@@ -546,7 +570,7 @@ def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: st
                   generated_files: str = None):
     """Insert a task step record."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         conn.execute(
             "INSERT INTO task_steps (task_id, step_number, tool_name, tool_label, args_preview, "
             "result_preview, full_result, success, thinking_content, session_id, tool_call_id, "
@@ -641,7 +665,7 @@ def _check_goal_completeness(task_id: int) -> int:
         if not task_ids:
             return 0
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         incomplete = conn.execute(
             f"SELECT COUNT(*) FROM tasks WHERE id IN ({','.join('?' for _ in task_ids)}) "
             f"AND status NOT IN ('completed', 'failed')",
@@ -657,7 +681,7 @@ def _check_goal_completeness(task_id: int) -> int:
         llm = LLMClient(default_model=cfg.get("default_model", "moonshot/kimi-latest"))
 
         result_summaries = []
-        conn2 = sqlite3.connect(DB_PATH)
+        conn2 = db_connect()
         conn2.row_factory = sqlite3.Row
         for _tid in task_ids:
             _row = conn2.execute(

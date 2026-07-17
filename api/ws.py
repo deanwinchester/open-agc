@@ -1,9 +1,10 @@
 """WebSocket endpoint - register with app.websocket()."""
 import os, sys, json, re, sqlite3, asyncio, threading, queue, concurrent.futures, traceback
+import time as _time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from fastapi import WebSocket, WebSocketDisconnect
-from api.db import DB_PATH
+from api.db import DB_PATH, db_connect
 from api.config import load_config, log_agent_error
 from api.state import (
     connected_websockets, _main_event_loop, _active_agents, _background_agents,
@@ -13,7 +14,7 @@ from api.state import (
 )
 from api.task_core import (
     create_task, update_task_status, update_task_type, get_task_context, save_task_context,
-    save_message, handle_task_completion,
+    save_message, handle_task_completion, claim_task_for_resume,
     add_task_step, _extract_task_title, _record_task_deliverables, _load_session_context,
     _resolve_task_for_query, _resolve_goal_for_query, _check_goal_completeness, _get_task_step_count,
 )
@@ -22,6 +23,7 @@ from core.llamacpp_manager import get_llamacpp_manager
 from core.logger import SessionLogger
 from core.stats_manager import get_stats_manager
 from agent.agent import OpenAGCAgent
+from tools.shell import interrupt_shell
 # Import background helper for task history broadcast
 from api.state import _broadcast_task_history
 
@@ -46,7 +48,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Broadcast history_steps if this session has a recent or in-progress task
     try:
-        _hb_conn = sqlite3.connect(DB_PATH)
+        _hb_conn = db_connect()
         _hb_row = _hb_conn.execute(
             "SELECT id, status FROM tasks WHERE session_id=? AND status IN ('interrupted','completed','running','backgrounded') ORDER BY updated_at DESC LIMIT 1",
             (ws_session_id,)
@@ -90,7 +92,7 @@ async def websocket_endpoint(websocket: WebSocket):
     # We will maintain conversation history for this session here
     # Load recent chat history from DB instead of starting empty
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         # Load the last 20 user/agent messages for context (exclude tool_step from count)
@@ -117,7 +119,7 @@ async def websocket_endpoint(websocket: WebSocket):
     # Replay the most recent task's steps for this session
     # Only replay if the user hasn't sent new messages after the task completed
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
@@ -166,14 +168,17 @@ async def websocket_endpoint(websocket: WebSocket):
         if resume_task_id:
             ws_task_id = resume_task_id
         else:
-            ws_task_id = _resolve_task_for_query(ws_session_id, query)
+            # May call llm.chat (sync network I/O with retries) — run in a
+            # worker thread so the event loop keeps serving WS/HTTP.
+            ws_task_id = await asyncio.get_running_loop().run_in_executor(
+                None, _resolve_task_for_query, ws_session_id, query)
         step_offset = 0
 
         # Always compute step offset from existing steps for ANY existing task,
         # not just explicit resume. Prevents step numbering reset after WS reconnect.
         if ws_task_id:
             try:
-                _offset_conn = sqlite3.connect(DB_PATH)
+                _offset_conn = db_connect()
                 _max_step = _offset_conn.execute(
                     "SELECT COALESCE(MAX(step_number), -1) FROM task_steps WHERE task_id=?",
                     (ws_task_id,)).fetchone()[0]
@@ -253,7 +258,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         dl_ids = pending.pop(ws_session_id, [])
                         if dl_ids:
                             print(f"[Task] tool_done: linking {len(dl_ids)} download(s) to task {ws_task_id}")
-                            dl_conn = sqlite3.connect(DB_PATH)
+                            dl_conn = db_connect()
                             for dl_id in dl_ids:
                                 dl_conn.execute(
                                     "UPDATE downloads SET task_id=? WHERE id=? AND task_id IS NULL",
@@ -313,7 +318,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         print(f"[Task] tool_done link error: {link_err}")
                     try:
                         # Update the step with result and tool_call_id
-                        conn = sqlite3.connect(DB_PATH)
+                        conn = db_connect()
                         cursor = conn.cursor()
                         cursor.execute(
                             "UPDATE task_steps SET result_preview=?, full_result=?, success=?, tool_call_id=COALESCE(?, tool_call_id) WHERE task_id=? AND step_number=?",
@@ -333,7 +338,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     try:
                         _rpreview = event.get("result_preview", "")
                         _success = 1 if event.get("success") else 0
-                        _conn_step = sqlite3.connect(DB_PATH)
+                        _conn_step = db_connect()
                         _conn_step.execute(
                             "UPDATE task_steps SET result_preview=?, success=? WHERE task_id=? AND step_number=?",
                             (_rpreview, _success, ws_task_id, adjusted_step)
@@ -456,12 +461,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         user_msg = json.loads(data)
                         if user_msg.get("type") == "interrupt":
                             agent.is_interrupted = True
-                            interrupt_shell()
                             if ws_task_id:
                                 update_task_status(ws_task_id, "interrupted", interruption_reason="user")
-                            # Also interrupt any background agents for this session
+                            # Also interrupt background agents — but ONLY those
+                            # belonging to this session (don't kill other
+                            # sessions' email/scheduled background tasks)
                             for tid, bg_agent in list(_background_agents.items()):
-                                bg_agent.is_interrupted = True
+                                if getattr(bg_agent, 'session_id', None) == ws_session_id:
+                                    bg_agent.is_interrupted = True
                             interrupt_shell()
                             # Cancel any active download
                             if _llamacpp_download_state.get("active"):
@@ -669,7 +676,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         try:
                             stats = get_stats_manager().get_task_usage(_tb_ws_task_id)
                             if stats:
-                                _conn_tmp = sqlite3.connect(DB_PATH)
+                                _conn_tmp = db_connect()
                                 _conn_tmp.execute(
                                     "UPDATE tasks SET total_tokens=?, total_cost=?, prompt_tokens=?, completion_tokens=?, cached_tokens=? WHERE id=?",
                                     (stats["total"], stats.get("cost", 0.0), stats.get("prompt", 0), stats.get("completion", 0), stats.get("cached", 0), _tb_ws_task_id))
@@ -801,7 +808,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         ws_session_id = new_sid
                         # Reload session_history for the new session's LLM context
                         try:
-                            _ss_conn = sqlite3.connect(DB_PATH)
+                            _ss_conn = db_connect()
                             _ss_conn.row_factory = sqlite3.Row
                             _ss_cursor = _ss_conn.cursor()
                             _ss_cursor.execute(
@@ -820,7 +827,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             session_history = []
                         # Broadcast history_steps for the new session's most recent task
                         try:
-                            _ss_conn2 = sqlite3.connect(DB_PATH)
+                            _ss_conn2 = db_connect()
                             _ss_conn2.row_factory = sqlite3.Row
                             _ss_last = _ss_conn2.execute(
                                 "SELECT id, status FROM tasks WHERE session_id=? AND status IN ('interrupted','completed','running','backgrounded') ORDER BY updated_at DESC LIMIT 1",
@@ -855,7 +862,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
                             # Find backgrounded/interrupted task for this session and resume
                             try:
-                                _late = sqlite3.connect(DB_PATH)
+                                _late = db_connect()
                                 _late_t = _late.execute(
                                     "SELECT id, user_query FROM tasks WHERE session_id=? AND status IN ('backgrounded','interrupted') ORDER BY id DESC LIMIT 1",
                                     (sid,)).fetchone()
@@ -874,6 +881,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                         "延迟授权触发恢复", interruption_reason="background_complete")
                                     print(f"[WS] Resuming task #{_tid2} after late sandbox approval")
                                     import threading as _thr
+                                    from api.background import _run_background_task
                                     _thr.Thread(
                                         target=_run_background_task,
                                         args=(_tid2, _uq2, _ctx2, True),
@@ -897,11 +905,17 @@ async def websocket_endpoint(websocket: WebSocket):
                                 _bg_agent.queue_message(_msg)
                                 print(f"[WS] Task #{task_id} is already running in background — queued resume message")
                                 continue
+                        # CAS: atomically claim the task so guardian/BgMonitor/
+                        # another WS connection can't resume it concurrently.
+                        # Allowed: any non-running status (original code resumed regardless).
+                        if not claim_task_for_resume(task_id, ('interrupted', 'backgrounded', 'background_failed', 'failed', 'completed')):
+                            print(f"[WS] Resume claim failed for task #{task_id} (already running or claimed by another path)")
+                            continue
                         resume_id_for_run = task_id
                         try:
                             ctx = get_task_context(task_id)
                             # Always load steps for replay and context
-                            conn2 = sqlite3.connect(DB_PATH)
+                            conn2 = db_connect()
                             conn2.row_factory = sqlite3.Row
                             steps = conn2.execute(
                                 "SELECT step_number, tool_name, tool_label, args_preview, "
@@ -969,7 +983,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         f"{m.get('role','?')}: {str(m.get('content',''))[:100]}"
                         for m in (session_history[-4:] if session_history else [])
                     ) if session_history else ""
-                    _resolved_goal = _resolve_goal_for_query(query, recent_context=_recent_ctx)
+                    # Calls llm.chat (sync network I/O) — run in a worker
+                    # thread so the event loop keeps serving WS/HTTP.
+                    _resolved_goal = await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: _resolve_goal_for_query(query, recent_context=_recent_ctx))
                     if _resolved_goal > 0:
                         try:
                             from tools.task_plan import load_goals as _ct_load

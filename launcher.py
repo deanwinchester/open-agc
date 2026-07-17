@@ -83,6 +83,8 @@ def main():
     setup_environment()
     
     port = int(os.environ.get("PORT", 8000))
+    # 默认仅监听回环地址；局域网访问需显式设置 OPEN_AGC_HOST=0.0.0.0
+    host = os.environ.get("OPEN_AGC_HOST", "127.0.0.1")
     
     print("=" * 40)
     print("  🐼 Open-AGC Panda is starting...")
@@ -96,7 +98,7 @@ def main():
     import uvicorn
     uvicorn.run(
         "api.server:app",
-        host="0.0.0.0",
+        host=host,
         port=port,
         log_level="info"
     )

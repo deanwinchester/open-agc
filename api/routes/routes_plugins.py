@@ -115,6 +115,11 @@ async def plugin_install(req: Request):
     name, url = body.get("name", ""), body.get("url", "")
     if not name or not url:
         raise HTTPException(status_code=400, detail="name and url required")
+    from core.security import resolve_under
+    try:
+        resolve_under(_user_plugins_dir, name)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid plugin name: {name}")
     from core.plugin_manager import install_from_git
     ok = install_from_git(name, url, _user_plugins_dir)
     if not ok:
@@ -125,8 +130,12 @@ async def plugin_install(req: Request):
 @router.delete("/api/plugins/{name}")
 async def plugin_delete(name: str):
     import shutil
+    from core.security import resolve_under
     pdir = _find_plugin_dir(name)
-    d = os.path.join(pdir, name)
+    try:
+        d = resolve_under(pdir, name)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid plugin name: {name}")
     if not os.path.isdir(d):
         raise HTTPException(status_code=404, detail=f"Plugin not found: {name}")
     from core.plugin_manager import unload_plugin

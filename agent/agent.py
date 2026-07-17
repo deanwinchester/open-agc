@@ -1425,7 +1425,11 @@ class OpenAGCAgent(PromptBuilderMixin):
             self.messages.append(build_user_message(user_input, images))
             if self.logger:
                 self.logger.log_user_query(user_input)
-                
+
+        # Normalize: downstream classification/delegation helpers expect a string
+        # (resume paths pass None).
+        user_input = user_input or ""
+
         _task_start = _time.time()
 
         memory_context = ""
@@ -1801,7 +1805,16 @@ class OpenAGCAgent(PromptBuilderMixin):
                     })
             
             # Append model's response to history
-            message_dict = message.model_dump()
+            message_dict = {"role": message.role, "content": message.content or ""}
+            if message.tool_calls:
+                message_dict["tool_calls"] = [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in message.tool_calls
+                ]
+            _rc = getattr(message, "reasoning_content", None)
+            if _rc:
+                message_dict["reasoning_content"] = _rc
             self.messages.append(message_dict)
             _tool_call_insertion_idx = len(self.messages) - 1  # track for cleanup on early return
             
@@ -1948,9 +1961,10 @@ class OpenAGCAgent(PromptBuilderMixin):
                                         "_permission_whitelist": self._session_permission_whitelist,
                                         "_session_id": self.session_id,
                                     }
-                                    # Pass sudo password to shell tool (never logged, never sent to LLM)
+                                    # Pass sudo password to the shell tool only (never logged, never sent to LLM,
+                                    # never exposed to other tools)
                                     _sudo_pw = self._pending_sudo_password or self._session_sudo_password
-                                    if _sudo_pw:
+                                    if _sudo_pw and function_name == "execute_shell":
                                         extra_kwargs["_sudo_password"] = _sudo_pw
                                         self._pending_sudo_password = ""  # Clear one-shot after passing
                                     if 'interrupt_check' in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):

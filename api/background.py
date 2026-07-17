@@ -1,9 +1,11 @@
 """Background task execution, monitoring, guardian and email listener."""
 import os, json, re, sqlite3, threading, shutil
+from contextlib import closing
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-from api.db import DB_PATH
+from api.db import DB_PATH, db_connect
 from api.config import load_config
+from core.process import pid_alive
 from api.state import (
     connected_websockets, _main_event_loop, _active_agents, _background_agents,
     _pending_sandbox_approvals, _guardian_resume_lock, _SERVER_START_TIME,
@@ -12,7 +14,7 @@ from api.state import (
 )
 from api.task_core import (
     create_task, update_task_status, get_task_context, save_task_context,
-    save_message, handle_task_completion,
+    save_message, handle_task_completion, claim_task_for_resume,
     add_task_step, _extract_task_title, _record_task_deliverables,
     _load_session_context, _get_task_step_count, _check_goal_completeness,
 )
@@ -32,7 +34,7 @@ def start_email_listener():
             try:
                 config = load_config()
                 try:
-                    conn = sqlite3.connect(DB_PATH)
+                    conn = db_connect()
                     conn.row_factory = sqlite3.Row
                     rows = conn.execute(
                         "SELECT id, email_account, email_password, email_imap_server, "
@@ -84,9 +86,10 @@ def start_email_listener():
                             for _ in range(_max_wait // 2):
                                 _time.sleep(2)
                                 try:
-                                    _trow = sqlite3.connect(DB_PATH).execute(
-                                        "SELECT status, result_summary FROM tasks WHERE id=?",
-                                        (task_id,)).fetchone()
+                                    with closing(db_connect()) as _tc:
+                                        _trow = _tc.execute(
+                                            "SELECT status, result_summary FROM tasks WHERE id=?",
+                                            (task_id,)).fetchone()
                                     if _trow and _trow[0] in ("completed", "failed", "interrupted"):
                                         _final_response = _trow[1] or ""
                                         break
@@ -132,7 +135,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     # for sandbox auth (_sandbox_waits key must match frontend's session_id)
     bg_session_id = 1
     try:
-        bg_conn = sqlite3.connect(DB_PATH)
+        bg_conn = db_connect()
         row = bg_conn.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()
         if row and row[0]:
             bg_session_id = row[0]
@@ -147,7 +150,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     step_offset = 0
     if is_resume:
         try:
-            off_conn = sqlite3.connect(DB_PATH)
+            off_conn = db_connect()
             off_conn.row_factory = sqlite3.Row
             max_step = off_conn.execute(
                 "SELECT COALESCE(MAX(step_number), 0) FROM task_steps WHERE task_id=?",
@@ -160,7 +163,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     # Detect heartbeat tasks — suppress all progress broadcasts and chat messages
     _is_heartbeat = False
     try:
-        _hb_conn = sqlite3.connect(DB_PATH)
+        _hb_conn = db_connect()
         _hb_row = _hb_conn.execute("SELECT task_type FROM tasks WHERE id=?", (task_id,)).fetchone()
         if _hb_row and _hb_row[0] == 'heartbeat':
             _is_heartbeat = True
@@ -202,7 +205,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         elif event.get("event") == "tool_done":
             done_step = event.get("step", step_counter) + step_offset
             try:
-                conn = sqlite3.connect(DB_PATH)
+                conn = db_connect()
                 cursor = conn.cursor()
                 cursor.execute(
                     "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=?",
@@ -286,7 +289,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
 
         # If user already interrupted this task, don't overwrite the status
         try:
-            chk_conn = sqlite3.connect(DB_PATH)
+            chk_conn = db_connect()
             chk_row = chk_conn.execute("SELECT status, interruption_reason FROM tasks WHERE id=?", (task_id,)).fetchone()
             chk_conn.close()
             if chk_row and chk_row[0] == "interrupted" and chk_row[1] == "user":
@@ -343,7 +346,7 @@ def start_task_scheduler():
         print("[TaskScheduler] Started")
         while True:
             try:
-                conn = sqlite3.connect(DB_PATH)
+                conn = db_connect()
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 now_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
@@ -399,7 +402,7 @@ _MAX_RESUME_NO_PROGRESS = 10
 def _has_recent_progress(task_id: int) -> bool:
     """Check if a task has any successful tool steps in its history."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         count = conn.execute(
             "SELECT COUNT(*) FROM task_steps WHERE task_id=? AND success=1", (task_id,)
         ).fetchone()[0]
@@ -443,9 +446,9 @@ def start_background_monitor():
         import os as _os
         _output_staleness = {}  # {task_id: {"size": int, "count": int}} for output file growth tracking
         while True:
+            conn = None
             try:
-                conn = sqlite3.connect(DB_PATH)
-                conn.row_factory = sqlite3.Row
+                conn = db_connect()
                 bg_tasks = conn.execute(
                     "SELECT id, user_query, resume_count, max_resume_count, created_at, updated_at, wake_at FROM tasks "
                     "WHERE status='backgrounded'"
@@ -463,6 +466,10 @@ def start_background_monitor():
                             _wake_dt = _wake_dt.replace(tzinfo=timezone.utc)
                             if datetime.now(timezone.utc) >= _wake_dt:
                                 print(f"[BgMonitor] Task {tid}: wake timer expired ({_wake_at}), resuming")
+                                # CAS: claim before resuming so no other path runs this task concurrently
+                                if not claim_task_for_resume(tid, ('backgrounded',)):
+                                    print(f"[BgMonitor] Task {tid}: resume claim failed (claimed by another path), skipping")
+                                    continue
                                 conn.execute("UPDATE tasks SET wake_at=NULL WHERE id=?", (tid,))
                                 conn.commit()
                                 ctx = get_task_context(tid)
@@ -600,7 +607,10 @@ def start_background_monitor():
                             is_long_running = uptime > 1800  # 30+ minutes
                             should_resume = False
                             try:
-                                os.kill(pid, 0)  # No signal, just check existence
+                                # NOTE: os.kill(pid, 0) would TERMINATE the process on
+                                # Windows (TerminateProcess), so use psutil-based check.
+                                if not pid_alive(pid):
+                                    raise OSError(f"process {pid} not found")
                                 # Process still running — check if output file stopped growing
                                 if out_file and _os.path.exists(out_file):
                                     cur_size = _os.path.getsize(out_file)
@@ -690,6 +700,12 @@ def start_background_monitor():
                 conn.close()
             except Exception as e:
                 print(f"[BgMonitor] Error: {e}")
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
             _t.sleep(10)
     threading.Thread(target=monitor_loop, daemon=True).start()
 # _check_goal_completeness imported from api.task_core
@@ -699,11 +715,9 @@ def _guardian_resume_task(task_id: int) -> None:
         print(f"[Guardian] Resume #{task_id}: lock held, skipping")
         return
     try:
-        conn = sqlite3.connect(DB_PATH)
-        row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
-        conn.close()
-        if not row or row[0] != 'interrupted':
-            print(f"[Guardian] Resume #{task_id}: not found or not interrupted")
+        # CAS: atomically flip interrupted→running so exactly one resume path wins
+        if not claim_task_for_resume(task_id, ('interrupted',)):
+            print(f"[Guardian] Resume #{task_id}: not found, not interrupted, or already claimed")
             return
 
         cfg = load_config()
@@ -715,7 +729,7 @@ def _guardian_resume_task(task_id: int) -> None:
         # uses the correct key that matches the frontend's session_id
         _hb_session = 1
         try:
-            _hb_c = sqlite3.connect(DB_PATH)
+            _hb_c = db_connect()
             _hb_r = _hb_c.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()
             if _hb_r: _hb_session = _hb_r[0]
             _hb_c.close()
@@ -793,7 +807,7 @@ def _guardian_resume_task(task_id: int) -> None:
             # Increment resume_count on max_iterations
             if _g_result == 'interrupted':
                 try:
-                    _hb_c2 = sqlite3.connect(DB_PATH)
+                    _hb_c2 = db_connect()
                     _hb_c2.execute("UPDATE tasks SET resume_count = resume_count + 1 WHERE id=?", (task_id,))
                     _hb_c2.commit()
                     _hb_c2.close()
@@ -840,7 +854,7 @@ def start_guardian_loop():
                     continue
                 interval = cfg.get("heartbeat_interval", 180)
 
-                conn = sqlite3.connect(DB_PATH)
+                conn = db_connect()
                 _running_count = conn.execute("SELECT COUNT(*) FROM tasks WHERE status='running' AND task_type NOT IN ('heartbeat', 'goal_resume')").fetchone()[0]
                 if _running_count > 0:
                     conn.close()
@@ -885,7 +899,7 @@ def start_guardian_loop():
                             _task_ids = _goal.get("task_ids", [])
                             if not _task_ids:
                                 continue
-                            _conn_g = sqlite3.connect(DB_PATH)
+                            _conn_g = db_connect()
                             _incomplete = _conn_g.execute(
                                 f"SELECT COUNT(*) FROM tasks WHERE id IN ({','.join('?' for _ in _task_ids)}) "
                                 f"AND status NOT IN ('completed', 'failed')", _task_ids

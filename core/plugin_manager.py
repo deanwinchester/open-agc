@@ -378,14 +378,19 @@ def install_from_git(name: str, repo_url: str, plugins_dir: str = "plugins",
                      logger: Callable = None) -> bool:
     """Clone a plugin from a Git repository into plugins/."""
     import subprocess
+    from core.security import resolve_under
     logger = logger or print
-    target = os.path.join(plugins_dir, name)
+    try:
+        target = resolve_under(plugins_dir, name)
+    except ValueError:
+        logger(f"[PluginManager] Invalid plugin name: {name!r}")
+        return False
     if os.path.exists(target):
         logger(f"[PluginManager] {name}: directory already exists")
         return False
     try:
         result = subprocess.run(
-            ["git", "clone", "--depth", "1", repo_url, target],
+            ["git", "clone", "--depth", "1", "--", repo_url, target],
             capture_output=True, text=True, timeout=120
         )
         if result.returncode != 0:

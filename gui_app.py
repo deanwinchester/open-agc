@@ -51,7 +51,9 @@ def start_server(port):
         
     try:
         from api.server import app
-        uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+        # 默认仅监听回环地址；局域网访问需显式设置 OPEN_AGC_HOST=0.0.0.0
+        host = os.environ.get("OPEN_AGC_HOST", "127.0.0.1")
+        uvicorn.run(app, host=host, port=port, log_level="warning")
     except Exception as e:
         with open("server_crash.log", "a") as f:
             f.write(f"Server crash: {e}\n")

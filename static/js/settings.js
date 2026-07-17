@@ -129,12 +129,65 @@ export function initSettingsListeners() {
   });
 
   document.getElementById('save-settings-btn')?.addEventListener('click', saveSettings);
-  document.getElementById('save-mcp-btn')?.addEventListener('click', saveSettings);
+  document.getElementById('save-mcp-btn')?.addEventListener('click', saveMcpConfig);
+}
+
+// Save only the MCP servers config — must not overwrite other settings.
+async function saveMcpConfig() {
+  const statusEl = document.getElementById('mcp-save-status') || document.getElementById('save-status');
+  const saveBtn = document.getElementById('save-mcp-btn');
+
+  let mcpServers;
+  try {
+    const mcpStr = document.getElementById('mcp-config-input')?.value?.trim();
+    mcpServers = mcpStr ? JSON.parse(mcpStr) : {};
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = '✗ MCP JSON 格式错误'; statusEl.className = 'save-status error'; }
+    return;
+  }
+
+  const payload = {
+    mcp_servers: mcpServers,
+    session_id: state.currentSessionId || 1
+  };
+
+  if (saveBtn) saveBtn.disabled = true;
+  if (statusEl) { statusEl.textContent = '保存中...'; statusEl.className = 'save-status'; }
+
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.status === 'success') {
+      if (statusEl) { statusEl.textContent = '✓ 保存成功！'; statusEl.className = 'save-status success'; }
+      setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 2000);
+    } else {
+      if (statusEl) { statusEl.textContent = '✗ 保存失败: ' + (data.detail || '未知错误'); statusEl.className = 'save-status error'; }
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = '✗ 网络错误'; statusEl.className = 'save-status error'; }
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
 }
 
 async function saveSettings() {
   const saveBtn = document.getElementById('save-settings-btn');
   const statusEl = document.getElementById('save-status');
+
+  // Guard: never build the payload from an uninitialized DOM (HTML default
+  // values would overwrite real config on the backend).
+  if (state.settingsLoaded === false) {
+    if (statusEl) { statusEl.textContent = '配置加载中，请稍候...'; statusEl.className = 'save-status'; }
+    await loadSettingsConfig();
+  }
+  if (state.settingsLoaded !== true) {
+    if (statusEl) { statusEl.textContent = '✗ 配置未加载，无法保存'; statusEl.className = 'save-status error'; }
+    return;
+  }
 
   const payload = {
     api_keys: {},

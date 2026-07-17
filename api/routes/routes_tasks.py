@@ -120,6 +120,10 @@ async def get_task_detail(task_id: int):
 @router.get("/api/tasks/{task_id}/steps")
 async def get_task_steps(task_id: int, page: int = 1, page_size: int = 50):
     """Get paginated task steps."""
+    if page < 1:
+        page = 1
+    if page_size < 1 or page_size > 200:
+        page_size = 50
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     total = conn.execute("SELECT COUNT(*) FROM task_steps WHERE task_id=?", (task_id,)).fetchone()[0]
@@ -138,7 +142,7 @@ async def interrupt_task(task_id: int):
     """Mark a task as interrupted by user and stop its agent."""
     for _agents in _active_agents.values():
         for _aid, _a in list(_agents.items()):
-            if _aid == task_id or _aid == 0:
+            if _aid == task_id:
                 _a.is_interrupted = True
                 _a._completed_by_user = True
     for _tid, _bg_a in list(_background_agents.items()):
@@ -159,7 +163,7 @@ async def delete_task(task_id: int):
     # Interrupt running agents
     for _agents in _active_agents.values():
         for _aid, _a in list(_agents.items()):
-            if _aid == task_id or _aid == 0:
+            if _aid == task_id:
                 try:
                     _a.is_interrupted = True
                 except Exception:
@@ -297,8 +301,9 @@ async def toggle_schedule(task_id: int):
             else:
                 conn.execute("UPDATE tasks SET schedule_enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                              (enabled, task_id))
-        except Exception:
-            conn.execute("UPDATE tasks SET schedule_enabled=?, status='paused' WHERE id=?", (0, task_id))
+        except Exception as e:
+            conn.close()
+            raise HTTPException(status_code=500, detail=f"Failed to enable schedule: {e}")
     else:
         conn.execute("UPDATE tasks SET schedule_enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (enabled, task_id))
     conn.commit()
@@ -314,11 +319,13 @@ async def update_schedule(task_id: int, req: ScheduleTaskRequest):
         croniter(req.cron)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid cron expression")
+    from datetime import datetime as _dt
+    next_run = croniter(req.cron, _dt.now()).get_next(_dt).strftime('%Y-%m-%d %H:%M:%S')
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
-        "UPDATE tasks SET title=?, user_query=?, schedule_cron=?, "
+        "UPDATE tasks SET title=?, user_query=?, schedule_cron=?, next_run_at=?, "
         "updated_at=CURRENT_TIMESTAMP WHERE id=?",
-        (req.title, req.query, req.cron, task_id)
+        (req.title, req.query, req.cron, next_run, task_id)
     )
     conn.commit()
     conn.close()

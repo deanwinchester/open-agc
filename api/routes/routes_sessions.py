@@ -87,14 +87,34 @@ def _cascade_cleanup_session(session_id: int):
         print(f"[CleanupSession] Auto-tools error: {e}")
 
 
+def _session_tables_with_column(conn, column: str):
+    """Return session-associated tables that actually have the given column."""
+    tables = ("tasks", "task_steps", "token_usage", "model_call_logs")
+    result = []
+    for t in tables:
+        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({t})").fetchall()]
+        if column in cols:
+            result.append(t)
+    return result
+
+
 @router.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: int):
     """Delete a session and all associated data. Default session (id=1) cannot be deleted."""
     if session_id == 1:
         raise HTTPException(status_code=403, detail="默认会话不可删除，只能强制清空数据。请使用 clear 端点。")
+    # Interrupt any running agents belonging to this session
+    from api.state import _active_agents
+    for _a in list(_active_agents.get(session_id, {}).values()):
+        try:
+            _a.is_interrupted = True
+        except Exception:
+            pass
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
+    for _t in _session_tables_with_column(conn, "session_id"):
+        cursor.execute(f"DELETE FROM {_t} WHERE session_id=?", (session_id,))
     cursor.execute("DELETE FROM sessions WHERE id=?", (session_id,))
     conn.commit()
     conn.close()
@@ -107,6 +127,8 @@ async def clear_session(session_id: int):
     """Clear all data for a session without deleting the session itself."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
+    if "session_id" in [r[1] for r in conn.execute("PRAGMA table_info(task_steps)").fetchall()]:
+        conn.execute("DELETE FROM task_steps WHERE session_id=?", (session_id,))
     conn.execute("UPDATE sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
     conn.commit()
     conn.close()

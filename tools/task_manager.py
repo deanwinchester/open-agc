@@ -76,6 +76,7 @@ class TaskManagerTool(BaseTool):
         if not os.path.exists(db_path):
             return "数据库不存在"
 
+        conn = None
         try:
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
@@ -92,10 +93,11 @@ class TaskManagerTool(BaseTool):
                 return self._record_deliverable(conn, task_id, desc, files)
             else:
                 return f"未知操作: {action}"
-
-            conn.close()
         except Exception as e:
             return f"查询任务失败: {e}"
+        finally:
+            if conn is not None:
+                conn.close()
 
     def _list_tasks(self, conn, status_filter: str, limit: int) -> str:
         if status_filter:

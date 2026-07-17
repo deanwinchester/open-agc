@@ -145,7 +145,18 @@ class SkillManager:
         # Normalize filename
         if not filename.endswith(".md"):
             filename += ".md"
-        
+
+        # Reject path traversal in the user-controlled filename
+        from core.security import resolve_under
+        try:
+            filepath = resolve_under(self.skills_dir, filename)
+        except ValueError:
+            return {
+                "success": False,
+                "message": f"Invalid filename: {filename}",
+                "validation": None
+            }
+
         # Validate
         validation = self.validate_skill(content)
         
@@ -157,7 +168,6 @@ class SkillManager:
             }
         
         # Save the skill
-        filepath = os.path.join(self.skills_dir, filename)
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
         
@@ -168,7 +178,11 @@ class SkillManager:
         }
 
     def delete_skill(self, filename: str) -> bool:
-        filepath = os.path.join(self.skills_dir, filename)
+        from core.security import resolve_under
+        try:
+            filepath = resolve_under(self.skills_dir, filename)
+        except ValueError:
+            return False
         if os.path.exists(filepath):
             os.remove(filepath)
             return True

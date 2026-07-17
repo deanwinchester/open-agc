@@ -118,6 +118,9 @@ class PythonREPLTool(BaseTool):
                 errors="replace",
                 cwd=cwd,
                 env=env,
+                # POSIX: detach into its own process group so the timeout
+                # killpg below can't take down the Open-AGC server itself.
+                **({} if sys.platform == "win32" else {"start_new_session": True}),
             )
 
             try:
