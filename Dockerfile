@@ -12,8 +12,7 @@ FROM node:20-slim AS frontend-builder
 WORKDIR /build
 COPY package.json ./
 RUN npm install
-COPY vite.config.mjs ./
-COPY static ./static
+COPY vue-app ./vue-app
 RUN npm run build
 
 # ============================================================
@@ -82,7 +81,7 @@ COPY static ./static
 COPY main.py launcher.py gui_app.py prompt_builder.py ./
 
 # ── Frontend build output from Stage 1 ──
-COPY --from=frontend-builder /build/static/dist ./static/dist
+COPY --from=frontend-builder /build/static/vue ./static/vue
 
 # ── docker-compose.yml for self-upgrade ──
 COPY docker-compose.yml ./

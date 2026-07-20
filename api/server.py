@@ -34,7 +34,7 @@ except Exception:
 # --------------------------------------------
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 from dotenv import load_dotenv, set_key
@@ -498,8 +498,8 @@ if not os.path.isdir(_static_dir):
     # Fallback: try project root relative path
     _static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "static")
     print(f"[Server] Falling back to: {os.path.abspath(_static_dir)}")
-# ── Vue3 SPA (migration in progress) ──
-# Built by `npm run build:vue` from vue-app/ into static/vue (gitignored).
+# ── Vue3 SPA (唯一前端) ──
+# Built by `npm run build` from vue-app/ into static/vue (gitignored).
 _vue_static_dir = os.path.join(_static_dir, "vue")
 os.makedirs(_vue_static_dir, exist_ok=True)
 app.mount("/static/vue", StaticFiles(directory=_vue_static_dir), name="vue_static")
@@ -508,7 +508,7 @@ def _vue_spa_index_response():
     """返回 Vue SPA 入口页；产物未构建时返回 503 而非让 FileResponse 抛 500。"""
     index = os.path.join(_vue_static_dir, "index.html")
     if not os.path.isfile(index):
-        return PlainTextResponse("Vue SPA 未构建，请先运行 npm run build:vue", status_code=503)
+        return PlainTextResponse("Vue SPA 未构建，请先运行 npm run build", status_code=503)
     return FileResponse(index)
 
 @app.get("/app")
@@ -525,8 +525,8 @@ app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 @app.get("/")
 async def read_index():
-    _idx = os.path.join(getattr(_sys, '_MEIPASS', os.getcwd()), "static", "index.html")
-    return FileResponse(_idx)
+    """根入口：新 Vue SPA 已是默认前端，重定向到 /app。"""
+    return RedirectResponse("/app")
 
 @app.get("/api/files/{file_path:path}")
 async def get_sandbox_file(file_path: str):
@@ -583,11 +583,22 @@ def load_config() -> dict:
 from api.ws import websocket_endpoint
 app.websocket("/ws")(websocket_endpoint)
 
-# SPA fallback: serve index.html for all unmatched frontend routes
+# Legacy SPA fallback: redirect known legacy view paths to the Vue SPA (preserves
+# old bookmarks); everything else unmatched is a 404 — notably /api/* must stay a
+# JSON 404 and never be swallowed by a redirect.
+_LEGACY_VIEW_PREFIXES = frozenset({
+    "chat", "tasks", "task-detail", "goals", "downloads", "settings", "debug", "logs",
+})
+
 @app.get("/{full_path:path}")
-async def spa_fallback(full_path: str):
-    _idx = os.path.join(getattr(_sys, '_MEIPASS', os.getcwd()), "static", "index.html")
-    return FileResponse(_idx)
+async def spa_fallback(full_path: str, request: Request):
+    first_segment = full_path.split("/", 1)[0]
+    if first_segment in _LEGACY_VIEW_PREFIXES:
+        target = f"/app/{full_path}"
+        if request.url.query:
+            target += f"?{request.url.query}"
+        return RedirectResponse(target)
+    raise HTTPException(status_code=404, detail="Not Found")
 
 # Start background systems
 import api.state as _state_mod

@@ -23,12 +23,12 @@ if [ -n "$LATEST_VER" ] && [ "$LATEST_VER" != "$CURRENT_VER" ]; then
         if [ -n "$EXTRACTED" ]; then
             echo "[Entrypoint] Applying v$LATEST_VER..."
             # Copy code files (merge, not replace)
-            for dir in core tools agent api plugins static skills; do
+            for dir in core tools agent api plugins static skills vue-app; do
                 if [ -d "$EXTRACTED/$dir" ]; then
                     cp -r "$EXTRACTED/$dir/" "/app/$dir/" 2>/dev/null || true
                 fi
             done
-            for file in main.py launcher.py gui_app.py package.json vite.config.mjs requirements.txt docker-entrypoint.sh; do
+            for file in main.py launcher.py gui_app.py package.json requirements.txt docker-entrypoint.sh; do
                 if [ -f "$EXTRACTED/$file" ]; then
                     cp "$EXTRACTED/$file" "/app/$file" 2>/dev/null || true
                 fi

@@ -17,6 +17,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./start.sh          # macOS/Linux
 start.bat           # Windows
 
+# Build the frontend SPA (vue-app/ → static/vue/)
+npm install && npm run build
+
 # Start manually (if venv already set up)
 python -m uvicorn api.server:app --host 0.0.0.0 --port 8000
 
@@ -38,7 +41,7 @@ No formal test suite; manual testing is done by starting the server and interact
 
 ## Architecture
 
-Open-AGC is an AI agent framework that gives an LLM access to real tools (shell, filesystem, Python REPL, mouse/keyboard control, browser automation). It has both a CLI (`main.py`) and a FastAPI web server with a single-page frontend (Panda theme).
+Open-AGC is an AI agent framework that gives an LLM access to real tools (shell, filesystem, Python REPL, mouse/keyboard control, browser automation). It has both a CLI (`main.py`) and a FastAPI web server with a Vue 3 single-page frontend served at `/app`.
 
 ### Entry points and startup flow
 
@@ -99,13 +102,13 @@ The `PluginInstance` carries a FastAPI `APIRouter` and optional `static_dir`. On
 
 The built-in `open-agc-train` plugin provides model training, finetuning, PPL evaluation, and benchmark testing. The core implementation has been decoupled into `plugins/open-agc-train/`. This separation ensures that heavy ML dependencies don't block the main server startup.
 
-### Frontend (`static/`)
+### Frontend (`vue-app/` → `static/vue/`)
 
-Single-page app: `index.html` + `app.js` + `style.css`. Panda theme with glass-morphism panels, bamboo-green accents. Features:
-- i18n: auto-detects browser language (zh-CN / en), all UI strings in `t()` function
+Vue 3 SPA (vue-router + Pinia + Element Plus). Source in `vue-app/`, built with `npm run build` (Vite config `vue-app/vite.config.js`) into `static/vue/` (gitignored). The server serves the SPA at `/app` (client-side routes fall back to the SPA index; built assets are under `/static/vue/`). `/` redirects to `/app`; legacy view paths (`/chat`, `/tasks`, `/task-detail`, `/goals`, `/downloads`, `/settings`, `/debug`, `/logs`) redirect to their `/app/*` equivalents. Features:
+- i18n (zh-CN / en) via `vue-app/src/i18n/`
 - WebSocket at `/ws` for real-time agent progress (tool_start, tool_done, thinking events)
-- Plugin menu rendering: sidebar sections dynamically created from plugin manifests
-- Built-in views: chat, settings, task manager, model training, plugin manager
+- Plugin frontends: a plugin's `plugin.json` may declare `"vue_entry": "<file>.js"` — the entry is exposed via the plugin static dir at `/static/plugins/<name>/` and dynamically imported by the SPA as a native ES module (outside the Vite build) when the plugin is loaded and enabled
+- Built-in views: chat, tasks, goals, downloads, settings, debug
 - Global download progress banner for model downloads
 
 ### Data storage (`core/paths.py`)

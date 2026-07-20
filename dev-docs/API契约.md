@@ -20,9 +20,9 @@
 
 | 方法 | 路径 | 用途 | 备注 |
 |---|---|---|---|
-| GET | `/` | 返回 `static/index.html` | SPA 入口 |
+| GET | `/` | 307 重定向到 `/app` | SPA 入口 |
 | GET | `/api/files/{file_path:path}` | 从 sandbox 目录向 UI 提供文件 | 越界路径 403 |
-| GET | `/{full_path:path}` | SPA fallback，返回 index.html | 兜底路由 |
+| GET | `/{full_path:path}` | 旧视图路径（chat/tasks/goals 等）重定向到 `/app/*`，其余 404 | 兜底路由；`/api/*` 未匹配保持 404 JSON |
 | WS | `/ws?session_id=N` | WebSocket 主通道 | 见第 3 节 |
 | — | `/static/*` | 静态资源挂载 | `app.mount` |
 
