@@ -34,7 +34,7 @@ except Exception:
 # --------------------------------------------
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 from dotenv import load_dotenv, set_key
@@ -498,6 +498,29 @@ if not os.path.isdir(_static_dir):
     # Fallback: try project root relative path
     _static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "static")
     print(f"[Server] Falling back to: {os.path.abspath(_static_dir)}")
+# ── Vue3 SPA (migration in progress) ──
+# Built by `npm run build:vue` from vue-app/ into static/vue (gitignored).
+_vue_static_dir = os.path.join(_static_dir, "vue")
+os.makedirs(_vue_static_dir, exist_ok=True)
+app.mount("/static/vue", StaticFiles(directory=_vue_static_dir), name="vue_static")
+
+def _vue_spa_index_response():
+    """返回 Vue SPA 入口页；产物未构建时返回 503 而非让 FileResponse 抛 500。"""
+    index = os.path.join(_vue_static_dir, "index.html")
+    if not os.path.isfile(index):
+        return PlainTextResponse("Vue SPA 未构建，请先运行 npm run build:vue", status_code=503)
+    return FileResponse(index)
+
+@app.get("/app")
+async def vue_app_index():
+    """Serve the new Vue3 SPA entry page."""
+    return _vue_spa_index_response()
+
+@app.get("/app/{path:path}")
+async def vue_app_spa_fallback(path: str):
+    """SPA fallback for Vue client-side routes under /app (e.g. /app/chat)."""
+    return _vue_spa_index_response()
+
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 @app.get("/")

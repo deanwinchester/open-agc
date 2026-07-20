@@ -258,6 +258,15 @@ async def complete_task(task_id: int):
 
 # ── Schedule ──
 
+def _next_run_utc(cron: str) -> str:
+    """Compute next run time in UTC, DB format 'YYYY-MM-DD HH:MM:SS'.
+
+    The scheduler (api/background.py start_task_scheduler) compares next_run_at
+    against datetime.now(timezone.utc), so ALL write sites must store UTC."""
+    from croniter import croniter
+    return croniter(cron, datetime.now(timezone.utc)).get_next(datetime).strftime('%Y-%m-%d %H:%M:%S')
+
+
 class ScheduleTaskRequest(BaseModel):
     title: str
     query: str
@@ -277,6 +286,11 @@ async def create_scheduled_task(req: ScheduleTaskRequest):
         title=req.title, user_query=req.query, task_type='scheduled',
         schedule_cron=req.cron, schedule_enabled=True, session_id=req.session_id
     )
+    # create_task() does not set next_run_at — set it here (UTC, like update/toggle)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE tasks SET next_run_at=? WHERE id=?", (_next_run_utc(req.cron), task_id))
+    conn.commit()
+    conn.close()
     return {"status": "success", "task_id": task_id}
 
 
@@ -291,11 +305,9 @@ async def toggle_schedule(task_id: int):
     enabled = 0 if row[0] else 1
     if enabled:
         try:
-            from croniter import croniter
-            from datetime import datetime as _dt
             cron = conn.execute("SELECT schedule_cron FROM tasks WHERE id=?", (task_id,)).fetchone()
             if cron and cron[0]:
-                next_run = croniter(cron[0], _dt.now()).get_next(_dt).strftime('%Y-%m-%d %H:%M:%S')
+                next_run = _next_run_utc(cron[0])
                 conn.execute("UPDATE tasks SET schedule_enabled=?, next_run_at=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                              (enabled, next_run, task_id))
             else:
@@ -319,8 +331,7 @@ async def update_schedule(task_id: int, req: ScheduleTaskRequest):
         croniter(req.cron)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid cron expression")
-    from datetime import datetime as _dt
-    next_run = croniter(req.cron, _dt.now()).get_next(_dt).strftime('%Y-%m-%d %H:%M:%S')
+    next_run = _next_run_utc(req.cron)
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         "UPDATE tasks SET title=?, user_query=?, schedule_cron=?, next_run_at=?, "
@@ -357,6 +368,58 @@ async def list_processes():
         pinfo["uptime"] = _time.time() - pinfo.get("started_at", _time.time()) if pinfo.get("started_at") else 0
         procs[oid] = pinfo
     return {"processes": procs}
+
+
+@router.get("/api/agent/effectiveness")
+async def get_agent_effectiveness():
+    """Read-only aggregate agent effectiveness metrics from chat_history.db.
+
+    All figures are computed with SELECT aggregates (no full-table loads):
+    - status_counts: task count per status
+    - tasks_last_7d / tasks_last_30d: recent task volume
+    - avg_steps_per_task: average task_steps count per task that has steps
+    - tool_success_rate: share of successful task_steps
+    - top_tools: top 10 tools by call count with per-tool success rate
+    """
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        status_counts = {
+            row[0]: row[1]
+            for row in conn.execute("SELECT status, COUNT(*) FROM tasks GROUP BY status").fetchall()
+        }
+        tasks_total = sum(status_counts.values())
+        tasks_last_7d = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE created_at >= datetime('now', '-7 days')"
+        ).fetchone()[0]
+        tasks_last_30d = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE created_at >= datetime('now', '-30 days')"
+        ).fetchone()[0]
+        avg_steps = conn.execute(
+            "SELECT AVG(cnt) FROM (SELECT COUNT(*) AS cnt FROM task_steps GROUP BY task_id)"
+        ).fetchone()[0]
+        tool_total, tool_ok = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(success), 0) FROM task_steps"
+        ).fetchone()
+        top_tools = [
+            {"tool_name": r[0], "calls": r[1],
+             "success_rate": round((r[2] or 0) / r[1], 4) if r[1] else 0.0}
+            for r in conn.execute(
+                "SELECT tool_name, COUNT(*) AS cnt, COALESCE(SUM(success), 0) AS ok "
+                "FROM task_steps GROUP BY tool_name ORDER BY cnt DESC LIMIT 10"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    return {
+        "status_counts": status_counts,
+        "tasks_total": tasks_total,
+        "tasks_last_7d": tasks_last_7d,
+        "tasks_last_30d": tasks_last_30d,
+        "avg_steps_per_task": round(avg_steps, 2) if avg_steps is not None else 0.0,
+        "tool_calls_total": tool_total,
+        "tool_success_rate": round(tool_ok / tool_total, 4) if tool_total else 0.0,
+        "top_tools": top_tools,
+    }
 
 
 @router.get("/api/tasks/{task_id}/process")

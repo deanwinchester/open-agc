@@ -1,0 +1,410 @@
+/* ==========================================================================
+   element-panda.css — 熊猫色板 → Element Plus 变量映射 + 全局设计令牌
+   色值取自旧版 static/css/variables.css（light / dark 两套）。
+   必须在 element-plus/dist/index.css 之后引入才能覆盖默认值。
+   light-N / dark-2 按 Element Plus 规则预计算：
+   light-N = N*10% 白 + (100-N*10)% 基色；dark-2 = 20% 黑 + 80% 基色。
+   ========================================================================== */
+
+/* --- 全局 Reset（保证 100vh 布局不出现常驻滚动条） --- */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+#app { height: 100%; }
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--el-bg-color-page, #f4f6f5);
+  color: var(--el-text-color-primary, #1f2937);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:root {
+  /* 主色：熊猫绿 --theme-color */
+  --el-color-primary: #4ade80;
+  --el-color-primary-light-3: #80e8a6;
+  --el-color-primary-light-5: #a5efc0;
+  --el-color-primary-light-7: #c9f5d9;
+  --el-color-primary-light-8: #dbf8e6;
+  --el-color-primary-light-9: #edfcf2;
+  --el-color-primary-dark-2: #3bb266;
+
+  /* 语义色：--success / --warning / --error / --info */
+  --el-color-success: #10b981;
+  --el-color-success-light-3: #58cea7;
+  --el-color-success-light-5: #88dcc0;
+  --el-color-success-light-7: #b7ead9;
+  --el-color-success-light-8: #cff1e6;
+  --el-color-success-light-9: #e7f8f2;
+  --el-color-success-dark-2: #0d9467;
+
+  --el-color-warning: #f59e0b;
+  --el-color-warning-light-3: #f8bb54;
+  --el-color-warning-light-5: #facf85;
+  --el-color-warning-light-7: #fce2b6;
+  --el-color-warning-light-8: #fdecce;
+  --el-color-warning-light-9: #fef5e7;
+  --el-color-warning-dark-2: #c47e09;
+
+  --el-color-error: #ef4444;
+  --el-color-error-light-3: #f47c7c;
+  --el-color-error-light-5: #f7a2a2;
+  --el-color-error-light-7: #fac7c7;
+  --el-color-error-light-8: #fcdada;
+  --el-color-error-light-9: #fdecec;
+  --el-color-error-dark-2: #bf3636;
+
+  --el-color-info: #3b82f6;
+  --el-color-info-light-3: #76a8f9;
+  --el-color-info-light-5: #9dc1fb;
+  --el-color-info-light-7: #c4dafc;
+  --el-color-info-light-8: #d8e6fd;
+  --el-color-info-light-9: #ebf3fe;
+  --el-color-info-dark-2: #2f68c5;
+
+  /* 文本：标题 #1f2937、正文 #374151，辅助文字用 secondary */
+  --el-text-color-primary: #1f2937;
+  --el-text-color-regular: #374151;
+  --el-text-color-secondary: #5e6669;
+
+  /* 边框 / 圆角：--border-color / --radius-xs / --radius-lg */
+  --el-border-color: rgba(0, 0, 0, 0.08);
+  --el-border-color-light: rgba(0, 0, 0, 0.05);
+  --el-border-color-lighter: rgba(0, 0, 0, 0.04);
+  --el-border-radius-base: 6px;
+  --el-border-radius-small: 6px;
+  --el-border-radius-round: 24px;
+
+  /* 页面背景：--bg-base */
+  --el-bg-color-page: #f4f6f5;
+
+  /* Element Plus 组件级微调 */
+  --el-card-border-radius: 12px;
+  --el-card-border-color: var(--el-border-color-light);
+  --el-card-padding: 18px;
+  --el-tag-border-radius: 999px;
+  --el-table-row-hover-bg-color: var(--el-color-primary-light-9);
+  --el-table-header-bg-color: var(--panda-table-header-bg);
+  --el-table-header-text-color: var(--el-text-color-secondary);
+
+  /* ==================================================================
+     Panda 设计令牌（--panda-*）：侧栏 / 阴影 / 动效 / 终端色
+     全站统一的视觉语言从这里取色，禁止在组件里硬编码色值。
+     ================================================================== */
+  /* 侧栏：深竹青渐变（深绿灰方向） */
+  --panda-sidebar-bg-start: #17231d;
+  --panda-sidebar-bg-end: #1f2733;
+  --panda-sidebar-text: #c2d2c9;
+  --panda-sidebar-text-dim: rgba(194, 210, 201, 0.5);
+  --panda-sidebar-active-bg: rgba(74, 222, 128, 0.14);
+  --panda-sidebar-hover-bg: rgba(255, 255, 255, 0.06);
+  --panda-sidebar-divider: rgba(255, 255, 255, 0.07);
+
+  /* 阴影：低透明绿灰（与竹绿同族，避免纯灰死板） */
+  --panda-shadow-card: 0 1px 2px rgba(31, 41, 55, 0.04), 0 4px 16px -4px rgba(46, 74, 61, 0.08);
+  --panda-shadow-card-hover: 0 2px 6px rgba(31, 41, 55, 0.06), 0 12px 28px -8px rgba(46, 74, 61, 0.16);
+  --panda-shadow-float: 0 8px 30px -6px rgba(46, 74, 61, 0.18);
+  --panda-shadow-glow: 0 0 16px rgba(74, 222, 128, 0.35);
+
+  /* 圆角 / 动效 */
+  --panda-radius-card: 12px;
+  --panda-radius-lg: 16px;
+  --panda-transition: 0.16s ease;
+
+  /* 表格头 / 终端（shell）配色 */
+  --panda-table-header-bg: #f3f8f5;
+  --panda-shell-bg: #1c2420;
+  --panda-shell-text: #d7e0da;
+  --panda-shell-dim: #8fa89a;
+
+  /* 聊天气泡 */
+  --panda-bubble-user-shadow: 0 2px 8px rgba(59, 178, 102, 0.28);
+  --panda-avatar-ring: 0 0 0 1px var(--el-border-color-light), 0 2px 6px rgba(31, 41, 55, 0.1);
+  /* 用户气泡内的附件 chip（叠加在强调色气泡上） */
+  --panda-bubble-chip-bg: rgba(255, 255, 255, 0.16);
+  --panda-bubble-chip-border: rgba(255, 255, 255, 0.28);
+
+  /* 强调色上的前景（白字）；行内代码底色 */
+  --panda-on-accent: #ffffff;
+  --panda-code-bg: rgba(0, 0, 0, 0.05);
+  --panda-code-border: rgba(0, 0, 0, 0.1);
+
+  /* 后台任务紫（status-pill 后台态） */
+  --panda-purple: #7c5cdb;
+  --panda-purple-bg: #f1edfc;
+}
+
+/* 暗色：variables.css [data-theme="dark"] 的对应映射（挂在 <html> 上生效） */
+[data-theme='dark'] {
+  --el-color-primary: #22c55e;
+  --el-color-primary-light-3: #65dd8f;
+  --el-color-primary-light-5: #91e3b0;
+  --el-color-primary-light-7: #bcebd0;
+  --el-color-primary-light-8: #cff1de;
+  --el-color-primary-light-9: #e7f8ee;
+  --el-color-primary-dark-2: #1b9e4b;
+
+  --el-text-color-primary: #f0fdf4;
+  --el-text-color-regular: #f0fdf4;
+  --el-text-color-secondary: #9ca3af;
+
+  --el-border-color: rgba(255, 255, 255, 0.08);
+  --el-border-color-light: rgba(255, 255, 255, 0.06);
+  --el-border-color-lighter: rgba(255, 255, 255, 0.04);
+
+  --el-bg-color-page: #121415;
+
+  --panda-table-header-bg: #1a201d;
+  --panda-code-bg: rgba(255, 255, 255, 0.08);
+  --panda-code-border: rgba(255, 255, 255, 0.14);
+  --panda-bubble-chip-bg: rgba(255, 255, 255, 0.14);
+  --panda-bubble-chip-border: rgba(255, 255, 255, 0.24);
+  --panda-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 16px -4px rgba(0, 0, 0, 0.4);
+  --panda-shadow-card-hover: 0 2px 6px rgba(0, 0, 0, 0.35), 0 12px 28px -8px rgba(0, 0, 0, 0.5);
+  --panda-shadow-float: 0 8px 30px -6px rgba(0, 0, 0, 0.55);
+}
+
+/* ==================================================================
+   全局组件打磨（不改结构，只统一观感）
+   ================================================================== */
+
+/* 卡片：12px 圆角 + 柔和绿灰阴影 + hover 微浮起 */
+.el-card {
+  border-radius: var(--el-card-border-radius);
+  box-shadow: var(--panda-shadow-card);
+  transition: box-shadow var(--panda-transition), transform var(--panda-transition);
+}
+
+.el-card:hover {
+  box-shadow: var(--panda-shadow-card-hover);
+  transform: translateY(-1px);
+}
+
+/* 按钮：过渡 + 字重（EP 默认 0.1s，略加长更顺滑） */
+.el-button {
+  font-weight: 500;
+  transition: color var(--panda-transition), background-color var(--panda-transition),
+    border-color var(--panda-transition), box-shadow var(--panda-transition);
+}
+
+/* 状态徽标 pill 化（--el-tag-border-radius 已映射 999px，这里补密度） */
+.el-tag {
+  font-weight: 500;
+  border: none;
+}
+
+.el-tag--plain {
+  border: 1px solid var(--el-border-color-light);
+}
+
+/* 表格：头部细分隔 + 行 hover 浅绿底（变量已映射） */
+.el-table th.el-table__cell {
+  font-weight: 600;
+}
+
+.el-table .el-table__row {
+  transition: background-color var(--panda-transition);
+}
+
+/* 菜单（设置区子导航）：圆角项 + 激活浅绿底 */
+.el-menu .el-menu-item {
+  margin: 2px 8px;
+  border-radius: 8px;
+  transition: background-color var(--panda-transition), color var(--panda-transition);
+}
+
+.el-menu .el-menu-item.is-active {
+  background: var(--el-color-primary-light-9);
+  font-weight: 600;
+}
+
+/* 弹窗 / 消息框：圆角加大 */
+.el-dialog {
+  border-radius: 14px;
+}
+
+.el-message-box {
+  border-radius: 14px;
+}
+
+/* 滚动条：细 + 半透明，不抢视觉 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.16);
+  border-radius: 8px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ==================================================================
+   共享类：各视图重复使用的页面骨架 / 空状态（组件 scoped 样式仅补充布局）
+   ================================================================== */
+
+/* 页面标题层级：600/400 对比（字号由各视图 scoped 规则定） */
+.view-header h1 {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.view-desc {
+  font-weight: 400;
+}
+
+/* 状态 pill：左侧 6px 圆点 + 浅色底 + 深一号文字，全站列表共用。
+   变体只改 --pill-color / --pill-bg 两个局部变量。 */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+  background: var(--pill-bg, var(--el-fill-color-light));
+  color: var(--pill-color, var(--el-text-color-secondary));
+}
+
+.status-pill .pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--pill-color, var(--el-text-color-secondary));
+}
+
+.status-pill--success { --pill-color: var(--el-color-success-dark-2); --pill-bg: var(--el-color-success-light-9); }
+.status-pill--danger { --pill-color: var(--el-color-error-dark-2); --pill-bg: var(--el-color-error-light-9); }
+.status-pill--warning { --pill-color: var(--el-color-warning-dark-2); --pill-bg: var(--el-color-warning-light-9); }
+.status-pill--info { --pill-color: var(--el-color-info-dark-2); --pill-bg: var(--el-color-info-light-9); }
+.status-pill--primary { --pill-color: var(--el-color-primary-dark-2); --pill-bg: var(--el-color-primary-light-9); }
+.status-pill--purple { --pill-color: var(--panda-purple); --pill-bg: var(--panda-purple-bg); }
+
+/* 列表行卡片：任务 / 目标 / 下载共用结构
+   head（图标/id + 标题 600 + 右侧 pill 与操作，永不换行掉落）+ meta（12px 三级色） */
+.row-card {
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  transition: box-shadow var(--panda-transition), transform var(--panda-transition);
+}
+
+.row-card:hover {
+  box-shadow: var(--panda-shadow-card-hover);
+  transform: translateY(-1px);
+}
+
+.row-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: nowrap;
+}
+
+.row-card-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 右侧操作区：pill + 按钮垂直居中，flex-shrink:0 保证不掉到第二行 */
+.row-card-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.row-card-meta {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+/* 空状态：emoji + 一句话 + 提示，全站统一节奏 */
+.empty-state {
+  font-size: 13px;
+}
+
+.empty-state .empty-icon {
+  font-size: 30px;
+  line-height: 1;
+  margin-bottom: 10px;
+  opacity: 0.9;
+}
+
+.empty-state small {
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+/* 路由切换淡入（App.vue <Transition name="route-fade">） */
+.route-fade-enter-active,
+.route-fade-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.route-fade-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.route-fade-leave-to {
+  opacity: 0;
+}
+
+/* ==================================================================
+   窄屏全局适配（≤768px 主断点）：EP 浮层宽度收敛，杜绝横向整页滚动
+   ================================================================== */
+@media (max-width: 768px) {
+  /* el-dialog 宽度为行内样式，需 !important 收敛到视口内 */
+  .el-dialog {
+    width: calc(100vw - 32px) !important;
+    max-width: calc(100vw - 32px);
+  }
+
+  .el-message-box {
+    width: calc(100vw - 32px);
+    max-width: calc(100vw - 32px);
+  }
+
+  .el-message {
+    min-width: 0;
+    max-width: calc(100vw - 32px);
+  }
+
+  /* 分页控件换行居中 */
+  .el-pagination {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    justify-content: center;
+  }
+
+  /* 级联/下拉面板不出屏 */
+  .el-select-dropdown,
+  .el-picker-panel {
+    max-width: calc(100vw - 16px);
+  }
+}

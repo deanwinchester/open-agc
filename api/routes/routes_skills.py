@@ -48,6 +48,32 @@ async def validate_skill(data: dict):
     return manager.validate_skill(content)
 
 
+@router.get("/api/skills/stats")
+async def get_skill_stats():
+    """Read-only skill usage statistics from skills/index.json (SkillStore usage tracking)."""
+    import json
+    index_path = os.path.join(get_skills_dir(), "index.json")
+    if not os.path.exists(index_path):
+        return {"skills": []}
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {"skills": []}
+    skills = [
+        {
+            "filename": s.get("filename", ""),
+            "title": s.get("title", s.get("filename", "")),
+            "usage_count": s.get("usage_count", 0),
+            "success_rate": s.get("success_rate", 1.0),
+            "last_used": s.get("last_used"),
+        }
+        for s in data.get("skills", [])
+    ]
+    skills.sort(key=lambda s: -s["usage_count"])
+    return {"skills": skills}
+
+
 @router.get("/api/skills/{filename}")
 async def get_skill_content(filename: str):
     """Get the content of a specific skill."""
