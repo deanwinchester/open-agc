@@ -61,9 +61,11 @@ async def get_api_version():
 
 @router.post("/api/upgrade")
 async def upgrade_server():
+    import asyncio
     from core.auto_upgrade import AutoUpgrader
     upgrader = AutoUpgrader()
-    success = upgrader.perform_upgrade()
+    # perform_upgrade 是同步下载+安装（分钟级），移出事件循环
+    success = await asyncio.get_running_loop().run_in_executor(None, upgrader.perform_upgrade)
     if not success:
         raise HTTPException(status_code=500, detail="Upgrade failed")
     return {"status": "ok", "message": "Upgrade completed"}
