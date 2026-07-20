@@ -1,7 +1,9 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import zh from './i18n/zh';
 import { pluginNav } from './plugins/registry';
+import { request } from './api/client';
 
 // Logo is served by the backend's existing /static mount (static/icon_rounded.png);
 // bound dynamically so Vite doesn't try to resolve it as a build-time asset.
@@ -28,6 +30,41 @@ const menus = [
   { path: '/settings', label: zh.menu.settings },
   { path: '/debug', label: zh.menu.debug },
 ];
+
+// ── 版本号与升级徽标（旧版侧栏底部同款）──
+const version = ref('');
+const updateAvailable = ref(false);
+const latestVersion = ref('');
+const upgrading = ref(false);
+
+onMounted(async () => {
+  try {
+    const data = await request('/api/version');
+    version.value = 'v' + (data.current || '0.0.0');
+    latestVersion.value = data.latest || '';
+    updateAvailable.value = !!data.update_available;
+  } catch { /* 版本检查失败静默，不影响主界面 */ }
+});
+
+async function doUpgrade() {
+  try {
+    await ElMessageBox.confirm(
+      `发现新版本 v${latestVersion.value}，升级将下载并覆盖程序文件，完成后需重启服务。继续？`,
+      '自动升级',
+      { confirmButtonText: '升级', cancelButtonText: '取消', type: 'warning' },
+    );
+  } catch { return; }
+  upgrading.value = true;
+  try {
+    await request('/api/upgrade', { method: 'POST' });
+    ElMessage.success('升级完成，请重启服务以生效');
+    updateAvailable.value = false;
+  } catch (err) {
+    ElMessage.error('升级失败：' + (err.message || ''));
+  } finally {
+    upgrading.value = false;
+  }
+}
 </script>
 
 <template>
@@ -69,6 +106,17 @@ const menus = [
           </router-link>
         </div>
       </nav>
+      <!-- 版本号与升级入口（侧栏底部） -->
+      <div class="sidebar-footer">
+        <span class="version-text">{{ version || 'v…' }}</span>
+        <span
+          v-if="updateAvailable"
+          class="upgrade-badge"
+          :class="{ upgrading }"
+          title="发现新版本，点击升级"
+          @click="doUpgrade"
+        >{{ upgrading ? '升级中…' : '⬆ 升级' }}</span>
+      </div>
     </aside>
     <div v-if="sidebarOpen" class="sidebar-overlay" @click="closeSidebar"></div>
     <main class="content">
@@ -135,6 +183,32 @@ const menus = [
   min-height: 0;
   overflow-y: auto;
 }
+
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  padding: 10px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.version-text {
+  font-size: 11px;
+  color: var(--panda-sidebar-text-dim, rgba(207, 216, 227, 0.55));
+}
+
+.upgrade-badge {
+  margin-left: 8px;
+  font-size: 11px;
+  color: #fff;
+  background: var(--el-color-primary);
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.upgrade-badge:hover { filter: brightness(1.1); }
+.upgrade-badge.upgrading { opacity: 0.6; pointer-events: none; }
 
 .menu-item {
   /* a 标签默认 inline：.menu 的 flex 列布局只约束直接子级，
