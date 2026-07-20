@@ -64,7 +64,7 @@ def check_server_and_load(window, port):
     import time
     for _ in range(60):
         try:
-            resp = requests.get(f"http://localhost:{port}/static/index.html", timeout=1)
+            resp = requests.get(f"http://localhost:{port}/static/icon_rounded.png", timeout=1)
             if resp.status_code == 200:
                 window.load_url(f"http://localhost:{port}")
                 return

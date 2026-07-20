@@ -2,13 +2,11 @@
   "name": "open-agc",
   "private": true,
   "scripts": {
-    "build": "vite build --config vite.config.mjs",
-    "watch": "vite build --watch --config vite.config.mjs",
-    "build:vue": "vite build --config vue-app/vite.config.js"
+    "build": "vite build --config vue-app/vite.config.js",
+    "watch": "vite build --watch --config vue-app/vite.config.js"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",
-    "terser": "^5.47.1",
     "vite": "^6.3.5"
   },
   "dependencies": {

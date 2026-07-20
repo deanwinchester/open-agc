@@ -34,7 +34,7 @@ UPGRADE_SOURCES = [
     "static", "skills",
     "main.py", "launcher.py", "gui_app.py",
     "requirements.txt", "docker-entrypoint.sh", "VERSION",
-    "package.json", "vite.config.mjs",
+    "package.json", "vue-app",
 ]
 
 

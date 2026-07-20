@@ -161,14 +161,14 @@ if [ -f "requirements.txt" ]; then
 fi
 
 # ── 4. Node.js / frontend build ─────────────────────────────
-# Rebuild frontend if source files are newer than dist, or dist doesn't exist
+# Rebuild frontend if source files are newer than the built SPA, or it doesn't exist
 NEED_BUILD=0
-if [ ! -f "static/dist/open-agc.min.js" ] || [ ! -f "static/dist/open-agc.css" ]; then
+if [ ! -f "static/vue/index.html" ]; then
     NEED_BUILD=1
 else
-    # Check if any source file is newer than the dist
-    for src in static/app.js static/js/*.js static/style.css package.json vite.config.mjs; do
-        if [ "$src" -nt "static/dist/open-agc.min.js" ] 2>/dev/null; then
+    # Check if any source file is newer than the built SPA
+    for src in vue-app/index.html vue-app/vite.config.js package.json $(find vue-app/src -type f 2>/dev/null); do
+        if [ "$src" -nt "static/vue/index.html" ] 2>/dev/null; then
             NEED_BUILD=1
             break
         fi

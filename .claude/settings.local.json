@@ -47,7 +47,6 @@
       "Bash(npx vite *)",
       "Bash(pip list *)",
       "Bash(git *)",
-      "Bash(/d/GitHub/open-agc/static/dist/open-agc.min.js)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:www.manus.im)",
       "WebFetch(domain:arxiv.org)",
