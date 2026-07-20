@@ -265,6 +265,7 @@ def list_plugins() -> List[dict]:
             "version": p.version,
             "description": p.description,
             "menu": p.manifest.get("menu", {}),
+            "vue_entry": p.manifest.get("vue_entry", ""),
             "enabled": state.get("enabled", True),
             "homepage": p.manifest.get("homepage", ""),
             "author": p.manifest.get("author", ""),
@@ -283,6 +284,7 @@ def list_all_plugins(plugins_dir: str = "plugins") -> List[dict]:
             "name": p.name, "version": p.version,
             "description": p.description,
             "menu": p.manifest.get("menu", {}),
+            "vue_entry": p.manifest.get("vue_entry", ""),
             "enabled": state.get("enabled", True),
             "loaded": True, "homepage": p.manifest.get("homepage", ""),
             "author": p.manifest.get("author", ""),
@@ -300,7 +302,7 @@ def list_all_plugins(plugins_dir: str = "plugins") -> List[dict]:
             if not os.path.exists(mf):
                 continue
             try:
-                with open(mf, "r") as f:
+                with open(mf, "r", encoding="utf-8") as f:
                     manifest = json.load(f)
             except Exception:
                 continue
@@ -310,6 +312,7 @@ def list_all_plugins(plugins_dir: str = "plugins") -> List[dict]:
                 "version": manifest.get("version", "0.0.0"),
                 "description": manifest.get("description", ""),
                 "menu": manifest.get("menu", {}),
+                "vue_entry": manifest.get("vue_entry", ""),
                 "enabled": state.get("enabled", True),
                 "loaded": False, "homepage": manifest.get("homepage", ""),
                 "author": manifest.get("author", ""),

@@ -61,6 +61,7 @@
 | POST | `/api/tasks/{task_id}/kill` | 杀掉任务后台进程 | — | `status`, `message` |
 | POST | `/api/tasks/{task_id}/reset-resume-count` | resume_count 归零（guardian 重试用） | — | `status` |
 | POST | `/api/tasks/{task_id}/reply` | 回复后台任务的 ask_user 提问 | `answer`（必填） | `status`, `message`；400/404/500 |
+| GET | `/api/agent/effectiveness` | Agent 效果聚合指标（纯 SELECT 聚合） | — | `status_counts{}`, `tasks_total`, `tasks_last_7d`, `tasks_last_30d`, `avg_steps_per_task`, `tool_calls_total`, `tool_success_rate`, `top_tools[]` |
 
 ### 1.4 大目标（api/routes/routes_goals.py）
 
@@ -84,6 +85,7 @@
 | 方法 | 路径 | 用途 | 请求体关键字段 | 响应关键字段 |
 |---|---|---|---|---|
 | GET | `/api/skills` | 列出技能（含 enabled 标记） | — | `skills[]` |
+| GET | `/api/skills/stats` | 技能使用统计（读 skills/index.json，不存在返回空数组） | — | `skills[]{filename,title,usage_count,success_rate,last_used}`（按使用次数降序） |
 | POST | `/api/skills/import` | 导入技能（安全校验） | `filename`, `content`, `force?` | 导入结果；400 |
 | POST | `/api/skills/validate` | 仅校验不导入 | `content` | 校验结果 |
 | GET | `/api/skills/{filename}` | 读取技能内容 | — | `filename`, `content`；400/404 |
@@ -268,3 +270,49 @@
 5. **会话删除级联**（routes_sessions.py）：`DELETE /api/sessions/{id}` 事务内删除 `messages/tasks/task_steps/token_usage/model_call_logs` 中该会话行（先查 `PRAGMA table_info` 确认 `session_id` 列存在），删除前将该会话 `_active_agents` 中的 agent 置 `is_interrupted`；`POST /api/sessions/{id}/clear` 补充清理 `task_steps`。
 6. **history has_more 基于存在性判断**（routes_memories.py）：改用 `SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=? AND id < ?)`，消息被删除后不再恒为 true。
 7. **/api/settings 增量语义 + 掩码约定**：见"通用约定"，本次仅文档化确认既有行为。
+8. **next_run_at 统一 UTC（批次 4，取代第 3 条的时区口径）**：`routes_tasks.py` 的 create/update/toggle 三个写入点原先以本地时间计算 `next_run_at`（且 create 时根本未写入，新建定时任务永不触发），而调度器 `api/background.py` 以 UTC 比较。现统一为 `croniter(cron, datetime.now(timezone.utc))`（辅助函数 `_next_run_utc`），存储格式仍为 `'YYYY-MM-DD HH:MM:SS'`（UTC）。存量本地时间行不做时区猜测，由调度器启动时 `_normalize_next_run_at_utc()` 按 cron 表达式一次性重算。
+
+---
+
+## 5. 插件 Vue 视图契约（新 SPA `/app`）
+
+新 SPA 通过 manifest 的可选字段 **`vue_entry`** 发现并挂载插件前端（实现：`vue-app/src/plugins/registry.js`，参照实现：`plugins/open-agc-train/static/vue-entry.js`）。
+
+### 5.1 manifest 与发现
+
+- `plugin.json` 声明 `"vue_entry": "vue-entry.js"`（入口文件相对插件静态目录，经 `/static/plugins/<name>/<vue_entry>` 暴露）。
+- `GET /api/plugins` 返回的每个插件对象带 `vue_entry` 字段（`core/plugin_manager.py` 的 `list_plugins` / `list_all_plugins` 透传）。
+- 主 SPA 仅为 **`loaded && enabled && vue_entry` 非空** 的插件加载入口模块（原生 `import()`，不进 Vite 构建）。
+
+### 5.2 入口模块
+
+default export 必须是函数 `setup(ctx)`，可同步或异步返回：
+
+```js
+export default function setup(ctx) {
+  return {
+    views: [
+      { path: 'designer', title: '模型设计器', icon: '🎓', component: /* 组件定义 */ },
+    ],
+  };
+}
+```
+
+- 每个 view 注册为路由 **`/plugins/<name>/<path>`**（`router.addRoute`），并渲染在主 SPA 侧边栏的插件区（插件 label 来自 manifest `menu.label` / `menu.icon`）。
+- `component` 必须用 `ctx.Vue` 创建（`ctx.Vue.defineComponent`）。主 SPA 的 Vite 构建将 `vue` 别名到 `vue/dist/vue.esm-bundler.js`（含模板编译器），因此插件组件可用**模板字符串**；**Element Plus 已全局注册**，插件模板可直接使用 `el-*` 组件，主题（Element Plus CSS 变量）共享。
+- 插件代码**不能 `import 'vue'` / `import 'element-plus'`**（插件以浏览器原生 ES module 加载，裸导入无法解析），一律经由 `ctx` 获取。
+
+### 5.3 ctx（setup 的唯一参数）
+
+| 字段 | 说明 |
+|---|---|
+| `pluginName` | 插件名（如 `open-agc-train`） |
+| `Vue` | 主应用的 Vue 命名空间（`defineComponent`/`ref`/`reactive`/`computed`/`watch`/`onMounted` 等），保证插件与主应用同一 Vue 实例 |
+| `apiFetch(url, options)` | 主应用 api client 的 `request`（JSON 解析 + 错误规范化，参数同 `fetch`）；插件自行拼接 API 前缀（如 `/api/plugin/<name>` 或主应用 `/api/...`），**API 请求统一走它，不用裸 fetch** |
+| `ElMessage` / `ElMessageBox` | Element Plus 反馈组件（toast / 确认框 / 输入框） |
+| `wsOn(type, fn)` | 订阅主应用 WebSocket 事件（§3.2），返回退订函数（组件卸载时必须退订）；未连接时自动建立连接 |
+| `navigate(path)` | `router.push` 封装（插件内跳转，如创建训练后跳监控页） |
+
+### 5.4 旧前端并存
+
+旧版插件前端（如 `plugins/open-agc-train/static/plugin.js`，IIFE + window 钩子）服务旧 SPA（`static/index.html`），与 `vue_entry` 互不干扰；两者通过同一套 `/api/plugin/<name>` REST 端点与 WS 事件通信。

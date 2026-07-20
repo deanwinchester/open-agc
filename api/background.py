@@ -339,11 +339,43 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     finally:
         _background_agents.pop(task_id, None)
 
+def _normalize_next_run_at_utc():
+    """One-time normalization: recompute next_run_at (UTC) for all enabled schedules.
+
+    Rows written before the UTC fix store next_run_at computed from LOCAL time
+    while the scheduler compares against UTC. Rather than guessing each row's
+    original timezone, simply recompute from the cron expression in UTC."""
+    try:
+        from croniter import croniter
+        conn = db_connect()
+        cursor = conn.cursor()
+        rows = cursor.execute(
+            "SELECT id, schedule_cron FROM tasks WHERE task_type='scheduled' "
+            "AND schedule_enabled=1 AND schedule_cron IS NOT NULL AND schedule_cron != ''"
+        ).fetchall()
+        now_utc = datetime.now(timezone.utc)
+        fixed = 0
+        for row in rows:
+            try:
+                next_run = croniter(row[1], now_utc).get_next(datetime).strftime('%Y-%m-%d %H:%M:%S')
+                cursor.execute("UPDATE tasks SET next_run_at=? WHERE id=?", (next_run, row[0]))
+                fixed += 1
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
+        if fixed:
+            print(f"[TaskScheduler] Normalized next_run_at to UTC for {fixed} scheduled task(s)")
+    except Exception as e:
+        print(f"[TaskScheduler] next_run_at normalization error: {e}")
+
+
 def start_task_scheduler():
     """Background thread that handles scheduled tasks only.
     Auto-resume is handled by the guardian loop (Phase 1 + Phase 2)."""
     def scheduler_loop():
         print("[TaskScheduler] Started")
+        _normalize_next_run_at_utc()
         while True:
             try:
                 conn = db_connect()

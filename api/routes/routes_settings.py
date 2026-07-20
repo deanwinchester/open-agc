@@ -434,6 +434,8 @@ async def get_settings(session_id: int = None):
 
         "context_budget": config.get("context_budget", {"max_total_tokens": 128000}),
 
+        "mcp_servers": config.get("mcp_servers", {}),
+
     }
 
 

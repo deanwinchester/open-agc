@@ -53,6 +53,7 @@ workspace/
 # Node.js / Vite build (optional frontend optimization)
 node_modules/
 package-lock.json
+/static/vue/
 
 # IDE - VSCode
 .vscode/
