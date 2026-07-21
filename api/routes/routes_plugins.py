@@ -13,7 +13,11 @@ async def approve_sandbox_request(body: dict):
     """Approve a sandbox path via persistent config."""
     from api.state import _sandbox_waits
     sid = body.get("session_id", body.get("sid", 1))
-    wait = _sandbox_waits.get(sid)
+    # Prefer the unique request_id (concurrent waits in one session). Only fall
+    # back to the legacy session_id key when the client sent no request_id —
+    # a stale rid must not route the reply to another wait.
+    req_id = body.get("request_id")
+    wait = _sandbox_waits.get(req_id) if req_id else _sandbox_waits.get(sid)
     if wait:
         action = body.get("action", "deny_once")
         wait["result"]["action"] = action

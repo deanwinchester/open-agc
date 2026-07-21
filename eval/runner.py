@@ -371,12 +371,15 @@ def main():
     parser.add_argument("--tag", nargs="*", help="Filter by tag")
     parser.add_argument("--report", action="store_true", help="Show historical report")
     parser.add_argument("--probes", action="store_true", help="Run advanced probes (memory recall, tool discovery, context retention)")
+    parser.add_argument("--probes-allow-side-effects", action="store_true",
+                        help="Also run probes that mutate the real environment "
+                             "(context retention / tool choice / response quality)")
     parser.add_argument("--json", action="store_true", help="JSON output (machine-readable)")
     args = parser.parse_args()
 
     if args.probes:
         from eval.probes import run_all_probes
-        probe_results = run_all_probes()
+        probe_results = run_all_probes(allow_side_effects=args.probes_allow_side_effects)
         if args.json:
             print(json.dumps(probe_results, ensure_ascii=False, indent=2))
         return

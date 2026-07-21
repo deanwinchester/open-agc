@@ -2,12 +2,16 @@
 System prompt building mixin for OpenAGCAgent.
 
 Extracted from agent/agent.py to reduce the 2649-line monolith.
+
+Note: the mixin used to also carry a `_build_system_prompt`, but
+OpenAGCAgent defines the same method (agent/agent.py), which always
+shadowed the mixin copy — and the mixin copy referenced an undefined
+`prompt` variable (NameError landmine). It was deleted in 阶段4 Task5;
+the live implementation is OpenAGCAgent._build_system_prompt.
 """
 import os
 import platform
 import shutil
-from datetime import datetime
-from core.paths import get_data_path
 
 
 def detect_system_env() -> str:
@@ -90,7 +94,7 @@ def detect_system_env() -> str:
 
 
 class PromptBuilderMixin:
-    """Mixin providing _build_tool_list_section and _build_system_prompt."""
+    """Mixin providing _build_tool_list_section."""
 
     def _build_tool_list_section(self) -> str:
         """Build a markdown section listing all available tools."""
@@ -121,55 +125,3 @@ class PromptBuilderMixin:
             lines.append("扩展工具（需通过 search_available_tools 唤醒）：")
             lines.extend(ext_items)
         return "\n".join(lines)
-
-    def _build_system_prompt(self, memory_context: str = "", skill_context: str = "",
-                             experience_context: str = "", kg_context: str = "") -> str:
-        """Build the system prompt with all dynamic context injections."""
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        current_date = datetime.now().strftime("%Y年%m月%d日")
-
-        prompt = prompt.replace("{cwd_dir}", self.sandbox_dir or os.getcwd())
-        prompt = prompt.replace("{system_env}", detect_system_env())
-
-        if hasattr(self, 'full_available_tools'):
-            prompt += self._build_tool_list_section()
-
-        if memory_context:
-            prompt += f"\n--- 历史记忆回溯 (Episodic Memory) ---\n{memory_context}\n"
-
-        # ── MEMORY.md: persistent facts (discovered paths, configs) ──
-        memory_file_path = get_data_path("MEMORY.md")
-        if os.path.exists(memory_file_path):
-            try:
-                with open(memory_file_path, "r", encoding="utf-8") as f:
-                    content = f.read().strip()
-                    if content:
-                        prompt += f"\n--- 全局核心设定与事实库 (MEMORY.md) ---\n{content}\n"
-            except Exception as e:
-                print(f"Failed to read MEMORY.md: {e}")
-        else:
-            prompt += f"\n持久化事实文件位于: {memory_file_path}（尚不存在，发现重要路径/配置后可创建）\n"
-
-        # ── soul.md: agent personality / style config ──
-        soul_path = get_data_path("soul.md")
-        if os.path.exists(soul_path):
-            try:
-                with open(soul_path, "r", encoding="utf-8") as f:
-                    soul = f.read().strip()
-                    if soul:
-                        prompt += f"\n--- 人格设定 (soul.md) ---\n{soul}\n"
-            except Exception as e:
-                print(f"Failed to read soul.md: {e}")
-
-        if skill_context:
-            prompt += f"\n{skill_context}"
-        if experience_context:
-            prompt += f"\n\n{experience_context}"
-        if kg_context:
-            prompt += f"\n\n{kg_context}"
-
-        # Append time/date at the end (not in the prefix!) so DeepSeek cache
-        # can reuse the stable prefix across turns and across minutes.
-        prompt += f"\n--- 当前日期与时间 ---\n当前时间：{current_time}（{current_date}）\n"
-
-        return prompt

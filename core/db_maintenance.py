@@ -34,12 +34,20 @@ def cleanup_model_logs(days: int = 30, min_cost: float = 0.0, dry_run: bool = Fa
 
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 
-    # Find entries to delete
-    cursor.execute(
-        """SELECT id, response_data FROM model_call_logs
-           WHERE timestamp < ? AND cost_estimate < ?""",
-        (cutoff, min_cost)
-    )
+    # Find entries to delete. min_cost <= 0 means "no cost filter" — otherwise
+    # the predicate `cost_estimate < 0.0` would never match any row.
+    if min_cost > 0:
+        cursor.execute(
+            """SELECT id, response_data FROM model_call_logs
+               WHERE timestamp < ? AND cost_estimate < ?""",
+            (cutoff, min_cost)
+        )
+    else:
+        cursor.execute(
+            """SELECT id, response_data FROM model_call_logs
+               WHERE timestamp < ?""",
+            (cutoff,)
+        )
     entries = cursor.fetchall()
     if not entries:
         conn.close()
@@ -57,8 +65,9 @@ def cleanup_model_logs(days: int = 30, min_cost: float = 0.0, dry_run: bool = Fa
     deleted_rows = cursor.rowcount
     conn.commit()
 
-    # Clean up corresponding disk files
+    # Clean up corresponding disk files, accumulating actual freed bytes
     deleted_files = 0
+    freed_bytes = 0
     for row in entries:
         response_data = row[1] or ""
         if "|" in response_data:
@@ -67,13 +76,14 @@ def cleanup_model_logs(days: int = 30, min_cost: float = 0.0, dry_run: bool = Fa
                 path = path.strip()
                 if os.path.isfile(path):
                     try:
+                        freed_bytes += os.path.getsize(path)
                         os.remove(path)
                         deleted_files += 1
                     except Exception:
                         pass
 
     conn.close()
-    return {"deleted_rows": deleted_rows, "freed_bytes": 0, "deleted_files": deleted_files}
+    return {"deleted_rows": deleted_rows, "freed_bytes": freed_bytes, "deleted_files": deleted_files}
 
 
 def vacuum_database() -> dict:
@@ -120,7 +130,9 @@ def cleanup_stale_kg_data(days: int = 90) -> dict:
         result["deleted_relations"] = 0
 
     try:
-        cursor.execute("DELETE FROM reflections WHERE created_at < ?", (cutoff,))
+        # The real table is task_trajectories (see core/reflection.py);
+        # a "reflections" table does not exist.
+        cursor.execute("DELETE FROM task_trajectories WHERE created_at < ?", (cutoff,))
         result["deleted_reflections"] = cursor.rowcount
     except Exception:
         result["deleted_reflections"] = 0

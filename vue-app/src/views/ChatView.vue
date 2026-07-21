@@ -8,7 +8,7 @@
 //   {type:'resume', task_id, extra_instruction?} 恢复中断任务
 //   {type:'retry', query?}                       重试上一轮（query 缺省时服务端用 last_query）
 //   {type:'tool_reply', answer}                  回复前台 ask_user
-//   {type:'sandbox_response', session_id, action, path, password?}  沙箱授权回复
+//   {type:'sandbox_response', session_id, action, path, password?, request_id?}  沙箱授权回复
 // 服务端 → 客户端：见底部 REPORT 注释与各 on* 处理器。
 //
 // 已知旧版缺陷的修正：
@@ -60,6 +60,7 @@ const railOpen = ref(false);
 const downloadBanner = reactive({ visible: false, label: '', pct: 0 });
 const sandboxState = reactive({
   visible: false, path: '', toolName: '', blockType: 'path', description: '', category: '',
+  requestId: '', // 唯一等待 id：随 sandbox_response 回传，ws.py 据此精确匹配（兼容旧会话键）
 });
 
 // ── 头部栏：agent 选择 / 当前模型 badge / token 用量（对齐旧聊天页头部） ──
@@ -249,6 +250,7 @@ function onProgress(data) {
     sandboxState.blockType = data.block_type || 'path';
     sandboxState.description = data.description || '';
     sandboxState.category = data.category || '';
+    sandboxState.requestId = data.request_id || '';
     sandboxState.visible = true;
     return;
   }
@@ -544,6 +546,7 @@ function onSandboxRespond({ action, password }) {
     action,
     path: sandboxState.path,
   };
+  if (sandboxState.requestId) msg.request_id = sandboxState.requestId;
   if (password) msg.password = password;
   if (!ws.send(msg)) ElMessage.error(t.sandbox.sendFailed);
   sandboxState.visible = false;

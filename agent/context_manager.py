@@ -6,7 +6,7 @@ All methods were originally @staticmethod or used only self.llm.
 """
 import re
 import json
-from typing import List, Dict, Any, Optional
+from typing import List, Dict
 
 
 def compress_search_results(result: str) -> str:
@@ -169,13 +169,6 @@ def fold_tool_calls(messages: List[Dict], force: bool = False) -> List[Dict]:
     if not messages:
         return messages
 
-    # Find tool-call round boundaries
-    bounds = []
-    for i, msg in enumerate(messages):
-        role = msg.get("role", "")
-        if role == "assistant" and msg.get("tool_calls"):
-            bounds.append(i)
-
     # A round = assistant(tool_calls) followed by zero or more tool results
     # Group consecutive tool messages into rounds
     rounds = []
@@ -240,84 +233,4 @@ def fold_tool_calls(messages: List[Dict], force: bool = False) -> List[Dict]:
     else:
         result = messages
 
-    print(f"[DBG] _fold_tool_calls: {len(rounds)} rounds, folded {len(fold)}, kept {len(keep)}")
     return result
-
-
-def compact_messages(messages: List[Dict], llm, fallback_fn=None,
-                     target_token_savings: Optional[int] = None) -> List[Dict]:
-    """Compact conversation history using LLM summarization.
-
-    Args:
-        messages: Full message list.
-        llm: LLMClient instance for summarization.
-        fallback_fn: Function to call if LLM summarization fails.
-        target_token_savings: Desired token savings (optional).
-
-    Returns:
-        Compacted messages list.
-    """
-    import time as _time
-
-    # First try folding (cheap, no LLM call)
-    folded = fold_tool_calls(messages, force=True)
-    if len(folded) < len(messages):
-        print(f"[Agent] Folded tool calls: {len(messages)} → {len(folded)} messages")
-        return folded
-
-    # If folding didn't help, try LLM compression
-    if llm is None:
-        if fallback_fn:
-            return fallback_fn(messages, force=True)
-        return messages
-
-    try:
-        from core.llm_client import estimate_messages_tokens
-        current_tokens = estimate_messages_tokens(messages)
-
-        # Identify compactable region: remove system prompt, keep last 2 rounds
-        compactable = []
-        preserved = []
-        round_boundaries = []
-        for i, msg in enumerate(messages):
-            if msg.get("role") == "system":
-                preserved.append(msg)
-                continue
-            if msg.get("role") == "assistant":
-                round_boundaries.append(i)
-
-        target = target_token_savings or (current_tokens // 2)
-        if current_tokens < target:
-            if fallback_fn:
-                return fallback_fn(messages, force=True)
-            return messages
-
-        # Send compactable region to LLM for summarization
-        compact_prompt = (
-            "Compress the following conversation history into a concise summary. "
-            "Keep all critical facts, decisions, file paths, error messages, and results. "
-            "The summary will be injected back as context so the agent doesn't lose track.\n\n"
-        )
-        try:
-            resp, _ = llm.chat(
-                messages=[{"role": "user", "content": compact_prompt + json.dumps(messages, ensure_ascii=False)}],
-            )
-            summary = ""
-            if hasattr(resp, "choices") and resp.choices:
-                summary = resp.choices[0].message.content or ""
-            if summary:
-                preserved.append({"role": "system", "content": (
-                    f"[Compressed History]\n{summary[:3000]}"
-                )})
-                print(f"[Agent] LLM compaction: {current_tokens} tokens → summary saved")
-                return preserved
-        except Exception as e:
-            print(f"[Agent] LLM compaction failed: {e}")
-
-    except Exception as e:
-        print(f"[Agent] Compaction error: {e}")
-
-    # Fallback: use folding
-    if fallback_fn:
-        return fallback_fn(messages, force=True)
-    return messages

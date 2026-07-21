@@ -17,6 +17,7 @@ from api.task_core import (
     save_message, handle_task_completion, claim_task_for_resume,
     add_task_step, _extract_task_title, _record_task_deliverables,
     _load_session_context, _get_task_step_count, _check_goal_completeness,
+    _is_task_stale, _get_step_offset, _STALE_RUNNING_MINUTES,
 )
 from tools.shell import (
     get_background_processes, cleanup_background_process,
@@ -149,16 +150,10 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     step_counter = 0
     step_offset = 0
     if is_resume:
-        try:
-            off_conn = db_connect()
-            off_conn.row_factory = sqlite3.Row
-            max_step = off_conn.execute(
-                "SELECT COALESCE(MAX(step_number), 0) FROM task_steps WHERE task_id=?",
-                (task_id,)).fetchone()[0]
-            step_offset = max_step
-            off_conn.close()
-        except Exception:
-            pass
+        # Agent steps are 1-based per run; offset = MAX(existing step) so the
+        # first new step after resume is MAX+1 (no collision with old rows,
+        # no gap). Shared helper keeps ws.py / background / guardian aligned.
+        step_offset = _get_step_offset(task_id)
 
     # Detect heartbeat tasks — suppress all progress broadcasts and chat messages
     _is_heartbeat = False
@@ -785,7 +780,13 @@ def _guardian_resume_task(task_id: int) -> None:
         update_task_status(task_id, "running")
         print(f"[Guardian] Resume #{task_id}: status set to running, starting run_turn...")
 
+        # Continue step numbering after existing steps (agent is 1-based per
+        # run) so resumed steps don't collide with old task_steps rows.
+        _hb_step_offset = _get_step_offset(task_id)
+
         def _hb_cb(e):
+            if "step" in e:
+                e["step"] = e.get("step", 0) + _hb_step_offset
             if e.get("event") == "tool_start":
                 add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", ""), session_id=_hb_session)
             # Persist sandbox approvals so they survive agent recreation
@@ -887,6 +888,26 @@ def start_guardian_loop():
                 interval = cfg.get("heartbeat_interval", 180)
 
                 conn = db_connect()
+                # Stale-running rescue: updated_at is heartbeated by add_task_step,
+                # so a 'running' task untouched for >_STALE_RUNNING_MINUTES has a
+                # dead worker thread (crashed before resetting its status). Reset
+                # it to 'interrupted' so it stops blocking the guardian and
+                # becomes resumable below.
+                try:
+                    _stale_running = conn.execute(
+                        "SELECT id, updated_at FROM tasks WHERE status='running' "
+                        "AND task_type NOT IN ('heartbeat', 'goal_resume')"
+                    ).fetchall()
+                    for _sr in _stale_running:
+                        if _is_task_stale(_sr["updated_at"]):
+                            print(f"[Guardian] Task #{_sr['id']} running but stale "
+                                  f"(>{_STALE_RUNNING_MINUTES}min no step update) — resetting to interrupted")
+                            update_task_status(
+                                _sr["id"], "interrupted",
+                                "执行线程失联（无步骤更新超时），已自动标记为可恢复",
+                                interruption_reason="stale_running")
+                except Exception as _stale_e:
+                    print(f"[Guardian] Stale running check error: {_stale_e}")
                 _running_count = conn.execute("SELECT COUNT(*) FROM tasks WHERE status='running' AND task_type NOT IN ('heartbeat', 'goal_resume')").fetchone()[0]
                 if _running_count > 0:
                     conn.close()

@@ -17,6 +17,7 @@ from api.task_core import (
     save_message, handle_task_completion, claim_task_for_resume,
     add_task_step, _extract_task_title, _record_task_deliverables, _load_session_context,
     _resolve_task_for_query, _resolve_goal_for_query, _check_goal_completeness, _get_task_step_count,
+    _get_step_offset,
 )
 from core.paths import get_data_path
 from core.llamacpp_manager import get_llamacpp_manager
@@ -95,8 +96,10 @@ async def websocket_endpoint(websocket: WebSocket):
         conn = db_connect()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        # Load the last 20 user/agent messages for context (exclude tool_step from count)
-        cursor.execute("SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? AND role != 'tool_step' ORDER BY id DESC LIMIT 20) ORDER BY id ASC", (ws_session_id,))
+        # Load the last 20 user/agent messages for LLM context.
+        # Only user/agent roles map cleanly to LLM roles — 'system' rows
+        # (download notices etc.) are UI-only and reachable via /api/history.
+        cursor.execute("SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? AND role IN ('user','agent') ORDER BY id DESC LIMIT 20) ORDER BY id ASC", (ws_session_id,))
         rows = cursor.fetchall()
         conn.close()
 
@@ -176,16 +179,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
         # Always compute step offset from existing steps for ANY existing task,
         # not just explicit resume. Prevents step numbering reset after WS reconnect.
+        # Agent steps are 1-based per run; offset = MAX(existing step) so the
+        # first new step is MAX+1 — same rule as background.py / guardian.
         if ws_task_id:
-            try:
-                _offset_conn = db_connect()
-                _max_step = _offset_conn.execute(
-                    "SELECT COALESCE(MAX(step_number), -1) FROM task_steps WHERE task_id=?",
-                    (ws_task_id,)).fetchone()[0]
-                _offset_conn.close()
-                step_offset = _max_step + 1
-            except Exception as e:
-                print(f"[Task] Step offset error: {e}")
+            step_offset = _get_step_offset(ws_task_id)
 
         # Additional resume-specific handling (status update)
         if resume_task_id:
@@ -351,11 +348,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 # tool_step is persisted in task_steps table -- no need to duplicate in messages
 
                 # Attach task_id to the event so frontend can track it
+                # (step was already offset-adjusted above via adjusted_step —
+                # do NOT add step_offset again here or the broadcast value
+                # diverges from the value persisted to task_steps)
                 if ws_task_id:
                     event["task_id"] = ws_task_id
-                # Adjust step number for resumed tasks
-                if step_offset:
-                    event["step"] = event.get("step", 0) + step_offset
 
                 progress_queue.put(event)
             
@@ -494,14 +491,19 @@ async def websocket_endpoint(websocket: WebSocket):
                         elif user_msg.get("type") == "sandbox_response":
                             sid = user_msg.get("session_id", ws_session_id)
                             action = user_msg.get("action", "deny_once")
-                            wait = _sandbox_waits.get(sid)
+                            # Match by unique request_id when present (concurrent
+                            # waits in one session). Only fall back to the legacy
+                            # session_id key when the client sent no request_id —
+                            # a stale rid must not route the reply to another wait.
+                            req_id = user_msg.get("request_id")
+                            wait = _sandbox_waits.get(req_id) if req_id else _sandbox_waits.get(sid)
                             if wait:
                                 wait["result"]["action"] = action
                                 wait["result"]["path"] = user_msg.get("path", "")
                                 if user_msg.get("password"):
                                     wait["result"]["password"] = user_msg["password"]
                                 wait["event"].set()
-                                print(f"[WS] Sandbox response: {action} for {sid}")
+                                print(f"[WS] Sandbox response: {action} for {sid} (req={req_id})")
                             elif action in ("approve_once", "approve_dir", "approve_always", "approve_session"):
                                 # Late approval: apply to running agent's whitelist directly
                                 _path = user_msg.get("path", "")
@@ -812,7 +814,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             _ss_conn.row_factory = sqlite3.Row
                             _ss_cursor = _ss_conn.cursor()
                             _ss_cursor.execute(
-                                "SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? AND role != 'tool_step' ORDER BY id DESC LIMIT 20) ORDER BY id ASC",
+                                "SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? AND role IN ('user','agent') ORDER BY id DESC LIMIT 20) ORDER BY id ASC",
                                 (ws_session_id,))
                             _ss_rows = _ss_cursor.fetchall()
                             _ss_conn.close()
@@ -844,14 +846,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Resolve a pending sandbox auth wait
                     sid = user_msg.get("session_id", ws_session_id)
                     action = user_msg.get("action", "deny_once")
-                    wait = _sandbox_waits.get(sid)
+                    # Match by unique request_id when present (concurrent waits
+                    # in one session). Only fall back to the legacy session_id key
+                    # when the client sent no request_id — a stale rid must not
+                    # route the reply to another wait.
+                    req_id = user_msg.get("request_id")
+                    wait = _sandbox_waits.get(req_id) if req_id else _sandbox_waits.get(sid)
                     if wait:
                         wait["result"]["action"] = action
                         wait["result"]["path"] = user_msg.get("path", "")
                         if user_msg.get("password"):
                             wait["result"]["password"] = user_msg["password"]
                         wait["event"].set()
-                        print(f"[WS] Sandbox response: {action} for session {sid}")
+                        print(f"[WS] Sandbox response: {action} for session {sid} (req={req_id})")
                     elif action in ("approve_once", "approve_dir", "approve_always", "approve_session"):
                         # Late approval after wait timed out — save and resume task
                         _path = user_msg.get("path", "")
