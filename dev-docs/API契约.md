@@ -195,10 +195,12 @@
 | DELETE | `/runs/{run_id}` | 删除训练任务 | — |
 | POST | `/runs/{run_id}/{action}` | 控制运行（pause/resume/abort 等，按 action_map） | 路径参数 `action` |
 | POST | `/runs/{run_id}/layer-stats-toggle` | 开关逐层统计 | — |
-| POST | `/runs/{run_id}/test-chat` | 用训练产物试聊 | `prompt`, `max_length=200`, `temperature=0.7` |
+| POST | `/runs/{run_id}/test-chat` | 用训练产物试聊（后台 job，立即返回 `{job_id}`） | `prompt`, `max_length=200`, `temperature=0.7` |
+| GET | `/runs/{run_id}/test-chat/{job_id}` | 查询试聊 job 进度/结果 | — |
 | POST | `/runs/{run_id}/eval-ppl` | 启动困惑度评估（后台 job） | `dataset_path=""`, `max_samples=500`, `stride=512`, `max_length=1024`, `dataset_id?` |
 | GET | `/runs/{run_id}/eval-ppl` | 查询 PPL 评估结果 | — |
-| POST | `/eval-metrics` | 生成质量指标评估 | `model_path`（支持 `run_<id>`）, `dataset_path`, `dataset_id?`, `max_samples=100` |
+| POST | `/eval-metrics` | 生成质量指标评估（后台 job，立即返回 `{job_id}`） | `model_path`（支持 `run_<id>`）, `dataset_path`, `dataset_id?`, `max_samples=100` |
+| GET | `/eval-metrics/{job_id}` | 查询指标评估 job 进度/结果 | — |
 | GET | `/model-configs` | 模型配置列表 | — |
 | POST | `/model-configs` | 新建模型配置 | `name`, `architecture`, `config_json`, `param_count_estimate=0` |
 | GET | `/model-configs/{config_id}` | 配置详情 | — |
@@ -215,7 +217,7 @@
 | GET | `/recommended-datasets` | 推荐数据集 | — |
 | GET | `/base-models` | 可微调的基座模型（GGUF + 已训练 + HF 预设） | — |
 
-> 注：`plugins/open-agc-train/routes_benchmark.py`、`routes_datasets.py` 是主应用 `api/routes/benchmark.py`、`downloads.py` 的副本，**未单独挂载**；对应端点以主应用的 `/api/training/*`、`/api/downloads/*` 为准（见 1.11/1.12）。
+> 注：`plugins/open-agc-train/routes_benchmark.py`、`routes_datasets.py`（主应用对应路由的漂移副本）已于阶段 3 删除；对应端点以主应用的 `/api/training/*`、`/api/downloads/*` 为准（见 1.11/1.12）。
 
 ---
 

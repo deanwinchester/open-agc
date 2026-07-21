@@ -886,9 +886,8 @@ async def setup_llamacpp():
 
     """Download and install the llama-server binary (runs in background with progress)."""
 
-    global _llamacpp_download_state
-
-
+    # Mutated in place (never rebound) so api/ws.py, tools/download.py and
+    # other holders of the original dict reference stay in sync.
 
     if _llamacpp_download_state["active"]:
 
@@ -896,7 +895,9 @@ async def setup_llamacpp():
 
 
 
-    _llamacpp_download_state = {
+    _llamacpp_download_state.clear()
+
+    _llamacpp_download_state.update({
 
         "active": True,
 
@@ -912,7 +913,7 @@ async def setup_llamacpp():
 
         "cancelled": False
 
-    }
+    })
 
 
 
@@ -939,8 +940,6 @@ async def setup_llamacpp():
 
 
     def run_download():
-
-        global _llamacpp_download_state
 
         dl_id = db_download_id
 
@@ -1006,7 +1005,7 @@ async def setup_llamacpp():
 
             if success:
 
-                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "complete", "progress": 1.0}
+                _llamacpp_download_state.update({"active": False, "stage": "complete", "progress": 1.0})
 
                 update_download_progress(dl_id, 1.0, status="completed")
 
@@ -1026,7 +1025,7 @@ async def setup_llamacpp():
 
             else:
 
-                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载失败"}
+                _llamacpp_download_state.update({"active": False, "stage": "error", "error": "下载失败"})
 
                 update_download_progress(dl_id, 0.0, status="failed", error_message="下载失败")
 
@@ -1048,7 +1047,7 @@ async def setup_llamacpp():
 
         except Exception as e:
 
-            _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
+            _llamacpp_download_state.update({"active": False, "stage": "error", "error": str(e)})
 
             update_download_progress(dl_id, 0.0, status="failed", error_message=str(e))
 
@@ -1184,9 +1183,7 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
 
     """Download a GGUF model from HuggingFace or ModelScope (runs in background with progress, supports resume)."""
 
-    global _llamacpp_download_state
-
-
+    # Mutated in place (never rebound) — see setup_llamacpp.
 
     if _llamacpp_download_state["active"]:
 
@@ -1270,7 +1267,9 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
 
 
 
-    _llamacpp_download_state = {
+    _llamacpp_download_state.clear()
+
+    _llamacpp_download_state.update({
 
         "active": True,
 
@@ -1296,13 +1295,11 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
 
         "cancelled": False
 
-    }
+    })
 
 
 
     def run_download():
-
-        global _llamacpp_download_state
 
         dl_id = db_download_id
 
@@ -1356,7 +1353,7 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
 
             if success:
 
-                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "complete", "progress": 1.0}
+                _llamacpp_download_state.update({"active": False, "stage": "complete", "progress": 1.0})
 
                 update_download_progress(dl_id, 1.0, status="completed")
 
@@ -1376,7 +1373,7 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
 
             else:
 
-                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载中断，可重新下载自动续传"}
+                _llamacpp_download_state.update({"active": False, "stage": "error", "error": "下载中断，可重新下载自动续传"})
 
                 update_download_progress(dl_id, 0.0, status="failed", error_message="下载中断，可重新下载自动续传")
 
@@ -1398,7 +1395,7 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
 
         except Exception as e:
 
-            _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
+            _llamacpp_download_state.update({"active": False, "stage": "error", "error": str(e)})
 
             update_download_progress(dl_id, 0.0, status="failed", error_message=str(e))
 
@@ -1488,9 +1485,7 @@ async def resume_download(download_id: int):
 
     """Resume a paused or failed download."""
 
-    global _llamacpp_download_state
-
-
+    # Mutated in place (never rebound) — see setup_llamacpp.
 
     if _llamacpp_download_state["active"]:
 
@@ -1518,7 +1513,9 @@ async def resume_download(download_id: int):
 
 
 
-    _llamacpp_download_state = {
+    _llamacpp_download_state.clear()
+
+    _llamacpp_download_state.update({
 
         "active": True,
 
@@ -1544,7 +1541,7 @@ async def resume_download(download_id: int):
 
         "cancelled": False
 
-    }
+    })
 
 
 
@@ -1557,8 +1554,6 @@ async def resume_download(download_id: int):
 
 
     def run_resume():
-
-        global _llamacpp_download_state
 
         dl_id = download_id
 
@@ -1642,7 +1637,7 @@ async def resume_download(download_id: int):
 
             if success:
 
-                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "complete", "progress": 1.0}
+                _llamacpp_download_state.update({"active": False, "stage": "complete", "progress": 1.0})
 
                 update_download_progress(dl_id, 1.0, status="completed")
 
@@ -1662,7 +1657,7 @@ async def resume_download(download_id: int):
 
             else:
 
-                _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": "下载失败"}
+                _llamacpp_download_state.update({"active": False, "stage": "error", "error": "下载失败"})
 
                 update_download_progress(dl_id, 0.0, status="failed", error_message="下载失败")
 
@@ -1684,7 +1679,7 @@ async def resume_download(download_id: int):
 
         except Exception as e:
 
-            _llamacpp_download_state = {**_llamacpp_download_state, "active": False, "stage": "error", "error": str(e)}
+            _llamacpp_download_state.update({"active": False, "stage": "error", "error": str(e)})
 
             update_download_progress(dl_id, 0.0, status="failed", error_message=str(e))
 
