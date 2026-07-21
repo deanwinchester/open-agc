@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from api.routes import routes_searxng
+from api.routes import routes_system
 
 
 def _run(coro):
@@ -17,12 +17,12 @@ def _run(coro):
     ("1.0.2rc12", None, False),          # 查不到线上 → 不提示
 ])
 def test_update_available_compares_versions(monkeypatch, current, latest, expected):
-    monkeypatch.setattr(routes_searxng, "get_version", lambda: current)
+    monkeypatch.setattr(routes_system, "get_version", lambda: current)
     import core.auto_upgrade as auto_upgrade
     # AutoUpgrader.__init__ 从 core.auto_upgrade 命名空间读 get_version，需一并替换
     monkeypatch.setattr(auto_upgrade, "get_version", lambda: current)
     monkeypatch.setattr(auto_upgrade.AutoUpgrader, "fetch_latest_release",
                         lambda self: setattr(self, "latest_version", latest) or latest)
-    result = _run(routes_searxng.get_api_version())
+    result = _run(routes_system.get_api_version())
     assert result["update_available"] is expected
     assert result["current"] == current

@@ -53,6 +53,8 @@ from api.routes.routes_memories import router as memories_router
 from api.routes.routes_sessions import router as sessions_router
 from api.routes.routes_plugins import router as plugins_router
 from api.routes.routes_searxng import router as searxng_router
+from api.routes.routes_system import router as system_router
+from api.routes.routes_stats import router as stats_router
 from api.routes.routes_goals import router as goals_router
 from api.routes.routes_tasks import router as tasks_router
 from api.routes.routes_settings import router as settings_router
@@ -104,6 +106,8 @@ app.include_router(memories_router)
 app.include_router(sessions_router)
 app.include_router(plugins_router)
 app.include_router(searxng_router)
+app.include_router(system_router)
+app.include_router(stats_router)
 app.include_router(goals_router)
 app.include_router(tasks_router)
 app.include_router(settings_router)

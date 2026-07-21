@@ -121,7 +121,7 @@
 | DELETE | `/api/downloads/{download_id}` | 删除下载任务 | — | 删除状态 |
 | POST | `/api/agent-design` | 用 agent 按自然语言需求生成模型设计参数 | `agent_name?="default"`, `requirements`（必填） | 设计参数；400 |
 
-### 1.9 SearXNG / 版本 / 日志 / 工具统计（api/routes/routes_searxng.py）
+### 1.9 SearXNG（routes_searxng.py）/ 版本·升级·日志（routes_system.py）/ 模型日志·工具统计（routes_stats.py）
 
 | 方法 | 路径 | 用途 | 请求体/参数关键字段 | 响应关键字段 |
 |---|---|---|---|---|
@@ -266,7 +266,7 @@
 ## 4. 阶段 1 修复的契约决定
 
 1. **中断/删除不误伤前台聊天**（routes_tasks.py）：`POST /api/tasks/{id}/interrupt` 与 `DELETE /api/tasks/{id}` 原先同时中断 `_active_agents` 中 key 为 `0` 的 agent（即该会话的前台聊天 agent，ws.py:407 以 `[ws_task_id or 0]` 注册），导致中断任意任务都会误杀正在进行的对话。已改为只匹配 `_aid == task_id`（与 `complete_task` 一致）。
-2. **分页统一 clamp**（routes_tasks.py `get_task_steps`、routes_searxng.py `get_model_logs`）：`page >= 1`、`1 <= page_size <= 200`，越界回落默认值（与 `get_tasks` 一致），杜绝 `LIMIT -1` 全表导出。
+2. **分页统一 clamp**（routes_tasks.py `get_task_steps`、routes_stats.py `get_model_logs`）：`page >= 1`、`1 <= page_size <= 200`，越界回落默认值（与 `get_tasks` 一致），杜绝 `LIMIT -1` 全表导出。
 3. **更新 cron 同步重算 next_run_at**（routes_tasks.py `update_schedule`）：用 croniter 以本地时间重算（`'%Y-%m-%d %H:%M:%S'`），与 `toggle_schedule` 同一实现，避免调度器仍按旧时间触发。
 4. **toggle_schedule 不再吞错**（routes_tasks.py）：cron 重算失败返回 HTTP 500 + `detail`，不再静默把任务置为 `status='paused'`。
 5. **会话删除级联**（routes_sessions.py）：`DELETE /api/sessions/{id}` 事务内删除 `messages/tasks/task_steps/token_usage/model_call_logs` 中该会话行（先查 `PRAGMA table_info` 确认 `session_id` 列存在），删除前将该会话 `_active_agents` 中的 agent 置 `is_interrupted`；`POST /api/sessions/{id}/clear` 补充清理 `task_steps`。
