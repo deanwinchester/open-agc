@@ -55,7 +55,8 @@ async def get_api_version():
     return {
         "current": current,
         "latest": latest or current,
-        "update_available": bool(latest and latest != current),
+        # 必须比较版本大小而非仅判不等：本地版本高于线上（如预发布开发中）时不提示升级
+        "update_available": bool(latest and upgrader.is_upgrade_available()),
     }
 
 
