@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from api.db import DB_PATH
 from api.config import load_config
-from api.state import _active_agents, _background_agents, connected_websockets, _broadcast_to_websockets
+from api.state import _active_agents, _background_agents, connected_websockets, _broadcast_to_websockets, _llamacpp_download_state
 from api.task_core import (
     create_task, update_task_status, update_task_type, get_task_context,
     save_task_context, add_task_step, _extract_task_title,
@@ -150,9 +150,9 @@ async def interrupt_task(task_id: int):
             _bg_a.is_interrupted = True
             _bg_a._completed_by_user = True
     interrupt_shell()
-    _llamacpp = globals().get('_llamacpp_download_state')
-    if _llamacpp:
-        _llamacpp["cancelled"] = True
+    # 中断任务时联动取消进行中的模型下载（此前 globals().get 恒为 None，是死代码）
+    if _llamacpp_download_state.get("active"):
+        _llamacpp_download_state["cancelled"] = True
     update_task_status(task_id, "interrupted", interruption_reason="user")
     return {"status": "success", "message": "Task marked as interrupted"}
 
