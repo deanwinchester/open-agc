@@ -17,6 +17,52 @@ _CONTINUATION_PREFIXES = [
 ]
 
 
+# Staleness threshold for 'running' tasks. Must exceed the worst-case
+# no-step window of a HEALTHY task: one LLM call can take timeout=600s
+# (llamacpp non-stream, core/llm_client.py:621) x 3 retries (:647) ~= 30min
+# without any add_task_step heartbeat. 35min covers that window + margin, so
+# only genuinely dead worker threads are flagged (avoids double-agent resume).
+_STALE_RUNNING_MINUTES = 35
+
+
+def _is_task_stale(updated_at_str, minutes: int = _STALE_RUNNING_MINUTES,
+                   now: datetime = None) -> bool:
+    """True when a 'running' task's updated_at is older than `minutes`.
+
+    add_task_step() heartbeats tasks.updated_at on every recorded step, so a
+    live agent keeps it fresh. A 'running' task with no update for longer than
+    `minutes` has no live worker (its thread died without resetting the
+    status). Missing or unparseable timestamps are treated as stale.
+    """
+    if not updated_at_str:
+        return True
+    try:
+        s = str(updated_at_str).strip().replace('T', ' ')[:19]
+        updated = datetime.strptime(s, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+        ref = now or datetime.now(timezone.utc)
+        return (ref - updated).total_seconds() > minutes * 60
+    except Exception:
+        return True
+
+
+def _get_step_offset(task_id: int) -> int:
+    """Step-number offset for (re)joining an existing task.
+
+    The agent numbers steps 1-based per run, so new steps must continue at
+    MAX(step_number)+1 — i.e. the offset to add is COALESCE(MAX(step_number), 0).
+    Shared by ws.py and background.py so every resume path numbers identically.
+    """
+    try:
+        conn = db_connect()
+        max_step = conn.execute(
+            "SELECT COALESCE(MAX(step_number), 0) FROM task_steps WHERE task_id=?",
+            (task_id,)).fetchone()[0]
+        conn.close()
+        return max_step or 0
+    except Exception:
+        return 0
+
+
 def _extract_task_title(response: str) -> str:
     """Extract a clean task title from the agent's first response line."""
     if not response:
@@ -243,16 +289,26 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
     try:
         conn = db_connect()
         existing = conn.execute(
-            "SELECT id, status, created_at FROM tasks WHERE session_id=? ORDER BY id DESC LIMIT 1",
+            "SELECT id, status, created_at, updated_at FROM tasks WHERE session_id=? ORDER BY id DESC LIMIT 1",
             (session_id,)
         ).fetchone()
         conn.close()
 
         if existing:
-            tid, status, created = existing
+            tid, status, created, updated_at = existing
             if status == 'running':
-                print(f"[Task] Reusing running task {tid} for session {session_id}")
-                return tid
+                if _is_task_stale(updated_at):
+                    # Running but silent for too long — the worker thread is
+                    # dead. Reset it (same rule as the guardian) and fall
+                    # through to create a fresh task for this query.
+                    print(f"[Task] Latest task {tid} running but stale "
+                          f"(>{_STALE_RUNNING_MINUTES}min no update) — not reusing")
+                    update_task_status(tid, "interrupted",
+                        "执行线程失联（无步骤更新超时），已自动标记",
+                        interruption_reason="stale_running")
+                else:
+                    print(f"[Task] Reusing running task {tid} for session {session_id}")
+                    return tid
             elif status in ('completed', 'interrupted', 'backgrounded', 'background_failed'):
                 try:
                     created_dt = datetime.strptime(created, '%Y-%m-%d %H:%M:%S')
@@ -310,40 +366,6 @@ def _load_session_context(session_id: int, limit: int = 50) -> list:
     except Exception as e:
         print(f"[Context] Failed to load session context: {e}")
         return []
-
-
-def record_tool_step(task_id: int, step_number: int, event: dict, session_id: int = 1):
-    """Record or update a tool execution step in task_steps.
-
-    Shared by ws.py and background.py to avoid duplicated DB logic.
-    - On tool_start: inserts a new step row.
-    - On tool_done: updates the step with result and success status.
-    """
-    try:
-        if event.get("event") == "tool_start":
-            add_task_step(
-                task_id=task_id, step_number=step_number,
-                tool_name=event.get("tool", ""),
-                tool_label=event.get("tool_label", ""),
-                args_preview=event.get("args_preview", ""),
-                session_id=session_id,
-                tool_call_id=event.get("tool_call_id"),
-                full_args=event.get("tool_args")
-            )
-        elif event.get("event") == "tool_done":
-            conn = db_connect()
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=?",
-                (event.get("result_preview", ""),
-                 event.get("full_result", event.get("result_preview", "")),
-                 1 if event.get("success") else 0,
-                 task_id, step_number)
-            )
-            conn.commit()
-            conn.close()
-    except Exception as _step_e:
-        print(f"[TaskCore] record_tool_step error: {_step_e}")
 
 
 def handle_task_completion(task_id: int, response: str, agent_messages: list,
@@ -579,6 +601,10 @@ def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: st
              full_result, 1 if success else 0, thinking_content, session_id, tool_call_id,
              full_args, generated_files or "")
         )
+        # Liveness heartbeat: a live agent records steps, so keep the parent
+        # task's updated_at fresh. _is_task_stale() relies on this to tell a
+        # healthy long-running task apart from one whose worker thread died.
+        conn.execute("UPDATE tasks SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
         conn.commit()
         conn.close()
     except Exception as e:

@@ -52,13 +52,68 @@ from tools.compact_context import CompactContextTool
 
 from agent.context_manager import (
     compress_search_results, compress_file_content, compress_shell_output,
-    compress_tool_result, fold_tool_calls, compact_messages,
+    compress_tool_result, fold_tool_calls,
 )
 from prompt_builder import detect_system_env, PromptBuilderMixin
 
 def _detect_system_env() -> str:
     """Delegate to prompt_builder module."""
     return detect_system_env()
+
+
+# ── Shared post-process worker (module-level singleton) ──
+# One queue + one daemon worker thread per process, NOT per agent instance:
+# api/ws.py creates a new agent per chat message, so a per-instance worker
+# thread (whose bound-method target strongly references the agent) would leak
+# one thread + one resident agent per message forever.
+_post_process_queue: queue.Queue = queue.Queue()
+_post_process_worker_lock = threading.Lock()
+_post_process_worker_started = False
+
+
+def _ensure_post_process_worker():
+    """Start the shared post-process worker thread (once per process)."""
+    global _post_process_worker_started
+    if _post_process_worker_started:
+        return
+    with _post_process_worker_lock:
+        if _post_process_worker_started:  # double-checked locking
+            return
+        _post_process_worker_started = True
+        threading.Thread(
+            target=_post_process_loop,
+            name="agent-post-process",
+            daemon=True,
+        ).start()
+
+
+def _post_process_loop():
+    """Serial worker: runs queued post-process jobs one at a time.
+
+    Each job carries its own agent reference (session isolation — the job
+    only ever touches that agent's stores/engines); the reference is dropped
+    as soon as the job finishes, so an idle queue holds no agents.
+    """
+    while True:
+        try:
+            job = _post_process_queue.get()
+        except Exception:
+            continue
+        try:
+            agent, task_input, duration, success, messages = job
+            agent._background_post_process(task_input, duration, success,
+                                           messages=messages)
+        except Exception as e:
+            print(f"[Agent] Post-process worker error: {e}")
+        finally:
+            agent = None  # drop the agent reference promptly
+            job = None
+            try:
+                _post_process_queue.task_done()
+            except ValueError:
+                pass
+
+
 class OpenAGCAgent(PromptBuilderMixin):
     """
     Main Agent Loop handling context, Tool calling, and orchestration.
@@ -67,7 +122,10 @@ class OpenAGCAgent(PromptBuilderMixin):
     """
     def __init__(self, model: str = "gpt-4o", session_id: Optional[int] = None,
                  logger: Optional[SessionLogger] = None,
-                 pre_enabled_tools: Optional[set] = None):
+                 pre_enabled_tools: Optional[set] = None,
+                 memory_db_path: Optional[str] = None):
+        # memory_db_path: optional override for the memory DB (eval probes
+        # inject an isolated temp DB). None = production default memory.db.
         self.session_id = session_id
         self.failed_attempts = []
         self._consecutive_failures = 0
@@ -81,8 +139,6 @@ class OpenAGCAgent(PromptBuilderMixin):
         self.logger = logger
         self.llm = LLMClient(default_model=model)
         self._pre_enabled_tools = pre_enabled_tools or set()
-        self._session_sandbox_whitelist: set = set()
-        self.pending_messages: list = []
         self._processing_interjection: bool = False
         self._rejected_interjection: Optional[dict] = None
         self._interjection_stuck_count: int = 0
@@ -130,7 +186,7 @@ class OpenAGCAgent(PromptBuilderMixin):
 
         # Initialize smart memory store before reflection/knowledge engines
         self.memory_store = MemoryStore(
-            db_path=get_data_path("memory.db"),
+            db_path=memory_db_path or get_data_path("memory.db"),
             session_id=self.session_id
         )
 
@@ -333,10 +389,13 @@ class OpenAGCAgent(PromptBuilderMixin):
         self.user_input_queue = queue.Queue()
         self.pending_messages: list = []  # Non-blocking input queue during execution
         self.progress_callback = None
+
+        # Post-process (reflection/auto-tool) runs on the module-level shared
+        # worker — see _ensure_post_process_worker; nothing to start here.
         
         # Instantiate tools (MemoryTool shares the same store)
         memory_tool = MemoryTool(
-            db_path=get_data_path("memory.db"),
+            db_path=memory_db_path or get_data_path("memory.db"),
             session_id=self.session_id
         )
         self.full_available_tools = {
@@ -670,10 +729,16 @@ class OpenAGCAgent(PromptBuilderMixin):
             if self._interjection_stuck_count > 12:  # ~12 iterations = ~30s timeout
                 self._processing_interjection = False
                 self._interjection_stuck_count = 0
-                # Auto-pop and accept on timeout
+                # Timeout: don't silently drop the user's message — inject it
+                # as a normal user message so the current loop processes it.
                 msg = self.pending_messages.pop(0)
-                print(f"[Agent] Interjection timeout, auto-accepting: {msg[:60]}")
-                return ""
+                print(f"[Agent] Interjection timeout, injecting as normal user message: {msg[:60]}")
+                return (
+                    f"[用户消息: {msg}] "
+                    f"【系统提示：该插入消息等待判断超时，现按普通用户消息注入当前任务。"
+                    f"请在回复中明确告知用户该消息的处理方式（纳入当前任务继续处理，"
+                    f"或说明它与当前任务无关、建议稍后单独处理）。】"
+                )
             return ""
 
         # New interjection: inject with protocol
@@ -703,6 +768,7 @@ class OpenAGCAgent(PromptBuilderMixin):
         """Pause agent loop and wait for user to approve/deny sandbox path access."""
         import threading
         import json as _json
+        import uuid as _uuid
         from core.paths import get_data_path
 
         # Build request
@@ -716,12 +782,19 @@ class OpenAGCAgent(PromptBuilderMixin):
             block_type = "network" if is_network else "path"
             desc_text = ""
             category_text = ""
+        # Unique id for this wait: two concurrent sandbox prompts in one session
+        # must not clobber each other in _sandbox_waits (previously keyed by
+        # session_id, so the second wait overwrote the first, which then always
+        # timed out). The id travels to the frontend in the sandbox_blocked
+        # event and comes back in the sandbox_response message.
+        request_id = _uuid.uuid4().hex
         if progress_callback:
             progress_callback({
                 "event": "sandbox_blocked",
                 "path": sb.path,
                 "tool_name": tool_name,
                 "session_id": self.session_id,
+                "request_id": request_id,
                 "block_type": block_type,
                 "description": desc_text,
                 "category": category_text,
@@ -735,19 +808,44 @@ class OpenAGCAgent(PromptBuilderMixin):
         except Exception as e:
             print(f"[Agent] Failed to import _sandbox_waits: {e}")
             return f"Sandbox authorization failed (internal error): {sb.path}"
-        _sandbox_waits[self.session_id] = {"event": wait_event, "result": result_holder}
+        entry = {"event": wait_event, "result": result_holder,
+                 "session_id": self.session_id, "request_id": request_id}
+        _sandbox_waits[request_id] = entry
+        # Legacy fallback key for clients that reply without a request_id
+        # (matched by session_id in ws.py / /api/sandbox/approve).
+        _sandbox_waits[self.session_id] = entry
+
+        def _clear_wait_entry():
+            _sandbox_waits.pop(request_id, None)
+            # Only drop the session fallback key if it still points to OUR
+            # entry — a concurrent wait may have overwritten it.
+            if _sandbox_waits.get(self.session_id) is entry:
+                _sandbox_waits.pop(self.session_id, None)
+
         print(f"[Agent] Sandbox blocked: {sb.path} — waiting for user response...")
-        responded = wait_event.wait(timeout=120)
+        # Segmented wait: 1s slices so a user interrupt is honored promptly
+        # instead of sleeping through the full 120s timeout.
+        responded = False
+        deadline = _time.time() + 120
+        while _time.time() < deadline:
+            if wait_event.wait(timeout=1):
+                responded = True
+                break
+            if self.is_interrupted:
+                break
 
         if not responded:
+            _clear_wait_entry()
+            if self.is_interrupted:
+                print(f"[Agent] Sandbox wait interrupted for {sb.path}")
+                return f"Sandbox authorization interrupted by user: {sb.path}"
             print(f"[Agent] Sandbox wait timeout for {sb.path}")
-            _sandbox_waits.pop(self.session_id, None)
             from tools.interaction import TaskPaused
             raise TaskPaused(f"等待权限授权超时，转入后台挂起状态，请确认权限后恢复执行。路径: {sb.path}")
 
         action = result_holder.get("action", "deny_once")
         try:
-            _sandbox_waits.pop(self.session_id, None)
+            _clear_wait_entry()
         except Exception:
             pass
 
@@ -949,8 +1047,31 @@ class OpenAGCAgent(PromptBuilderMixin):
         # deny_once or deny_always or timeout → return error
         return f"Sandbox access denied by user: {sb.path}"
 
+    def _handle_subagent_sandbox_blocked(self, sb, plan, progress_callback):
+        """Route a SandboxBlocked re-raised by a sub-agent into the main auth flow.
+
+        Returns a result dict shaped like SubAgent.run()'s failure result so the
+        delegation collector treats it uniformly. The sub-agent itself has
+        already aborted; on approval the shared session whitelist is updated so
+        a retried or later tool call goes through.
+        """
+        from tools.interaction import TaskPaused
+        _task_desc = plan.get("task", "?") if isinstance(plan, dict) else "?"
+        try:
+            auth_result = self._handle_sandbox_blocked(
+                sb, sb.tool_name or "sub_agent", {}, progress_callback)
+        except TaskPaused as tp:
+            return {"success": False,
+                    "summary": f"子任务「{_task_desc}」等待沙箱授权超时: {tp}"}
+        if auth_result is None:
+            # Approved — whitelist updated, but the sub-agent already aborted.
+            return {"success": False,
+                    "summary": (f"子任务「{_task_desc}」因沙箱限制中断；"
+                                f"路径 {sb.path} 已获用户授权，可在后续重试该操作。")}
+        return {"success": False, "summary": str(auth_result)}
+
     def _record_skill_feedback(self, success: bool, task_input: str = "",
-                                duration: float = 0):
+                                duration: float = 0, messages: list = None):
         """Update skill usage stats and generate reflection based on task outcome."""
         if self._active_skills:
             for filename in self._active_skills:
@@ -963,30 +1084,68 @@ class OpenAGCAgent(PromptBuilderMixin):
             try:
                 self.reflection_engine.generate_reflection(
                     task_input=task_input,
-                    messages=self.messages,
+                    messages=messages if messages is not None else self.messages,
                     success=success,
                     duration_seconds=duration,
                 )
             except Exception as e:
                 print(f"[Agent] Reflection error: {e}")
 
-    def _background_post_process(self, task_input: str, duration: float, success: bool):
-        """Run reflection + auto-tool in background thread after run_turn returns."""
+    def _background_post_process(self, task_input: str, duration: float, success: bool,
+                                 messages: list = None):
+        """Run reflection + auto-tool in background after run_turn returns.
+
+        ``messages`` must be a snapshot taken at enqueue time so the worker
+        never races with the next turn mutating ``self.messages``.
+        """
+        msgs = messages if messages is not None else self.messages
         try:
-            self._record_skill_feedback(success=success, task_input=task_input, duration=duration)
+            self._record_skill_feedback(success=success, task_input=task_input,
+                                        duration=duration, messages=msgs)
         except Exception as e:
             print(f"[Agent] BG post-process error: {e}")
         if success:
             try:
                 tool_name = self._auto_generate_tool(
                     task_input,
-                    {"tool_sequence": self.reflection_engine._extract_tool_sequence(self.messages)},
+                    {"tool_sequence": self.reflection_engine._extract_tool_sequence(msgs)},
                     self.llm
                 )
                 if tool_name:
                     print(f"[Agent] Auto-generated tool: {tool_name}")
             except Exception as e:
                 print(f"[Agent] BG auto-tool error: {e}")
+
+    def _enqueue_post_process(self, task_input: str, duration: float, success: bool):
+        """Enqueue reflection + auto-tool on the shared post-process worker.
+
+        A snapshot of the conversation is taken here so the worker never
+        races with the next turn mutating ``self.messages``. The job carries
+        this agent's reference only until processed — an idle queue holds no
+        agents, so short-lived agents stay garbage-collectable.
+        """
+        if not self.reflection_engine:
+            return
+        try:
+            _ensure_post_process_worker()
+            _post_process_queue.put(
+                (self, task_input, duration, success, list(self.messages)))
+        except Exception as e:
+            print(f"[Agent] Post-process enqueue error: {e}")
+
+    def _finalize_failed_turn(self, user_input: str, current_iter: int, duration: float):
+        """Cleanup shared by abnormal turn exits (max iterations, LLM failure).
+
+        Extracts KG entities, saves task stats and enqueues background
+        post-process so no finalization step is ever skipped.
+        """
+        try:
+            self.knowledge_graph.extract_from_messages(self.messages)
+        except Exception as e:
+            print(f"[Agent] KG extraction error: {e}")
+        cat = self._classify_task_category(user_input)
+        self._save_task_stats(cat, current_iter, False)
+        self._enqueue_post_process(user_input, duration, False)
 
     # Task categories for adaptive config
     TASK_CATEGORIES = {
@@ -1575,8 +1734,15 @@ class OpenAGCAgent(PromptBuilderMixin):
             if plans:
                 sub_results = []
                 completed = set()
+                # Normalize plans: guarantee id/task keys so malformed LLM
+                # output cannot crash the delegation loop with KeyError.
+                plans = [p for p in plans if isinstance(p, dict)]
+                for i, _p in enumerate(plans, 1):
+                    _p.setdefault("id", i)
+                    _p.setdefault("task", f"子任务 {i}")
                 # Execute sub-agents respecting dependency order
                 remaining = list(plans)
+                skipped = []  # Subtasks dropped because a dependency failed
                 max_rounds = len(plans) * 2
                 for _ in range(max_rounds):
                     if not remaining:
@@ -1590,12 +1756,13 @@ class OpenAGCAgent(PromptBuilderMixin):
 
                     # Run independent sub-agents in parallel
                     import concurrent.futures
+                    from tools.base import SandboxBlocked
                     batch_futures = {}
                     with concurrent.futures.ThreadPoolExecutor(
                             max_workers=min(len(batch), 4)) as executor:
                         for plan in batch:
                             sub = SubAgent(
-                                task=plan["task"],
+                                task=plan.get("task", f"子任务 {plan.get('id', '?')}"),
                                 tools=plan.get("tools", ["execute_shell"]),
                                 parent_tools=self.full_available_tools,
                                 max_iterations=plan.get("max_iterations", 10),
@@ -1612,15 +1779,40 @@ class OpenAGCAgent(PromptBuilderMixin):
                             plan = batch_futures[future]
                             try:
                                 result = future.result()
+                            except SandboxBlocked as sb:
+                                # Sub-agent re-raised a sandbox block (it has no
+                                # auth channel of its own) — route it through the
+                                # main agent's authorization flow.
+                                result = self._handle_subagent_sandbox_blocked(
+                                    sb, plan, progress_callback)
                             except Exception as e:
                                 result = {"success": False, "summary": str(e)}
                             sub_results.append(result)
                             if result.get("success"):
-                                completed.add(plan["id"])
+                                completed.add(plan.get("id"))
                             else:
-                                dep_ids = {plan["id"]}
+                                dep_ids = {plan.get("id")}
+                                skipped.extend(
+                                    p for p in remaining
+                                    if dep_ids & set(p.get("depends_on", [])))
                                 remaining = [p for p in remaining
                                     if not (dep_ids & set(p.get("depends_on", [])))]
+                # Surface subtasks that never executed (failed or circular
+                # dependencies) so they are not silently dropped.
+                unexecuted = skipped + remaining
+                if unexecuted:
+                    skipped_lines = "\n".join(
+                        f"- 子任务 {p.get('id', '?')}「{p.get('task', '(无描述)')}」"
+                        for p in unexecuted
+                    )
+                    print(f"[Agent] {len(unexecuted)} subtask(s) not executed:\n{skipped_lines}")
+                    sub_results.append({
+                        "success": False,
+                        "summary": (
+                            f"以下 {len(unexecuted)} 个子任务未执行"
+                            f"（依赖失败或循环依赖）：\n{skipped_lines}"
+                        ),
+                    })
                 result_text = self._synthesize_results(user_input, sub_results)
                 self.messages.append({"role": "assistant", "content": result_text})
 
@@ -1721,8 +1913,25 @@ class OpenAGCAgent(PromptBuilderMixin):
             if progress_callback:
                 progress_callback({"event": "thinking", "iteration": current_iter})
             
-            response, actual_model = self.llm.chat(messages=self.messages, tools=self.tool_schemas)
-            message = response.choices[0].message
+            try:
+                response, actual_model = self.llm.chat(messages=self.messages, tools=self.tool_schemas)
+                choices = getattr(response, "choices", None) or []
+                if not choices:
+                    raise ValueError("LLM returned an empty choices list")
+                message = choices[0].message
+            except Exception as e:
+                # LLM call failed (network error, empty choices, malformed
+                # response). Must not escape run_turn — run the same cleanup
+                # as the max-iterations path so stats/KG/post-process still run.
+                error_text = (f"[LLM_ERROR] Agent stopped: LLM call failed at iteration "
+                              f"{current_iter}: {e}")
+                if verbose:
+                    print(f"[Agent] {error_text}")
+                self.messages.append({"role": "assistant",
+                                      "content": f"Error: LLM call failed: {e}"})
+                self._finalize_failed_turn(user_input, current_iter,
+                                           _time.time() - _task_start)
+                return error_text
             
             # Update logger with the actual model used for this turn
             if self.logger:
@@ -2134,15 +2343,16 @@ class OpenAGCAgent(PromptBuilderMixin):
                             if action == "accept":
                                 self.pending_messages.pop(0)
                                 # Re-inject as clean user message so LLM processes it naturally
+                                # (-3 = user interjection; -2 = assistant tool_call; -1 = tool result)
                                 clean_msg = jr.get("response", "") or "已收到"
-                                self.messages[-2]["content"] = f"[用户插入已接受] {clean_msg}"
+                                self.messages[-3]["content"] = f"[用户插入已接受] {clean_msg}"
                                 if verbose:
                                     print(f"[Agent] ✅ Interjection accepted: {clean_msg[:60]}")
                             elif action == "reject":
                                 self.pending_messages.pop(0)
                                 reason = jr.get("reason", "")
                                 self._rejected_interjection = {
-                                    "message": self.messages[-2].get("content", ""),
+                                    "message": self.messages[-3].get("content", ""),
                                     "reason": reason,
                                     "response": jr.get("response", ""),
                                 }
@@ -2161,10 +2371,6 @@ class OpenAGCAgent(PromptBuilderMixin):
                                 # Use ask_user_question to get clarification
                                 from tools.interaction import AskUserQuestionTool
                                 aqt = AskUserQuestionTool()
-                                # Create a fake context that stores the answer
-                                _fake_ctx = type('obj', (object,), {
-                                    'wait_for_user_input': lambda self, q, opts: None
-                                })()
                                 try:
                                     answer = aqt.execute(
                                         question_text=question,
@@ -2337,14 +2543,8 @@ class OpenAGCAgent(PromptBuilderMixin):
                 # Save runtime stats (fast, synchronous)
                 cat = self._classify_task_category(user_input)
                 self._save_task_stats(cat, current_iter, True)
-                # Defer reflection + auto-tool to background thread
-                if self.reflection_engine:
-                    import threading as _post_thr
-                    _post_thr.Thread(
-                        target=self._background_post_process,
-                        args=(user_input, _time.time() - _task_start, True),
-                        daemon=True,
-                    ).start()
+                # Defer reflection + auto-tool to the serial post-process worker
+                self._enqueue_post_process(user_input, _time.time() - _task_start, True)
                 # If there are rejected interjections, attach them to the response
                 if self._rejected_interjection:
                     import json as _rj
@@ -2353,20 +2553,8 @@ class OpenAGCAgent(PromptBuilderMixin):
                     return f"[INTERJECTION_REJECTED] {_rj.dumps(reject_data, ensure_ascii=False)}\n{final_answer}"
                 return final_answer
 
-        # Extract knowledge graph entities even on failure
-        try:
-            self.knowledge_graph.extract_from_messages(self.messages)
-        except Exception as e:
-            print(f"[Agent] KG extraction error: {e}")
-        cat = self._classify_task_category(user_input)
-        self._save_task_stats(cat, current_iter, False)
-        if self.reflection_engine:
-            import threading as _post_thr3
-            _post_thr3.Thread(
-                target=self._background_post_process,
-                args=(user_input, _time.time() - _task_start, False),
-                daemon=True,
-            ).start()
+        # KG extraction + stats + post-process even on failure
+        self._finalize_failed_turn(user_input, current_iter, _time.time() - _task_start)
         if self._self_review_history:
             summaries = "; ".join(
                 h.split("进度总结：")[1].split("\n")[0][:80] if "进度总结：" in h else "N/A"
@@ -2389,6 +2577,11 @@ class OpenAGCAgent(PromptBuilderMixin):
     def wait_for_user_input(self, question: str, options: Optional[List[str]] = None) -> str:
         """
         Block the agent thread and wait for user input from the frontend.
+
+        Polls the queue with a 1s timeout so task interrupts are honored
+        (a stopped task never leaks this thread), and gives up after a total
+        timeout (default 300s, overridable via ``self._user_input_timeout``),
+        which is treated as an interrupt.
         """
         if self.progress_callback:
             self.progress_callback({
@@ -2396,11 +2589,22 @@ class OpenAGCAgent(PromptBuilderMixin):
                 "question": question,
                 "options": options
             })
-        
+
         # Clear queue of any stale responses
         while not self.user_input_queue.empty():
             self.user_input_queue.get_nowait()
-            
-        # Block until the websocket sends a response
-        answer = self.user_input_queue.get(block=True)
-        return answer
+
+        # Block until the websocket sends a response, waking periodically to
+        # check for interrupts.
+        total_timeout = getattr(self, "_user_input_timeout", 300.0)
+        deadline = _time.time() + total_timeout
+        while True:
+            if getattr(self, "is_interrupted", False):
+                return "[用户已中断任务]"
+            try:
+                return self.user_input_queue.get(timeout=1.0)
+            except queue.Empty:
+                if _time.time() >= deadline:
+                    # Total timeout — treat as interrupt so the agent loop unwinds
+                    self.is_interrupted = True
+                    return "[等待用户输入超时，任务已中断]"

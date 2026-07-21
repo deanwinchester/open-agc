@@ -1166,3 +1166,32 @@ Claude Code 内置了强大的 `MCPTool`, `ListMcpResourcesTool` 等原生支持
 ### 17.1 max iteration机制不友好，claude code是什么机制？
 
 ### 17.2 中断后的自动恢复机制也有问题，我点继续时，系统同时自动恢复，变成两个任务了
+
+---
+
+## 十八、失效修复记录（阶段 0/3/4，2026-07）
+
+> ⚠️ **不要以本文档的"✅ 已完成"标记作为功能可用的依据。**
+> 本文档多处声称反思（Reflection）、知识图谱（KG）等功能"已完成"，但阶段 0 排查发现：
+> **反思功能因异常被静默吞掉（裸 `except`/只 print 不上报），已 100% 失效数月**，
+> 期间本文档一直标注"完成"，无人察觉。同类静默失效并非孤例。
+> 功能是否可用，**以代码与测试证据为准，不以本文件完成度为准**。
+
+已修复并验证的记录（均有代码/测试证据）：
+
+- **阶段 0**：修复吞异常导致的核心链路静默失效（含反思流程）；验证见 `scratch/verify_stage0.py`、
+  `tests/test_stage0_fixes.py`。
+- **阶段 3**：子代理并发锁、任务过期判定（stale running）等可靠性修复；
+  验证见 `tests/test_subagent_locks.py`、`tests/test_task_staleness.py`。
+- **阶段 4**：观测一致性与 eval 隔离——
+  成本费率表统一为单一来源 `core/model_pricing.py`（此前 llm_client 与 stats_manager 两套费率，
+  同一调用两处成本不一致）；`eval/probes.py` 不再往生产 `data/memory.db` 写测试数据，
+  有真实环境副作用的 probe 默认跳过；死代码清理（含 `prompt_builder.py` mixin 中被
+  `agent.py` 同名方法遮蔽、且首行即 NameError 的 `_build_system_prompt`）。
+
+教训与约定：
+
+1. 标注"已完成"的功能必须附带可运行的验证证据（测试或脚本输出），否则视为未完成。
+2. 禁止裸 `except: pass`、只 print 不往上报的吞异常写法——静默失效比崩溃更难发现，
+   反思功能即因此失效数月无人察觉。
+3. 修改功能后必须同步更新本文档状态；文档与代码冲突时，以代码为准。

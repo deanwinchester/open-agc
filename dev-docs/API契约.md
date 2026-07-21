@@ -233,7 +233,7 @@
 |---|---|---|
 | `query`（缺省） | `query`, `agent_name?`, `images?` | 启动一轮 agent 执行；该会话已有活动 agent 时改为 `queue_message` 排队（ws.py:959-966） |
 | `switch_session` | `session_id` | 不重连切换会话，重载历史并推送该会话最近任务的 `history_steps` |
-| `sandbox_response` | `session_id?`, `action`, `path?`, `password?` | 解除沙箱授权等待；迟到的授权会记录并恢复被中断任务（ws.py:837-886） |
+| `sandbox_response` | `session_id?`, `action`, `path?`, `password?`, `request_id?` | 解除沙箱授权等待；带 `request_id` 时按唯一等待精确匹配（同会话并发授权不串），缺省回退 session 键；迟到的授权会记录并恢复被中断任务（ws.py:837-886） |
 | `resume` | `task_id`, `extra_instruction?` | 恢复中断任务：先推 `history_steps`（task_status=resuming），再带上下文续跑 |
 | `retry` | `query?`, `model?`, `agent_name?`, `images?` | 用指定模型/agent 重试上一轮 |
 | `interrupt` | — | 中断当前运行中的 agent 与 shell（ws.py:462-472）。前端同时也会调 REST `POST /api/tasks/{id}/interrupt` |
@@ -247,7 +247,7 @@
 | └ `event=thinking` / `usage` / `model_switched` / `response` | agent/agent.py | `iteration`, token 用量等 | 思考状态/用量展示 |
 | └ `event=tool_start` / `tool_done` | agent/agent.py、agent/sub_agent.py | `step`, `tool`, `tool_label`, `args_preview` / `result_preview`, `success` | 步骤卡片开始/完成渲染 |
 | └ `event=ask_user` | agent/agent.py:2395 | `question`, `task_id`, `background` | 后台提问：渲染回复输入框，提交走 `POST /api/tasks/{id}/reply`；自动切到聊天视图 |
-| └ `event=sandbox_blocked` / `sandbox_approved` | agent/agent.py | `block_type`（path/network/permission）, `path`, `category?`, `description?` | `showSandboxBlockedModal` 授权弹窗，结果经 WS `sandbox_response` 或 REST `/api/sandbox/approve` 回传 |
+| └ `event=sandbox_blocked` / `sandbox_approved` | agent/agent.py | `block_type`（path/network/permission）, `path`, `category?`, `description?`, `request_id` | `showSandboxBlockedModal` 授权弹窗，结果经 WS `sandbox_response` 或 REST `/api/sandbox/approve` 回传（回传须带原 `request_id`） |
 | └ `event=task_backgrounded` | agent/agent.py | `task_id` | 步骤卡片标记转入后台 |
 | `message` | api/ws.py、api/background.py | `role`（agent/system/user；`tool_step` 前端跳过）, `content`, `session_id`, `task_id?`, `background?` | `appendMessage` 渲染最终回复；语音播报（如开启） |
 | `error` | api/ws.py、api/background.py | `content`, `original_query?`, `session_id` | 前台：重试条 `showRetryBar`；后台：系统消息 |

@@ -3,6 +3,8 @@ import os
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
+from core.model_pricing import calculate_cost
+
 class StatsManager:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -42,7 +44,10 @@ class StatsManager:
                      cached_tokens: int = 0):
         """Record token usage for a single request."""
         total_tokens = prompt_tokens + completion_tokens
-        cost_estimate = (total_tokens / 1000.0) * 0.01
+        # Shared rate table (core/model_pricing.py) — must match the cost
+        # llm_client writes to model_call_logs for the same call.
+        cost_estimate = calculate_cost(provider, model, prompt_tokens,
+                                       completion_tokens, cached_tokens)
 
         try:
             with self._get_conn() as conn:
@@ -81,8 +86,13 @@ class StatsManager:
             
         return results
 
-    def get_task_usage(self, task_id: int) -> Dict[str, int]:
-        """Get cumulative usage for a specific task."""
+    def get_task_usage(self, task_id: int) -> Dict[str, Any]:
+        """Get cumulative usage for a specific task.
+
+        Always returns the full key set (prompt/completion/total/cached/cost).
+        SUM() over zero matching rows yields NULL, so each value falls back
+        to 0 — callers can rely on the "cost" key being present.
+        """
         query = '''
             SELECT SUM(prompt_tokens) as prompt,
                    SUM(completion_tokens) as completion,
@@ -92,16 +102,19 @@ class StatsManager:
             FROM token_usage
             WHERE task_id = ?
         '''
+        keys = ("prompt", "completion", "total", "cached", "cost")
         try:
             with self._get_conn() as conn:
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(query, (task_id,)).fetchone()
                 if row:
-                    return dict(row)
+                    data = dict(row)
+                    return {k: (data.get(k) if data.get(k) is not None else 0)
+                            for k in keys}
         except Exception as e:
             print(f"[StatsManager] Error fetching task usage: {e}")
 
-        return {"prompt": 0, "completion": 0, "total": 0, "cached": 0}
+        return {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "cost": 0}
 
 # Global singleton will be initialized in api/server.py
 _stats_manager = None

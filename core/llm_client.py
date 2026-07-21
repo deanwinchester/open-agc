@@ -4,8 +4,7 @@ import re
 import uuid
 import base64
 import time
-import threading
-import sqlite3
+import contextlib
 import litellm
 from litellm.exceptions import ContextWindowExceededError
 # Fix for PyInstaller bundling issue with tiktoken
@@ -13,41 +12,58 @@ litellm.num_tokens_logging = False
 litellm.supports_token_counter = False
 from typing import List, Dict, Any, Optional, Tuple
 
-from core.paths import get_data_path
+from core.model_pricing import calculate_cost
+from api.db import db_connect
 
 # ── Model call logging ──
-_MODEL_LOGS_DB = threading.local()
-
-def _get_model_logs_conn() -> sqlite3.Connection:
-    if not hasattr(_MODEL_LOGS_DB, 'conn') or _MODEL_LOGS_DB.conn is None:
-        db_path = get_data_path("chat_history.db")
-        _MODEL_LOGS_DB.conn = sqlite3.connect(db_path, timeout=5)
-        _MODEL_LOGS_DB.conn.execute("PRAGMA journal_mode=WAL")
-    return _MODEL_LOGS_DB.conn
+# Connections are opened per write via api.db.db_connect() (busy_timeout +
+# Row factory) and closed immediately. The previous thread-local connection
+# lived for the whole process lifetime and was never closed (阶段4 Task5).
+_model_logs_table_ready = False
 
 def _init_model_logs_table():
-    """Create the model_call_logs table if it doesn't exist."""
+    """Create the model_call_logs table if it doesn't exist.
+
+    Runs at most once per process, so hot logging paths don't pay DDL costs
+    on every write.
+    """
+    global _model_logs_table_ready
+    if _model_logs_table_ready:
+        return
     try:
-        conn = _get_model_logs_conn()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS model_call_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                session_id INTEGER,
-                task_id INTEGER,
-                provider TEXT NOT NULL,
-                model TEXT NOT NULL,
-                prompt_tokens INTEGER DEFAULT 0,
-                completion_tokens INTEGER DEFAULT 0,
-                total_tokens INTEGER DEFAULT 0,
-                request_data TEXT,
-                response_data TEXT,
-                cache_hit TEXT DEFAULT 'unknown',
-                latency_ms INTEGER DEFAULT 0,
-                cost_estimate REAL DEFAULT 0.0
-            )
-        """)
-        conn.commit()
+        with contextlib.closing(db_connect()) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS model_call_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    session_id INTEGER,
+                    task_id INTEGER,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    prompt_tokens INTEGER DEFAULT 0,
+                    completion_tokens INTEGER DEFAULT 0,
+                    total_tokens INTEGER DEFAULT 0,
+                    request_data TEXT,
+                    response_data TEXT,
+                    cache_hit TEXT DEFAULT 'unknown',
+                    latency_ms INTEGER DEFAULT 0,
+                    cost_estimate REAL DEFAULT 0.0,
+                    cached_tokens INTEGER DEFAULT 0
+                )
+            """)
+            # Idempotent migration for databases created before cached_tokens existed
+            import sqlite3 as _sqlite3
+            try:
+                conn.execute("ALTER TABLE model_call_logs ADD COLUMN cached_tokens INTEGER DEFAULT 0")
+            except _sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+            # 确认列真的存在再置 ready —— 避免迁移静默失败后本进程日志永久丢失
+            _cols = {r[1] for r in conn.execute("PRAGMA table_info(model_call_logs)").fetchall()}
+            if "cached_tokens" not in _cols:
+                raise RuntimeError("cached_tokens column missing after migration attempt")
+            conn.commit()
+        _model_logs_table_ready = True
     except Exception as _e:
         print(f"[LLMClient] Failed to init model_logs table: {_e}")
 
@@ -56,6 +72,10 @@ def _infer_provider(model_name: str) -> str:
     if not model_name:
         return "unknown"
     ml = model_name.lower()
+    # Local serving stacks first: their model ids often contain upstream
+    # provider keywords (e.g. "llamacpp/qwen", "sglang/llama-3").
+    if "llamacpp" in ml: return "local"
+    if "sglang" in ml: return "local"
     if "deepseek" in ml: return "deepseek"
     if "kimi_code" in ml: return "kimi_code"
     if "gpt" in ml or "openai" in ml: return "openai"
@@ -65,8 +85,6 @@ def _infer_provider(model_name: str) -> str:
     if "glm" in ml or "zhipu" in ml or "zai" in ml: return "glm"
     if "qwen" in ml or "alibaba" in ml: return "qwen"
     if "llama" in ml or "meta" in ml: return "llama"
-    if "llamacpp" in ml: return "local"
-    if "sglang" in ml: return "local"
     if "/" in model_name:
         return model_name.split("/")[0]
     return "unknown"
@@ -119,22 +137,10 @@ def is_model_logging_enabled() -> bool:
 
 def _calculate_cost(provider: str, model: str, prompt_tokens: int,
                      completion_tokens: int, cached_tokens: int) -> float:
-    """Calculate cost in CNY with provider-specific pricing."""
-    ml = model.lower()
-    # DeepSeek pricing (¥ per 1M tokens)
-    if "deepseek" in ml:
-        uncached = prompt_tokens - cached_tokens
-        if "chat" in ml:  # Flash
-            return (cached_tokens / 1_000_000 * 0.02
-                    + uncached / 1_000_000 * 1.0
-                    + completion_tokens / 1_000_000 * 2.0)
-        else:  # Pro / Reasoner
-            return (cached_tokens / 1_000_000 * 0.025
-                    + uncached / 1_000_000 * 3.0
-                    + completion_tokens / 1_000_000 * 6.0)
-    # Default flat rate
-    tt = prompt_tokens + completion_tokens
-    return (tt / 1000.0) * 0.01
+    """Calculate cost in CNY. Back-compat wrapper: the rate table lives in
+    core/model_pricing.py (single source of truth shared with stats_manager)."""
+    return calculate_cost(provider, model, prompt_tokens,
+                          completion_tokens, cached_tokens)
 
 
 def _log_model_call(provider: str, model: str, prompt_tokens: int,
@@ -184,20 +190,20 @@ def _log_model_call(provider: str, model: str, prompt_tokens: int,
 
         # Store file paths + summary in DB
         _init_model_logs_table()
-        conn = _get_model_logs_conn()
         cost = _calculate_cost(provider, model, prompt_tokens, completion_tokens, cached_tokens)
         _summary = (request_data or "")[:500]
-        conn.execute(
-            """INSERT INTO model_call_logs
-               (session_id, task_id, provider, model, prompt_tokens,
-                completion_tokens, total_tokens, request_data, response_data,
-                cache_hit, latency_ms, cost_estimate, cached_tokens)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (session_id, task_id, provider, model, prompt_tokens,
-             completion_tokens, total_tokens, _summary, f"{_req_path}|{_resp_path}",
-             cache_hit, latency_ms, cost, cached_tokens)
-        )
-        conn.commit()
+        with contextlib.closing(db_connect()) as conn:
+            conn.execute(
+                """INSERT INTO model_call_logs
+                   (session_id, task_id, provider, model, prompt_tokens,
+                    completion_tokens, total_tokens, request_data, response_data,
+                    cache_hit, latency_ms, cost_estimate, cached_tokens)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (session_id, task_id, provider, model, prompt_tokens,
+                 completion_tokens, total_tokens, _summary, f"{_req_path}|{_resp_path}",
+                 cache_hit, latency_ms, cost, cached_tokens)
+            )
+            conn.commit()
     except Exception as e:
         print(f"[ModelLog] Failed to log: {e}")
 
@@ -520,12 +526,14 @@ class LLMClient:
         orphaned tool calls from previous conversation rounds.
         """
         sanitized = []
-        system_content = None
+        system_parts = []
 
         for msg in messages:
             role = msg.get("role", "")
             if role == "system":
-                system_content = msg.get("content", "")
+                content = msg.get("content", "")
+                if content:
+                    system_parts.append(content)
                 continue
 
             if role == "tool":
@@ -537,8 +545,10 @@ class LLMClient:
 
             sanitized.append(msg)
 
-        # If there was a system message, prepend it to the first user message
-        if system_content:
+        # If there were system messages, merge ALL of them (in order) into the
+        # first user message — previously only the last one survived.
+        if system_parts:
+            system_content = "\n\n".join(system_parts)
             for i, msg in enumerate(sanitized):
                 if msg.get("role") == "user":
                     sanitized[i] = {
@@ -667,9 +677,11 @@ class LLMClient:
                                 "关键信息已在当前消息中保留，如果需要更早的上下文，请使用 search_history 工具检索。"
                             )}
                             truncated.insert(1, note)
-                        kwargs["messages"] = truncated
+                        # Rebuild kwargs via _build_model_kwargs so provider-specific
+                        # handling (e.g. llamacpp sanitization) also applies on the
+                        # retry. Do NOT mutate the caller's messages list.
+                        kwargs = self._build_model_kwargs(attempt_model, truncated, tools, stream=False)
                         response = litellm.completion(**kwargs)
-                        messages[:] = truncated
                     t1 = time.time()
 
                     try:

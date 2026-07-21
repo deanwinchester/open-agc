@@ -27,7 +27,12 @@ class SubAgent:
 
     # Tools that maintain global/singleton state — serialize access with locks
     STATEFUL_TOOLS = {"browser_automation", "computer_control"}
-    _tool_locks: Dict[str, threading.Lock] = {}
+    # Pre-created at class definition time: check-then-act creation in run()
+    # races when parallel sub-agents each create and overwrite the shared Lock,
+    # silently breaking mutual exclusion for browser/computer.
+    _tool_locks: Dict[str, threading.Lock] = {
+        name: threading.Lock() for name in STATEFUL_TOOLS
+    }
 
     def __init__(self, task: str, tools: List[str],
                  parent_tools: Dict,
@@ -79,6 +84,7 @@ class SubAgent:
 
     def run(self) -> Dict[str, Any]:
         """Execute the sub-task. Returns structured result."""
+        from tools.base import SandboxBlocked
         start_time = _time.time()
 
         if not self.llm:
@@ -200,9 +206,8 @@ class SubAgent:
                                 "_session_id": self._session_id,
                             }
                             # Serialize access for stateful tools shared across threads
+                            # (locks are pre-created at class level — no check-then-act here)
                             if func_name in self.STATEFUL_TOOLS:
-                                if func_name not in self._tool_locks:
-                                    self._tool_locks[func_name] = threading.Lock()
                                 self._tool_locks[func_name].acquire()
                                 try:
                                     result = tool.execute(
@@ -223,6 +228,12 @@ class SubAgent:
                             if len(result) > 15000:
                                 result = result[:15000] + "\n...[truncated]"
                             success = True
+                        except SandboxBlocked:
+                            # Sub-agents have no channel to ask the user for
+                            # authorization — re-raise so the main agent's
+                            # delegation collector can route it into
+                            # _handle_sandbox_blocked.
+                            raise
                         except Exception as e:
                             result = f"Error executing {func_name}: {e}"
 

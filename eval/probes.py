@@ -4,11 +4,25 @@ Advanced evaluation probes — measure real execution path quality.
 These probes run via the REST API (same path as web UI) and measure
 aspects the basic runner can't: memory precision/recall, progressive
 disclosure activation, long-context retention, and tool choice quality.
+
+Isolation rules (阶段4 Task5):
+  - probe_memory_recall seeds its 7 test memories into a TEMPORARY database
+    that is deleted on exit — the production data/memory.db is never touched
+    unless you explicitly pass db_path= (seeded rows are then deleted again).
+    The agent under test is constructed with memory_db_path pointing at that
+    same database, so recall is measured against the seeded ground truth.
+  - Probes whose tasks mutate the real environment (filesystem writes,
+    package installs, memory writes — see SIDE_EFFECT_PROBES) are SKIPPED
+    unless explicitly enabled with allow_side_effects=True.
 """
-import sys, os, json, time, re, urllib.request, urllib.parse
+import sys, os, json, time, re, shutil, tempfile, urllib.request, urllib.parse
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Probes that execute agent tasks with real-environment side effects
+# (write/edit files, install packages, write memories). Skipped by default.
+SIDE_EFFECT_PROBES = ("context_retention", "tool_choice_quality", "response_quality")
 
 
 def api_query(query, session_id=9999, base_url="http://127.0.0.1:8000"):
@@ -29,69 +43,97 @@ def api_query(query, session_id=9999, base_url="http://127.0.0.1:8000"):
 
 # ── Probe 1: Memory recall precision/recall ──
 
-def probe_memory_recall(session_id=9998):
+def probe_memory_recall(session_id=9998, db_path=None):
     """Measure memory recall quality: precision, recall, F1.
 
-    Writes test memories first, then queries for them and measures
-    how many correct (precision) and how many expected (recall).
+    Measurement semantics: the 7 test memories are seeded into the SAME
+    database the agent under test reads — the agent is constructed with
+    ``OpenAGCAgent(memory_db_path=db_path)`` so its MemoryStore/MemoryTool
+    point at the seeded store. Recall is therefore measured against the
+    seeded ground truth, not the production memories.
+
+    Isolation: by default that database is a TEMPORARY file (tempfile)
+    deleted on exit — the production data/memory.db is never touched.
+    Pass ``db_path`` explicitly (e.g. get_data_path("memory.db")) only for
+    a full end-to-end run against the real store; the seeded rows are
+    deleted again in the cleanup phase.
     """
     from core.memory_store import MemoryStore
-    from core.paths import get_data_path
     from agent.agent import OpenAGCAgent
 
-    store = MemoryStore(db_path=get_data_path("memory.db"), session_id=session_id)
+    tmp_dir = None
+    store = None
+    seeded_ids = []
+    if db_path is None:
+        tmp_dir = tempfile.mkdtemp(prefix="openagc_probe_mem_")
+        db_path = os.path.join(tmp_dir, "memory.db")
 
-    # Step 1: Seed test memories with known ground truth
-    test_memories = [
-        ("用户的出生地是北京", "user_pref", "core"),
-        ("用户最喜欢的颜色是蓝色", "user_pref", "core"),
-        ("用户养了一只橘猫叫小橘", "user_pref", "core"),
-        ("用户的工作是软件工程师", "user_pref", "core"),
-        ("用户用的是Windows 11系统", "tech", "core"),
-        ("用户的显卡是RTX 4090", "tech", "core"),
-        ("用户常用IDE是VS Code", "tech", "episode"),
-    ]
-    for content, cat, mtype in test_memories:
-        store.add_memory(content, category=cat, memory_type=mtype)
+    try:
+        store = MemoryStore(db_path=db_path, session_id=session_id)
 
-    # Step 2: Query agent about user preferences
-    agent = OpenAGCAgent()
-    response = agent.run_turn("你还记得哪些关于我的个人信息？", verbose=False)
+        # Step 1: Seed test memories with known ground truth
+        test_memories = [
+            ("用户的出生地是北京", "user_pref", "core"),
+            ("用户最喜欢的颜色是蓝色", "user_pref", "core"),
+            ("用户养了一只橘猫叫小橘", "user_pref", "core"),
+            ("用户的工作是软件工程师", "user_pref", "core"),
+            ("用户用的是Windows 11系统", "tech", "core"),
+            ("用户的显卡是RTX 4090", "tech", "core"),
+            ("用户常用IDE是VS Code", "tech", "episode"),
+        ]
+        for content, cat, mtype in test_memories:
+            seeded_ids.append(store.add_memory(content, category=cat, memory_type=mtype))
 
-    # Step 3: Calculate recall metrics
-    expected_facts = {"北京", "蓝色", "橘猫", "小橘", "软件工程师", "Windows", "RTX 4090", "VS Code"}
-    found_facts = set()
-    for fact in expected_facts:
-        if fact in response:
-            found_facts.add(fact)
+        # Step 2: Query the agent — it reads the SAME (seeded) db via injection
+        agent = OpenAGCAgent(memory_db_path=db_path)
+        response = agent.run_turn("你还记得哪些关于我的个人信息？", verbose=False)
 
-    # Also check for hallucinated facts (things not stored)
-    hallucinated = set()
-    possible_hallucinations = {"上海", "红色", "小狗", "设计师", "MacOS", "RTX 3080", "PyCharm", "Linux"}
-    for h in possible_hallucinations:
-        if h in response and h not in expected_facts:
-            hallucinated.add(h)
+        # Step 3: Calculate recall metrics
+        expected_facts = {"北京", "蓝色", "橘猫", "小橘", "软件工程师", "Windows", "RTX 4090", "VS Code"}
+        found_facts = set()
+        for fact in expected_facts:
+            if fact in response:
+                found_facts.add(fact)
 
-    true_positives = len(found_facts)
-    false_positives = len(hallucinated)
-    false_negatives = len(expected_facts - found_facts)
+        # Also check for hallucinated facts (things not stored)
+        hallucinated = set()
+        possible_hallucinations = {"上海", "红色", "小狗", "设计师", "MacOS", "RTX 3080", "PyCharm", "Linux"}
+        for h in possible_hallucinations:
+            if h in response and h not in expected_facts:
+                hallucinated.add(h)
 
-    precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
-    recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        true_positives = len(found_facts)
+        false_positives = len(hallucinated)
+        false_negatives = len(expected_facts - found_facts)
 
-    return {
-        "probe": "memory_recall",
-        "true_positives": true_positives,
-        "false_positives": false_positives,
-        "false_negatives": false_negatives,
-        "precision": round(precision, 3),
-        "recall": round(recall, 3),
-        "f1": round(f1, 3),
-        "found": list(found_facts),
-        "hallucinated": list(hallucinated),
-        "expected_count": len(expected_facts),
-    }
+        precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
+        recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+        return {
+            "probe": "memory_recall",
+            "true_positives": true_positives,
+            "false_positives": false_positives,
+            "false_negatives": false_negatives,
+            "precision": round(precision, 3),
+            "recall": round(recall, 3),
+            "f1": round(f1, 3),
+            "found": list(found_facts),
+            "hallucinated": list(hallucinated),
+            "expected_count": len(expected_facts),
+            "isolated_db": tmp_dir is not None,
+        }
+    finally:
+        # Cleanup: never leave probe data behind.
+        if tmp_dir is None and store is not None and seeded_ids:
+            # Explicit (e.g. production) db_path: remove just the seeded rows.
+            try:
+                for mid in seeded_ids:
+                    store.delete_memory(mid)
+            except Exception as _clean_e:
+                print(f"[Probe] Seed cleanup error: {_clean_e}")
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ── Probe 2: Progressive disclosure activation ──
@@ -129,12 +171,23 @@ def probe_tool_discovery(session_id=9997):
 
 # ── Probe 3: Long-context retention ──
 
-def probe_context_retention(session_id=9996):
+def probe_context_retention(session_id=9996, allow_side_effects=False):
     """Measure how well the agent retains information across a long conversation.
 
     Simulates a multi-turn interaction by feeding sequential messages
     and checking if earlier information is retained in later turns.
+
+    Side effects: the injected "请记住：…" turns make the real agent write
+    memories into the production memory.db. Skipped unless
+    ``allow_side_effects=True``.
     """
+    if not allow_side_effects:
+        return {
+            "probe": "context_retention",
+            "skipped": True,
+            "reason": "real-environment side effects (memory writes); "
+                      "pass allow_side_effects=True to enable",
+        }
     from agent.agent import OpenAGCAgent
 
     agent = OpenAGCAgent()
@@ -182,12 +235,23 @@ def probe_context_retention(session_id=9996):
 
 # ── Probe 4: Tool choice quality ──
 
-def probe_tool_choice_quality(session_id=9995):
+def probe_tool_choice_quality(session_id=9995, allow_side_effects=False):
     """Evaluate whether the agent chooses the right tool for each task.
 
     Measures: correct tool first attempt, unnecessary tool switches,
     and task completion efficiency.
+
+    Side effects: several tasks ("修改文件内容", "安装Python包", …) make the
+    real agent edit files / install packages in the real environment.
+    Skipped unless ``allow_side_effects=True``.
     """
+    if not allow_side_effects:
+        return {
+            "probe": "tool_choice_quality",
+            "skipped": True,
+            "reason": "real-environment side effects (file edits, package installs); "
+                      "pass allow_side_effects=True to enable",
+        }
     from agent.agent import OpenAGCAgent
 
     tasks = [
@@ -247,8 +311,20 @@ def probe_tool_choice_quality(session_id=9995):
 
 # ── Probe 5: Response quality (conciseness, helpfulness) ──
 
-def probe_response_quality(session_id=9994):
-    """Measure response quality metrics: length, structure, code inclusion."""
+def probe_response_quality(session_id=9994, allow_side_effects=False):
+    """Measure response quality metrics: length, structure, code inclusion.
+
+    Side effects: tasks like "帮我创建一个简单的HTML页面" make the real
+    agent write files into the workspace. Skipped unless
+    ``allow_side_effects=True``.
+    """
+    if not allow_side_effects:
+        return {
+            "probe": "response_quality",
+            "skipped": True,
+            "reason": "real-environment side effects (workspace file writes); "
+                      "pass allow_side_effects=True to enable",
+        }
     from agent.agent import OpenAGCAgent
 
     queries = [
@@ -328,13 +404,23 @@ def probe_rest_api_execution(base_url="http://127.0.0.1:8000"):
 
 # ── Run all probes ──
 
-def run_all_probes(include_rest_api=False):
-    """Run all advanced probes and return aggregated results."""
+def run_all_probes(include_rest_api=False, allow_side_effects=False):
+    """Run all advanced probes and return aggregated results.
+
+    Probes with real-environment side effects (SIDE_EFFECT_PROBES) are
+    skipped unless ``allow_side_effects=True``.
+    """
     print(f"  {'='*55}")
     print(f"  🔬 Advanced Probes")
     print(f"  {'='*55}")
 
     probes = []
+
+    def _skipped(r):
+        if r.get("skipped"):
+            print(f"  ⏭️  Skipped (side effects) — enable with allow_side_effects=True")
+            return True
+        return False
 
     print(f"\n  ── Probe 1: Memory Recall (precision/recall/F1) ──")
     try:
@@ -342,6 +428,8 @@ def run_all_probes(include_rest_api=False):
         probes.append(r)
         print(f"  Precision={r['precision']:.1%} Recall={r['recall']:.1%} F1={r['f1']:.1%}")
         print(f"  TP={r['true_positives']} FP={r['false_positives']} FN={r['false_negatives']}")
+        if r.get("isolated_db"):
+            print(f"  🛡️  Isolated temp DB (production memory.db untouched)")
         if r['hallucinated']:
             print(f"  ⚠️  Hallucinated: {r['hallucinated']}")
     except Exception as e:
@@ -362,34 +450,37 @@ def run_all_probes(include_rest_api=False):
 
     print(f"\n  ── Probe 3: Long-context Retention ──")
     try:
-        r = probe_context_retention()
+        r = probe_context_retention(allow_side_effects=allow_side_effects)
         probes.append(r)
-        print(f"  Recall rate: {r['recall_rate']:.0%} ({r['facts_recalled']}/{r['facts_injected']})")
-        print(f"  Hallucinated: {r['hallucinated_facts']}")
-        if r['missed_details']:
-            print(f"  Missed: {r['missed_details']}")
+        if not _skipped(r):
+            print(f"  Recall rate: {r['recall_rate']:.0%} ({r['facts_recalled']}/{r['facts_injected']})")
+            print(f"  Hallucinated: {r['hallucinated_facts']}")
+            if r['missed_details']:
+                print(f"  Missed: {r['missed_details']}")
     except Exception as e:
         probes.append({"probe": "context_retention", "error": str(e)})
         print(f"  ❌ Error: {e}")
 
     print(f"\n  ── Probe 4: Tool Choice Quality ──")
     try:
-        r = probe_tool_choice_quality()
+        r = probe_tool_choice_quality(allow_side_effects=allow_side_effects)
         probes.append(r)
-        print(f"  Correct first choice: {r['correct_first_choice']}/{r['total_tasks']} ({r['accuracy']:.0%})")
-        for d in r['details']:
-            mark = "✅" if d.get('correct_first_choice') else "❌"
-            print(f"  {mark} {d['task']}: first={d.get('first_tool')} expected={d.get('expected')}")
+        if not _skipped(r):
+            print(f"  Correct first choice: {r['correct_first_choice']}/{r['total_tasks']} ({r['accuracy']:.0%})")
+            for d in r['details']:
+                mark = "✅" if d.get('correct_first_choice') else "❌"
+                print(f"  {mark} {d['task']}: first={d.get('first_tool')} expected={d.get('expected')}")
     except Exception as e:
         probes.append({"probe": "tool_choice_quality", "error": str(e)})
         print(f"  ❌ Error: {e}")
 
     print(f"\n  ── Probe 5: Response Quality ──")
     try:
-        r = probe_response_quality()
+        r = probe_response_quality(allow_side_effects=allow_side_effects)
         probes.append(r)
-        print(f"  Avg response length: {r['avg_response_length']} chars")
-        print(f"  Code blocks: {r['total_code_blocks']}")
+        if not _skipped(r):
+            print(f"  Avg response length: {r['avg_response_length']} chars")
+            print(f"  Code blocks: {r['total_code_blocks']}")
     except Exception as e:
         probes.append({"probe": "response_quality", "error": str(e)})
         print(f"  ❌ Error: {e}")
@@ -407,17 +498,20 @@ def run_all_probes(include_rest_api=False):
             probes.append({"probe": "rest_api", "error": str(e)})
             print(f"  ❌ Error: {e}")
 
-    # Aggregate
-    passed = sum(1 for p in probes if "error" not in p)
+    # Aggregate (skipped probes count as neither passed nor failed)
+    passed = sum(1 for p in probes if "error" not in p and not p.get("skipped"))
+    skipped = sum(1 for p in probes if p.get("skipped"))
     total = len(probes)
 
     print(f"\n  {'='*55}")
-    print(f"  Probes: {passed}/{total} passed")
+    print(f"  Probes: {passed}/{total - skipped} passed" +
+          (f" ({skipped} skipped)" if skipped else ""))
     print(f"  {'='*55}")
 
     return {
         "timestamp": datetime.now().isoformat(),
         "total_probes": total,
         "passed_probes": passed,
+        "skipped_probes": skipped,
         "results": probes,
     }
