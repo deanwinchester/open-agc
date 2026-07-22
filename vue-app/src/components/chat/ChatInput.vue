@@ -13,7 +13,7 @@
 // paste/drag 均走模板事件绑定，组件卸载时 Vue 自动移除，无遗留监听。
 import { ref, computed, nextTick, onUnmounted } from 'vue';
 import { ElMessage } from 'element-plus';
-import { Picture, Paperclip, Microphone } from '@element-plus/icons-vue';
+import { Picture, Paperclip, Microphone, Promotion } from '@element-plus/icons-vue';
 import zh from '../../i18n/zh';
 
 const t = zh.chat;
@@ -326,9 +326,12 @@ onUnmounted(() => {
       >⏹</el-button>
       <el-button
         type="primary"
+        circle
+        class="send-btn"
         :disabled="!canSend"
+        :title="running ? t.append : t.send"
         @click="submit"
-      >{{ running ? t.append : t.send }}</el-button>
+      ><el-icon><Promotion /></el-icon></el-button>
     </div>
 
     <!-- 移动端「＋」动作面板：图标卡片式（微信风格） -->
