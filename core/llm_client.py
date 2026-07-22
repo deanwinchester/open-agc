@@ -225,6 +225,7 @@ MIME_TYPES = {
 }
 
 SCREENSHOT_MARKER = "[SCREENSHOT_DATA:"
+IMAGE_MARKER = "[IMAGE_DATA:"
 
 
 def encode_image_to_data_url(file_path: str) -> str:
@@ -262,6 +263,32 @@ def extract_screenshot_data(text: str) -> Optional[str]:
         return text[start:end]
     except (ValueError, IndexError):
         return None
+
+def extract_image_data(text: str) -> Optional[str]:
+    """Extract an image data URL emitted by the image_view tool. Returns None if not found."""
+    if IMAGE_MARKER not in text:
+        return None
+    try:
+        start = text.index(IMAGE_MARKER) + len(IMAGE_MARKER)
+        end = text.index("]", start)
+        return text[start:end]
+    except (ValueError, IndexError):
+        return None
+
+# Short placeholder swapped in for image payloads after extraction, so the
+# base64 blob isn't retained a second time inside the tool message (the image
+# itself is injected separately as a user image message).
+IMAGE_INJECTED_PLACEHOLDER = "[图片已注入]"
+_IMAGE_MARKER_RE = re.compile(r"\[(?:SCREENSHOT_DATA|IMAGE_DATA):[^\]]*\]")
+
+
+def replace_image_markers(text: str, placeholder: str = IMAGE_INJECTED_PLACEHOLDER) -> str:
+    """Replace [SCREENSHOT_DATA:...] / [IMAGE_DATA:...] payloads with a short
+    placeholder. Must be called AFTER extract_screenshot_data/extract_image_data
+    (they need the intact marker) and before the result is written to messages."""
+    if SCREENSHOT_MARKER not in text and IMAGE_MARKER not in text:
+        return text
+    return _IMAGE_MARKER_RE.sub(placeholder, text)
 
 def load_config() -> dict:
     from core.paths import get_data_path

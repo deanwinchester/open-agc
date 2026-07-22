@@ -11,15 +11,52 @@ import threading
 from typing import List, Dict, Any, Optional, Callable
 
 
-# Tool sets for common sub-task types
-TOOL_SETS: Dict[str, List[str]] = {
-    "filesystem": ["read_file", "write_file", "execute_shell"],
-    "code": ["execute_python", "execute_shell", "read_file", "ask_user_question"],
-    "web": ["browser_automation", "search_web", "ask_user_question"],
-    "analysis": ["execute_python", "read_file", "search_web", "ask_user_question"],
-    "deploy": ["execute_shell", "read_file", "write_file", "ask_user_question"],
-    "research": ["search_web", "read_file", "ask_user_question"],
+# Tool sets for common sub-task types.
+# Each entry separates domain keywords (semantic words used for matching user
+# intent) from tool names — tool names must NOT appear in keywords, otherwise
+# a request merely mentioning a tool (e.g. "用 read_file 读一下 X") would hit
+# every domain at once and force sub-agent delegation.
+TOOL_SETS: Dict[str, Dict[str, List[str]]] = {
+    "filesystem": {
+        "keywords": ["文件", "目录", "文件夹", "批量重命名", "整理文件"],
+        "tools": ["read_file", "write_file", "execute_shell"],
+    },
+    "code": {
+        "keywords": ["写代码", "代码", "编程", "脚本", "调试", "code", "script", "debug"],
+        "tools": ["execute_python", "execute_shell", "read_file", "ask_user_question"],
+    },
+    "web": {
+        "keywords": ["网页", "浏览器", "网站", "抓取", "browser", "website", "crawl"],
+        "tools": ["browser_automation", "search_web", "ask_user_question"],
+    },
+    "analysis": {
+        "keywords": ["分析", "统计", "数据", "报表", "analysis", "analyze"],
+        "tools": ["execute_python", "read_file", "search_web", "ask_user_question"],
+    },
+    "deploy": {
+        "keywords": ["部署", "发布", "上线", "deploy"],
+        "tools": ["execute_shell", "read_file", "write_file", "ask_user_question"],
+    },
+    "monitor": {
+        "keywords": ["监控", "告警", "运维", "monitor", "alert"],
+        "tools": ["execute_shell", "read_file", "ask_user_question"],
+    },
+    "research": {
+        "keywords": ["研究", "调研", "调查", "资料收集", "research"],
+        "tools": ["search_web", "read_file", "ask_user_question"],
+    },
 }
+
+
+def match_tool_set(task: str, default: str = "filesystem") -> str:
+    """Pick the TOOL_SETS domain whose keywords best match a task description."""
+    text = (task or "").lower()
+    best, best_hits = default, 0
+    for name, entry in TOOL_SETS.items():
+        hits = sum(1 for kw in entry["keywords"] if kw in text)
+        if hits > best_hits:
+            best, best_hits = name, hits
+    return best
 
 
 class SubAgent:

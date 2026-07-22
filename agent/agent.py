@@ -12,7 +12,7 @@ import queue
 
 from core.paths import get_data_path, get_skills_dir
 
-from core.llm_client import LLMClient, build_user_message, extract_screenshot_data
+from core.llm_client import LLMClient, build_user_message, extract_screenshot_data, extract_image_data, replace_image_markers
 from core.logger import SessionLogger
 from core.memory_store import MemoryStore
 from core.skill_store import SkillStore
@@ -27,6 +27,8 @@ from tools.python_repl import PythonREPLTool
 from tools.computer import ComputerTool
 from tools.memory import MemoryTool
 from tools.web_search import WebSearchTool
+from tools.fetch_url import FetchURLTool
+from tools.image_view import ImageViewTool
 from tools.system_mac import MacSystemTool
 from tools.save_skill import SaveSkillTool
 from tools.browser import BrowserAutomationTool
@@ -48,6 +50,7 @@ from tools.system_config import ConfigureSystemTool
 from tools.plugin_dev import DevelopPluginTool
 from tools.reader_lm import ReaderLMTool
 from tools.compact_context import CompactContextTool
+from tools.subagent_dispatch import DispatchSubagentTool
 
 
 from agent.context_manager import (
@@ -255,7 +258,7 @@ class OpenAGCAgent:
             f"2. execute_python — 运行 Python 代码进行数据处理、测试等\n"
             f"3. execute_shell — 执行系统命令（仅当无专用工具可用时）\n"
             f"4. search_file_content / find_files — 搜索文件内容、查找文件（查看目录结构用 list_dir，扩展工具需先启用）\n"
-            f"5. search_web — 搜索互联网获取最新信息\n"
+            f"5. search_web / fetch_url — 搜索互联网获取最新信息 / 抓取已知 URL 的网页正文\n"
             f"6. search_history — 检索当前会话历史（需要回忆之前内容时使用）\n"
             f"7. browser_automation — 虚拟浏览器操作网页（扩展工具，先用 search_available_tools 启用）\n"
             f"8. parse_html — 使用 Reader-lm 将 HTML 源码转为 Markdown（扩展工具，需先启用；浏览器获取的页面过大时使用）\n"
@@ -441,6 +444,8 @@ class OpenAGCAgent:
             "computer_control": ComputerTool(),
             "manage_memory": memory_tool,
             "search_web": WebSearchTool(),
+            "fetch_url": FetchURLTool(),
+            "image_view": ImageViewTool(),
             "mac_system_action": MacSystemTool(),
             "save_learned_skill": SaveSkillTool(),
             "browser_automation": BrowserAutomationTool(headless=self.browser_headless),
@@ -461,6 +466,7 @@ class OpenAGCAgent:
             "manage_task": TaskManagerTool(),
             "parse_html": ReaderLMTool() if ReaderLMTool.is_available() else None,
             "compact_context": CompactContextTool(),
+            "dispatch_subagent": DispatchSubagentTool(),
         }
 
         # Add to core tool names so it's always available
@@ -479,6 +485,8 @@ class OpenAGCAgent:
             "computer_control": "操控电脑",
             "manage_memory": "管理记忆",
             "search_web": "搜索网页",
+            "fetch_url": "抓取网页正文",
+            "image_view": "查看图片",
             "mac_system_action": "系统操作",
             "save_learned_skill": "保存技能",
             "browser_automation": "虚拟浏览器控制",
@@ -500,6 +508,7 @@ class OpenAGCAgent:
             "manage_task_plan": "管理任务计划",
             "manage_task": "查看和管理任务",
             "parse_html": "HTML 转 Markdown",
+            "dispatch_subagent": "分派子代理",
         }
 
         # Load auto-generated tools (persisted from previous sessions)
@@ -509,11 +518,33 @@ class OpenAGCAgent:
         else:
             user_gen_dir = get_data_path("auto_tools")
         init_auto_tools(user_gen_dir)
+        self._auto_tools_dir = user_gen_dir
+        # Archive stale, never-used auto-tools (loading skips _archive)
+        try:
+            from tools.auto_tool import prune_auto_tools
+            _pruned = prune_auto_tools(user_gen_dir)
+            if _pruned["archived"]:
+                print(f"[Agent] Auto-tools pruned: {len(_pruned['archived'])} archived, "
+                      f"{len(_pruned['kept'])} kept")
+        except Exception as e:
+            print(f"[Agent] Auto-tool prune error: {e}")
+        # Track each dynamic tool's home directory — its trust file lives
+        # beside the tool (usage recording / graduation need it).
+        self._dynamic_tool_dirs: Dict[str, str] = {}
         loaded = load_all_dynamic_tools(user_gen_dir)
         for tool_name, tool_instance in loaded.items():
             if tool_name not in self.full_available_tools:
                 self.full_available_tools[tool_name] = tool_instance
                 self.tool_display_names[tool_name] = (tool_instance.description or self.name)[:20]
+                self._dynamic_tool_dirs[tool_name] = user_gen_dir
+
+        # Graduated tools live in skills/permanent and load in EVERY session
+        _permanent_dir = os.path.join(get_skills_dir(), "permanent")
+        for tool_name, tool_instance in load_all_dynamic_tools(_permanent_dir).items():
+            if tool_name not in self.full_available_tools:
+                self.full_available_tools[tool_name] = tool_instance
+                self.tool_display_names[tool_name] = (tool_instance.description or self.name)[:20]
+                self._dynamic_tool_dirs[tool_name] = _permanent_dir
 
         # Load MCP tools
         try:
@@ -544,14 +575,14 @@ class OpenAGCAgent:
         #   their exact usage every session; memory ops happen in normal chat
         TIERED_CORE_TOOL_NAMES = {"read_file", "write_file", "edit_file", "apply_patch", "execute_shell",
                                   "execute_python", "search_file_content", "find_files",
-                                  "search_web", "ask_user_question", "self_review",
+                                  "search_web", "fetch_url", "ask_user_question", "self_review",
                                   "user_interjection_response", "manage_memory",
                                   "search_history", "search_available_tools"}
         # Legacy full-resident set (tool_tiered_exposure=false)
         FULL_CORE_TOOL_NAMES = {"execute_shell", "manage_memory", "read_file", "write_file", "edit_file", "apply_patch",
                                 "search_file_content", "find_files", "list_dir", "search_available_tools",
                                 "ask_user_question", "user_interjection_response", "search_history", "queue_download", "pause_and_wait",
-                                "execute_python", "search_web", "self_review", "configure_system",
+                                "execute_python", "search_web", "fetch_url", "self_review", "configure_system",
                                 "manage_task_plan", "parse_html", "shell_send"}
         CORE_TOOL_NAMES = TIERED_CORE_TOOL_NAMES if self.tool_tiered_exposure else FULL_CORE_TOOL_NAMES
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
@@ -1301,15 +1332,58 @@ class OpenAGCAgent:
         if tool_name in self.available_tools:
             return False
         self.available_tools[tool_name] = tool_instance
+        # Mirror into full_available_tools — the tool_done path resolves dynamic
+        # tools there (usage recording / graduation), and the dedup gate checks it.
+        self.full_available_tools[tool_name] = tool_instance
         self.tool_display_names[tool_name] = tool_instance.description[:20]
         self.tool_schemas = [t.get_openai_schema() for t in self.available_tools.values() if t is not None]
         return True
 
+    def _session_auto_tools_dir(self) -> str:
+        """Directory holding this session's auto-generated tools."""
+        d = getattr(self, "_auto_tools_dir", None)
+        if d:
+            return d
+        return get_data_path(f"auto_tools/{self.session_id or '1'}")
+
+    def _reinforce_existing_tool(self, tool_name: str):
+        """Record a dedup/reinforce signal for an existing auto-tool.
+
+        Uses record_tool_reinforce: bumps total/reinforced only — never pushes
+        the consecutive-success streak, so reinforcement alone cannot graduate
+        a tool that was never actually executed.
+        """
+        try:
+            from tools.auto_tool import record_tool_reinforce
+            tools_dir = getattr(self, "_dynamic_tool_dirs", {}).get(
+                tool_name, self._session_auto_tools_dir())
+            record_tool_reinforce(tools_dir, tool_name)
+            print(f"[Agent] Auto-tool reinforced existing tool: {tool_name}")
+        except Exception as e:
+            print(f"[Agent] Auto-tool reinforce error: {e}")
+
     def _auto_generate_tool(self, task_input: str, trajectory, llm_client) -> Optional[str]:
-        """Try to generate a reusable tool from a successful trajectory."""
+        """Try to generate a reusable tool from a successful trajectory.
+
+        Gate (plan_tool_generation): ≥5 tool calls, deterministic trajectory
+        (execute_shell/execute_python dominant — exploratory read/search
+        trajectories are skipped), plus a lightweight LLM reusability verdict.
+        Trajectories overlapping an existing auto-tool reinforce that tool's
+        trust record instead of generating a duplicate.
+        """
+        from tools.auto_tool import plan_tool_generation
         tool_sequence = trajectory.get("tool_sequence", "")
-        tool_count = tool_sequence.count("\n→ ")
-        if tool_count < 5:
+        existing = {
+            name: (self.full_available_tools[name].description or "")
+            for name in getattr(self, "_dynamic_tool_dirs", {})
+            if name in self.full_available_tools
+        }
+        plan = plan_tool_generation(task_input, tool_sequence, existing, llm_client)
+        if plan["action"] == "skip":
+            print(f"[Agent] Auto-tool generation skipped: {plan['reason']}")
+            return None
+        if plan["action"] == "reinforce":
+            self._reinforce_existing_tool(plan["overlap_with"])
             return None
 
         code = generate_tool_code(task_input, tool_sequence,
@@ -1319,6 +1393,7 @@ class OpenAGCAgent:
 
         # Extract name from TOOL_SCHEMA
         import ast
+        tool_name = None
         try:
             tree = ast.parse(code)
             for node in ast.walk(tree):
@@ -1336,7 +1411,14 @@ class OpenAGCAgent:
         if not tool_name:
             return None
 
-        filepath = save_tool_code(code, tool_name)
+        # Dedup: never overwrite an existing tool — reinforce it instead
+        if tool_name in getattr(self, "_dynamic_tool_dirs", {}) or \
+                tool_name in self.full_available_tools:
+            print(f"[Agent] Auto-tool generation deduped: {tool_name} already exists")
+            self._reinforce_existing_tool(tool_name)
+            return None
+
+        filepath = save_tool_code(code, tool_name, self._session_auto_tools_dir())
         if not filepath:
             return None
 
@@ -1345,8 +1427,12 @@ class OpenAGCAgent:
         if not tool_instance:
             return None
 
-        self._register_dynamic_tool(tool_name, tool_instance)
-        return tool_name
+        if self._register_dynamic_tool(tool_name, tool_instance):
+            _dyn_dirs = getattr(self, "_dynamic_tool_dirs", None)
+            if _dyn_dirs is not None:
+                _dyn_dirs[tool_name] = self._session_auto_tools_dir()
+            return tool_name
+        return None
 
     def _should_delegate(self, user_input: str) -> bool:
         """Assess whether a task is complex enough to warrant sub-agent delegation."""
@@ -1363,15 +1449,21 @@ class OpenAGCAgent:
             if re.search(kw, text):
                 match_count += 1
 
-        # Check if it spans multiple areas
+        # Check if it spans multiple areas. Keywords are domain-semantic words
+        # kept separate from tool names, so merely mentioning a tool
+        # (e.g. "用 read_file 读一下 X") no longer hits every domain at once.
         area_count = 0
-        for area_kws in TOOL_SETS.values():
-            if any(kw in text for kw in area_kws):
+        for entry in TOOL_SETS.values():
+            if any(kw in text for kw in entry["keywords"]):
                 area_count += 1
 
-        # Delegate if high complexity or multi-domain
+        # Delegate if high complexity or truly multi-domain. The combined
+        # branch requires area_count >= 2 (a real cross-domain task like
+        # "部署并监控这个服务" = deploy + monitor) so that high-frequency
+        # words alone ("列出所有文件" — 所有 + single filesystem domain)
+        # cannot force delegation for a one-step request.
         # Note: Do not use len(text) > 200 because users often paste long error logs for simple one-shot fixes.
-        return match_count >= 2 or area_count >= 3
+        return match_count >= 2 or area_count >= 3 or (match_count >= 1 and area_count >= 2)
 
     def _decompose_task(self, task_input: str) -> List[Dict]:
         """Use LLM to decompose a complex task into sub-tasks."""
@@ -1381,7 +1473,7 @@ class OpenAGCAgent:
 
 要求：
 - 每个子任务应独立、可完成
-- 为每个子任务标注需要的工具类型（可选：filesystem, code, web, analysis, deploy, research）
+- 为每个子任务标注需要的工具类型（可选：filesystem, code, web, analysis, deploy, monitor, research）
 - 标注子任务间的依赖关系（depends_on 为依赖的子任务 id 列表）
 
 输出 JSON 数组，格式：
@@ -1407,7 +1499,8 @@ class OpenAGCAgent:
                     tool_names = plan.get("tools", ["filesystem"])
                     resolved = []
                     for t in tool_names:
-                        resolved.extend(TOOL_SETS.get(t, [t]))
+                        entry = TOOL_SETS.get(t)
+                        resolved.extend(entry["tools"] if entry else [t])
                     plan["tools"] = list(set(resolved))
                 return plans
         except Exception as e:
@@ -2335,16 +2428,44 @@ class OpenAGCAgent:
                         pass
                     if is_dynamic:
                         try:
-                            from tools.auto_tool import check_graduation, graduate_tool
-                            _tools_dir = _gdp(f"auto_tools/{self.session_id or '1'}")
-                            if check_graduation(_tools_dir, function_name):
+                            from tools.auto_tool import (record_tool_usage,
+                                                         check_graduation, graduate_tool)
+                            # Usage recording feeds the trust file that drives
+                            # graduation. The trust file lives beside the tool,
+                            # so resolve the tool's home dir (session dir or
+                            # skills/permanent) rather than assuming session.
+                            _tools_dir = getattr(self, "_dynamic_tool_dirs", {}).get(
+                                function_name) or self._session_auto_tools_dir()
+                            record_tool_usage(_tools_dir, function_name, tool_success)
+                            # Only session-scoped tools graduate; permanent
+                            # tools already graduated (a second graduate would
+                            # move the file onto itself).
+                            if _tools_dir == self._session_auto_tools_dir() and \
+                                    check_graduation(_tools_dir, function_name):
                                 print(f"[Agent] Auto-tool {function_name} ready for graduation!")
                                 if graduate_tool(_tools_dir, function_name):
+                                    _dyn_dirs = getattr(self, "_dynamic_tool_dirs", None)
+                                    if _dyn_dirs is not None:
+                                        _dyn_dirs[function_name] = os.path.join(
+                                            get_skills_dir(), "permanent")
                                     self.skill_store.refresh()
                         except Exception:
                             pass
 
                     result_str = str(result)
+
+                    # Vision data: extract base64 image payloads from the full
+                    # (untruncated) result FIRST, then swap the marker for a
+                    # short placeholder — otherwise the tool message would
+                    # retain a second copy of the base64 blob alongside the
+                    # user image message injected below.
+                    url = extract_screenshot_data(result_str)
+                    if url:
+                        screenshot_urls.append((url, "[工具执行截图 — 请根据此截图内容继续后续操作]"))
+                    img_url = extract_image_data(result_str)
+                    if img_url:
+                        screenshot_urls.append((img_url, "[image_view 读取的本地图片 — 请查看图片内容并继续后续操作]"))
+                    result_str = replace_image_markers(result_str)
 
                     # Context Compaction: compress long tool results to preserve context window
                     # result_str = self._compress_tool_result(result_str, function_name)
@@ -2370,6 +2491,7 @@ class OpenAGCAgent:
                             "execute_shell": 5000,
                             "execute_python": 5000,
                             "search_web": 3000,
+                            "fetch_url": 3000,
                             "read_file": 3000,
                             "write_file": 2000,
                             "edit_file": 2000,
@@ -2497,17 +2619,16 @@ class OpenAGCAgent:
                         if verbose:
                             print(f"[Agent] ⚠️ Context preservation: injected reminder after {self._consecutive_failures} consecutive failures")
 
-                    # Collect screenshot data for vision injection
-                    url = extract_screenshot_data(result_str)
-                    if url:
-                        screenshot_urls.append(url)
+                    # Collect screenshot/image data for vision injection
+                    # (extraction + placeholder replacement happen right after
+                    # `result_str = str(result)` above; see that block)
 
                 # After all tool results in this iteration, inject screenshot vision observations
-                for url in screenshot_urls:
+                for url, caption in screenshot_urls:
                     self.messages.append({
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "[工具执行截图 — 请根据此截图内容继续后续操作]"},
+                            {"type": "text", "text": caption},
                             {"type": "image_url", "image_url": {"url": url}}
                         ]
                     })

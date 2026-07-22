@@ -9,7 +9,10 @@ import json
 import os
 import importlib.util
 import re
-from typing import Dict, Any, Optional, Callable
+import shutil
+import threading
+from datetime import datetime
+from typing import Dict, Any, List, Optional, Callable
 from tools.base import BaseTool
 
 
@@ -52,12 +55,19 @@ class DynamicTool(BaseTool):
             return f"Error executing dynamic tool: {str(e)}"
 
 
-# Tools directory for persisted auto-generated tools
+# Tools directory for persisted auto-generated tools. Legacy load-path marker
+# only — write paths (save_tool_code) take an explicit tools_dir and must NOT
+# rely on this global (multiple session agents in one process would otherwise
+# save into whichever directory init_auto_tools ran last for).
 AUTO_TOOLS_DIR = None  # Set via init
 
 
 def init_auto_tools(tools_dir: str):
-    """Set the auto-generated tools directory."""
+    """Create the auto-generated tools directory (load-path initialization).
+
+    Still records AUTO_TOOLS_DIR for backward compatibility, but saving uses
+    the explicit ``tools_dir`` argument of save_tool_code.
+    """
     global AUTO_TOOLS_DIR
     AUTO_TOOLS_DIR = tools_dir
     os.makedirs(tools_dir, exist_ok=True)
@@ -410,21 +420,26 @@ def validate_tool_code(code: str) -> bool:
     return True
 
 
-def save_tool_code(code: str, name: str) -> Optional[str]:
-    """Save generated tool code to the auto-tools directory.
+def save_tool_code(code: str, name: str, tools_dir: str) -> Optional[str]:
+    """Save generated tool code into ``tools_dir``.
+
+    The directory is an explicit parameter (not the AUTO_TOOLS_DIR global) so
+    concurrent session agents never save into each other's directory — the
+    trust file and the tool source must stay co-located for graduation.
 
     Returns the file path if successful, None otherwise.
     """
-    if not AUTO_TOOLS_DIR:
+    if not tools_dir:
         return None
 
     # Sanitize the filename
     safe_name = re.sub(r'[^a-zA-Z0-9_]', '', name)
     if not safe_name:
         safe_name = "auto_tool"
-    filepath = os.path.join(AUTO_TOOLS_DIR, f"{safe_name}.py")
+    filepath = os.path.join(tools_dir, f"{safe_name}.py")
 
     try:
+        os.makedirs(tools_dir, exist_ok=True)
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(code)
         return filepath
@@ -459,24 +474,153 @@ def load_dynamic_tool(filepath: str) -> Optional[DynamicTool]:
 
 
 def load_all_dynamic_tools(tools_dir: str) -> Dict[str, DynamicTool]:
-    """Scan the auto-tools directory and load all tools."""
+    """Scan the auto-tools directory and load all tools.
+
+    Skips ``_archive`` (pruned tools, see prune_auto_tools), ``__pycache__``,
+    dotfiles and anything that is not a plain ``.py`` file.
+    """
     tools = {}
     if not os.path.isdir(tools_dir):
         return tools
 
     for fname in os.listdir(tools_dir):
-        if fname.endswith(".py") and fname != "__init__.py":
-            filepath = os.path.join(tools_dir, fname)
-            tool = load_dynamic_tool(filepath)
-            if tool:
-                tools[tool.name] = tool
+        if fname.startswith("_") or fname.startswith("."):
+            continue  # _archive, __pycache__, _trust.json, dotfiles
+        if not fname.endswith(".py"):
+            continue
+        filepath = os.path.join(tools_dir, fname)
+        if not os.path.isfile(filepath):
+            continue
+        tool = load_dynamic_tool(filepath)
+        if tool:
+            tools[tool.name] = tool
     return tools
+
+
+# ── Trajectory classification & pre-generation reusability gate ──
+
+# A trajectory dominated by execute_shell/execute_python is deterministic
+# command/script work — suitable to固化成工具. One dominated by read/search
+# tools is exploratory (context-specific, one-off) and must not be固化.
+_DETERMINISTIC_TOOLS = {"execute_shell", "execute_python"}
+
+# Minimum tool calls in a successful trajectory before generation is considered.
+MIN_TOOL_CALLS_FOR_GENERATION = 5
+
+
+def parse_tool_names(tool_sequence: str) -> List[str]:
+    """Extract ordered tool names from a rendered trajectory ("→ name: detail" lines)."""
+    return re.findall(r'→\s*([A-Za-z_][A-Za-z0-9_]*)\s*:', tool_sequence)
+
+
+def classify_trajectory(tool_sequence: str) -> str:
+    """Classify a trajectory as "deterministic" or "exploratory".
+
+    deterministic: ≥50% of calls are execute_shell/execute_python.
+    exploratory:   anything else (read/search-dominated or unparseable).
+    """
+    names = parse_tool_names(tool_sequence)
+    if not names:
+        return "exploratory"
+    det = sum(1 for n in names if n in _DETERMINISTIC_TOOLS)
+    return "deterministic" if det / len(names) >= 0.5 else "exploratory"
+
+
+def assess_reusability(task_input: str, tool_sequence: str,
+                       existing_tools: Dict[str, str], llm_client) -> dict:
+    """One lightweight LLM call: is this trajectory worth turning into a tool?
+
+    ``existing_tools`` maps tool name → description for already-loaded auto
+    tools (dedup context). Returns a dict with keys ``reusable`` (bool),
+    ``reason`` (str), ``suggested_name`` (str), ``overlap_with`` (str|None).
+    Fail-closed: any error yields reusable=False so a flaky LLM never
+    re-opens the generation floodgate.
+    """
+    existing_desc = "\n".join(
+        f"- {name}: {desc}" for name, desc in list(existing_tools.items())[:30]
+    ) or "(none)"
+    prompt = f"""Judge whether this successful agent task trajectory should become a reusable tool.
+
+Task: {task_input[:200]}
+Trajectory:
+{tool_sequence[:1500]}
+
+Existing auto-generated tools:
+{existing_desc}
+
+Answer with ONLY a JSON object, no other text:
+{{"reusable": true/false, "reason": "short reason", "suggested_name": "snake_case_name", "overlap_with": "existing_tool_name_or_null"}}
+
+Rules:
+- reusable=false for one-off, context-specific work (specific files, URLs, dates, data) unlikely to recur.
+- reusable=true only when the pattern is generic and likely to recur in future tasks.
+- If the trajectory's function substantially overlaps an existing tool (name/description keywords match), set overlap_with to that tool's name — a duplicate must NOT be created."""
+
+    try:
+        response, _ = llm_client.chat(
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = response.choices[0].message.content.strip()
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if not match:
+            raise ValueError("no JSON object in response")
+        data = json.loads(match.group(0))
+        return {
+            "reusable": bool(data.get("reusable")),
+            "reason": str(data.get("reason", ""))[:200],
+            "suggested_name": str(data.get("suggested_name") or ""),
+            "overlap_with": data.get("overlap_with") or None,
+        }
+    except Exception as e:
+        print(f"[AutoTool] Reusability assessment failed, skipping generation: {e}")
+        return {"reusable": False, "reason": f"assessment_error: {e}",
+                "suggested_name": "", "overlap_with": None}
+
+
+def plan_tool_generation(task_input: str, tool_sequence: str,
+                         existing_tools: Dict[str, str], llm_client,
+                         min_calls: int = MIN_TOOL_CALLS_FOR_GENERATION) -> dict:
+    """Pre-generation gate. Pure decision function (only side effect: the LLM call).
+
+    Returns a plan dict with ``action`` one of:
+      - "skip":      do not generate ("reason" explains why)
+      - "reinforce": trajectory overlaps existing tool "overlap_with" — the
+                     caller should record usage for that tool instead of
+                     generating a duplicate
+      - "generate":  proceed to code generation ("suggested_name" may be "")
+    """
+    names = parse_tool_names(tool_sequence)
+    if len(names) < min_calls:
+        return {"action": "skip", "reason": f"too_few_calls:{len(names)}"}
+    if classify_trajectory(tool_sequence) != "deterministic":
+        return {"action": "skip", "reason": "exploratory_trajectory"}
+
+    verdict = assess_reusability(task_input, tool_sequence, existing_tools, llm_client)
+    if not verdict["reusable"]:
+        return {"action": "skip", "reason": f"not_reusable:{verdict['reason']}"}
+    overlap = verdict.get("overlap_with")
+    if overlap and overlap in existing_tools:
+        return {"action": "reinforce", "overlap_with": overlap,
+                "reason": verdict["reason"]}
+    suggested = verdict.get("suggested_name") or ""
+    if suggested and suggested in existing_tools:
+        return {"action": "reinforce", "overlap_with": suggested,
+                "reason": "suggested_name_exists"}
+    return {"action": "generate", "suggested_name": suggested,
+            "reason": verdict["reason"]}
 
 
 # ── Tool Graduation: auto-tool trust scoring ──
 
 TRUST_FILE = "_trust.json"
 GRADUATE_THRESHOLD = 3  # consecutive successes to graduate
+
+# Serializes read-modify-write cycles on _trust.json: usage recording runs on
+# the agent main loop while reinforce signals come from the background
+# post-process worker — without a lock, interleaved load->mutate->save cycles
+# silently drop each other's updates. Held only for file-IO-granularity
+# critical sections.
+_TRUST_LOCK = threading.Lock()
 
 
 def _get_trust_path(tools_dir: str) -> str:
@@ -496,25 +640,52 @@ def _load_trust(tools_dir: str) -> dict:
 
 def _save_trust(tools_dir: str, trust: dict):
     path = _get_trust_path(tools_dir)
+    os.makedirs(tools_dir, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(trust, f, ensure_ascii=False, indent=2)
 
 
 def record_tool_usage(tools_dir: str, tool_name: str, success: bool) -> dict:
     """Record usage of an auto-generated tool. Returns the tool's trust info."""
-    trust = _load_trust(tools_dir)
-    entry = trust.get(tool_name, {"total": 0, "successes": 0, "consecutive": 0,
-                                   "failures": 0, "graduated": False})
-    entry["total"] += 1
-    if success:
-        entry["successes"] += 1
-        entry["consecutive"] += 1
-    else:
-        entry["failures"] += 1
-        entry["consecutive"] = 0  # Reset streak on failure
-    trust[tool_name] = entry
-    _save_trust(tools_dir, trust)
-    return entry
+    with _TRUST_LOCK:
+        trust = _load_trust(tools_dir)
+        entry = trust.get(tool_name, {"total": 0, "successes": 0, "consecutive": 0,
+                                       "failures": 0, "graduated": False})
+        entry["total"] += 1
+        if success:
+            entry["successes"] += 1
+            entry["consecutive"] += 1
+        else:
+            entry["failures"] += 1
+            entry["consecutive"] = 0  # Reset streak on failure
+        now_iso = datetime.now().astimezone().isoformat()
+        entry.setdefault("first_used", now_iso)
+        entry["last_used"] = now_iso
+        trust[tool_name] = entry
+        _save_trust(tools_dir, trust)
+        return entry
+
+
+def record_tool_reinforce(tools_dir: str, tool_name: str) -> dict:
+    """Record a reinforce signal (generation deduped onto this existing tool).
+
+    Bumps ``total`` and a separate ``reinforced`` counter and refreshes
+    ``last_used``, but deliberately does NOT touch ``successes``/``consecutive``
+    — a reinforce is not a real execution and must never count toward
+    graduation (GRADUATE_THRESHOLD consecutive successes).
+    """
+    with _TRUST_LOCK:
+        trust = _load_trust(tools_dir)
+        entry = trust.get(tool_name, {"total": 0, "successes": 0, "consecutive": 0,
+                                       "failures": 0, "graduated": False})
+        entry["total"] += 1
+        entry["reinforced"] = entry.get("reinforced", 0) + 1
+        now_iso = datetime.now().astimezone().isoformat()
+        entry.setdefault("first_used", now_iso)
+        entry["last_used"] = now_iso
+        trust[tool_name] = entry
+        _save_trust(tools_dir, trust)
+        return entry
 
 
 def check_graduation(tools_dir: str, tool_name: str) -> bool:
@@ -529,26 +700,92 @@ def check_graduation(tools_dir: str, tool_name: str) -> bool:
 def graduate_tool(tools_dir: str, tool_name: str) -> bool:
     """Move an auto-tool to skills/permanent/ after graduation."""
     from core.paths import get_data_path
+    with _TRUST_LOCK:
+        trust = _load_trust(tools_dir)
+        if tool_name not in trust:
+            return False
+
+        source = os.path.join(tools_dir, f"{tool_name}.py")
+        if not os.path.exists(source):
+            return False
+
+        from core.paths import get_skills_dir
+        permanent_dir = os.path.join(get_skills_dir(), "permanent")
+        os.makedirs(permanent_dir, exist_ok=True)
+        dest = os.path.join(permanent_dir, f"{tool_name}.py")
+
+        try:
+            import shutil
+            shutil.move(source, dest)
+            trust[tool_name]["graduated"] = True
+            _save_trust(tools_dir, trust)
+            print(f"[AutoTool] {tool_name} graduated to permanent skill!")
+            return True
+        except Exception as e:
+            print(f"[AutoTool] Graduation failed for {tool_name}: {e}")
+            return False
+
+
+# ── Pruning: archive stale, never-used auto-tools ──
+
+ARCHIVE_DIRNAME = "_archive"
+
+
+def _entry_last_used_ts(entry: dict, fallback_mtime: float) -> float:
+    """Best-effort last-used timestamp for a trust entry (epoch seconds)."""
+    raw = entry.get("last_used")
+    if raw:
+        try:
+            return datetime.fromisoformat(raw).timestamp()
+        except Exception:
+            pass
+    return fallback_mtime
+
+
+def prune_auto_tools(tools_dir: str, max_age_days: int = 30,
+                     min_calls: int = 1, now: float = None) -> dict:
+    """Archive stale auto-tools into ``<tools_dir>/_archive/`` (never hard-deleted).
+
+    A tool is archived when BOTH hold:
+      - recorded calls < min_calls (from ``_trust.json``; missing entry = 0 calls)
+      - unused for more than max_age_days (trust ``last_used``, falling back to
+        file mtime for tools that predate usage recording)
+
+    ``_archive`` is skipped by load_all_dynamic_tools, so archived tools stop
+    being offered to the LLM but can be restored manually.
+
+    Returns {"kept": [names], "archived": [names]}.
+    """
+    import time as _time
+    now = now if now is not None else _time.time()
+    result = {"kept": [], "archived": []}
+    if not os.path.isdir(tools_dir):
+        return result
+
     trust = _load_trust(tools_dir)
-    if tool_name not in trust:
-        return False
+    archive_dir = os.path.join(tools_dir, ARCHIVE_DIRNAME)
+    max_age_s = max_age_days * 86400
 
-    source = os.path.join(tools_dir, f"{tool_name}.py")
-    if not os.path.exists(source):
-        return False
-
-    from core.paths import get_skills_dir
-    permanent_dir = os.path.join(get_skills_dir(), "permanent")
-    os.makedirs(permanent_dir, exist_ok=True)
-    dest = os.path.join(permanent_dir, f"{tool_name}.py")
-
-    try:
-        import shutil
-        shutil.move(source, dest)
-        trust[tool_name]["graduated"] = True
-        _save_trust(tools_dir, trust)
-        print(f"[AutoTool] {tool_name} graduated to permanent skill!")
-        return True
-    except Exception as e:
-        print(f"[AutoTool] Graduation failed for {tool_name}: {e}")
-        return False
+    for fname in sorted(os.listdir(tools_dir)):
+        if fname.startswith("_") or fname.startswith("."):
+            continue  # _archive, __pycache__, _trust.json, dotfiles
+        if not fname.endswith(".py"):
+            continue
+        fpath = os.path.join(tools_dir, fname)
+        if not os.path.isfile(fpath):
+            continue
+        tool_name = fname[:-3]
+        entry = trust.get(tool_name) or {}
+        calls = entry.get("total", 0)
+        last_used = _entry_last_used_ts(entry, os.path.getmtime(fpath))
+        if calls < min_calls and (now - last_used) > max_age_s:
+            try:
+                os.makedirs(archive_dir, exist_ok=True)
+                shutil.move(fpath, os.path.join(archive_dir, fname))
+                result["archived"].append(tool_name)
+            except Exception as e:
+                print(f"[AutoTool] Prune failed for {tool_name}: {e}")
+                result["kept"].append(tool_name)
+        else:
+            result["kept"].append(tool_name)
+    return result

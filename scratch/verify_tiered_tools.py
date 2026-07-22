@@ -51,7 +51,7 @@ agent = OpenAGCAgent(model="kimi_code/k3", session_id=990201,
 
 TIERED_CORE_TOOL_NAMES = {"read_file", "write_file", "edit_file", "apply_patch", "execute_shell",
                           "execute_python", "search_file_content", "find_files",
-                          "search_web", "ask_user_question", "self_review",
+                          "search_web", "fetch_url", "ask_user_question", "self_review",
                           "user_interjection_response", "manage_memory",
                           "search_history", "search_available_tools"}
 
