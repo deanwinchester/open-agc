@@ -126,6 +126,7 @@ class OpenAGCAgent(PromptBuilderMixin):
                  memory_db_path: Optional[str] = None):
         # memory_db_path: optional override for the memory DB (eval probes
         # inject an isolated temp DB). None = production default memory.db.
+        self.model = model
         self.session_id = session_id
         self.failed_attempts = []
         self._consecutive_failures = 0
@@ -201,6 +202,27 @@ class OpenAGCAgent(PromptBuilderMixin):
             session_id=self.session_id,
         )
 
+        # 原生工具调用模型（litellm tools= 传递）必须走原生通道：
+        # 在系统提示里教 JSON 文本格式会误导强指令遵循模型（如 kimi code 系）
+        # 绕过原生 tool_calls，导致 agent 永远进不了步骤循环。
+        # 仅本地 GGUF 模型（无原生工具调用能力）保留 JSON 文本格式教学。
+        _native_tools = not str(model or "").startswith(("llamacpp/", "sglang/"))
+        if _native_tools:
+            _tool_call_rule = (
+                f"\n## 2. 工具调用方式\n"
+                f"始终通过系统提供的原生工具调用机制（tool calls）发起调用，"
+                f"严禁把工具调用写成 JSON 文本或 markdown 代码块输出在回复正文中。\n"
+                f"需要验证、执行或获取信息时必须实际调用工具，"
+                f"不要仅凭记忆或上下文中的信息直接回答。\n"
+            )
+        else:
+            _tool_call_rule = (
+                f"\n## 2. 工具调用格式\n"
+                f"工具调用格式：`{{\"name\": \"tool_name\", \"arguments\": {{\"key\": \"value\"}}}}`。"
+                f"仅当你决定使用工具时，才输出 JSON 对象。对于正常对话回复，直接输出纯文本，严禁使用 JSON 格式。\n"
+                f"如想在调用工具前表达思考过程，放在 JSON 之前的独立段落中。\n"
+            )
+
         self.system_prompt_base = (
             f"# 身份与能力\n"
             f"你是 Open-AGC，一个强大的 AI 智能体，能够执行终端命令、运行 Python 代码、"
@@ -214,10 +236,7 @@ class OpenAGCAgent(PromptBuilderMixin):
             f"处理涉及多个步骤的复杂任务时，先说明你的计划，然后逐步执行。"
             f"如果任务规模较大（如创建新项目、实现多文件功能），必须先设计方案，"
             f"再创建目录结构，然后分步实现。不要一上来就写代码而不做规划。\n"
-            f"\n## 2. 工具调用格式\n"
-            f"工具调用格式：`{{\"name\": \"tool_name\", \"arguments\": {{\"key\": \"value\"}}}}`。"
-            f"仅当你决定使用工具时，才输出 JSON 对象。对于正常对话回复，直接输出纯文本，严禁使用 JSON 格式。\n"
-            f"如想在调用工具前表达思考过程，放在 JSON 之前的独立段落中。\n"
+            f"{_tool_call_rule}"
             f"\n## 3. 上下文复用\n"
             f"当用户要求\"重试\"\"再下载一遍\"\"再试一次\"等操作时，"
             f"必须先检查对话历史中的 tool_call 记录，复用已有的 URL、参数、文件路径等数据。"
