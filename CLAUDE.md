@@ -84,6 +84,7 @@ All tools extend `BaseTool` (a Pydantic model) and implement:
 | `browser.py` — `browser_automation` | `playwright` (sync, singleton, isolated thread) |
 | `memory.py` — `manage_memory` | `MemoryStore` (shared instance) |
 | `web_search.py` — `search_web` | `duckduckgo-search` |
+| `fetch_url.py` — `fetch_url` | `requests` + `bs4`（SSRF 防护，2MB 上限） |
 | `email_tool.py` — `search_emails` / `send_email` | — |
 | `save_skill.py` — `save_learned_skill` | writes to `skills/` dir |
 | `system_mac.py` — `mac_system_action` | macOS-specific |

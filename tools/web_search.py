@@ -7,7 +7,6 @@ Engine selection by query language:
     Sogou handles Chinese queries much more reliably.)
   - English queries → Bing → DuckDuckGo → Sogou → Baidu
 """
-import json as _json
 import os
 import random
 import re
@@ -15,6 +14,7 @@ import traceback
 import requests
 from bs4 import BeautifulSoup
 from .base import BaseTool
+from .fetch_url import fetch_url_text
 
 # Rotating User-Agents to avoid blocks
 USER_AGENTS = [
@@ -313,230 +313,14 @@ def _search_brave(query: str, max_results: int = 5) -> list:
         return []
 
 
-def _extract_spa_embedded_text(soup) -> str:
-    """Extract text from SPA pages via embedded JSON data (Next.js, ModelScope, etc.).
-
-    Falls back when the normal DOM extraction yields very little — SPA shells
-    render content via JS, but often embed the data in <script> tags.
-    """
-    parts = []
-    seen = set()
-
-    # Pattern 1: <script id="__NEXT_DATA__" type="application/json"> (Next.js)
-    for script in soup.select("script#__NEXT_DATA__[type='application/json']"):
-        try:
-            data = _json.loads(script.string)
-            text = _json_text_walk(data)
-            if text and text not in seen:
-                parts.append(text)
-                seen.add(text)
-        except Exception:
-            pass
-
-    # Pattern 2: <script type="application/ld+json"> (structured data)
-    for script in soup.select("script[type='application/ld+json']"):
-        try:
-            data = _json.loads(script.string)
-            text = _json_text_walk(data)
-            if text and text not in seen:
-                parts.append(text)
-                seen.add(text)
-        except Exception:
-            pass
-
-    # Pattern 3: window.__detail_data__ (ModelScope / Alibaba Cloud)
-    for script in soup.find_all("script"):
-        if not script.string:
-            continue
-        raw = script.string.strip()
-        # Match: __detail_data__ = "...json...";
-        m = re.search(r'__detail_data__\s*=\s*"(.+?)"\s*;', raw, re.DOTALL)
-        if m:
-            try:
-                inner = m.group(1)
-                # JS string unescape: first handle \\\\u sequences
-                inner = _js_str_unescape(inner)
-                data = _json.loads(inner)
-                text = _json_text_walk(data)
-                if text and text not in seen:
-                    parts.append(text)
-                    seen.add(text)
-            except Exception:
-                pass
-
-    # Pattern 4: window.__INITIAL_STATE__ (common SPA pattern)
-    for script in soup.find_all("script"):
-        if not script.string:
-            continue
-        raw = script.string.strip()
-        m = re.search(r'__INITIAL_STATE__\s*=\s*({.+?});', raw, re.DOTALL)
-        if m:
-            try:
-                data = _json.loads(m.group(1))
-                text = _json_text_walk(data)
-                if text and text not in seen:
-                    parts.append(text)
-                    seen.add(text)
-            except Exception:
-                pass
-
-    # Pattern 5: window.__NUXT__ (Nuxt.js)
-    for script in soup.find_all("script"):
-        if not script.string:
-            continue
-        raw = script.string.strip()
-        m = re.search(r'__NUXT__\s*=\s*({.+?});', raw, re.DOTALL)
-        if m:
-            try:
-                data = _json.loads(m.group(1))
-                text = _json_text_walk(data)
-                if text and text not in seen:
-                    parts.append(text)
-                    seen.add(text)
-            except Exception:
-                pass
-
-    return "\n\n".join(parts)
-
-
-def _js_str_unescape(s: str) -> str:
-    """Unescape a JS string that contains \\escaped quotes and backslashes.
-
-    Handles:
-      - \\" -> " (escaped quote)
-      - \\\\ -> \\ (escaped backslash)
-      - \\uXXXX -> unicode char (limited support)
-    """
-    result = []
-    i = 0
-    while i < len(s):
-        if s[i:i+2] == '\\\\':  # Escaped backslash
-            result.append('\\')
-            i += 2
-        elif s[i:i+2] == '\\"':  # Escaped quote
-            result.append('"')
-            i += 2
-        elif s[i:i+2] == '\\n':
-            result.append('\n')
-            i += 2
-        elif s[i:i+2] == '\\r':
-            result.append('\r')
-            i += 2
-        elif s[i:i+2] == '\\t':
-            result.append('\t')
-            i += 2
-        elif s[i] == '\\' and i + 1 < len(s) and s[i+1] == 'u':
-            # \\uXXXX
-            hex_str = s[i+2:i+6]
-            if len(hex_str) == 4:
-                try:
-                    result.append(chr(int(hex_str, 16)))
-                    i += 6
-                    continue
-                except ValueError:
-                    pass
-            result.append(s[i])
-            i += 1
-        else:
-            result.append(s[i])
-            i += 1
-    return "".join(result)
-
-
-def _json_text_walk(obj, depth=0) -> str:
-    """Recursively extract all string values from a parsed JSON object.
-
-    Skips short fragments (<40 chars), URLs, timestamps, and null/empty values.
-    Favors long text fields like Card, Readme, Description, body, content.
-    """
-    if depth > 8:
-        return ""
-    parts = []
-
-    if isinstance(obj, dict):
-        # Prioritize long text fields
-        for priority_key in ["ReadmeEn", "ReadmeZh", "Card", "Description",
-                             "readme", "README", "body", "content", "text",
-                             "description", "summary", "overview"]:
-            val = obj.get(priority_key)
-            if val and isinstance(val, str) and len(val) > 100:
-                parts.append(val)
-        # Then walk all values
-        for v in obj.values():
-            child = _json_text_walk(v, depth + 1)
-            if child:
-                parts.append(child)
-
-    elif isinstance(obj, list):
-        for item in obj:
-            child = _json_text_walk(item, depth + 1)
-            if child:
-                parts.append(child)
-
-    elif isinstance(obj, str) and len(obj) >= 40:
-        # Skip URLs, timestamps, and JSON-stringified data
-        if obj.startswith("http") or obj.startswith("{") or obj.startswith("["):
-            return ""
-        if re.match(r'^\d{4}-\d{2}-\d{2}', obj):
-            return ""
-        parts.append(obj)
-
-    return "\n".join(parts)
-
-
 def fetch_page_content(url: str, max_chars: int = 5000) -> str:
-    """Fetch a URL and extract its readable text content."""
-    try:
-        resp = requests.get(url, headers=_get_headers(), timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.content, "html.parser")
+    """Fetch a URL and extract its readable text content.
 
-        for tag in soup.select("script, style, nav, footer, header, aside, iframe, .sidebar, .ad, .menu, .comment"):
-            tag.decompose()
-
-        content = None
-        for selector in ["article", "[role='main']", "main", ".content", ".post-content", ".article-content",
-                         "#content", ".entry-content", ".post"]:
-            el = soup.select_one(selector)
-            if el and len(el.get_text(strip=True)) > 200:
-                content = el
-                break
-
-        if not content:
-            content = soup.body or soup
-
-        text = content.get_text(separator="\n", strip=True)
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        text = re.sub(r'[ \t]{2,}', ' ', text)
-
-        # If extracted text is too short, the page is likely an SPA shell.
-        # Try to extract embedded JSON data from <script> tags.
-        if len(text) < 500:
-            spa_text = _extract_spa_embedded_text(soup)
-            if spa_text:
-                text = spa_text
-
-        # Also include <title> and <meta description> as summary
-        title = soup.title.string.strip() if soup.title and soup.title.string else ""
-        meta_desc = ""
-        meta = soup.find("meta", attrs={"name": "description"}) or soup.find("meta", attrs={"property": "og:description"})
-        if meta and meta.get("content"):
-            meta_desc = meta["content"].strip()
-
-        summary_parts = []
-        if title:
-            summary_parts.append(f"# {title}")
-        if meta_desc:
-            summary_parts.append(meta_desc)
-        if summary_parts:
-            text = "\n\n".join(summary_parts) + "\n\n" + text
-
-        if len(text) <= max_chars:
-            return text.strip()
-        return text[:max_chars].strip() + f"\n\n...(output truncated, full length: {len(text)} chars)"
-
-    except Exception as e:
-        return f"Error fetching page: {type(e).__name__}: {str(e)}"
+    Delegates to tools.fetch_url.fetch_url_text, so search-result page
+    fetches get the same SSRF guard and 2MB response cap as the fetch_url
+    tool.
+    """
+    return fetch_url_text(url, max_chars=max_chars)
 
 
 # Engine order varies by query language
@@ -572,7 +356,7 @@ class WebSearchTool(BaseTool):
         super().__init__(
             name="search_web",
             description=(
-                "搜索网页获取实时信息。时效性问题必用；已知 URL 用本工具的 fetch_url 参数直接抓正文。"
+                "搜索网页获取实时信息。时效性问题必用；已知 URL 直接用 fetch_url 工具抓正文。"
             ),
         )
 
