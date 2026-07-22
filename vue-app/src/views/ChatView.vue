@@ -204,7 +204,9 @@ function renderHistorySteps(data) {
         kind: 'tool', step: s.step_number, tool: s.tool_name,
         toolLabel: s.tool_label || s.tool_name,
         argsPreview: s.args_preview || '',
-        resultPreview: String(s.full_result || s.result_preview || '').substring(0, 600),
+        // 行内只显示短概览；完整结果点击后在右侧抽屉查看（对齐旧版交互）
+        resultPreview: String(s.result_preview || '').substring(0, 120),
+        fullResult: s.full_result || '',
         success: ok ? true : failed ? false : null,
         status: ok ? 'done' : failed ? 'failed' : 'running',
       };
@@ -305,6 +307,7 @@ function onProgress(data) {
         entry.status = data.success ? 'done' : 'failed';
         entry.success = !!data.success;
         if (data.result_preview) entry.resultPreview = data.result_preview;
+        if (data.full_result) entry.fullResult = data.full_result;
       }
       break;
     }

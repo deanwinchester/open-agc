@@ -2,7 +2,7 @@
 // Agent 执行进度卡片：实时（live）与历史（history）两种模式。
 // 条目类型：tool（工具步骤）/ thinking（思考过程）/ response（LLM 中间回复）/
 // note（模型切换等提示）/ ask（Agent 提问）。shellLines 为实时 shell 输出。
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import zh from '../../i18n/zh';
 import AskUserForm from './AskUserForm.vue';
 
@@ -12,6 +12,16 @@ const props = defineProps({
   card: { type: Object, required: true },
 });
 const emit = defineEmits(['resume', 'submit-ask']);
+
+// 步骤详情抽屉：行内只显示概览，点击步骤在右侧查看完整结果
+const detailEntry = ref(null);
+const detailVisible = computed({
+  get: () => detailEntry.value !== null,
+  set: (v) => { if (!v) detailEntry.value = null; },
+});
+function openDetail(entry) {
+  if (entry.fullResult) detailEntry.value = entry;
+}
 
 const stepCount = computed(() => props.card.entries.filter((e) => e.kind === 'tool').length);
 
@@ -73,10 +83,10 @@ function onSubmitAsk(entry, answer) {
 
     <div v-show="!card.collapsed" class="pc-steps">
       <template v-for="(entry, idx) in card.entries" :key="idx">
-        <div v-if="entry.kind === 'tool'" class="pc-step" :class="entry.status">
+        <div v-if="entry.kind === 'tool'" class="pc-step" :class="[entry.status, { clickable: entry.fullResult }]" @click.stop="openDetail(entry)">
           <span class="step-icon">{{ stepIcon(entry) }}</span>
           <div class="step-body">
-            <span class="step-label">{{ entry.step }}. {{ entry.toolLabel }}</span>
+            <span class="step-label">{{ entry.step }}. {{ entry.toolLabel }}<span v-if="entry.fullResult" class="step-more"> 🔍</span></span>
             <span v-if="entry.argsPreview" class="step-detail">{{ entry.argsPreview }}</span>
             <span v-if="entry.resultPreview" class="step-detail">{{ entry.resultPreview }}</span>
           </div>
@@ -119,6 +129,26 @@ function onSubmitAsk(entry, answer) {
         <div v-for="(line, i) in card.shellLines" :key="i" class="shell-line">{{ line }}</div>
       </div>
     </div>
+
+    <!-- 步骤详情抽屉：点击步骤查看完整结果 -->
+    <el-drawer
+      v-model="detailVisible"
+      direction="rtl"
+      size="480px"
+      :title="detailEntry ? `${detailEntry.step}. ${detailEntry.toolLabel}` : ''"
+      append-to-body
+    >
+      <div v-if="detailEntry" class="step-full-detail">
+        <div v-if="detailEntry.argsPreview" class="sfd-block">
+          <div class="sfd-title">参数</div>
+          <pre class="sfd-pre">{{ detailEntry.argsPreview }}</pre>
+        </div>
+        <div class="sfd-block">
+          <div class="sfd-title">完整结果</div>
+          <pre class="sfd-pre">{{ detailEntry.fullResult }}</pre>
+        </div>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -225,6 +255,48 @@ function onSubmitAsk(entry, answer) {
   gap: 8px;
   padding: 4px 0;
   font-size: 13px;
+}
+
+.pc-step.clickable {
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 4px 6px;
+  margin: 0 -6px;
+  transition: background var(--panda-transition);
+}
+
+.pc-step.clickable:hover {
+  background: var(--el-color-primary-light-9);
+}
+
+.step-more {
+  opacity: 0.55;
+  font-size: 12px;
+}
+
+.step-full-detail .sfd-block {
+  margin-bottom: 16px;
+}
+
+.sfd-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 6px;
+}
+
+.sfd-pre {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--el-fill-color-light);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 60vh;
+  overflow-y: auto;
+  font-family: var(--panda-font-mono, monospace);
 }
 
 .step-icon {
