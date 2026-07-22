@@ -29,6 +29,53 @@ from tools.shell import interrupt_shell
 from api.state import _broadcast_task_history
 
 
+def _map_history_message(role: str, content: str):
+    """Map a messages-table row to an LLM context entry.
+
+    'system' rows (download notices etc.) are folded into the context as user
+    messages with a 【系统通知】 prefix — the information reaches the agent
+    without emitting extra role='system' messages (strict providers reject
+    multiple system messages). tool_step rows return None (skipped).
+    'agent' is renamed to 'assistant' for LLM role compatibility.
+    """
+    if role == "tool_step":
+        return None
+    if role == "agent":
+        return {"role": "assistant", "content": content}
+    if role == "system":
+        text = content if content.lstrip().startswith("【系统通知】") else f"【系统通知】{content}"
+        return {"role": "user", "content": text}
+    return {"role": role, "content": content}
+
+
+def _load_session_history(session_id: int, limit: int = 20) -> list:
+    """Load the last `limit` chat messages of a session as LLM context.
+
+    role='system' rows (download/task notices) are included and mapped to the
+    user role via _map_history_message, so the agent still sees them after a
+    reload or session switch.
+    """
+    try:
+        conn = db_connect()
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? "
+            "AND role IN ('user','agent','system') ORDER BY id DESC LIMIT ?) ORDER BY id ASC",
+            (session_id, limit))
+        rows = cursor.fetchall()
+        conn.close()
+        history = []
+        for row in rows:
+            msg = _map_history_message(row["role"], row["content"])
+            if msg is not None:
+                history.append(msg)
+        return history
+    except Exception as e:
+        print(f"Failed to load chat history: {e}")
+        return []
+
+
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_websockets.append(websocket)
@@ -91,30 +138,10 @@ async def websocket_endpoint(websocket: WebSocket):
             ws_alive = False
 
     # We will maintain conversation history for this session here
-    # Load recent chat history from DB instead of starting empty
-    try:
-        conn = db_connect()
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        # Load the last 20 user/agent messages for LLM context.
-        # Only user/agent roles map cleanly to LLM roles — 'system' rows
-        # (download notices etc.) are UI-only and reachable via /api/history.
-        cursor.execute("SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? AND role IN ('user','agent') ORDER BY id DESC LIMIT 20) ORDER BY id ASC", (ws_session_id,))
-        rows = cursor.fetchall()
-        conn.close()
-
-        # LLMs strict require 'assistant' not 'agent'
-        session_history = []
-        for row in rows:
-            role = row["role"]
-            if role in ("tool_step",):  # skip internal display messages
-                continue
-            if role == "agent":
-                role = "assistant"
-            session_history.append({"role": role, "content": row["content"]})
-    except Exception as e:
-        print(f"Failed to load chat history: {e}")
-        session_history = []
+    # Load recent chat history from DB instead of starting empty.
+    # role='system' rows (download notices etc.) are included, mapped to
+    # user-role 【系统通知】 messages so the agent sees them after reload.
+    session_history = _load_session_history(ws_session_id)
     last_query = ""  # Track last query for retry
     agent_is_running = False
     receive_task = None # Persistent receive_task to avoid concurrency issues
@@ -808,25 +835,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     new_sid = int(user_msg.get("session_id", 1))
                     if new_sid != ws_session_id:
                         ws_session_id = new_sid
-                        # Reload session_history for the new session's LLM context
-                        try:
-                            _ss_conn = db_connect()
-                            _ss_conn.row_factory = sqlite3.Row
-                            _ss_cursor = _ss_conn.cursor()
-                            _ss_cursor.execute(
-                                "SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? AND role IN ('user','agent') ORDER BY id DESC LIMIT 20) ORDER BY id ASC",
-                                (ws_session_id,))
-                            _ss_rows = _ss_cursor.fetchall()
-                            _ss_conn.close()
-                            session_history = []
-                            for _ss_row in _ss_rows:
-                                _ss_role = _ss_row["role"]
-                                if _ss_role in ("tool_step",): continue
-                                if _ss_role == "agent": _ss_role = "assistant"
-                                session_history.append({"role": _ss_role, "content": _ss_row["content"]})
-                        except Exception as _ss_e:
-                            print(f"[WS] Session switch: failed to reload history: {_ss_e}")
-                            session_history = []
+                        # Reload session_history for the new session's LLM context.
+                        # system rows (download notices) are included, mapped to
+                        # user-role 【系统通知】 messages by _load_session_history.
+                        session_history = _load_session_history(ws_session_id)
                         # Broadcast history_steps for the new session's most recent task
                         try:
                             _ss_conn2 = db_connect()

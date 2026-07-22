@@ -267,6 +267,9 @@ class OpenAGCAgent:
             f"如果需要下载超过 100MB 的大文件（如模型文件 .gguf/.safetensors/.bin），"
             f"必须使用 queue_download 工具（扩展工具，需先通过 search_available_tools 启用）而非 execute_shell。它支持断点续传，"
             f"不会因为超时而失败。下载进度可在下载管理面板查看。\n"
+            f"下载完成或失败时，系统会推送【系统通知】告知结果。向用户汇报下载或后台任务进展前，"
+            f"必须严格依据系统通知与下载管理器中的实际记录：只有确认成功才可报喜，"
+            f"失败必须如实说明失败原因，严禁凭推断谎称下载成功。\n"
             f"\n## 长时间任务后台化\n"
             f"当执行耗时操作（下载模型/安装依赖/训练等），shell 返回 [Still Running] 时，"
             f"应立即调用 pause_and_wait 工具（扩展工具，未启用时先 search_available_tools）暂停自己。系统会保存上下文，后台任务完成后自动恢复执行。"
@@ -821,6 +824,19 @@ class OpenAGCAgent:
                     f"或说明它与当前任务无关、建议稍后单独处理）。】"
                 )
             return ""
+
+        # System notices (download results etc.) are factual system events, not
+        # user interjections — inject directly and deterministically, bypassing
+        # the accept/reject/ask LLM judgment so a 'reject' can never drop them.
+        msg = self.pending_messages[0]
+        if msg.lstrip().startswith("【系统通知】"):
+            self.pending_messages.pop(0)
+            print(f"[Agent] Injected system notice directly (no judgment): {msg[:80]}")
+            return (
+                f"{msg}\n"
+                f"【系统指令：以上为系统事件通知（非用户插入），已确定送达，无需判断。"
+                f"请结合当前任务继续执行；向用户汇报相关进展时必须基于该通知如实说明。】"
+            )
 
         # New interjection: inject with protocol
         msg = self.pending_messages[0]  # peek, don't pop

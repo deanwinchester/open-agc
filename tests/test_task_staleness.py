@@ -167,8 +167,13 @@ def test_ws_progress_step_offset_applied_once():
     assert 'event["step"] = event.get("step", 0) + step_offset' not in src  # 二次偏移已删
 
 
-def test_ws_history_filter_excludes_system_rows():
-    """喂给 LLM 上下文的会话历史只允许 user/agent；system 通知只走 /api/history 给 UI。"""
+def test_ws_history_filter_maps_system_rows_to_user_notices():
+    """会话历史把 system 行（下载通知等）映射为 user 角色的【系统通知】纳入上下文：
+    既不向严格 provider 发送多条 system 角色消息，也保证 agent 看得到下载通知。"""
     src = _WS_SRC.read_text(encoding="utf-8")
     assert "role != 'tool_step'" not in src
-    assert src.count("role IN ('user','agent')") >= 2  # 连接时 + 切换会话时两处
+    # 两处加载（连接时 + 切换会话时）统一走 _load_session_history
+    assert src.count("_load_session_history(ws_session_id)") >= 2
+    # system 行纳入查询，并以 user 角色 + 【系统通知】前缀进入上下文
+    assert "role IN ('user','agent','system')" in src
+    assert 'f"【系统通知】{content}"' in src

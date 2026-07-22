@@ -102,6 +102,14 @@ class DownloadTool(BaseTool):
         else:
             return "Error: Provide either 'url' (with source='direct') or 'repo_id' (with source='huggingface'/'modelscope')."
 
+        # Preflight: verify the file actually exists BEFORE creating any record.
+        # A failed preflight returns an error directly — nothing is queued and
+        # no downloads row is created (zero dirty data).
+        if download_url.lower().startswith(("http://", "https://")):
+            preflight_err = _preflight_download_url(download_url)
+            if preflight_err:
+                return preflight_err
+
         # Create DB record (link to task if available)
         try:
             task_id = kwargs.get("_task_id")
@@ -278,6 +286,43 @@ class DownloadTool(BaseTool):
                 }
             }
         }
+
+
+def _preflight_download_url(url: str, timeout: float = 12.0) -> Optional[str]:
+    """Verify an HTTP(S) download URL before a download record is created.
+
+    Issues GET with ``Range: bytes=0-0`` (HEAD is rejected by many CDNs).
+    200/206/301/302/307/308 mean the file is reachable; 416 (range not
+    satisfiable) still proves the file exists. 404/410 and connection
+    failures are hard rejections. Other statuses (401/403/5xx...) are
+    inconclusive — the download proceeds and the downloader's own
+    raise_for_status reports them accurately.
+
+    Returns None when the URL passes, else an error message for the agent.
+    """
+    import requests
+    try:
+        with requests.get(url, stream=True, headers={"Range": "bytes=0-0"},
+                          timeout=timeout, allow_redirects=True) as resp:
+            code = resp.status_code
+    except requests.RequestException as e:
+        return (
+            f"Error: 无法连接到下载源 ({e})，文件不存在或源不可用。\n"
+            f"URL: {url}\n"
+            "文件不存在或源不可用，换源前请先验证文件是否存在"
+            "（用 search_web / fetch_url 确认仓库与文件名后再试）。"
+        )
+    if code in (200, 206, 301, 302, 307, 308, 416):
+        return None
+    if code in (404, 410):
+        return (
+            f"Error: 源服务器返回 HTTP {code}，目标文件不存在。\n"
+            f"URL: {url}\n"
+            "文件不存在或源不可用，换源前请先验证文件是否存在"
+            "（用 search_web / fetch_url 确认仓库与文件名后再试）。"
+        )
+    print(f"[Download] Preflight got HTTP {code} for {url} — proceeding anyway")
+    return None
 
 
 def _download_direct(url: str, target: str, progress_callback=None) -> bool:

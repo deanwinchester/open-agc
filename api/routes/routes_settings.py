@@ -8,7 +8,7 @@ from dotenv import load_dotenv, set_key
 
 from api.db import DB_PATH
 from api.config import load_config, save_config, CONFIG_PATH
-from api.state import connected_websockets, _llamacpp_download_state, _broadcast_to_websockets, _active_agents, _sandbox_waits
+from api.state import connected_websockets, _llamacpp_download_state, _broadcast_to_websockets, _active_agents, _background_agents, _sandbox_waits
 from api.task_core import create_task, update_task_status, get_task_context, save_task_context, add_task_step
 from core.paths import get_data_path
 from core.llamacpp_manager import get_llamacpp_manager
@@ -118,6 +118,38 @@ def _direct_resume_background_task(task_id: int, user_query: str, context: list,
 
 
 
+def _inject_notice_to_running_agent(task_id: int, session_id: int, notice: str) -> bool:
+    """Inject a 【系统通知】 into the agent still running this task, if any.
+
+    Foreground agents register in _active_agents[session_id][task_id (or 0)];
+    running background agents live in _background_agents[task_id]. Reuses the
+    standard queue_message injection path (same as user interjections), so the
+    agent sees the notice on its next iteration instead of reporting stale
+    progress. Returns True when the notice was delivered to a live agent.
+    """
+    try:
+        candidates = []
+        bg_agent = _background_agents.get(task_id)
+        if bg_agent is not None:
+            candidates.append(bg_agent)
+        session_agents = _active_agents.get(session_id, {}) if session_id else {}
+        # Task-keyed agent first (most specific), then ALL other session
+        # agents: a foreground agent may be registered under key 0 (task id
+        # unknown at registration), and an interrupted exact match must not
+        # shadow a live session agent — try every candidate in order.
+        if task_id in session_agents:
+            candidates.append(session_agents[task_id])
+        candidates.extend(a for tid, a in session_agents.items() if tid != task_id)
+        for agent in candidates:
+            if agent is not None and not getattr(agent, "is_interrupted", False):
+                agent.queue_message(notice)
+                return True
+    except Exception as e:
+        print(f"[Download] Failed to inject notice into running agent: {e}")
+    return False
+
+
+
 def update_download_progress(download_id: int, progress: float,
                               downloaded_bytes: int = None,
                               status: str = None, error_message: str = None):
@@ -164,6 +196,12 @@ def update_download_progress(download_id: int, progress: float,
                         path_hint = f"\n保存路径: {save_path}" if save_path else ""
                         save_message("system",
                             f"✅ 下载完成: {label}{path_hint}", session_id)
+                        # Live-notify the agent if it is still running so it
+                        # reports based on facts, not assumptions.
+                        _notice = (f"【系统通知】下载完成: {label}{path_hint}\n"
+                                   "文件已就绪。向用户汇报时必须基于本通知，不要重复下载。")
+                        if _inject_notice_to_running_agent(task_id, session_id, _notice):
+                            print(f"[Download] Injected completion notice into running agent (task {task_id})")
                         try:
                             cursor.execute("SELECT MAX(step_number) FROM task_steps WHERE task_id=?", (task_id,))
                             max_step = cursor.fetchone()[0] or 0
@@ -210,6 +248,13 @@ def update_download_progress(download_id: int, progress: float,
                         save_message("system",
                             f"❌ 下载失败: {label}\n错误信息: {err}",
                             session_id)
+                        # Live-notify the agent if it is still running — it must
+                        # report the failure honestly instead of claiming success.
+                        _notice = (f"【系统通知】下载失败: {label}\n错误信息: {err}\n"
+                                   "请分析失败原因并向用户如实说明失败，严禁谎称下载成功；"
+                                   "如需换源重试，请先验证新源上文件确实存在。")
+                        if _inject_notice_to_running_agent(task_id, session_id, _notice):
+                            print(f"[Download] Injected failure notice into running agent (task {task_id})")
                         try:
                             cursor.execute("SELECT MAX(step_number) FROM task_steps WHERE task_id=?", (task_id,))
                             max_step = cursor.fetchone()[0] or 0
