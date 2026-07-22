@@ -13,6 +13,7 @@
 // paste/drag 均走模板事件绑定，组件卸载时 Vue 自动移除，无遗留监听。
 import { ref, computed, nextTick, onUnmounted } from 'vue';
 import { ElMessage } from 'element-plus';
+import { Picture, Paperclip, Microphone } from '@element-plus/icons-vue';
 import zh from '../../i18n/zh';
 
 const t = zh.chat;
@@ -295,8 +296,8 @@ onUnmounted(() => {
         @paste="onPaste"
       />
       <template v-if="!isMobile">
-        <el-button circle class="tool-btn" :title="t.attachImage" @click="pickImage">🖼️</el-button>
-        <el-button circle class="tool-btn" :title="t.attachFile" @click="pickFile">📎</el-button>
+        <el-button circle class="tool-btn" :title="t.attachImage" @click="pickImage"><el-icon><Picture /></el-icon></el-button>
+        <el-button circle class="tool-btn" :title="t.attachFile" @click="pickFile"><el-icon><Paperclip /></el-icon></el-button>
         <el-button
           v-if="speechSupported"
           circle
@@ -304,7 +305,7 @@ onUnmounted(() => {
           :class="{ listening }"
           :title="t.voiceInput"
           @click="toggleListen"
-        >🎤</el-button>
+        ><el-icon><Microphone /></el-icon></el-button>
       </template>
       <!-- 移动端：单个「＋」按钮，点击展开动作面板（微信式） -->
       <el-button
@@ -333,10 +334,10 @@ onUnmounted(() => {
     <!-- 移动端「＋」动作面板：图标卡片式（微信风格） -->
     <div v-if="isMobile && panelOpen" class="ci-plus-panel">
       <button type="button" class="plus-action" @click="withPanelClose(pickImage)">
-        <span class="pa-icon">🖼️</span><span class="pa-label">{{ t.attachImage }}</span>
+        <span class="pa-icon"><el-icon><Picture /></el-icon></span><span class="pa-label">{{ t.attachImage }}</span>
       </button>
       <button type="button" class="plus-action" @click="withPanelClose(pickFile)">
-        <span class="pa-icon">📎</span><span class="pa-label">{{ t.attachFile }}</span>
+        <span class="pa-icon"><el-icon><Paperclip /></el-icon></span><span class="pa-label">{{ t.attachFile }}</span>
       </button>
       <button
         v-if="speechSupported"
@@ -345,7 +346,7 @@ onUnmounted(() => {
         :class="{ listening }"
         @click="withPanelClose(toggleListen)"
       >
-        <span class="pa-icon">🎤</span><span class="pa-label">{{ listening ? t.stop : t.voiceInput }}</span>
+        <span class="pa-icon"><el-icon><Microphone /></el-icon></span><span class="pa-label">{{ listening ? t.stop : t.voiceInput }}</span>
       </button>
     </div>
 
