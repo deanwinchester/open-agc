@@ -60,3 +60,5 @@ package-lock.json
 *.sw?
 *.pyc
 __pycache__/
+# 一次性验证脚本与产物的工作区（可复用工具在 scripts/）
+scratch/
