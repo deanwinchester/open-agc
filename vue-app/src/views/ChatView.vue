@@ -90,6 +90,18 @@ async function loadHeaderMeta() {
 }
 
 const listEl = ref(null);
+const chatViewEl = ref(null);
+// 移动端输入法遮挡：visualViewport 收缩（键盘弹出）时把聊天区高度钉在可视区，
+// 键盘收起后还原；仅窄屏生效，桌面端 visualViewport 变化不影响布局。
+function _onImeViewportResize() {
+  const el = chatViewEl.value;
+  if (!el || !window.visualViewport) return;
+  if (!window.matchMedia('(max-width: 768px)').matches) { el.style.height = ''; return; }
+  const vv = window.visualViewport;
+  const keyboardOpen = window.innerHeight - vv.height > 80;
+  el.style.height = keyboardOpen ? `${vv.height}px` : '';
+  if (keyboardOpen) scrollToBottom(true, true);
+}
 let keySeq = 0;
 const nextKey = () => ++keySeq;
 let downloadBannerTimer = null;
@@ -719,6 +731,7 @@ watch(
 );
 
 onMounted(async () => {
+  window.visualViewport?.addEventListener('resize', _onImeViewportResize);
   unsubs.push(
     ws.on('status', onStatus),
     ws.on('progress', onProgress),
@@ -743,6 +756,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  window.visualViewport?.removeEventListener('resize', _onImeViewportResize);
   unsubs.forEach((fn) => { try { fn(); } catch { /* noop */ } });
   unsubs.length = 0;
   clearTimeout(downloadBannerTimer);
@@ -751,7 +765,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="chat-view" :class="{ 'rail-open': railOpen }">
+  <div ref="chatViewEl" class="chat-view" :class="{ 'rail-open': railOpen }">
     <SessionRail
       :sessions="sessions"
       :current-id="currentSessionId"

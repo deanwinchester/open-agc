@@ -32,6 +32,24 @@ const pendingImages = ref([]); // dataURL 数组
 const attachedFiles = ref([]); // 已上传完成 {name, path, size}
 const uploading = ref([]); // 上传中 {id, name, pct}
 
+// 移动端（≤768px）：图片/附件/语音按钮收进「＋」面板（参考微信输入区），
+// 桌面端保持行内按钮。切回桌面时强制收起面板。
+const isMobile = ref(window.matchMedia('(max-width: 768px)').matches);
+const panelOpen = ref(false);
+const _mobileMq = window.matchMedia('(max-width: 768px)');
+function _onMobileMq(e) {
+  isMobile.value = e.matches;
+  if (!e.matches) panelOpen.value = false;
+}
+_mobileMq.addEventListener('change', _onMobileMq);
+onUnmounted(() => _mobileMq.removeEventListener('change', _onMobileMq));
+
+function togglePanel() { panelOpen.value = !panelOpen.value; }
+// 面板动作：执行后自动收起（微信交互）
+function withPanelClose(fn) {
+  return () => { fn(); panelOpen.value = false; };
+}
+
 const canSend = computed(() => props.connected
   && (text.value.trim() || pendingImages.value.length || attachedFiles.value.length));
 
@@ -276,16 +294,27 @@ onUnmounted(() => {
         @keydown="onKeydown"
         @paste="onPaste"
       />
-      <el-button circle class="tool-btn" :title="t.attachImage" @click="pickImage">🖼️</el-button>
-      <el-button circle class="tool-btn" :title="t.attachFile" @click="pickFile">📎</el-button>
+      <template v-if="!isMobile">
+        <el-button circle class="tool-btn" :title="t.attachImage" @click="pickImage">🖼️</el-button>
+        <el-button circle class="tool-btn" :title="t.attachFile" @click="pickFile">📎</el-button>
+        <el-button
+          v-if="speechSupported"
+          circle
+          class="tool-btn mic-btn"
+          :class="{ listening }"
+          :title="t.voiceInput"
+          @click="toggleListen"
+        >🎤</el-button>
+      </template>
+      <!-- 移动端：单个「＋」按钮，点击展开动作面板（微信式） -->
       <el-button
-        v-if="speechSupported"
+        v-else
         circle
-        class="tool-btn mic-btn"
-        :class="{ listening }"
-        :title="t.voiceInput"
-        @click="toggleListen"
-      >🎤</el-button>
+        class="tool-btn plus-btn"
+        :class="{ open: panelOpen }"
+        :title="t.attachImage"
+        @click="togglePanel"
+      >＋</el-button>
       <el-button
         v-if="running"
         type="danger"
@@ -299,6 +328,25 @@ onUnmounted(() => {
         :disabled="!canSend"
         @click="submit"
       >{{ running ? t.append : t.send }}</el-button>
+    </div>
+
+    <!-- 移动端「＋」动作面板：图标卡片式（微信风格） -->
+    <div v-if="isMobile && panelOpen" class="ci-plus-panel">
+      <button type="button" class="plus-action" @click="withPanelClose(pickImage)">
+        <span class="pa-icon">🖼️</span><span class="pa-label">{{ t.attachImage }}</span>
+      </button>
+      <button type="button" class="plus-action" @click="withPanelClose(pickFile)">
+        <span class="pa-icon">📎</span><span class="pa-label">{{ t.attachFile }}</span>
+      </button>
+      <button
+        v-if="speechSupported"
+        type="button"
+        class="plus-action"
+        :class="{ listening }"
+        @click="withPanelClose(toggleListen)"
+      >
+        <span class="pa-icon">🎤</span><span class="pa-label">{{ listening ? t.stop : t.voiceInput }}</span>
+      </button>
     </div>
 
     <input ref="imageFileInput" type="file" accept="image/*" multiple hidden @change="onImagePicked" />
@@ -449,6 +497,67 @@ onUnmounted(() => {
 .tool-btn,
 .stop-btn {
   flex-shrink: 0;
+}
+
+/* 移动端「＋」按钮与动作面板（微信式） */
+.plus-btn {
+  transition: transform 0.18s ease;
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.plus-btn.open {
+  transform: rotate(45deg);
+}
+
+.ci-plus-panel {
+  display: flex;
+  gap: 14px;
+  padding: 10px 4px 2px;
+  animation: ci-panel-in 0.16s ease;
+}
+
+@keyframes ci-panel-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.plus-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 6px;
+}
+
+.pa-icon {
+  width: 52px;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 12px;
+  transition: border-color var(--panda-transition), box-shadow var(--panda-transition);
+}
+
+.plus-action:active .pa-icon {
+  background: var(--el-fill-color);
+}
+
+.plus-action.listening .pa-icon {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 3px var(--el-color-primary-light-8);
+}
+
+.pa-label {
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
 }
 
 /* 识别中：主色描边 + 呼吸光圈反馈（对齐旧 mic-btn.listening 状态反馈） */
