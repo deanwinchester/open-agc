@@ -128,6 +128,9 @@ function onSubmitAsk(entry, answer) {
         <div class="shell-title">{{ t.shellOutput }}</div>
         <div v-for="(line, i) in card.shellLines" :key="i" class="shell-line">{{ line }}</div>
       </div>
+
+      <!-- 底部收起栏：长卡片展开后无需滚回顶部即可收起 -->
+      <div class="pc-collapse-bottom" @click.stop="toggle">{{ t.collapseSteps }}</div>
     </div>
 
     <!-- 步骤详情抽屉：点击步骤查看完整结果 -->
@@ -243,6 +246,24 @@ function onSubmitAsk(entry, answer) {
   border-top: 1px solid var(--el-border-color-lighter);
   /* v-show 展开时播放一次轻量淡入上滑 */
   animation: pc-expand 0.18s ease;
+}
+
+.pc-collapse-bottom {
+  margin-top: 8px;
+  padding: 7px 0 2px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+  text-align: center;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  cursor: pointer;
+  user-select: none;
+  border-radius: 0 0 6px 6px;
+  transition: color var(--panda-transition), background var(--panda-transition);
+}
+
+.pc-collapse-bottom:hover {
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
 }
 
 @keyframes pc-expand {
