@@ -8,9 +8,8 @@ from tools.base import BaseTool
 class EnterWorktreeTool(BaseTool):
     name: str = "enter_sandbox_mode"
     description: str = (
-        "Create a secure Git worktree sandbox to safely modify code or run risky commands. "
-        "This isolates changes from the main project until they are verified. "
-        "Returns the path to the new sandbox directory."
+        "创建 git worktree 隔离沙箱，在其中安全修改代码或运行高风险命令。"
+        "需要隔离验证、避免影响主项目时使用；完成后用 exit_sandbox_mode 退出。"
     )
     
     def get_openai_schema(self) -> Dict[str, Any]:
@@ -24,7 +23,7 @@ class EnterWorktreeTool(BaseTool):
                     "properties": {
                         "branch_name": {
                             "type": "string",
-                            "description": "Optional branch name to create. If omitted, a random one is generated."
+                            "description": "可选分支名，留空则自动生成。"
                         }
                     }
                 }
@@ -78,7 +77,7 @@ class EnterWorktreeTool(BaseTool):
 class ExitWorktreeTool(BaseTool):
     name: str = "exit_sandbox_mode"
     description: str = (
-        "Exit the sandbox mode. You can choose to merge changes back to the main branch or discard them."
+        "退出沙箱模式：把变更合并回主分支（merge）或整体丢弃（discard），并恢复原工作目录。"
     )
     
     def get_openai_schema(self) -> Dict[str, Any]:
@@ -93,7 +92,7 @@ class ExitWorktreeTool(BaseTool):
                         "action": {
                             "type": "string",
                             "enum": ["merge", "discard"],
-                            "description": "Whether to merge changes back to the original branch or discard them entirely."
+                            "description": "merge=合并变更回原分支；discard=丢弃全部变更。"
                         }
                     },
                     "required": ["action"]

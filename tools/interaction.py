@@ -9,9 +9,7 @@ from tools.base import BaseTool
 class AskUserQuestionTool(BaseTool):
     name: str = "ask_user_question"
     description: str = (
-        "Ask the user a question to clarify requirements, request permission, or get missing information. "
-        "Use this tool whenever you are unsure how to proceed or need explicit user confirmation. "
-        "The agent will pause execution until the user answers."
+        "向用户提问并等待回答。需求不清、缺少关键信息或需要用户确认时使用。"
     )
     
     def get_openai_schema(self) -> Dict[str, Any]:
@@ -25,14 +23,14 @@ class AskUserQuestionTool(BaseTool):
                     "properties": {
                         "question_text": {
                             "type": "string",
-                            "description": "The exact question to display to the user."
+                            "description": "要展示给用户的问题原文。"
                         },
                         "options": {
                             "type": "array",
                             "items": {
                                 "type": "string"
                             },
-                            "description": "(Optional) A list of predefined options for the user to choose from. Leave empty if you want a free-text answer."
+                            "description": "可选，预设选项；留空则用户自由输入。"
                         }
                     },
                     "required": ["question_text"]
@@ -69,9 +67,8 @@ class TaskPaused(Exception):
 class PauseAndWaitTool(BaseTool):
     name: str = "pause_and_wait"
     description: str = (
-        "暂停当前任务并等待后台进程完成。用于长时间运行的命令（下载模型、安装依赖、训练模型等）。"
-        "系统会保存当前上下文，在后台任务完成后自动恢复执行。"
-        "可设置定时唤醒作为兜底（即使后台进程检测失败，到时间也会自动恢复）。"
+        "暂停当前任务转入后台等待。命令长时间运行（下载、训练、安装）时使用；"
+        "系统保存上下文，后台完成后自动恢复，可设定时唤醒兜底。"
     )
 
     def execute(self, reason: str = "", pid: int = None,
@@ -90,33 +87,27 @@ class PauseAndWaitTool(BaseTool):
             "function": {
                 "name": "pause_and_wait",
                 "description": (
-                    "Pause the current task and yield to background execution. "
-                    "Use this when a command returns [Still Running] (long downloads, "
-                    "model training, package installation). The system will save context "
-                    "and automatically resume when the background task completes. "
-                    "You can also set a wake-up timer as a safety net — even if the "
-                    "background process detection fails, the task will be resumed on time."
+                    "暂停任务转入后台等待。命令返回 [Still Running]（长下载、训练、安装）时用；"
+                    "后台完成后自动恢复，可设定时唤醒兜底。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "reason": {
                             "type": "string",
-                            "description": "Brief description of the background task for the user."
+                            "description": "后台任务简述。"
                         },
                         "pid": {
                             "type": "integer",
-                            "description": "PID of the background process to monitor."
+                            "description": "后台进程 PID。"
                         },
                         "output_file": {
                             "type": "string",
-                            "description": "Path to the output file for reading results on resume."
+                            "description": "输出文件路径，恢复时读结果用。"
                         },
                         "wake_in_minutes": {
                             "type": "integer",
-                            "description": "Optional: wake up after this many minutes as fallback. "
-                                           "Use when the process might not be tracked correctly "
-                                           "(e.g., orphan processes, restart scenarios)."
+                            "description": "可选，定时唤醒分钟数（兜底）。"
                         }
                     },
                     "required": ["reason"]
@@ -129,11 +120,7 @@ class UserInterjectionResponseTool(BaseTool):
     """Tool for agent to respond to user interjections during task execution."""
     name: str = "user_interjection_response"
     description: str = (
-        "当你在任务执行过程中收到 [用户插入: ...] 消息时，使用此工具判断是否应处理此消息。\n\n"
-        "参数 action:\n"
-        "  - accept：消息与当前任务相关（约束、反馈、补充信息等），将在当前任务中处理\n"
-        "  - reject：消息与当前任务无关（全新主题、不相关请求），系统将为其创建新任务\n"
-        "  - ask：不确定是否相关，需要向用户提问来澄清意图"
+        "处理执行中收到的 [用户插入] 消息：相关 accept；无关 reject（另建新任务）；不确定 ask。"
     )
 
     def execute(self, action: str = "accept", response: str = "",
@@ -162,19 +149,19 @@ class UserInterjectionResponseTool(BaseTool):
                         "action": {
                             "type": "string",
                             "enum": ["accept", "reject", "ask"],
-                            "description": "accept=接受并继续当前任务, reject=拒绝（系统将创建新任务）, ask=需要向用户提问"
+                            "description": "accept 相关继续；reject 无关（另建新任务）；ask 不确定（向用户提问）"
                         },
                         "response": {
                             "type": "string",
-                            "description": "action=accept 时：对用户插入消息的回应（如'已收到约束，将在后续步骤中处理'）"
+                            "description": "accept 时对用户的回应。"
                         },
                         "reason": {
                             "type": "string",
-                            "description": "action=reject 时：解释为什么此消息与当前任务无关"
+                            "description": "reject 时说明无关原因。"
                         },
                         "question": {
                             "type": "string",
-                            "description": "action=ask 时：需要向用户澄清的问题"
+                            "description": "ask 时要澄清的问题。"
                         }
                     },
                     "required": ["action"]
@@ -187,9 +174,8 @@ class SearchHistoryTool(BaseTool):
     """Search the agent's own conversation memory — recall past queries, results, decisions."""
     name: str = "search_history"
     description: str = (
-        "检索当前会话的完整记忆。当上下文模糊、需要回忆之前讨论过什么、"
-        "查找之前获取的数据（URL/文件/命令结果）、或需要确认任务进度时使用。"
-        "这是你的\"记忆回溯\"入口——不记得时就搜索。"
+        "检索自己的会话记忆（记忆回溯）。上下文模糊、要回忆之前的文件/命令/URL/结论时必用；"
+        "结果中括号里的 ID 可传给 expand_id 展开全文。"
     )
 
     def _expand_item(self, expand_id: str, agent_ctx) -> str:
@@ -602,57 +588,45 @@ class SearchHistoryTool(BaseTool):
             "function": {
                 "name": "search_history",
                 "description": (
-                    "Search your own conversation memory. Use this whenever you feel context is fuzzy — "
-                    "to recall what the user asked, what files you read, what commands you ran, "
-                    "what errors occurred, what URLs you found, or what decisions were made earlier. "
-                    "This is your memory recall tool. If you don't remember, search.\n\n"
-                    "Progressive drill-down: after a search, you can get full content of a specific "
-                    "result by calling search_history with expand_id set to the result's ID "
-                    "(e.g. 'step:204:39', 'mem:42', 'msg:100'). The ID is shown in brackets in each result."
+                    "检索自己的会话记忆。上下文模糊、要回忆之前内容时必用；"
+                    "结果括号里的 ID 可传给 expand_id 展开全文。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "What to search for: a keyword, filename, URL fragment, task description, error message, or leave empty to see recent activity."
+                            "description": "搜索关键词，留空看最近活动。"
                         },
                         "search_type": {
                             "type": "string",
                             "enum": ["all", "user_query", "tool_calls", "results", "agent_response"],
-                            "description": "Scope: 'all' (default), 'user_query' (user messages), 'tool_calls' (tool invocations), 'results' (tool outputs), 'agent_response' (your own replies)."
+                            "description": "搜索范围，默认 all。"
                         },
                         "max_results": {
                             "type": "integer",
-                            "description": "Max results to return (default 8)."
+                            "description": "条数上限，默认 8。"
                         },
                         "expand_id": {
                             "type": "string",
-                            "description": "Progressive drill-down: set to a result ID from a previous search "
-                                           "(e.g. 'step:204:39', 'mem:42', 'msg:100') to get the FULL content "
-                                           "of that specific item. Leave empty for normal search."
+                            "description": "结果 ID（如 mem:42），取该条全文；留空普通搜索。"
                         },
                         "topic": {
                             "type": "string",
-                            "description": "Optional: limit search to a specific topic tag (e.g. '车票'). "
-                                           "Only affects memory store search."
+                            "description": "话题标签过滤（仅记忆库）。"
                         },
                         "include_archived": {
                             "type": "boolean",
-                            "description": "Set to true to also search archived (old, 1yr+) memories. "
-                                           "Default false. Use when normal search returns nothing useful."
+                            "description": "true 含归档旧记忆，默认 false。"
                         },
                         "page": {
                             "type": "integer",
-                            "description": "Page number for paginated results (default 1, most recent first). "
-                                           "Use when you see '还有 N 条，用 page=N 查看下一页'."
+                            "description": "页码，默认 1。"
                         },
                         "memory_type": {
                             "type": "string",
                             "enum": ["", "core", "working", "episode"],
-                            "description": "Filter memory store by type: 'core' (long-term facts), "
-                                           "'working' (current task context), "
-                                           "'episode' (task experience). Leave empty for all."
+                            "description": "core 长期/working 当前任务/episode 经验，留空不限。"
                         }
                     },
                     "required": []

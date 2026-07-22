@@ -17,13 +17,8 @@ def _is_pid_alive(pid: int) -> bool:
 class ShellSendTool(BaseTool):
     name: str = "shell_send"
     description: str = (
-        "向正在交互模式运行的进程发送输入并读取输出。\n"
-        "用于与 python、mysql、llama-cli 等交互式命令行程序进行对话。\n\n"
-        "用法：\n"
-        "1. 先执行 execute_shell 启动交互式命令\n"
-        "2. 收到 [Interactive] PID xxx 后，用此工具发送输入\n"
-        "3. 用 exit/quit 退出后，进程自动结束\n\n"
-        "注意：如果进程已结束或 PID 无效，工具会返回错误信息。"
+        "向交互中的进程发输入并读新输出。"
+        "execute_shell 返回 [Interactive] PID 后用它续聊（python、mysql 等）。"
     )
 
     def get_openai_schema(self) -> Dict[str, Any]:
@@ -37,15 +32,15 @@ class ShellSendTool(BaseTool):
                     "properties": {
                         "pid": {
                             "type": "integer",
-                            "description": "交互进程的 PID（从 execute_shell 返回的 [Interactive] 消息中获取）",
+                            "description": "交互进程 PID（来自 [Interactive] 消息）。",
                         },
                         "input": {
                             "type": "string",
-                            "description": "要发送给进程的输入文本（会自动追加换行）",
+                            "description": "输入文本（自动追加换行）。",
                         },
                         "timeout": {
                             "type": "integer",
-                            "description": "等待输出的超时秒数（默认 30，最长 120）",
+                            "description": "等待输出秒数（默认 30，最长 120）。",
                         },
                     },
                     "required": ["pid", "input"],

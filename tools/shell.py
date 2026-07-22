@@ -53,11 +53,8 @@ def interrupt_shell() -> bool:
 
 class ShellTool(BaseTool):
     name: str = "execute_shell"
-    description: str = ("Execute a bash environment shell command on the local machine. "
-                        "Note: sudo commands will trigger a permission popup with a password "
-                        "input field. The password is sent directly to sudo -S via stdin and "
-                        "never appears in the conversation. If sudo fails with 'a password is "
-                        "required', simply retry the command to trigger the popup again.")
+    description: str = ("在本机执行 bash 命令。sudo 弹密码框（密码不入会话，失败提示需要密码时重试一次即可触发）；"
+                        "交互程序用 shell_send 续聊。")
 
     def get_openai_schema(self) -> Dict[str, Any]:
         return {
@@ -70,16 +67,16 @@ class ShellTool(BaseTool):
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "The bash command to execute (e.g., 'ls -la', 'python script.py')"
+                            "description": "bash 命令，如 'ls -la'。"
                         },
                         "timeout": {
                             "type": "integer",
-                            "description": "Optional timeout in seconds (default 120, max 600).",
+                            "description": "超时秒数（默认 120，最长 600）。",
                             "default": 120
                         },
                         "detach": {
                             "type": "boolean",
-                            "description": "设为 true 以启动常驻服务（服务器/守护进程），命令不会阻塞任务，系统不会等待它结束。适用于启动 ComfyUI、Web 服务等长期运行的程序。默认 false。",
+                            "description": "true 启动常驻服务不阻塞（如 Web 服务）；默认 false。",
                             "default": False
                         }
                     },
@@ -238,8 +235,7 @@ class ShellTool(BaseTool):
             except Exception as e:
                 print(f"[ShellTool] Warning: failed to load sandbox config: {e}")
 
-        is_background = bool(re.search(r'(?:^|\s+)(?:start\b)(?:\s|$)', command.strip(), re.IGNORECASE)
-                             or command.strip().endswith('&'))
+        is_background = _is_background_command(command)
 
         try:
             _t0 = time.time()
@@ -430,27 +426,13 @@ class ShellTool(BaseTool):
                                 "支持断点续传且不会阻塞。命令仍在后台运行中。\n"
                             )
                         # ── Interactive prompt detection ──
-                        # Check the last 200 bytes of output for common interactive prompts
-                        _interactive_prompts = [
-                            b'mysql> ', b'sqlite> ', b'psql> ',
-                            b'>>> ', b'In [',
-                            b'ress: ',
-                            b' :',  # pager (colon alone can match many things, check carefully)
-                        ]
+                        # Check the last 512 bytes of output; only whole-line
+                        # prompt patterns count (see _INTERACTIVE_LINE_PATTERNS).
                         try:
                             with open(out_path, "rb") as _rf:
-                                _rf.seek(max(0, output_size - 200))
-                                _tail_bytes = _rf.read(200)
-                            # Check specific prompts first, then >  (llama.cpp/Ollama CLI)
-                            _is_interactive = any(p in _tail_bytes for p in _interactive_prompts)
-                            if not _is_interactive and b'\n> ' in _tail_bytes:
-                                _is_interactive = True
-                            # Also check if last non-empty line is a single >
-                            if not _is_interactive:
-                                _last_lines = tail.strip().split('\n')
-                                _last_nonempty = next((l.strip() for l in reversed(_last_lines) if l.strip()), '')
-                                if _last_nonempty == '>':
-                                    _is_interactive = True
+                                _rf.seek(max(0, output_size - 512))
+                                _tail_bytes = _rf.read(512)
+                            _is_interactive = _detect_interactive_prompt(_tail_bytes)
                             if _is_interactive:
                                 if proc.stdin:
                                     with _interactive_procs_lock:
@@ -566,6 +548,73 @@ def adopt_orphan_processes(task_id: int, session_id: int = None) -> int:
         import sys
         print(f"[Shell] Adopted {adopted} orphan process(es) → task #{task_id}", file=sys.stderr, flush=True)
     return adopted
+
+
+def _is_background_command(command: str) -> bool:
+    """Detect commands that self-background and return immediately.
+
+    Only two cases count as background:
+      1. The Windows `start` builtin as the FIRST token of the command
+         (e.g. `start chrome`, `start /min cmd /c ...`). `start` is a cmd.exe
+         builtin that launches a detached process and returns immediately,
+         so waiting for it would be pointless.
+      2. A trailing `&` (Unix shell background operator).
+
+    Explicitly NOT background:
+      - `npm start` / `yarn start` — `start` is an npm subcommand argument,
+        not the Windows builtin; the process runs in the foreground.
+      - `start.py` / `python start.py` — a filename, not the bare builtin.
+      - `echo start` / `"start"` mid-command — `start` not in first position.
+      - `cmd /c start notepad` — first token is `cmd`; the cmd process itself
+        returns immediately, so foreground handling is correct anyway.
+    """
+    stripped = command.strip()
+    if not stripped:
+        return False
+    # Windows `start` builtin: must be the first token, followed by
+    # whitespace or end-of-command. `start.py` / `startx` do not match.
+    if re.match(r'^start(?:\s|$)', stripped, re.IGNORECASE):
+        return True
+    # Unix background operator
+    if stripped.endswith('&'):
+        return True
+    return False
+
+
+# Whole-line interactive prompt patterns, matched against the last non-empty
+# line of a still-running process's output. Deliberately precise so progress
+# output like "Progress: 50%" or "Address: 1.2.3.4" is NOT flagged.
+_INTERACTIVE_LINE_PATTERNS = [
+    re.compile(r'(?:mysql|sqlite|psql|mongo|redis|gdb|irb)>\s*$', re.IGNORECASE),  # DB/GDB CLIs
+    re.compile(r'>>>\s*$'),                    # Python REPL prompt
+    re.compile(r'^\.\.\.\s*$'),                # Python continuation prompt (whole line only)
+    re.compile(r'^In \[\d*\]:\s*$'),           # IPython
+    re.compile(r'^>\s*$'),                     # llama.cpp / Ollama CLI bare prompt
+    re.compile(r'(?:password|passphrase|login|username)[^:\n]*:\s*$', re.IGNORECASE),  # login prompts
+    re.compile(r'\S+@\S+:[^\s]*[$#]\s*$'),     # bash-style prompt: user@host:~$ / root@host:~#
+]
+
+
+def _detect_interactive_prompt(tail_bytes: bytes) -> bool:
+    """Return True if the output tail ends at an interactive prompt.
+
+    Only whole-line prompt patterns are accepted (checked against the last
+    non-empty line), so progress/log output containing "Progress: 50%",
+    "Address: ..." or "key: value" no longer triggers a false positive.
+    """
+    try:
+        text = tail_bytes.decode("utf-8", errors="replace")
+    except Exception:
+        return False
+    # Treat \r as a line break too (progress bars overwrite via \r).
+    last = ""
+    for line in reversed(text.replace("\r", "\n").split("\n")):
+        if line.strip():
+            last = line.strip()
+            break
+    if not last:
+        return False
+    return any(p.search(last) for p in _INTERACTIVE_LINE_PATTERNS)
 
 
 def _looks_like_download(command: str, output: str) -> bool:

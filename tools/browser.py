@@ -389,17 +389,10 @@ class BrowserAutomationTool:
             "function": {
                 "name": "browser_automation",
                 "description": (
-                    "虚拟沙盒浏览器工具。使用 playwright 进行隔离环境下的网页控制与数据抓取。"
-                    "大模型如果需要查询或者填写网页内容，应该首推使用此工具，而不是 pyautogui。"
-                    "动作(action)支持："
-                    "1. 'goto': 导航到指定网址 (需 url)。"
-                    "2. 'read_dom': 获取当前页面的纯净交互元素DOM树(极度推荐在点击前先使用本命令以了解当前网页上的具体 CSS Seletor/class/id)。"
-                    "3. 'click': 使用 CSS 选择器点击元素 (需 selector)。遇到真正的文件上传按钮切勿使用 click，而是使用 upload 动作。"
-                    "4. 'fill': 向输入框填入文字 (需 selector 和 text)。"
-                    "5. 'press': 按下键盘按键 (如 Enter、Escape)。"
-                    "6. 'upload': 上传文件到网页表单 (非常重要：对准 <input type='file'> 元素的 selector 进行操作，用本地文件的绝对路径作为 path 参数)。"
-                    "7. 'get_url': 读当前页面的真实 URL。"
-                    "8. 'close': 关闭并清理浏览器沙盒环境。"
+                    "用 playwright 控制隔离沙盒浏览器，操作网页首选。动作：goto 导航；"
+                    "read_dom 取交互元素树（点击前先确认 selector）；click 点击（上传按钮改用 upload）；"
+                    "fill 填文本；press 按键；upload 传文件（selector 对准 <input type='file'>，"
+                    "path 用本地绝对路径）；get_url 读 URL；close 关闭。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -407,31 +400,31 @@ class BrowserAutomationTool:
                         "action": {
                             "type": "string",
                             "enum": ["goto", "read_dom", "click", "fill", "press", "upload", "get_url", "close"],
-                            "description": "要执行的浏览器指令",
+                            "description": "要执行的浏览器动作。",
                         },
                         "url": {
                             "type": "string",
-                            "description": "目标网页地址 (用于 goto)，例如 'https://github.com'",
+                            "description": "目标网址（goto 用）。",
                         },
                         "selector": {
                             "type": "string",
-                            "description": "CSS 选择器 (用于 click, fill)，例如 '#search-input' 或 'button.submit-btn'",
+                            "description": "CSS 选择器（click/fill/upload）。",
                         },
                         "text": {
                             "type": "string",
-                            "description": "要填入的文本内容 (用于 fill)",
+                            "description": "要填入的文本（fill 用）。",
                         },
                         "key": {
                             "type": "string",
-                            "description": "按键名称 (用于 press)，例如 'Enter', 'Escape'",
+                            "description": "按键名（press 用），如 Enter。",
                         },
                         "path": {
                             "type": "string",
-                            "description": "本地文件的绝对路径 (用于 upload)"
+                            "description": "本地文件绝对路径（upload 用）。"
                         },
                         "wait_time": {
                             "type": "integer",
-                            "description": "执行动作后的硬等待秒数，默认1秒，如果网页加载慢可提高",
+                            "description": "硬等待秒数，默认 1。",
                         }
                     },
                     "required": ["action"],

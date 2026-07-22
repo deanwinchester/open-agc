@@ -6,7 +6,7 @@ class SaveSkillTool(BaseTool):
     保存或更新一个大模型学习到的技能。
     """
     name: str = "save_learned_skill"
-    description: str = "保存或更新一个大模型学习到或整理出的复合技能流程（Markdown 格式），并落盘固化为长期技能。"
+    description: str = "把学会的可复用流程保存为长期技能（Markdown 格式）并落盘固化。用户要求记住做法或沉淀经验时用。"
 
     def get_openai_schema(self) -> Dict[str, Any]:
         return {
@@ -19,11 +19,11 @@ class SaveSkillTool(BaseTool):
                     "properties": {
                         "skill_filename": {
                             "type": "string",
-                            "description": "保存的文件名（例如：check_logs.md，强烈建议以 .md 结尾）",
+                            "description": "保存的文件名，建议以 .md 结尾（如 check_logs.md）。",
                         },
                         "skill_content": {
                             "type": "string",
-                            "description": "技能的 Markdown 格式全文。需包含明确的触发条件和分步实施指令。",
+                            "description": "技能 Markdown 全文，须含明确的触发条件和分步指令。",
                         }
                     },
                     "required": ["skill_filename", "skill_content"],

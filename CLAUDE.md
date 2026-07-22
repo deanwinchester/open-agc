@@ -79,7 +79,7 @@ All tools extend `BaseTool` (a Pydantic model) and implement:
 |------|---------------|
 | `shell.py` — `execute_shell` | `subprocess` |
 | `python_repl.py` — `execute_python` | `subprocess` (temp .py file) |
-| `filesystem.py` — `read_file` / `write_file` | — |
+| `filesystem.py` — `read_file` / `write_file` / `edit_file` / `apply_patch` / `list_dir` | — |
 | `computer.py` — `computer_control` | `pyautogui` (FAILSAFE=True) |
 | `browser.py` — `browser_automation` | `playwright` (sync, singleton, isolated thread) |
 | `memory.py` — `manage_memory` | `MemoryStore` (shared instance) |

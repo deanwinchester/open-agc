@@ -130,12 +130,7 @@ class ToolDiscoveryTool(BaseTool):
 
     name: str = "search_available_tools"
     description: str = (
-        "Search and discover advanced tools based on your current needs. "
-        "Use this tool when you need capabilities that are not in your current tool list "
-        "(e.g., 'browser', 'web search', 'email', 'python', 'system config', "
-        "'plugin development', 'MCP', etc.). "
-        "It will search the system's deferred tools pool and enable the matching tools. "
-        "You can then use them in your NEXT step."
+        "检索并启用扩展工具。需要当前没有的能力（浏览器、邮件等）时先搜后用。"
     )
 
     def __init__(self, full_tools: Dict[str, BaseTool], enable_callback: Callable[[List[str]], None], **kwargs):
@@ -154,7 +149,7 @@ class ToolDiscoveryTool(BaseTool):
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "A natural language query describing the capability you need (e.g., 'search web', 'browser automation', 'execute python')."
+                            "description": "描述需要的能力（中英文均可），如 '浏览器'、'email'。"
                         }
                     },
                     "required": ["query"]

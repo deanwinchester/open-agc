@@ -8,10 +8,7 @@ from tools.base import BaseTool
 
 class ComputerTool(BaseTool):
     name: str = "computer_control"
-    description: str = (
-        "Control the physical computer mouse and keyboard. "
-        "Allows you to click, move the mouse, type text, and press keys."
-    )
+    description: str = "物理操控本机鼠标和键盘（点击、移动、输入、按键、截图）。browser_automation 等工具无法完成的 GUI 操作才用它。"
     def __init__(self, **data):
         super().__init__(**data)
         # Import pyautogui lazily to avoid issues if not installed or running headlessly
@@ -37,28 +34,28 @@ class ComputerTool(BaseTool):
                     "properties": {
                         "action": {
                             "type": "string",
-                            "description": "The action to perform: 'mouse_move', 'mouse_click', 'type_text', 'press_key', 'hotkey', 'screenshot'."
+                            "description": "mouse_move/mouse_click/type_text/press_key/hotkey/screenshot"
                         },
                         "x": {
                             "type": "integer",
-                            "description": "X coordinate for mouse actions."
+                            "description": "鼠标操作的 X 坐标。"
                         },
                         "y": {
                             "type": "integer",
-                            "description": "Y coordinate for mouse actions."
+                            "description": "鼠标操作的 Y 坐标。"
                         },
                         "text": {
                             "type": "string",
-                            "description": "Text to type when action is 'type_text'."
+                            "description": "action=type_text 时要输入的文本。"
                         },
                         "key": {
                             "type": "string",
-                            "description": "Key to press when action is 'press_key' (e.g., 'enter', 'tab', 'esc')."
+                            "description": "action=press_key 时的按键名（如 enter、tab、esc）。"
                         },
                         "keys": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "List of keys for hotkey combinations (e.g., ['command', 'c'])."
+                            "description": "action=hotkey 时的组合键列表（如 ['command', 'c']）。"
                         }
                     },
                     "required": ["action"]

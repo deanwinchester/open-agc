@@ -6,12 +6,8 @@ from tools.base import BaseTool
 class MemoryTool(BaseTool):
     name: str = "manage_memory"
     description: str = (
-        "管理长期记忆。\n\n"
-        "使用 'add' 保存重要信息（需指定 topic 话题标签，如 '车票'、'偏好'、'项目配置'）\n"
-        "使用 'read' 查看已记住的内容\n"
-        "使用 'update' 按 ID 替换记忆内容\n"
-        "使用 'forget' 按 ID 删除记忆\n\n"
-        "注意：查找记忆请用 search_history 工具（支持多源搜索和渐进展开），不要用 manage_memory 来搜索。"
+        "管理长期记忆（增/查/改/删）。记住重要事实、偏好、项目配置时用；"
+        "搜索记忆用 search_history。"
     )
 
     _store: Any = PrivateAttr()
@@ -121,30 +117,29 @@ class MemoryTool(BaseTool):
                         "action": {
                             "type": "string",
                             "enum": ["add", "read", "update", "forget"],
-                            "description": "操作类型：'add'=添加，'read'=查看全部，'update'=按ID更新，'forget'=按ID删除"
+                            "description": "add 添加；read 查看；update/forget 按 ID 更新/删除"
                         },
                         "content": {
                             "type": "string",
-                            "description": "记忆内容（add/update 时必填，最长 2000 字）。"
+                            "description": "记忆内容（add/update 必填，≤2000 字）。"
                         },
                         "query": {
                             "type": "string",
-                            "description": "记忆 ID（update/forget 时必填，数字）。"
+                            "description": "记忆 ID（update/forget 必填）。"
                         },
                         "topic": {
                             "type": "string",
-                            "description": "话题标签（add 时建议填写，如 '车票'、'偏好'、'项目配置'）。"
-                                   "同话题的记忆会按相关性排序返回。"
+                            "description": "话题标签（add 建议填）。"
                         },
                         "category": {
                             "type": "string",
                             "enum": ["", "tech", "user_pref", "project", "knowledge", "system", "general"],
-                            "description": "类别（可选）"
+                            "description": "类别（可选）。"
                         },
                         "memory_type": {
                             "type": "string",
                             "enum": ["", "core", "working", "episode"],
-                            "description": "记忆类型：core=长期核心事实，working=短期工作记忆（默认），episode=事件经验"
+                            "description": "core=长期/working=工作记忆（默认）/episode=事件经验"
                         },
                     },
                     "required": ["action"],

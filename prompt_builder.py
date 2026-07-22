@@ -93,35 +93,3 @@ def detect_system_env() -> str:
     return "\n".join(parts)
 
 
-class PromptBuilderMixin:
-    """Mixin providing _build_tool_list_section."""
-
-    def _build_tool_list_section(self) -> str:
-        """Build a markdown section listing all available tools."""
-        lines = ["\n## 全量工具列表\n",
-                 "以下是你可用的所有工具"
-                 "（核心工具已加载完整用法，其余工具通过 search_available_tools 加载完整用法）：\n"]
-        CORE_NAMES = {"execute_shell", "read_file", "write_file", "edit_file",
-                       "search_file_content", "find_files", "execute_python",
-                       "search_web", "manage_memory", "ask_user_question",
-                       "search_history", "queue_download", "pause_and_wait",
-                       "self_review", "search_available_tools", "configure_system", "compact_context"}
-        core_items = []
-        ext_items = []
-        for name, tool in sorted(self.full_available_tools.items()):
-            is_core = name in CORE_NAMES
-            if is_core:
-                desc = getattr(tool, 'description', '')[:60]
-                item = f"  ✅ `{name}`"
-                if desc:
-                    item += f" — {desc}"
-                core_items.append(item)
-            else:
-                ext_items.append(f"  🔧 `{name}`")
-        if core_items:
-            lines.append("核心工具（已就绪）：")
-            lines.extend(core_items)
-        if ext_items:
-            lines.append("扩展工具（需通过 search_available_tools 唤醒）：")
-            lines.extend(ext_items)
-        return "\n".join(lines)

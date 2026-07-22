@@ -24,7 +24,7 @@ def load_email_config():
 
 class SearchEmailTool(BaseTool):
     name: str = "search_emails"
-    description: str = "Fetch and read emails from the connected IMAP account. Useful for summarizing emails. IMAP criteria examples: 'UNSEEN', 'ALL', 'FROM person@example.com'."
+    description: str = "从已配置的 IMAP 邮箱抓取并阅读邮件。查看、总结邮件时用它；发邮件用 send_email。"
 
     def get_openai_schema(self) -> Dict[str, Any]:
         return {
@@ -37,11 +37,11 @@ class SearchEmailTool(BaseTool):
                     "properties": {
                         "criteria": {
                             "type": "string",
-                            "description": "IMAP search criteria (e.g., 'UNSEEN', 'ALL', 'FROM owner_email'). Defaults to 'ALL'."
+                            "description": "IMAP 搜索条件（如 UNSEEN、ALL、FROM a@b.com），默认 ALL。"
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximum number of emails to return.",
+                            "description": "返回邮件数上限。",
                             "default": 10
                         }
                     }
@@ -81,7 +81,7 @@ class SearchEmailTool(BaseTool):
 
 class SendEmailTool(BaseTool):
     name: str = "send_email"
-    description: str = "Send an email from the connected SMTP account to a recipient. You can use 'owner' as to_addr to send to the owner."
+    description: str = "从已配置的 SMTP 账户发送邮件。to_addr 填 owner 可直接发给主人。"
 
     def get_openai_schema(self) -> Dict[str, Any]:
         return {
@@ -94,15 +94,15 @@ class SendEmailTool(BaseTool):
                     "properties": {
                         "to_addr": {
                             "type": "string",
-                            "description": "Recipient email address."
+                            "description": "收件人邮箱地址；填 owner 发给主人。"
                         },
                         "subject": {
                             "type": "string",
-                            "description": "Email subject."
+                            "description": "邮件主题。"
                         },
                         "body": {
                             "type": "string",
-                            "description": "Email body content."
+                            "description": "邮件正文内容。"
                         }
                     },
                     "required": ["to_addr", "subject", "body"]

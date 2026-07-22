@@ -5,10 +5,8 @@ import json
 class CompactContextTool(BaseTool):
     name: str = "compact_context"
     description: str = (
-        "使用 LLM 对早期上下文对话历史进行结构化总结压缩。"
-        "当长篇输出或历史任务记录让你感到困惑时，调用此工具清理上下文。"
-        "会用 LLM 生成结构化的摘要（含用户需求、关键决策、文件修改、待办事项等），"
-        "保留最近的消息原文，早期内容替换为摘要。"
+        "用 LLM 把早期对话历史压缩成结构化摘要（含需求、决策、文件修改、待办）。"
+        "历史记录过长干扰当前任务时调用；最近消息保留原文。"
     )
 
     def get_openai_schema(self) -> Dict[str, Any]:
@@ -22,7 +20,7 @@ class CompactContextTool(BaseTool):
                     "properties": {
                         "reason": {
                             "type": "string",
-                            "description": "为什么要清理上下文（例如：'之前的构建日志太长干扰了现在的注意力'）"
+                            "description": "清理原因，如 '之前的构建日志太长干扰了注意力'。"
                         }
                     },
                     "required": ["reason"],

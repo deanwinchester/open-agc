@@ -53,7 +53,7 @@ class ConfigureSystemTool(BaseTool):
     """Read and modify system configuration, manage MCP servers, plugins, agent profiles, and skills."""
 
     name: str = "configure_system"
-    description: str = "配置系统自身：读取/修改配置、管理 MCP 服务器、安装/卸载插件、管理 Agent 配置档、管理技能。"
+    description: str = "读写系统自身配置：配置项、MCP 服务器、插件、Agent 配置档、技能。"
 
     def get_openai_schema(self) -> Dict[str, Any]:
         return {
@@ -84,51 +84,51 @@ class ConfigureSystemTool(BaseTool):
                                 "import_skill",
                                 "delete_skill",
                             ],
-                            "description": "要执行的操作",
+                            "description": "setting 配置；mcp_server MCP；plugin 插件；profile 配置档；skill 技能",
                         },
                         "key": {
                             "type": "string",
-                            "description": "update_setting 时使用的配置键名（如 default_model、sandbox_mode 等）",
+                            "description": "配置键名（update_setting 用）。",
                         },
                         "value": {
                             "type": "string",
-                            "description": "update_setting 时使用的配置值（JSON 格式，如 \"gpt-4o\"、true、false、\"[]\"）",
+                            "description": "配置值（JSON 格式）。",
                         },
                         "mcp_server_name": {
                             "type": "string",
-                            "description": "MCP 服务器名称（add/remove 时使用）",
+                            "description": "MCP 服务器名（add/remove 用）。",
                         },
                         "mcp_command": {
                             "type": "string",
-                            "description": "MCP 服务器启动命令",
+                            "description": "MCP 启动命令。",
                         },
                         "mcp_args": {
                             "type": "string",
-                            "description": "MCP 服务器参数（JSON 字符串数组）",
+                            "description": "MCP 参数（JSON 数组）。",
                         },
                         "plugin_name": {
                             "type": "string",
-                            "description": "插件名称",
+                            "description": "插件名称。",
                         },
                         "plugin_repo_url": {
                             "type": "string",
-                            "description": "插件 git 仓库地址",
+                            "description": "插件 git 仓库地址。",
                         },
                         "profile_name": {
                             "type": "string",
-                            "description": "Agent 配置档名称",
+                            "description": "配置档名称。",
                         },
                         "profile_data": {
                             "type": "string",
-                            "description": "Agent 配置档数据（JSON 字符串，含 prompt/model/temperature/max_tokens）",
+                            "description": "配置档数据（JSON 字符串）。",
                         },
                         "skill_filename": {
                             "type": "string",
-                            "description": "技能文件名（以 .md 结尾）",
+                            "description": "技能文件名（.md）。",
                         },
                         "skill_content": {
                             "type": "string",
-                            "description": "技能 Markdown 全文",
+                            "description": "技能 Markdown 全文。",
                         },
                     },
                     "required": ["action"],
