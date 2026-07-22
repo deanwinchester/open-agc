@@ -1,0 +1,82 @@
+{
+ "model": "kimi_code/k3",
+ "started": "2026-07-22 09:10:09",
+ "structural_problems": [],
+ "sizes": {
+  "static_before": 29764,
+  "static_after": 21845,
+  "active_before": 23942,
+  "active_after": 16259
+ },
+ "fallback_model": "kimi_code/k3[1m]",
+ "litellm_accept": {
+  "ok": true,
+  "model": "kimi_code/k3",
+  "schemas": 22,
+  "payload_bytes": 16259,
+  "reply": "ok"
+ },
+ "model_used": "kimi_code/k3",
+ "tasks": [
+  {
+   "label": "读文件并总结",
+   "duration_s": 11.1,
+   "error": null,
+   "tools_called": [
+    "read_file"
+   ],
+   "tools_done_success": {
+    "read_file": true
+   },
+   "expected_tools_hit": [
+    "read_file"
+   ],
+   "expected_tools_missing": [],
+   "asked_user": false,
+   "reply_preview": "该文件介绍了 Open-AGC 本地智能体项目，说明其支持工具调用、记忆管理和沙箱执行，并注明阶段五的任务是优化工具描述（含标记词 BANANA_MARK_42）。",
+   "ok": true
+  },
+  {
+   "label": "搜索代码并修改",
+   "duration_s": 25.5,
+   "error": null,
+   "tools_called": [
+    "search_file_content",
+    "edit_file",
+    "read_file"
+   ],
+   "tools_done_success": {
+    "search_file_content": true,
+    "edit_file": true,
+    "read_file": true
+   },
+   "expected_tools_hit": [
+    "search_file_content",
+    "edit_file"
+   ],
+   "expected_tools_missing": [],
+   "asked_user": false,
+   "reply_preview": "完成 ✅\n\n标记词 `BANANA_MARK_42` 位于第 4 行，已替换为 `APPLE_MARK_42`，其他内容未做任何改动。修改后文件内容：\n\n```\nOpen-AGC 是一个本地智能体项目。\n它支持工具调用、记忆管理和沙箱执行。\n阶段五的任务是优化工具描述。\n标记词: APPLE_MARK_42\n```",
+   "ok": true
+  },
+  {
+   "label": "运行命令",
+   "duration_s": 7.4,
+   "error": null,
+   "tools_called": [
+    "execute_shell"
+   ],
+   "tools_done_success": {
+    "execute_shell": true
+   },
+   "expected_tools_hit": [
+    "execute_shell"
+   ],
+   "expected_tools_missing": [],
+   "asked_user": false,
+   "reply_preview": "命令执行成功（退出码 0），输出为：\n\n```\nS5T1_SHELL_OK\n```",
+   "ok": true
+  }
+ ],
+ "all_ok": true
+}

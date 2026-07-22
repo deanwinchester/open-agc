@@ -21,7 +21,7 @@ from core.reflection import ReflectionEngine
 from core.knowledge_graph import KnowledgeGraph
 from core.stats_manager import get_stats_manager
 from tools.shell import ShellTool
-from tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool
+from tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool, ApplyPatchTool
 from tools.search import GrepSearchTool, GlobTool
 from tools.python_repl import PythonREPLTool
 from tools.computer import ComputerTool
@@ -54,7 +54,7 @@ from agent.context_manager import (
     compress_search_results, compress_file_content, compress_shell_output,
     compress_tool_result, fold_tool_calls,
 )
-from prompt_builder import detect_system_env, PromptBuilderMixin
+from prompt_builder import detect_system_env
 
 def _detect_system_env() -> str:
     """Delegate to prompt_builder module."""
@@ -114,7 +114,7 @@ def _post_process_loop():
                 pass
 
 
-class OpenAGCAgent(PromptBuilderMixin):
+class OpenAGCAgent:
     """
     Main Agent Loop handling context, Tool calling, and orchestration.
     Supports real-time progress callbacks for task tracking.
@@ -170,6 +170,10 @@ class OpenAGCAgent(PromptBuilderMixin):
         # Store config for later use
         self.sandbox_dir = None
         self.browser_headless = False
+        # Tiered tool exposure: only a small resident core in tool_schemas,
+        # everything else discovered+injected via search_available_tools.
+        # Set tool_tiered_exposure=false in config.json for full residency.
+        self.tool_tiered_exposure = True
         budget_cfg = {}
         if os.path.exists(config_path):
             try:
@@ -178,6 +182,7 @@ class OpenAGCAgent(PromptBuilderMixin):
                     if config.get("sandbox_mode", True):
                         self.sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
                     self.browser_headless = config.get("browser_headless", False)
+                    self.tool_tiered_exposure = config.get("tool_tiered_exposure", True)
                     # Initialize token budget from config if available
                     budget_cfg = config.get("context_budget", {})
             except Exception:
@@ -246,22 +251,22 @@ class OpenAGCAgent(PromptBuilderMixin):
             f"也不要因为一次失败就完全放弃可行的方法。\n"
             f"\n# 工具使用指南\n"
             f"\n## 工具优先级（按推荐顺序）\n"
-            f"1. write_file / edit_file — 创建和修改文件（首选文件操作方式）\n"
+            f"1. write_file / edit_file / apply_patch — 创建和修改文件（首选文件操作方式；多文件多处批量修改用 apply_patch）\n"
             f"2. execute_python — 运行 Python 代码进行数据处理、测试等\n"
             f"3. execute_shell — 执行系统命令（仅当无专用工具可用时）\n"
-            f"4. search_file_content / find_files — 搜索文件内容与查找文件\n"
+            f"4. search_file_content / find_files — 搜索文件内容、查找文件（查看目录结构用 list_dir，扩展工具需先启用）\n"
             f"5. search_web — 搜索互联网获取最新信息\n"
-            f"6. browser_automation — 虚拟浏览器操作网页\n"
-            f"7. parse_html — 使用 Reader-lm 将 HTML 源码转为 Markdown（浏览器获取的页面过大时使用）\n"
-            f"8. search_history — 检索当前会话历史（需要回忆之前内容时使用）\n"
-            f"9. 其他专用工具根据场景选用\n"
+            f"6. search_history — 检索当前会话历史（需要回忆之前内容时使用）\n"
+            f"7. browser_automation — 虚拟浏览器操作网页（扩展工具，先用 search_available_tools 启用）\n"
+            f"8. parse_html — 使用 Reader-lm 将 HTML 源码转为 Markdown（扩展工具，需先启用；浏览器获取的页面过大时使用）\n"
+            f"9. 其他专用工具（下载、邮件、任务计划、电脑控制等）先通过 search_available_tools 搜索启用，再根据场景选用\n"
             f"\n## 大文件下载\n"
             f"如果需要下载超过 100MB 的大文件（如模型文件 .gguf/.safetensors/.bin），"
-            f"必须使用 queue_download 工具而非 execute_shell。它支持断点续传，"
+            f"必须使用 queue_download 工具（扩展工具，需先通过 search_available_tools 启用）而非 execute_shell。它支持断点续传，"
             f"不会因为超时而失败。下载进度可在下载管理面板查看。\n"
             f"\n## 长时间任务后台化\n"
             f"当执行耗时操作（下载模型/安装依赖/训练等），shell 返回 [Still Running] 时，"
-            f"应立即调用 pause_and_wait 工具暂停自己。系统会保存上下文，后台任务完成后自动恢复执行。"
+            f"应立即调用 pause_and_wait 工具（扩展工具，未启用时先 search_available_tools）暂停自己。系统会保存上下文，后台任务完成后自动恢复执行。"
             f"不要让用户干等着，也不要反复重试。\n"
             f"\n## Python 后台进程\n"
             f"如果使用 execute_python 启动长期运行的进程（如 ffmpeg 录屏、服务器等），"
@@ -274,7 +279,7 @@ class OpenAGCAgent(PromptBuilderMixin):
             f"\n## 交互式命令\n"
             f"如果 shell 返回 [Interactive] PID xxx，说明该命令已进入交互模式（如 python、mysql 等）。"
             f"此时进程并未超时，而是等待你的输入。你可以：\n"
-            f"1. 使用 shell_send(pid=xxx, input=\"...\") 向进程发送输入并读取响应\n"
+            f"1. 使用 shell_send(pid=xxx, input=\"...\") 向进程发送输入并读取响应（扩展工具，未启用时先 search_available_tools 启用）\n"
             f"2. 发送 exit 或 quit 退出交互模式\n"
             f"3. 或调用 pause_and_wait 保持进程运行\n"
             f"\n{{system_env}}\n"
@@ -311,17 +316,18 @@ class OpenAGCAgent(PromptBuilderMixin):
             f"`![图片描述](/api/files/生成的文件名.png)`。"
             f"这个内部 API 能将沙箱里的图片直接推送到网页前端显示。\n"
             f"\n## 网页文件上传\n"
-            f"优先使用 browser_automation（虚拟浏览器）工具的 upload 动作将文件填入网页。"
+            f"优先使用 browser_automation（虚拟浏览器，扩展工具，需先 search_available_tools 启用）工具的 upload 动作将文件填入网页。"
             f"如果遇到必须通过操作系统原生文件选择框处理的情况，"
-            f"可临时使用 computer_control（键鼠控制工具）来操作系统的上传弹窗。\n"
+            f"可临时使用 computer_control（键鼠控制，扩展工具）来操作系统的上传弹窗。\n"
             f"\n## 任务管理\n"
-            f"使用 manage_task 工具查看现有任务、搜索历史任务、查看详情和交付物:\n"
+            f"使用 manage_task 工具（扩展工具，需先 search_available_tools 启用）查看现有任务、搜索历史任务、查看详情和交付物:\n"
             f"- list → 列出最近任务（可按状态筛选）\n"
             f"- search → 按关键词搜索历史任务\n"
             f"- get → 查看任务详情、步骤和交付物\n"
             f"- record_deliverable → 记录任务交付物\n"
             f"\n## 任务计划与大目标管理\n"
-            f"对于多步骤的复杂任务，使用 manage_task_plan 工具管理：\n"
+            f"对于多步骤的复杂任务，使用 manage_task_plan 工具管理"
+            f"（扩展工具，首次使用前需先通过 search_available_tools 搜索「任务计划」启用）：\n"
             f"\n"
             f"### Plan（执行计划）\n"
             f"- plan.create(goal, steps) → 创建任务执行计划，steps 是细分步骤\n"
@@ -359,18 +365,23 @@ class OpenAGCAgent(PromptBuilderMixin):
             f"在每次任务开始时，系统会根据任务内容自动检索并注入相关技能供你参考执行。"
             f"如果你成功完成了一项之前未完成过的复杂任务，并且得到了用户的正面反馈，"
             f"必须主动询问用户是否需要将过程保存为新技能。"
-            f"如用户同意，请使用 save_learned_skill 工具。\n"
+            f"如用户同意，请使用 save_learned_skill 工具（扩展工具，需先 search_available_tools 启用）。\n"
             f"\n## 自我审查机制\n"
             f"当任务接近最大迭代次数或你感觉陷入循环时，可以调用 self_review 工具进行自我审查。"
             f"系统会在达到迭代上限时自动提示你使用此工具。通过审查你可以获得额外的执行机会。"
             f"请诚实评估：如果确实陷入无效循环，及时报告用户比浪费计算资源更好。\n"
             f"\n## 扩展工具系统\n"
-            f"当前可用的工具是核心工具子集。如果你的任务需要以下能力，但它们不在当前工具列表中，"
-            f"请使用 search_available_tools 工具搜索并启用：\n"
+            f"当前可用的工具是核心工具子集。其余工具默认未启用；需要某种能力时，"
+            f"请使用 search_available_tools 工具搜索并启用（支持中文关键词），"
+            f"搜索成功后工具将在你的下一轮回复中可用。常见扩展能力：\n"
+            f"- 浏览器/网页自动化——搜索「浏览器」\n"
+            f"- 大文件下载——搜索「下载」\n"
+            f"- 任务计划与任务管理——搜索「任务」\n"
+            f"- 邮件收发——搜索「邮件」\n"
+            f"- 电脑键鼠控制——搜索「电脑」\n"
             f"- 系统配置管理（查看/修改配置、管理 API 密钥、MCP 服务器）——搜索「配置」「设置」「API」\n"
             f"- 插件开发（生成新插件脚手架、安装插件）——搜索「插件」\n"
             f"- 以及其他未默认启用的专用工具\n"
-            f"搜索成功后，工具将在你的下一轮回复中可用。\n"
             f"\n## 持久化事实 (MEMORY.md) 与 人格设定 (soul.md)\n"
             f"### MEMORY.md\n"
             f"`data/MEMORY.md` 是**最高优先级的持久化事实库**，每次任务开头系统会自动注入其内容。\n"
@@ -422,8 +433,10 @@ class OpenAGCAgent(PromptBuilderMixin):
             "read_file": ReadFileTool(),
             "write_file": WriteFileTool(),
             "edit_file": EditFileTool(),
+            "apply_patch": ApplyPatchTool(),
             "search_file_content": GrepSearchTool(),
             "find_files": GlobTool(),
+            "list_dir": ListDirTool(),
             "execute_python": PythonREPLTool(),
             "computer_control": ComputerTool(),
             "manage_memory": memory_tool,
@@ -458,8 +471,10 @@ class OpenAGCAgent(PromptBuilderMixin):
             "read_file": "读取文件",
             "write_file": "写入文件",
             "edit_file": "局部修改文件",
+            "apply_patch": "批量应用多处编辑",
             "search_file_content": "搜索文件内容",
             "find_files": "查找文件",
+            "list_dir": "列出目录结构",
             "execute_python": "运行 Python 代码",
             "computer_control": "操控电脑",
             "manage_memory": "管理记忆",
@@ -516,11 +531,29 @@ class OpenAGCAgent(PromptBuilderMixin):
             print(f"[Agent] Failed to load MCP tools: {e}")
 
         # Progressive Disclosure Setup
-        CORE_TOOL_NAMES = {"execute_shell", "manage_memory", "read_file", "write_file", "edit_file",
-                           "search_file_content", "find_files", "search_available_tools",
-                           "ask_user_question", "user_interjection_response", "search_history", "queue_download", "pause_and_wait",
-                           "execute_python", "search_web", "self_review", "configure_system",
-                           "manage_task_plan", "parse_html", "shell_send"}
+        # Tiered exposure (default): only a minimal resident core goes into the
+        # initial tool_schemas; every other tool stays discoverable via
+        # search_available_tools and is injected into the schema on demand
+        # (same path as adaptive auto-resident below).
+        # Resident-core rationale:
+        # - read/write/edit/shell/python/grep/glob/web: brief's base toolkit
+        # - search_available_tools: the discovery path itself, must be resident
+        # - user_interjection_response / self_review: the system injects
+        #   instructions telling the model to call these directly
+        # - manage_memory / search_history: the 记忆系统 prompt section teaches
+        #   their exact usage every session; memory ops happen in normal chat
+        TIERED_CORE_TOOL_NAMES = {"read_file", "write_file", "edit_file", "apply_patch", "execute_shell",
+                                  "execute_python", "search_file_content", "find_files",
+                                  "search_web", "ask_user_question", "self_review",
+                                  "user_interjection_response", "manage_memory",
+                                  "search_history", "search_available_tools"}
+        # Legacy full-resident set (tool_tiered_exposure=false)
+        FULL_CORE_TOOL_NAMES = {"execute_shell", "manage_memory", "read_file", "write_file", "edit_file", "apply_patch",
+                                "search_file_content", "find_files", "list_dir", "search_available_tools",
+                                "ask_user_question", "user_interjection_response", "search_history", "queue_download", "pause_and_wait",
+                                "execute_python", "search_web", "self_review", "configure_system",
+                                "manage_task_plan", "parse_html", "shell_send"}
+        CORE_TOOL_NAMES = TIERED_CORE_TOOL_NAMES if self.tool_tiered_exposure else FULL_CORE_TOOL_NAMES
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
 
         # Adaptive resident: auto-load frequently used non-core tools
@@ -568,15 +601,13 @@ class OpenAGCAgent(PromptBuilderMixin):
         lines = ["\n## 全量工具列表\n",
                  "以下是你可用的所有工具"
                  "（核心工具已加载完整用法，其余工具通过 search_available_tools 加载完整用法）：\n"]
-        CORE_NAMES = {"execute_shell", "read_file", "write_file", "edit_file",
-                       "search_file_content", "find_files", "execute_python",
-                       "search_web", "manage_memory", "ask_user_question",
-                       "search_history", "queue_download", "pause_and_wait",
-                       "self_review", "search_available_tools", "configure_system", "compact_context"}
+        # Mark tools that are actually resident right now (core + adaptive +
+        # pre-enabled) — matches what's really in tool_schemas this session.
+        resident = getattr(self, 'active_tool_names', set())
         core_items = []
         ext_items = []
         for name, tool in sorted(self.full_available_tools.items()):
-            is_core = name in CORE_NAMES
+            is_core = name in resident
             if is_core:
                 desc = getattr(tool, 'description', '')[:60]
                 item = f"  ✅ `{name}`"
@@ -2274,7 +2305,15 @@ class OpenAGCAgent(PromptBuilderMixin):
                                     tool_success = False
                                     break
                         else:
-                            result = f"Error: Tool {function_name} not found."
+                            if function_name in self.full_available_tools:
+                                # Known but lazy (tiered exposure): guide the
+                                # model through the discovery path instead of
+                                # a dead-end "not found".
+                                result = (f"Error: Tool '{function_name}' is not enabled in the current session. "
+                                          f"Call search_available_tools with a related query to enable it, "
+                                          f"then retry your call.")
+                            else:
+                                result = f"Error: Tool {function_name} not found."
                             tool_success = False
 
                     if self.logger:
@@ -2334,6 +2373,7 @@ class OpenAGCAgent(PromptBuilderMixin):
                             "read_file": 3000,
                             "write_file": 2000,
                             "edit_file": 2000,
+                            "apply_patch": 2000,
                             "browser_automation": 2000,
                         }.get(function_name, 1000)
                         if len(result_str) > _full_cap:

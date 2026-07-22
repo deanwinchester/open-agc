@@ -6,7 +6,7 @@ from tools.base import BaseTool
 
 class PythonREPLTool(BaseTool):
     name: str = "execute_python"
-    description: str = "Execute Python code in an isolated environment and return the standard output/error."
+    description: str = "执行 Python 代码并返回 stdout/stderr。"
 
     def get_openai_schema(self) -> Dict[str, Any]:
         return {
@@ -19,7 +19,7 @@ class PythonREPLTool(BaseTool):
                     "properties": {
                         "code": {
                             "type": "string",
-                            "description": "The python code to execute."
+                            "description": "要执行的 Python 代码。"
                         }
                     },
                     "required": ["code"]

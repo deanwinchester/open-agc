@@ -4,6 +4,7 @@ AutoTool — Dynamic tool generation, registration, and execution.
 Converts successful task trajectories into reusable Python tools
 that can be dynamically registered and called by the LLM.
 """
+import ast
 import json
 import os
 import importlib.util
@@ -112,28 +113,299 @@ Output ONLY the Python code, no explanation."""
         return None
 
 
-def validate_tool_code(code: str) -> bool:
-    """Validate generated tool code for safety and correctness."""
-    # Check for dangerous patterns
-    dangerous_patterns = [
-        r"rm\s+-rf\s+/",
-        r"os\.remove\(['\"]/",  # Removing root files
-        r"shutil\.rmtree\(['\"]/",
-        r"__import__\(['\"]os['\"]\)\.system",
-        r"eval\(.*request",
-        r"exec\(.*request",
-    ]
-    for pattern in dangerous_patterns:
-        if re.search(pattern, code):
-            print(f"[AutoTool] Dangerous pattern detected: {pattern}")
-            return False
+# ── Safety whitelist for generated tool code (AST analysis, see validate_tool_code) ──
+#
+# Modules that generated code may NEVER import: process execution, system
+# control, raw network, FFI/low-level memory, dynamic loading.
+_BLOCKED_MODULES = {
+    # process execution / system control / dynamic loading
+    "subprocess", "sys", "signal", "multiprocessing", "runpy", "importlib",
+    "code", "codeop", "pty",
+    # raw network (requests with whitelisted methods is the sanctioned way out)
+    "socket", "ftplib", "smtplib", "telnetlib", "http", "urllib.request",
+    # low-level memory / FFI
+    "ctypes", "mmap",
+    # the builtins module re-exposes everything the name/attribute checks
+    # block (builtins.exec, builtins.open('/etc/passwd'), ...). Generated
+    # code never needs to import it explicitly — builtins are ambient.
+    "builtins", "__builtin__",
+}
 
-    # Verify the code is syntactically valid Python
+# Modules that MAY be imported, but only the listed members may be used.
+# Anything not listed (e.g. os.system, os.remove, shutil.rmtree) is rejected.
+_RESTRICTED_MODULE_MEMBERS = {
+    "os": {
+        "path",       # os.path.* — joins, exists, basename, ...
+        "listdir", "makedirs", "getcwd", "walk",
+        "environ",    # read access to env vars (documented: values could leak)
+        "sep", "name", "linesep",
+    },
+    "requests": {
+        "get", "post", "put", "patch", "delete", "head", "options",
+        "Session", "exceptions",
+    },
+    "shutil": {
+        "copy", "copy2", "copyfile", "copytree", "move", "which",
+        "disk_usage", "make_archive", "unpack_archive",
+    },
+    # io.open / codecs.open are alternates to builtin open() — they get the
+    # same path/mode rules (see _validate_open_call). The rest of each
+    # whitelist is pure in-memory / codec work.
+    "io": {
+        "open", "StringIO", "BytesIO", "TextIOBase", "TextIOWrapper",
+        "BufferedReader", "BufferedWriter", "FileIO",
+        "SEEK_SET", "SEEK_CUR", "SEEK_END", "DEFAULT_BUFFER_SIZE",
+    },
+    "codecs": {
+        "open", "encode", "decode", "lookup", "register",
+        "getreader", "getwriter", "getencoder", "getdecoder",
+        "iterencode", "iterdecode",
+    },
+}
+
+# pathlib constructor names whose literal absolute paths are rejected
+# (Path('/etc/passwd').read_text() / .write_text(...) etc.).
+_PATH_CONSTRUCTOR_NAMES = {"Path", "PosixPath", "WindowsPath"}
+
+# Builtins/names that must never appear in generated code: dynamic evaluation
+# and introspection that would bypass the attribute whitelist.
+_BLOCKED_NAMES = {
+    "eval", "exec", "__import__", "compile",
+    "getattr", "setattr", "delattr", "globals", "locals", "vars",
+    "breakpoint", "exit", "quit", "input",
+    "__builtins__",
+}
+
+# Dunder attributes that are safe to reference; all others are rejected
+# (blocks `__class__`/`__subclasses__`/`__globals__` sandbox escapes).
+_ALLOWED_DUNDER_ATTRS = {
+    "__init__", "__name__", "__doc__", "__main__",
+    "__version__", "__all__", "__file__",
+}
+
+
+def _is_absolute_path_literal(p: str) -> bool:
+    """Detect absolute paths in string literals, cross-platform.
+
+    Covers POSIX (`/x`), Windows drive (`C:\\x`, `C:/x`), UNC (`\\\\srv`) and
+    home-relative (`~/x`) forms.
+    """
+    return (
+        p.startswith("/")
+        or p.startswith("\\")
+        or p.startswith("~")
+        or bool(re.match(r'^[a-zA-Z]:[\\/]', p))
+    )
+
+
+def _validate_open_call(node: "ast.Call") -> Optional[str]:
+    """Check an open() call. Returns a rejection reason, or None if acceptable.
+
+    Rules:
+      - Literal absolute path (any mode)            -> reject
+      - Write/append/exclusive mode (`w`/`a`/`x`/`+`) with a literal
+        relative path                               -> allow
+      - Write mode with a non-literal path          -> allow (path cannot be
+        resolved statically; documented residual risk)
+      - Non-literal mode expression                 -> reject (unanalyzable)
+    """
+    if not node.args:
+        return None
+    path_arg = node.args[0]
+    # mode: second positional arg or keyword mode=
+    mode_arg = node.args[1] if len(node.args) > 1 else None
+    for kw in node.keywords:
+        if kw.arg == "mode":
+            mode_arg = kw.value
+    is_literal_path = isinstance(path_arg, ast.Constant) and isinstance(path_arg.value, str)
+    if is_literal_path and _is_absolute_path_literal(path_arg.value):
+        return f"open() with absolute path {path_arg.value!r}"
+    if mode_arg is not None:
+        if not (isinstance(mode_arg, ast.Constant) and isinstance(mode_arg.value, str)):
+            return "open() with non-literal mode (cannot be verified)"
+        if any(c in mode_arg.value for c in "wax+"):
+            # Write mode: literal relative path is fine; non-literal path is
+            # allowed but noted (see module docstring of validate_tool_code).
+            return None
+    return None
+
+
+def _is_module_target(dotted: str) -> bool:
+    """True if `dotted` refers to a blocked or restricted module itself."""
+    return (
+        dotted in _RESTRICTED_MODULE_MEMBERS
+        or dotted in _BLOCKED_MODULES
+        or dotted.split(".")[0] in _BLOCKED_MODULES
+    )
+
+
+def _is_path_constructor(func, aliases: Dict[str, str]) -> bool:
+    """True if a Call's func is a pathlib Path/PosixPath/WindowsPath constructor.
+
+    Only recognised when traceable to pathlib: `from pathlib import Path`
+    (alias resolves to pathlib.Path) or `pathlib.Path` / `pl.Path` attribute
+    form. A bare `Path(...)` with no pathlib import is left alone — it may be
+    a user-defined name.
+    """
+    if isinstance(func, ast.Name):
+        resolved = aliases.get(func.id, "")
+        return resolved in {f"pathlib.{n}" for n in _PATH_CONSTRUCTOR_NAMES}
+    if isinstance(func, ast.Attribute) and func.attr in _PATH_CONSTRUCTOR_NAMES \
+            and isinstance(func.value, ast.Name):
+        return aliases.get(func.value.id, func.value.id) == "pathlib"
+    return False
+
+
+def _validate_path_constructor(node: "ast.Call") -> Optional[str]:
+    """Reject pathlib Path()/PosixPath()/WindowsPath() with a literal absolute
+    path — covers `.read_text()` reads and `.write_text()/.write_bytes()/
+    .open('w')` writes in one place. Non-literal paths cannot be resolved
+    statically and are a documented residual risk (same policy as open())."""
+    if not node.args:
+        return None
+    first = node.args[0]
+    if isinstance(first, ast.Constant) and isinstance(first.value, str) and \
+            _is_absolute_path_literal(first.value):
+        return f"pathlib {node.func.attr if isinstance(node.func, ast.Attribute) else 'Path'}() " \
+               f"with absolute path {first.value!r}"
+    return None
+
+
+def validate_tool_code(code: str) -> bool:
+    """Validate generated tool code for safety via AST analysis.
+
+    Replaces the old regex blocklist (trivially bypassed with string
+    concatenation, f-strings or getattr). The code is parsed and every node
+    is walked; enforcement is by whitelist, documented at module level:
+
+      1. Imports: blocked modules rejected outright; restricted modules may
+         only expose whitelisted members; relative and star imports rejected.
+         Everything else (pure-computation stdlib / common packages) is allowed.
+      2. Dangerous builtins (eval/exec/__import__/compile/getattr/...) rejected
+         as names anywhere, including inside f-strings.
+      3. Dunder attribute access rejected except a small safe set
+         (blocks `().__class__.__bases__[0].__subclasses__()` escapes).
+      4. open() restricted (see _validate_open_call); io.open/codecs.open get
+         the same rules; pathlib Path()/PosixPath()/WindowsPath() with a
+         literal absolute path is rejected (covers read_text/write_text/
+         write_bytes/open('w') through the constructor).
+      5. Direct module aliasing (`x = os`) rejected — it would re-root a
+         restricted/blocked module under an unchecked variable name.
+      6. The `builtins` module itself is a blocked import (it re-exposes
+         exec/eval/open under an attribute root).
+      7. Syntax errors rejected (ast.parse).
+
+    Residual risks (accepted, documented): non-literal paths in write-mode
+    open()/io.open/codecs.open and in pathlib constructors; indirect module
+    flows (modules stashed in containers, tuple unpacking, attribute chains
+    such as `os.path.os`); allowed modules used maliciously. The generated
+    tool runs with full user privileges; this validation blocks obvious
+    escape hatches, it is not a complete sandbox.
+    """
     try:
-        compile(code, "<auto_tool>", "exec")
+        tree = ast.parse(code)
     except SyntaxError as e:
         print(f"[AutoTool] Syntax error in generated code: {e}")
         return False
+    except Exception as e:
+        print(f"[AutoTool] Unparseable code: {e}")
+        return False
+
+    def _reject(reason: str) -> bool:
+        print(f"[AutoTool] Code rejected: {reason}")
+        return False
+
+    def _module_check(dotted: str) -> Optional[str]:
+        """Return rejection reason if module `dotted` may not be imported."""
+        root = dotted.split(".")[0]
+        if root in _BLOCKED_MODULES or dotted in _BLOCKED_MODULES:
+            return f"import of blocked module '{dotted}'"
+        # e.g. urllib.request blocked while urllib.parse allowed
+        for blocked in _BLOCKED_MODULES:
+            if dotted.startswith(blocked + "."):
+                return f"import of blocked module '{dotted}'"
+        return None
+
+    # Pass 1: collect import aliases {local_name: dotted_target}
+    aliases: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                reason = _module_check(a.name)
+                if reason:
+                    return _reject(reason)
+                if a.asname:
+                    aliases[a.asname] = a.name
+                else:
+                    # `import a.b` binds the top-level name `a` (full module a)
+                    aliases[a.name.split(".")[0]] = a.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                return _reject("relative imports are not allowed")
+            mod = node.module or ""
+            reason = _module_check(mod)
+            if reason:
+                return _reject(reason)
+            for a in node.names:
+                if a.name == "*":
+                    return _reject(f"star import from '{mod}' is not allowed")
+                if mod in _RESTRICTED_MODULE_MEMBERS and \
+                        a.name not in _RESTRICTED_MODULE_MEMBERS[mod]:
+                    return _reject(f"'{mod}.{a.name}' is not a whitelisted member")
+                aliases[a.asname or a.name] = f"{mod}.{a.name}" if mod else a.name
+
+    # Pass 2: walk every node (covers f-strings, decorators, nested funcs...)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            if node.id in _BLOCKED_NAMES:
+                return _reject(f"use of blocked builtin '{node.id}'")
+        elif isinstance(node, ast.Attribute):
+            # Block dunder attribute traversal except safe constants
+            if node.attr.startswith("__") and node.attr.endswith("__") and \
+                    node.attr not in _ALLOWED_DUNDER_ATTRS:
+                return _reject(f"dunder attribute access '{node.attr}'")
+            # Enforce member whitelist on restricted modules:
+            # only the attribute directly hanging off the module root needs
+            # checking (e.g. `os.system` -> attr 'system' on root 'os').
+            if isinstance(node.value, ast.Name):
+                target = aliases.get(node.value.id, node.value.id)
+                if target in _RESTRICTED_MODULE_MEMBERS and \
+                        node.attr not in _RESTRICTED_MODULE_MEMBERS[target]:
+                    return _reject(f"'{target}.{node.attr}' is not a whitelisted member")
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            # Direct module alias: `x = os` would re-root the module under a
+            # plain variable and slip past the per-attribute whitelist
+            # (`x.system(...)` — root 'x' doesn't resolve to 'os'). Only this
+            # direct form is covered; indirect flows (modules stashed in
+            # containers, tuple unpacking, attribute chains like os.path.os)
+            # are documented residual risks.
+            value = node.value
+            if isinstance(value, ast.Name):
+                target = aliases.get(value.id, value.id)
+                if _is_module_target(target):
+                    return _reject(f"aliasing module '{target}' to a variable is not allowed")
+        elif isinstance(node, ast.Call):
+            func = node.func
+            reason = None
+            if isinstance(func, ast.Name):
+                resolved = aliases.get(func.id)
+                if func.id == "open" and resolved is None:
+                    # builtin open(...)
+                    reason = _validate_open_call(node)
+                elif resolved in ("io.open", "codecs.open"):
+                    # from io/codecs import open
+                    reason = _validate_open_call(node)
+                elif _is_path_constructor(func, aliases):
+                    reason = _validate_path_constructor(node)
+            elif isinstance(func, ast.Attribute):
+                if func.attr == "open" and isinstance(func.value, ast.Name) and \
+                        aliases.get(func.value.id, func.value.id) in ("io", "codecs"):
+                    # io.open(...) / codecs.open(...)
+                    reason = _validate_open_call(node)
+                elif _is_path_constructor(func, aliases):
+                    reason = _validate_path_constructor(node)
+            if reason:
+                return _reject(reason)
 
     return True
 

@@ -572,10 +572,7 @@ class WebSearchTool(BaseTool):
         super().__init__(
             name="search_web",
             description=(
-                "Search the web for information, news, or current events. "
-                "Tries multiple search engines (Tavily, Bing, Sogou, Baidu, DuckDuckGo, SearXNG, Brave) automatically. "
-                "Use fetch_content=True to get full page content from a result URL. "
-                "Use this tool for any question about recent events or real-time information."
+                "搜索网页获取实时信息。时效性问题必用；已知 URL 用本工具的 fetch_url 参数直接抓正文。"
             ),
         )
 
@@ -590,19 +587,19 @@ class WebSearchTool(BaseTool):
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "The search query. Use the language most relevant to the topic.",
+                            "description": "搜索关键词，使用与主题最相关的语言。",
                         },
                         "max_results": {
                             "type": "integer",
-                            "description": "Maximum number of results to return (default 5).",
+                            "description": "返回结果数上限（默认 5）。",
                         },
                         "fetch_content": {
                             "type": "boolean",
-                            "description": "If True, also fetch the full text content from the top result URL. Useful when snippets are insufficient. Default: False.",
+                            "description": "true 时抓取首个结果的全文，默认 false。",
                         },
                         "fetch_url": {
                             "type": "string",
-                            "description": "Fetch full text content from a specific URL instead of searching. Use this when you already have a URL and want to read its content.",
+                            "description": "抓取指定 URL 全文（此时不搜索）。",
                         },
                     },
                     "required": ["query"],

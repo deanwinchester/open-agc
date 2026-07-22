@@ -175,27 +175,11 @@ class DownloadTool(BaseTool):
                         resume=True
                     )
                 else:
-                    import requests
-                    target = f"{dl_dir}/{filename}"
-                    partial = target + ".partial"
-                    resume_offset = 0
-                    headers = {}
-                    if os.path.exists(partial):
-                        resume_offset = os.path.getsize(partial)
-                        headers["Range"] = f"bytes={resume_offset}-"
-                    resp = requests.get(download_url, stream=True, headers=headers, timeout=30)
-                    total = int(resp.headers.get("content-length", 0)) + (resume_offset if resp.status_code == 206 else 0)
-                    mode = "ab" if resp.status_code == 206 else "wb"
-                    downloaded = resume_offset if mode == "ab" else 0
-                    with open(partial, mode) as f:
-                        for chunk in resp.iter_content(8192):
-                            if chunk:
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                if total > 0 and progress_cb:
-                                    progress_cb(downloaded / total)
-                    os.replace(partial, target)
-                    success = True
+                    success = _download_direct(
+                        url=download_url,
+                        target=f"{dl_dir}/{filename}",
+                        progress_callback=progress_cb,
+                    )
 
                 # Check if cancelled before broadcasting complete/error
                 if _llamacpp_download_state.get("cancelled"):
@@ -267,36 +251,75 @@ class DownloadTool(BaseTool):
             "function": {
                 "name": "queue_download",
                 "description": (
-                    "Queue a model file download via the system download manager. "
-                    "Returns immediately — downloads run in background with progress tracking. "
-                    "Supports HuggingFace, ModelScope, and direct URLs. "
-                    "Resume is automatic — interrupted downloads pick up from where they stopped."
+                    "排队下载模型等大文件：后台下载、断点续传，立即返回。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "filename": {
                             "type": "string",
-                            "description": "Target filename to save as (e.g. 'qwen2-7b.gguf')."
+                            "description": "保存文件名。"
                         },
                         "repo_id": {
                             "type": "string",
-                            "description": "HuggingFace repo (e.g. 'Qwen/Qwen2-7B-Instruct-GGUF'). Use with source='huggingface' or 'modelscope'."
+                            "description": "仓库 ID（huggingface/modelscope 用）。"
                         },
                         "url": {
                             "type": "string",
-                            "description": "Direct download URL. Use with source='direct'."
+                            "description": "直链地址（source=direct 用）。"
                         },
                         "source": {
                             "type": "string",
                             "enum": ["huggingface", "modelscope", "direct"],
-                            "description": "Download source. Default: 'huggingface'."
+                            "description": "下载源，默认 huggingface。"
                         }
                     },
                     "required": ["filename"]
                 }
             }
         }
+
+
+def _download_direct(url: str, target: str, progress_callback=None) -> bool:
+    """Download a file over HTTP(S) with resume support.
+
+    Raises on HTTP errors (404/500/...) so an error page is never saved as
+    the target file, and sanity-checks the final size against Content-Length
+    when the server provided one. Returns True on success.
+    """
+    import requests
+    partial = target + ".partial"
+    resume_offset = 0
+    headers = {}
+    if os.path.exists(partial):
+        resume_offset = os.path.getsize(partial)
+        headers["Range"] = f"bytes={resume_offset}-"
+    with requests.get(url, stream=True, headers=headers, timeout=30) as resp:
+        # Reject HTTP error pages (404/500...) instead of writing them to disk.
+        resp.raise_for_status()
+        if resp.status_code not in (200, 206):
+            raise RuntimeError(f"Unexpected HTTP status {resp.status_code} for {url}")
+        total = int(resp.headers.get("content-length", 0)) + (resume_offset if resp.status_code == 206 else 0)
+        mode = "ab" if resp.status_code == 206 else "wb"
+        downloaded = resume_offset if mode == "ab" else 0
+        with open(partial, mode) as f:
+            for chunk in resp.iter_content(8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total > 0 and progress_callback:
+                        progress_callback(downloaded / total)
+    # Size sanity check: when the server told us the size, the completed file
+    # must match it exactly; an empty result is always a failure.
+    final_size = os.path.getsize(partial)
+    if total > 0 and final_size != total:
+        raise RuntimeError(
+            f"Download incomplete: got {final_size} bytes, expected {total} ({url})"
+        )
+    if final_size == 0:
+        raise RuntimeError(f"Download produced an empty file ({url})")
+    os.replace(partial, target)
+    return True
 
 
 def _download_ftp(url: str, target: str, progress_callback=None) -> bool:

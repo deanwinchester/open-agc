@@ -141,26 +141,23 @@ class SelfReviewTool(BaseTool):
             "function": {
                 "name": "self_review",
                 "description": (
-                    "执行任务进度自我审查。当你觉得任务陷入循环、长时间无进展、"
-                    "需要总结当前进度、或系统提示已达最大迭代次数时调用。"
-                    "系统会根据审查结果决定是否允许继续执行。请诚实分析。"
+                    "自我审查任务进度。陷入循环、无进展或达最大迭代次数时调用；"
+                    "系统据此决定是否允许继续。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "max_iterations_reached": {
                             "type": "boolean",
-                            "description": "是否因达到最大迭代次数而触发审查。系统自动设置。"
+                            "description": "是否因达最大迭代触发（自动设置）。"
                         },
                         "progress_summary": {
                             "type": "string",
-                            "description": "你对自己当前进度的总结。已经完成了什么，还剩什么。可选。"
+                            "description": "可选，进度总结。"
                         },
                         "analysis_focus": {
                             "type": "string",
-                            "description": "分析重点：'loop_detection'（循环检测）/ "
-                                           "'progress_summary'（进度总结）/ "
-                                           "'direction_correction'（方向纠偏）。可选。"
+                            "description": "可选，loop_detection/progress_summary/direction_correction。"
                         }
                     },
                     "required": []

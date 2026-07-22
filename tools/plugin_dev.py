@@ -16,7 +16,7 @@ class DevelopPluginTool(BaseTool):
     """Scaffold and develop new plugins for the Open-AGC system."""
 
     name: str = "develop_plugin"
-    description: str = "开发新插件：生成插件目录结构、添加路由、添加静态文件、安装插件。"
+    description: str = "开发新插件：生成脚手架（目录、路由、菜单、静态文件）或安装插件。用户要求扩展系统插件功能时用。"
 
     def get_openai_schema(self) -> Dict[str, Any]:
         return {
@@ -30,47 +30,47 @@ class DevelopPluginTool(BaseTool):
                         "action": {
                             "type": "string",
                             "enum": ["scaffold", "install"],
-                            "description": "要执行的操作：scaffold=生成新插件脚手架，install=安装插件",
+                            "description": "scaffold=生成新插件脚手架；install=安装插件。",
                         },
                         "plugin_name": {
                             "type": "string",
-                            "description": "插件名称（如 my-plugin、hello-world）",
+                            "description": "插件名称（如 my-plugin、hello-world）。",
                         },
                         "description": {
                             "type": "string",
-                            "description": "插件描述",
+                            "description": "插件描述。",
                         },
                         "version": {
                             "type": "string",
-                            "description": "插件版本号（默认 1.0.0）",
+                            "description": "插件版本号（默认 1.0.0）。",
                         },
                         "author": {
                             "type": "string",
-                            "description": "插件作者",
+                            "description": "插件作者。",
                         },
                         "init_code": {
                             "type": "string",
-                            "description": "__init__.py 的完整代码，必须包含 init_plugin(context) 函数",
+                            "description": "__init__.py 的完整代码，必须包含 init_plugin(context) 函数。",
                         },
                         "routes_code": {
                             "type": "string",
-                            "description": "可选的 routes.py 代码（API 路由）",
+                            "description": "可选，routes.py 代码（API 路由）。",
                         },
                         "menu_section": {
                             "type": "string",
-                            "description": "侧边栏菜单位置（如 tools、training、data）",
+                            "description": "侧边栏菜单位置（如 tools、training、data）。",
                         },
                         "menu_label": {
                             "type": "string",
-                            "description": "侧边栏菜单显示名称",
+                            "description": "侧边栏菜单显示名称。",
                         },
                         "menu_icon": {
                             "type": "string",
-                            "description": "侧边栏菜单图标 emoji",
+                            "description": "侧边栏菜单图标 emoji。",
                         },
                         "has_static": {
                             "type": "boolean",
-                            "description": "是否需要静态文件目录",
+                            "description": "是否需要静态文件目录。",
                         },
                     },
                     "required": ["action", "plugin_name"],

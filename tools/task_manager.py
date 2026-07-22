@@ -9,8 +9,7 @@ from tools.base import BaseTool
 class TaskManagerTool(BaseTool):
     name: str = "manage_task"
     description: str = (
-        "查看和管理任务。可以列出当前任务、按关键词搜索历史任务、查看任务详情和交付物。\n"
-        "用于了解当前工作进度、检索历史任务经验、查看之前任务的产出物。"
+        "查看和管理任务记录。了解进度、检索历史、看交付物时用；定计划用 manage_task_plan。"
     )
 
     def get_openai_schema(self) -> Dict[str, Any]:
@@ -25,37 +24,31 @@ class TaskManagerTool(BaseTool):
                         "action": {
                             "type": "string",
                             "enum": ["list", "search", "get", "record_deliverable"],
-                            "description": (
-                                "操作类型：\n"
-                                "- list: 列出任务，可按状态筛选\n"
-                                "- search: 按关键词搜索任务\n"
-                                "- get: 查看任务详情，包括步骤和交付物\n"
-                                "- record_deliverable: 记录当前任务的交付物"
-                            ),
+                            "description": "list 列任务；search 搜索；get 详情；record_deliverable 记录交付物",
                         },
                         "task_id": {
                             "type": "integer",
-                            "description": "任务ID（get/record_deliverable 时需要）",
+                            "description": "任务 ID（get/record_deliverable 用）",
                         },
                         "status_filter": {
                             "type": "string",
-                            "description": "状态筛选（list 时可选）：running, completed, failed, interrupted, backgrounded",
+                            "description": "状态筛选（list 可选）",
                         },
                         "keyword": {
                             "type": "string",
-                            "description": "搜索关键词（search 时使用）",
+                            "description": "搜索关键词（search 用）",
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "返回条数上限（默认 10）",
+                            "description": "条数上限（默认 10）",
                         },
                         "deliverable_description": {
                             "type": "string",
-                            "description": "交付物描述（record_deliverable 时需要）",
+                            "description": "交付物描述（record_deliverable 用）",
                         },
                         "deliverable_files": {
                             "type": "string",
-                            "description": "交付物文件路径列表，JSON 数组格式（record_deliverable 时可选）",
+                            "description": "交付物文件路径列表（JSON 数组，可选）",
                         },
                     },
                     "required": ["action"],

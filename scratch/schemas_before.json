@@ -1,0 +1,1136 @@
+{
+ "schemas": {
+  "ask_user_question": {
+   "type": "function",
+   "function": {
+    "name": "ask_user_question",
+    "description": "Ask the user a question to clarify requirements, request permission, or get missing information. Use this tool whenever you are unsure how to proceed or need explicit user confirmation. The agent will pause execution until the user answers.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "question_text": {
+       "type": "string",
+       "description": "The exact question to display to the user."
+      },
+      "options": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       },
+       "description": "(Optional) A list of predefined options for the user to choose from. Leave empty if you want a free-text answer."
+      }
+     },
+     "required": [
+      "question_text"
+     ]
+    }
+   }
+  },
+  "browser_automation": {
+   "type": "function",
+   "function": {
+    "name": "browser_automation",
+    "description": "虚拟沙盒浏览器工具。使用 playwright 进行隔离环境下的网页控制与数据抓取。大模型如果需要查询或者填写网页内容，应该首推使用此工具，而不是 pyautogui。动作(action)支持：1. 'goto': 导航到指定网址 (需 url)。2. 'read_dom': 获取当前页面的纯净交互元素DOM树(极度推荐在点击前先使用本命令以了解当前网页上的具体 CSS Seletor/class/id)。3. 'click': 使用 CSS 选择器点击元素 (需 selector)。遇到真正的文件上传按钮切勿使用 click，而是使用 upload 动作。4. 'fill': 向输入框填入文字 (需 selector 和 text)。5. 'press': 按下键盘按键 (如 Enter、Escape)。6. 'upload': 上传文件到网页表单 (非常重要：对准 <input type='file'> 元素的 selector 进行操作，用本地文件的绝对路径作为 path 参数)。7. 'get_url': 读当前页面的真实 URL。8. 'close': 关闭并清理浏览器沙盒环境。",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "action": {
+       "type": "string",
+       "enum": [
+        "goto",
+        "read_dom",
+        "click",
+        "fill",
+        "press",
+        "upload",
+        "get_url",
+        "close"
+       ],
+       "description": "要执行的浏览器指令"
+      },
+      "url": {
+       "type": "string",
+       "description": "目标网页地址 (用于 goto)，例如 'https://github.com'"
+      },
+      "selector": {
+       "type": "string",
+       "description": "CSS 选择器 (用于 click, fill)，例如 '#search-input' 或 'button.submit-btn'"
+      },
+      "text": {
+       "type": "string",
+       "description": "要填入的文本内容 (用于 fill)"
+      },
+      "key": {
+       "type": "string",
+       "description": "按键名称 (用于 press)，例如 'Enter', 'Escape'"
+      },
+      "path": {
+       "type": "string",
+       "description": "本地文件的绝对路径 (用于 upload)"
+      },
+      "wait_time": {
+       "type": "integer",
+       "description": "执行动作后的硬等待秒数，默认1秒，如果网页加载慢可提高"
+      }
+     },
+     "required": [
+      "action"
+     ]
+    }
+   }
+  },
+  "compact_context": {
+   "type": "function",
+   "function": {
+    "name": "compact_context",
+    "description": "使用 LLM 对早期上下文对话历史进行结构化总结压缩。当长篇输出或历史任务记录让你感到困惑时，调用此工具清理上下文。会用 LLM 生成结构化的摘要（含用户需求、关键决策、文件修改、待办事项等），保留最近的消息原文，早期内容替换为摘要。",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "reason": {
+       "type": "string",
+       "description": "为什么要清理上下文（例如：'之前的构建日志太长干扰了现在的注意力'）"
+      }
+     },
+     "required": [
+      "reason"
+     ]
+    }
+   }
+  },
+  "computer_control": {
+   "type": "function",
+   "function": {
+    "name": "computer_control",
+    "description": "Control the physical computer mouse and keyboard. Allows you to click, move the mouse, type text, and press keys.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "action": {
+       "type": "string",
+       "description": "The action to perform: 'mouse_move', 'mouse_click', 'type_text', 'press_key', 'hotkey', 'screenshot'."
+      },
+      "x": {
+       "type": "integer",
+       "description": "X coordinate for mouse actions."
+      },
+      "y": {
+       "type": "integer",
+       "description": "Y coordinate for mouse actions."
+      },
+      "text": {
+       "type": "string",
+       "description": "Text to type when action is 'type_text'."
+      },
+      "key": {
+       "type": "string",
+       "description": "Key to press when action is 'press_key' (e.g., 'enter', 'tab', 'esc')."
+      },
+      "keys": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       },
+       "description": "List of keys for hotkey combinations (e.g., ['command', 'c'])."
+      }
+     },
+     "required": [
+      "action"
+     ]
+    }
+   }
+  },
+  "configure_system": {
+   "type": "function",
+   "function": {
+    "name": "configure_system",
+    "description": "配置系统自身：读取/修改配置、管理 MCP 服务器、安装/卸载插件、管理 Agent 配置档、管理技能。",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "action": {
+       "type": "string",
+       "enum": [
+        "get_settings",
+        "update_setting",
+        "get_mcp_servers",
+        "add_mcp_server",
+        "remove_mcp_server",
+        "list_plugins",
+        "install_plugin",
+        "remove_plugin",
+        "toggle_plugin",
+        "list_agent_profiles",
+        "create_agent_profile",
+        "update_agent_profile",
+        "delete_agent_profile",
+        "list_skills",
+        "import_skill",
+        "delete_skill"
+       ],
+       "description": "要执行的操作"
+      },
+      "key": {
+       "type": "string",
+       "description": "update_setting 时使用的配置键名（如 default_model、sandbox_mode 等）"
+      },
+      "value": {
+       "type": "string",
+       "description": "update_setting 时使用的配置值（JSON 格式，如 \"gpt-4o\"、true、false、\"[]\"）"
+      },
+      "mcp_server_name": {
+       "type": "string",
+       "description": "MCP 服务器名称（add/remove 时使用）"
+      },
+      "mcp_command": {
+       "type": "string",
+       "description": "MCP 服务器启动命令"
+      },
+      "mcp_args": {
+       "type": "string",
+       "description": "MCP 服务器参数（JSON 字符串数组）"
+      },
+      "plugin_name": {
+       "type": "string",
+       "description": "插件名称"
+      },
+      "plugin_repo_url": {
+       "type": "string",
+       "description": "插件 git 仓库地址"
+      },
+      "profile_name": {
+       "type": "string",
+       "description": "Agent 配置档名称"
+      },
+      "profile_data": {
+       "type": "string",
+       "description": "Agent 配置档数据（JSON 字符串，含 prompt/model/temperature/max_tokens）"
+      },
+      "skill_filename": {
+       "type": "string",
+       "description": "技能文件名（以 .md 结尾）"
+      },
+      "skill_content": {
+       "type": "string",
+       "description": "技能 Markdown 全文"
+      }
+     },
+     "required": [
+      "action"
+     ]
+    }
+   }
+  },
+  "develop_plugin": {
+   "type": "function",
+   "function": {
+    "name": "develop_plugin",
+    "description": "开发新插件：生成插件目录结构、添加路由、添加静态文件、安装插件。",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "action": {
+       "type": "string",
+       "enum": [
+        "scaffold",
+        "install"
+       ],
+       "description": "要执行的操作：scaffold=生成新插件脚手架，install=安装插件"
+      },
+      "plugin_name": {
+       "type": "string",
+       "description": "插件名称（如 my-plugin、hello-world）"
+      },
+      "description": {
+       "type": "string",
+       "description": "插件描述"
+      },
+      "version": {
+       "type": "string",
+       "description": "插件版本号（默认 1.0.0）"
+      },
+      "author": {
+       "type": "string",
+       "description": "插件作者"
+      },
+      "init_code": {
+       "type": "string",
+       "description": "__init__.py 的完整代码，必须包含 init_plugin(context) 函数"
+      },
+      "routes_code": {
+       "type": "string",
+       "description": "可选的 routes.py 代码（API 路由）"
+      },
+      "menu_section": {
+       "type": "string",
+       "description": "侧边栏菜单位置（如 tools、training、data）"
+      },
+      "menu_label": {
+       "type": "string",
+       "description": "侧边栏菜单显示名称"
+      },
+      "menu_icon": {
+       "type": "string",
+       "description": "侧边栏菜单图标 emoji"
+      },
+      "has_static": {
+       "type": "boolean",
+       "description": "是否需要静态文件目录"
+      }
+     },
+     "required": [
+      "action",
+      "plugin_name"
+     ]
+    }
+   }
+  },
+  "edit_file": {
+   "type": "function",
+   "function": {
+    "name": "edit_file",
+    "description": "Performs exact string replacements in a file. Best for localized edits. You must have read the file recently before editing.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string",
+       "description": "The absolute or relative path to the file to edit."
+      },
+      "old_string": {
+       "type": "string",
+       "description": "The exact string to replace. Must be unique in the file to succeed unless replace_all is true. Do NOT include the line number prefixes (e.g. ' 12 | ') from the read tool output."
+      },
+      "new_string": {
+       "type": "string",
+       "description": "The string to replace old_string with. Preserve correct indentation."
+      },
+      "replace_all": {
+       "type": "boolean",
+       "description": "If true, replaces all occurrences of old_string. If false (default), old_string must be unique in the file."
+      }
+     },
+     "required": [
+      "path",
+      "old_string",
+      "new_string"
+     ]
+    }
+   }
+  },
+  "enter_sandbox_mode": {
+   "type": "function",
+   "function": {
+    "name": "enter_sandbox_mode",
+    "description": "Create a secure Git worktree sandbox to safely modify code or run risky commands. This isolates changes from the main project until they are verified. Returns the path to the new sandbox directory.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "branch_name": {
+       "type": "string",
+       "description": "Optional branch name to create. If omitted, a random one is generated."
+      }
+     }
+    }
+   }
+  },
+  "execute_python": {
+   "type": "function",
+   "function": {
+    "name": "execute_python",
+    "description": "Execute Python code in an isolated environment and return the standard output/error.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "code": {
+       "type": "string",
+       "description": "The python code to execute."
+      }
+     },
+     "required": [
+      "code"
+     ]
+    }
+   }
+  },
+  "execute_shell": {
+   "type": "function",
+   "function": {
+    "name": "execute_shell",
+    "description": "Execute a bash environment shell command on the local machine. Note: sudo commands will trigger a permission popup with a password input field. The password is sent directly to sudo -S via stdin and never appears in the conversation. If sudo fails with 'a password is required', simply retry the command to trigger the popup again.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string",
+       "description": "The bash command to execute (e.g., 'ls -la', 'python script.py')"
+      },
+      "timeout": {
+       "type": "integer",
+       "description": "Optional timeout in seconds (default 120, max 600).",
+       "default": 120
+      },
+      "detach": {
+       "type": "boolean",
+       "description": "设为 true 以启动常驻服务（服务器/守护进程），命令不会阻塞任务，系统不会等待它结束。适用于启动 ComfyUI、Web 服务等长期运行的程序。默认 false。",
+       "default": false
+      }
+     },
+     "required": [
+      "command"
+     ]
+    }
+   }
+  },
+  "exit_sandbox_mode": {
+   "type": "function",
+   "function": {
+    "name": "exit_sandbox_mode",
+    "description": "Exit the sandbox mode. You can choose to merge changes back to the main branch or discard them.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "action": {
+       "type": "string",
+       "enum": [
+        "merge",
+        "discard"
+       ],
+       "description": "Whether to merge changes back to the original branch or discard them entirely."
+      }
+     },
+     "required": [
+      "action"
+     ]
+    }
+   }
+  },
+  "find_files": {
+   "type": "function",
+   "function": {
+    "name": "find_files",
+    "description": "Fast file pattern matching tool that works with any codebase size. Supports glob patterns like '**/*.py' or 'src/**/*.ts'. Returns matching file paths.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string",
+       "description": "The glob pattern to search for (e.g., '**/*.py', 'src/**/*.js')."
+      },
+      "path": {
+       "type": "string",
+       "description": "The base directory to start searching from. Defaults to the current working directory."
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  "mac_system_action": {
+   "type": "function",
+   "function": {
+    "name": "mac_system_action",
+    "description": "Perform a native macOS system action like sending a push notification or reading the clipboard.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "action": {
+       "type": "string",
+       "enum": [
+        "notify",
+        "read_clipboard",
+        "get_system_info"
+       ],
+       "description": "The action to perform."
+      },
+      "message": {
+       "type": "string",
+       "description": "The message for the notification (required if action='notify')."
+      },
+      "title": {
+       "type": "string",
+       "description": "The title for the notification."
+      }
+     },
+     "required": [
+      "action"
+     ]
+    }
+   }
+  },
+  "manage_memory": {
+   "type": "function",
+   "function": {
+    "name": "manage_memory",
+    "description": "管理长期记忆。\n\n使用 'add' 保存重要信息（需指定 topic 话题标签，如 '车票'、'偏好'、'项目配置'）\n使用 'read' 查看已记住的内容\n使用 'update' 按 ID 替换记忆内容\n使用 'forget' 按 ID 删除记忆\n\n注意：查找记忆请用 search_history 工具（支持多源搜索和渐进展开），不要用 manage_memory 来搜索。",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "action": {
+       "type": "string",
+       "enum": [
+        "add",
+        "read",
+        "update",
+        "forget"
+       ],
+       "description": "操作类型：'add'=添加，'read'=查看全部，'update'=按ID更新，'forget'=按ID删除"
+      },
+      "content": {
+       "type": "string",
+       "description": "记忆内容（add/update 时必填，最长 2000 字）。"
+      },
+      "query": {
+       "type": "string",
+       "description": "记忆 ID（update/forget 时必填，数字）。"
+      },
+      "topic": {
+       "type": "string",
+       "description": "话题标签（add 时建议填写，如 '车票'、'偏好'、'项目配置'）。同话题的记忆会按相关性排序返回。"
+      },
+      "category": {
+       "type": "string",
+       "enum": [
+        "",
+        "tech",
+        "user_pref",
+        "project",
+        "knowledge",
+        "system",
+        "general"
+       ],
+       "description": "类别（可选）"
+      },
+      "memory_type": {
+       "type": "string",
+       "enum": [
+        "",
+        "core",
+        "working",
+        "episode"
+       ],
+       "description": "记忆类型：core=长期核心事实，working=短期工作记忆（默认），episode=事件经验"
+      }
+     },
+     "required": [
+      "action"
+     ]
+    }
+   }
+  },
+  "manage_task": {
+   "type": "function",
+   "function": {
+    "name": "manage_task",
+    "description": "查看和管理任务。可以列出当前任务、按关键词搜索历史任务、查看任务详情和交付物。\n用于了解当前工作进度、检索历史任务经验、查看之前任务的产出物。",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "action": {
+       "type": "string",
+       "enum": [
+        "list",
+        "search",
+        "get",
+        "record_deliverable"
+       ],
+       "description": "操作类型：\n- list: 列出任务，可按状态筛选\n- search: 按关键词搜索任务\n- get: 查看任务详情，包括步骤和交付物\n- record_deliverable: 记录当前任务的交付物"
+      },
+      "task_id": {
+       "type": "integer",
+       "description": "任务ID（get/record_deliverable 时需要）"
+      },
+      "status_filter": {
+       "type": "string",
+       "description": "状态筛选（list 时可选）：running, completed, failed, interrupted, backgrounded"
+      },
+      "keyword": {
+       "type": "string",
+       "description": "搜索关键词（search 时使用）"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "返回条数上限（默认 10）"
+      },
+      "deliverable_description": {
+       "type": "string",
+       "description": "交付物描述（record_deliverable 时需要）"
+      },
+      "deliverable_files": {
+       "type": "string",
+       "description": "交付物文件路径列表，JSON 数组格式（record_deliverable 时可选）"
+      }
+     },
+     "required": [
+      "action"
+     ]
+    }
+   }
+  },
+  "manage_task_plan": {
+   "type": "function",
+   "function": {
+    "name": "manage_task_plan",
+    "description": "管理任务计划和大目标。用于制定任务步骤、跟踪进度、记录关键结果。\n\n适用场景：\n- 涉及多步骤的复杂任务（爬虫、批量下载、多文件处理等）\n- 可能会被中断的长时间任务\n- 需要恢复上下文的任务\n\n操作说明：\n- create：根据 goal 和 steps 创建新计划，系统自动生成 plan_id\n- update：更新步骤状态(done/doing/todo)、添加关键发现、记录创建的文件\n- show：查看当前计划内容和进度\n- check：检查是否所有步骤已完成，未完成时禁止结束任务\n\n大目标操作：\n- goal_add(desc=...)：添加一条大目标（最多 10 项）\n- goal_start(id=N)：标记大目标为执行中\n- goal_done(id=N)：标记大目标为已完成\n- goal_stuck(id=N, reason=...)：标记大目标为受阻\n- goal_reset(id=N)：将完成或受阻的大目标重置为待执行\n- goal_list()：查看当前所有大目标\n注意：创建 plan 时请同时添加对应的 goal 项。所有复杂任务都应该有 goal。",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "action": {
+       "type": "string",
+       "enum": [
+        "create",
+        "update",
+        "show",
+        "check",
+        "cleanup",
+        "goal_add",
+        "goal_start",
+        "goal_done",
+        "goal_stuck",
+        "goal_reset",
+        "goal_list"
+       ],
+       "description": "操作类型"
+      },
+      "goal": {
+       "type": "string",
+       "description": "任务目标描述（create 时必填）"
+      },
+      "steps": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       },
+       "description": "执行步骤列表（create 时必填）"
+      },
+      "step_id": {
+       "type": "integer",
+       "description": "要更新的步骤编号（update 时填）"
+      },
+      "step_status": {
+       "type": "string",
+       "enum": [
+        "done",
+        "doing",
+        "todo"
+       ],
+       "description": "步骤的新状态（update 时填）"
+      },
+      "step_result": {
+       "type": "string",
+       "description": "步骤执行结果描述（update 时可选）"
+      },
+      "key_findings": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       },
+       "description": "关键发现列表"
+      },
+      "created_files": {
+       "type": "array",
+       "items": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "purpose": {
+          "type": "string"
+         }
+        }
+       },
+       "description": "创建的文件/文件夹及其用途"
+      },
+      "goal_id": {
+       "type": "integer",
+       "description": "大目标 ID（goal_start/done/stuck/reset 时必填）"
+      },
+      "desc": {
+       "type": "string",
+       "description": "大目标描述（goal_add 时必填，最长 100 字）"
+      },
+      "reason": {
+       "type": "string",
+       "description": "受阻原因（goal_stuck 时必填）"
+      }
+     },
+     "required": [
+      "action"
+     ]
+    }
+   }
+  },
+  "parse_html": {
+   "type": "function",
+   "function": {
+    "name": "parse_html",
+    "description": "使用 Reader-lm 小模型将 HTML 源码或网页 URL 解析为干净的 Markdown 文本。当浏览器获取到的页面包含大量 HTML 噪音（导航、广告、脚本等）时使用。\n\n适用场景：\n- 从 browser_automation 获取的页面 HTML 需要提取正文\n- 直接传入 URL 自动抓取并解析\n- 需要保留标题、列表、表格结构\n- HTML 过大不能直接传给大模型\n\n注意：首次调用会自动下载模型（约 500MB），会提示等待。",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "html": {
+       "type": "string",
+       "description": "要转换的 HTML 源码（可选，html/file_path/url 三选一）"
+      },
+      "file_path": {
+       "type": "string",
+       "description": "包含 HTML 的文件路径（可选，html/file_path/url 三选一）"
+      },
+      "url": {
+       "type": "string",
+       "description": "目标网页 URL，自动抓取 HTML 后解析（可选，html/file_path/url 三选一）"
+      },
+      "save_path": {
+       "type": "string",
+       "description": "可选，指定 Markdown 输出文件的保存路径，如 /workspace/article.md"
+      }
+     }
+    }
+   }
+  },
+  "pause_and_wait": {
+   "type": "function",
+   "function": {
+    "name": "pause_and_wait",
+    "description": "Pause the current task and yield to background execution. Use this when a command returns [Still Running] (long downloads, model training, package installation). The system will save context and automatically resume when the background task completes. You can also set a wake-up timer as a safety net — even if the background process detection fails, the task will be resumed on time.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "reason": {
+       "type": "string",
+       "description": "Brief description of the background task for the user."
+      },
+      "pid": {
+       "type": "integer",
+       "description": "PID of the background process to monitor."
+      },
+      "output_file": {
+       "type": "string",
+       "description": "Path to the output file for reading results on resume."
+      },
+      "wake_in_minutes": {
+       "type": "integer",
+       "description": "Optional: wake up after this many minutes as fallback. Use when the process might not be tracked correctly (e.g., orphan processes, restart scenarios)."
+      }
+     },
+     "required": [
+      "reason"
+     ]
+    }
+   }
+  },
+  "queue_download": {
+   "type": "function",
+   "function": {
+    "name": "queue_download",
+    "description": "Queue a model file download via the system download manager. Returns immediately — downloads run in background with progress tracking. Supports HuggingFace, ModelScope, and direct URLs. Resume is automatic — interrupted downloads pick up from where they stopped.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filename": {
+       "type": "string",
+       "description": "Target filename to save as (e.g. 'qwen2-7b.gguf')."
+      },
+      "repo_id": {
+       "type": "string",
+       "description": "HuggingFace repo (e.g. 'Qwen/Qwen2-7B-Instruct-GGUF'). Use with source='huggingface' or 'modelscope'."
+      },
+      "url": {
+       "type": "string",
+       "description": "Direct download URL. Use with source='direct'."
+      },
+      "source": {
+       "type": "string",
+       "enum": [
+        "huggingface",
+        "modelscope",
+        "direct"
+       ],
+       "description": "Download source. Default: 'huggingface'."
+      }
+     },
+     "required": [
+      "filename"
+     ]
+    }
+   }
+  },
+  "read_file": {
+   "type": "function",
+   "function": {
+    "name": "read_file",
+    "description": "Read the contents of a file at a given path.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string",
+       "description": "The absolute or relative path to the file."
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Optional. The line number to start reading from (1-indexed). Defaults to 1."
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Optional. The maximum number of lines to read. Defaults to reading the whole file (up to a reasonable limit)."
+      }
+     },
+     "required": [
+      "path"
+     ]
+    }
+   }
+  },
+  "save_learned_skill": {
+   "type": "function",
+   "function": {
+    "name": "save_learned_skill",
+    "description": "保存或更新一个大模型学习到或整理出的复合技能流程（Markdown 格式），并落盘固化为长期技能。",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "skill_filename": {
+       "type": "string",
+       "description": "保存的文件名（例如：check_logs.md，强烈建议以 .md 结尾）"
+      },
+      "skill_content": {
+       "type": "string",
+       "description": "技能的 Markdown 格式全文。需包含明确的触发条件和分步实施指令。"
+      }
+     },
+     "required": [
+      "skill_filename",
+      "skill_content"
+     ]
+    }
+   }
+  },
+  "search_available_tools": {
+   "type": "function",
+   "function": {
+    "name": "search_available_tools",
+    "description": "Search and discover advanced tools based on your current needs. Use this tool when you need capabilities that are not in your current tool list (e.g., 'browser', 'web search', 'email', 'python', 'system config', 'plugin development', 'MCP', etc.). It will search the system's deferred tools pool and enable the matching tools. You can then use them in your NEXT step.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string",
+       "description": "A natural language query describing the capability you need (e.g., 'search web', 'browser automation', 'execute python')."
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   }
+  },
+  "search_emails": {
+   "type": "function",
+   "function": {
+    "name": "search_emails",
+    "description": "Fetch and read emails from the connected IMAP account. Useful for summarizing emails. IMAP criteria examples: 'UNSEEN', 'ALL', 'FROM person@example.com'.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "criteria": {
+       "type": "string",
+       "description": "IMAP search criteria (e.g., 'UNSEEN', 'ALL', 'FROM owner_email'). Defaults to 'ALL'."
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Maximum number of emails to return.",
+       "default": 10
+      }
+     }
+    }
+   }
+  },
+  "search_file_content": {
+   "type": "function",
+   "function": {
+    "name": "search_file_content",
+    "description": "A powerful search tool to find content within files. Uses ripgrep if available, falling back to Python's re module. Supports regex.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string",
+       "description": "The regex pattern to search for."
+      },
+      "path": {
+       "type": "string",
+       "description": "The directory or file to search within. Defaults to current directory."
+      },
+      "include": {
+       "type": "string",
+       "description": "Optional glob pattern to filter files (e.g., '*.py')."
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  "search_history": {
+   "type": "function",
+   "function": {
+    "name": "search_history",
+    "description": "Search your own conversation memory. Use this whenever you feel context is fuzzy — to recall what the user asked, what files you read, what commands you ran, what errors occurred, what URLs you found, or what decisions were made earlier. This is your memory recall tool. If you don't remember, search.\n\nProgressive drill-down: after a search, you can get full content of a specific result by calling search_history with expand_id set to the result's ID (e.g. 'step:204:39', 'mem:42', 'msg:100'). The ID is shown in brackets in each result.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string",
+       "description": "What to search for: a keyword, filename, URL fragment, task description, error message, or leave empty to see recent activity."
+      },
+      "search_type": {
+       "type": "string",
+       "enum": [
+        "all",
+        "user_query",
+        "tool_calls",
+        "results",
+        "agent_response"
+       ],
+       "description": "Scope: 'all' (default), 'user_query' (user messages), 'tool_calls' (tool invocations), 'results' (tool outputs), 'agent_response' (your own replies)."
+      },
+      "max_results": {
+       "type": "integer",
+       "description": "Max results to return (default 8)."
+      },
+      "expand_id": {
+       "type": "string",
+       "description": "Progressive drill-down: set to a result ID from a previous search (e.g. 'step:204:39', 'mem:42', 'msg:100') to get the FULL content of that specific item. Leave empty for normal search."
+      },
+      "topic": {
+       "type": "string",
+       "description": "Optional: limit search to a specific topic tag (e.g. '车票'). Only affects memory store search."
+      },
+      "include_archived": {
+       "type": "boolean",
+       "description": "Set to true to also search archived (old, 1yr+) memories. Default false. Use when normal search returns nothing useful."
+      },
+      "page": {
+       "type": "integer",
+       "description": "Page number for paginated results (default 1, most recent first). Use when you see '还有 N 条，用 page=N 查看下一页'."
+      },
+      "memory_type": {
+       "type": "string",
+       "enum": [
+        "",
+        "core",
+        "working",
+        "episode"
+       ],
+       "description": "Filter memory store by type: 'core' (long-term facts), 'working' (current task context), 'episode' (task experience). Leave empty for all."
+      }
+     },
+     "required": []
+    }
+   }
+  },
+  "search_web": {
+   "type": "function",
+   "function": {
+    "name": "search_web",
+    "description": "Search the web for information, news, or current events. Tries multiple search engines (Tavily, Bing, Sogou, Baidu, DuckDuckGo, SearXNG, Brave) automatically. Use fetch_content=True to get full page content from a result URL. Use this tool for any question about recent events or real-time information.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string",
+       "description": "The search query. Use the language most relevant to the topic."
+      },
+      "max_results": {
+       "type": "integer",
+       "description": "Maximum number of results to return (default 5)."
+      },
+      "fetch_content": {
+       "type": "boolean",
+       "description": "If True, also fetch the full text content from the top result URL. Useful when snippets are insufficient. Default: False."
+      },
+      "fetch_url": {
+       "type": "string",
+       "description": "Fetch full text content from a specific URL instead of searching. Use this when you already have a URL and want to read its content."
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   }
+  },
+  "self_review": {
+   "type": "function",
+   "function": {
+    "name": "self_review",
+    "description": "执行任务进度自我审查。当你觉得任务陷入循环、长时间无进展、需要总结当前进度、或系统提示已达最大迭代次数时调用。系统会根据审查结果决定是否允许继续执行。请诚实分析。",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "max_iterations_reached": {
+       "type": "boolean",
+       "description": "是否因达到最大迭代次数而触发审查。系统自动设置。"
+      },
+      "progress_summary": {
+       "type": "string",
+       "description": "你对自己当前进度的总结。已经完成了什么，还剩什么。可选。"
+      },
+      "analysis_focus": {
+       "type": "string",
+       "description": "分析重点：'loop_detection'（循环检测）/ 'progress_summary'（进度总结）/ 'direction_correction'（方向纠偏）。可选。"
+      }
+     },
+     "required": []
+    }
+   }
+  },
+  "send_email": {
+   "type": "function",
+   "function": {
+    "name": "send_email",
+    "description": "Send an email from the connected SMTP account to a recipient. You can use 'owner' as to_addr to send to the owner.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "to_addr": {
+       "type": "string",
+       "description": "Recipient email address."
+      },
+      "subject": {
+       "type": "string",
+       "description": "Email subject."
+      },
+      "body": {
+       "type": "string",
+       "description": "Email body content."
+      }
+     },
+     "required": [
+      "to_addr",
+      "subject",
+      "body"
+     ]
+    }
+   }
+  },
+  "shell_send": {
+   "type": "function",
+   "function": {
+    "name": "shell_send",
+    "description": "向正在交互模式运行的进程发送输入并读取输出。\n用于与 python、mysql、llama-cli 等交互式命令行程序进行对话。\n\n用法：\n1. 先执行 execute_shell 启动交互式命令\n2. 收到 [Interactive] PID xxx 后，用此工具发送输入\n3. 用 exit/quit 退出后，进程自动结束\n\n注意：如果进程已结束或 PID 无效，工具会返回错误信息。",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pid": {
+       "type": "integer",
+       "description": "交互进程的 PID（从 execute_shell 返回的 [Interactive] 消息中获取）"
+      },
+      "input": {
+       "type": "string",
+       "description": "要发送给进程的输入文本（会自动追加换行）"
+      },
+      "timeout": {
+       "type": "integer",
+       "description": "等待输出的超时秒数（默认 30，最长 120）"
+      }
+     },
+     "required": [
+      "pid",
+      "input"
+     ]
+    }
+   }
+  },
+  "user_interjection_response": {
+   "type": "function",
+   "function": {
+    "name": "user_interjection_response",
+    "description": "当你在任务执行过程中收到 [用户插入: ...] 消息时，使用此工具判断是否应处理此消息。\n\n参数 action:\n  - accept：消息与当前任务相关（约束、反馈、补充信息等），将在当前任务中处理\n  - reject：消息与当前任务无关（全新主题、不相关请求），系统将为其创建新任务\n  - ask：不确定是否相关，需要向用户提问来澄清意图",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "action": {
+       "type": "string",
+       "enum": [
+        "accept",
+        "reject",
+        "ask"
+       ],
+       "description": "accept=接受并继续当前任务, reject=拒绝（系统将创建新任务）, ask=需要向用户提问"
+      },
+      "response": {
+       "type": "string",
+       "description": "action=accept 时：对用户插入消息的回应（如'已收到约束，将在后续步骤中处理'）"
+      },
+      "reason": {
+       "type": "string",
+       "description": "action=reject 时：解释为什么此消息与当前任务无关"
+      },
+      "question": {
+       "type": "string",
+       "description": "action=ask 时：需要向用户澄清的问题"
+      }
+     },
+     "required": [
+      "action"
+     ]
+    }
+   }
+  },
+  "write_file": {
+   "type": "function",
+   "function": {
+    "name": "write_file",
+    "description": "Write content to a file. Overwrites if it exists, creates if it does not.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string",
+       "description": "The absolute or relative path to the file."
+      },
+      "content": {
+       "type": "string",
+       "description": "The full text content to write to the file."
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  }
+ },
+ "active_tool_names": [
+  "search_web",
+  "ask_user_question",
+  "queue_download",
+  "read_file",
+  "find_files",
+  "browser_automation",
+  "manage_task_plan",
+  "parse_html",
+  "user_interjection_response",
+  "shell_send",
+  "self_review",
+  "execute_python",
+  "pause_and_wait",
+  "edit_file",
+  "write_file",
+  "configure_system",
+  "search_file_content",
+  "manage_memory",
+  "manage_task",
+  "execute_shell",
+  "search_history",
+  "search_available_tools"
+ ],
+ "active_total_bytes": 23942
+}

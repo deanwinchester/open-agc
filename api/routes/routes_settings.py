@@ -313,6 +313,7 @@ class ConfigUpdate(BaseModel):
     cold_cache_ttl: Optional[int] = None
     max_resume_count: Optional[int] = None
     max_total_tokens: Optional[int] = None
+    tool_tiered_exposure: Optional[bool] = None
 
 
 
@@ -431,6 +432,8 @@ async def get_settings(session_id: int = None):
         "cold_cache_ttl": config.get("cold_cache_ttl", 3600),
 
         "max_resume_count": config.get("max_resume_count", 10),
+
+        "tool_tiered_exposure": config.get("tool_tiered_exposure", True),
 
         "context_budget": config.get("context_budget", {"max_total_tokens": 128000}),
 
@@ -556,6 +559,10 @@ async def update_settings(config_update: ConfigUpdate):
         if config_update.browser_headless is not None:
 
             config["browser_headless"] = config_update.browser_headless
+
+        if config_update.tool_tiered_exposure is not None:
+
+            config["tool_tiered_exposure"] = config_update.tool_tiered_exposure
 
         if config_update.http_proxy is not None:
 
@@ -818,7 +825,7 @@ async def get_provider_models(provider: str):
 
             'kimi': ['moonshot/kimi-k2.6', 'moonshot/kimi-k2.5', 'moonshot/kimi-latest', 'moonshot/moonshot-v1-8k', 'moonshot/moonshot-v1-32k', 'moonshot/moonshot-v1-128k'],
 
-            'kimi_code': ['kimi_code/kimi-for-coding', 'kimi_code/kimi-for-coding-highspeed', 'kimi_code/k3', 'kimi_code/k3[1m]'],
+            'kimi_code': ['kimi_code/kimi-for-coding', 'kimi_code/kimi-for-coding-highspeed', 'kimi_code/k3'],
 
             'glm': ['zai/glm-4.7', 'zai/glm-4.5', 'zai/glm-4.5-flash', 'zai/glm-4.5-air'],
 

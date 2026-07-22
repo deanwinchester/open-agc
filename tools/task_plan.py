@@ -255,24 +255,7 @@ def _heartbeat_plan_context(plan: dict) -> str:
 class TaskPlanTool(BaseTool):
     name: str = "manage_task_plan"
     description: str = (
-        "管理任务计划和大目标。用于制定任务步骤、跟踪进度、记录关键结果。\n\n"
-        "适用场景：\n"
-        "- 涉及多步骤的复杂任务（爬虫、批量下载、多文件处理等）\n"
-        "- 可能会被中断的长时间任务\n"
-        "- 需要恢复上下文的任务\n\n"
-        "操作说明：\n"
-        "- create：根据 goal 和 steps 创建新计划，系统自动生成 plan_id\n"
-        "- update：更新步骤状态(done/doing/todo)、添加关键发现、记录创建的文件\n"
-        "- show：查看当前计划内容和进度\n"
-        "- check：检查是否所有步骤已完成，未完成时禁止结束任务\n\n"
-        "大目标操作：\n"
-        "- goal_add(desc=...)：添加一条大目标（最多 10 项）\n"
-        "- goal_start(id=N)：标记大目标为执行中\n"
-        "- goal_done(id=N)：标记大目标为已完成\n"
-        "- goal_stuck(id=N, reason=...)：标记大目标为受阻\n"
-        "- goal_reset(id=N)：将完成或受阻的大目标重置为待执行\n"
-        "- goal_list()：查看当前所有大目标\n"
-        "注意：创建 plan 时请同时添加对应的 goal 项。所有复杂任务都应该有 goal。"
+        "管理任务计划与大目标。复杂/长任务先建计划；建 plan 应同时 goal_add；check 未完成禁止结束。"
     )
 
     def execute(self, action: str = "show", goal: str = "",
@@ -576,29 +559,29 @@ class TaskPlanTool(BaseTool):
                             "enum": ["create", "update", "show", "check", "cleanup",
                                      "goal_add", "goal_start", "goal_done",
                                      "goal_stuck", "goal_reset", "goal_list"],
-                            "description": "操作类型"
+                            "description": "create 建计划；update 更新；show 看进度；check 查完成；goal_* 管大目标"
                         },
                         "goal": {
                             "type": "string",
-                            "description": "任务目标描述（create 时必填）"
+                            "description": "任务目标（create 必填）"
                         },
                         "steps": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "执行步骤列表（create 时必填）"
+                            "description": "步骤列表（create 必填）"
                         },
                         "step_id": {
                             "type": "integer",
-                            "description": "要更新的步骤编号（update 时填）"
+                            "description": "步骤编号（update 用）"
                         },
                         "step_status": {
                             "type": "string",
                             "enum": ["done", "doing", "todo"],
-                            "description": "步骤的新状态（update 时填）"
+                            "description": "新状态（update 用）"
                         },
                         "step_result": {
                             "type": "string",
-                            "description": "步骤执行结果描述（update 时可选）"
+                            "description": "步骤结果（update 可选）"
                         },
                         "key_findings": {
                             "type": "array",
@@ -614,19 +597,19 @@ class TaskPlanTool(BaseTool):
                                     "purpose": {"type": "string"}
                                 }
                             },
-                            "description": "创建的文件/文件夹及其用途"
+                            "description": "产出文件及用途"
                         },
                         "goal_id": {
                             "type": "integer",
-                            "description": "大目标 ID（goal_start/done/stuck/reset 时必填）"
+                            "description": "大目标 ID（goal_* 用）"
                         },
                         "desc": {
                             "type": "string",
-                            "description": "大目标描述（goal_add 时必填，最长 100 字）"
+                            "description": "大目标描述（goal_add 用，≤100 字）"
                         },
                         "reason": {
                             "type": "string",
-                            "description": "受阻原因（goal_stuck 时必填）"
+                            "description": "受阻原因（goal_stuck 用）"
                         }
                     },
                     "required": ["action"]

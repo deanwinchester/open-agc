@@ -8,7 +8,7 @@ class MacSystemTool(BaseTool):
     def __init__(self):
         super().__init__(
             name="mac_system_action",
-            description="Perform a native macOS system action like sending a push notification or reading the clipboard."
+            description="执行 macOS 原生系统操作（通知、剪贴板、系统信息）。仅 macOS 可用。"
         )
 
     def get_openai_schema(self) -> dict:
@@ -23,15 +23,15 @@ class MacSystemTool(BaseTool):
                         "action": {
                             "type": "string",
                             "enum": ["notify", "read_clipboard", "get_system_info"],
-                            "description": "The action to perform."
+                            "description": "notify 发通知；read_clipboard 读剪贴板；get_system_info 系统信息。"
                         },
                         "message": {
                             "type": "string",
-                            "description": "The message for the notification (required if action='notify')."
+                            "description": "通知内容（action=notify 时必填）。"
                         },
                         "title": {
                             "type": "string",
-                            "description": "The title for the notification."
+                            "description": "通知标题（可选）。"
                         }
                     },
                     "required": ["action"]
