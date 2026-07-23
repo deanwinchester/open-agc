@@ -86,7 +86,9 @@ function onSubmitAsk(entry, answer) {
         <div v-if="entry.kind === 'tool'" class="pc-step" :class="[entry.status, { clickable: entry.fullResult }]" @click.stop="openDetail(entry)">
           <span class="step-icon">{{ stepIcon(entry) }}</span>
           <div class="step-body">
-            <span class="step-label">{{ entry.step }}. {{ entry.toolLabel }}<span v-if="entry.fullResult" class="step-more"> 🔍</span></span>
+            <span class="step-label">
+              <span v-if="entry.subTask" class="subtask-badge" :title="entry.subTask">🧩 {{ entry.subTask.substring(0, 18) }}</span>{{ entry.step }}. {{ entry.toolLabel }}<span v-if="entry.fullResult" class="step-more"> 🔍</span>
+            </span>
             <span v-if="entry.argsPreview" class="step-detail">{{ entry.argsPreview }}</span>
             <span v-if="entry.resultPreview" class="step-detail">{{ entry.resultPreview }}</span>
           </div>
@@ -284,6 +286,20 @@ function onSubmitAsk(entry, answer) {
   padding: 4px 6px;
   margin: 0 -6px;
   transition: background var(--panda-transition);
+}
+
+/* 子任务徽标：紫色区分主代理步骤 */
+.subtask-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 17px;
+  color: #7c3aed;
+  background: rgba(124, 58, 237, 0.1);
+  border: 1px solid rgba(124, 58, 237, 0.25);
+  vertical-align: 1px;
 }
 
 .pc-step.clickable:hover {

@@ -335,10 +335,13 @@ function onProgress(data) {
         toolLabel: data.tool_label || data.tool,
         argsPreview: data.args_preview || '',
         resultPreview: '', success: null, status: 'running',
+        subTask: data.sub_task || '',
       });
       break;
     case 'tool_done': {
-      const entry = card.entries.find((e) => e.kind === 'tool' && e.step === data.step);
+      // 按 step + subTask 匹配：并行子代理各自从 1 编号，仅按 step 会串号
+      const entry = card.entries.find((e) => e.kind === 'tool' && e.step === data.step
+        && (e.subTask || '') === (data.sub_task || ''));
       if (entry) {
         entry.status = data.success ? 'done' : 'failed';
         entry.success = !!data.success;
