@@ -369,13 +369,17 @@ class TestWaitForUserInput:
         agent.is_interrupted = True
         assert agent.wait_for_user_input("q?") == "[用户已中断任务]"
 
-    def test_total_timeout_treated_as_interrupt(self):
+    def test_total_timeout_raises_task_paused(self):
+        from tools.interaction import TaskPaused
         agent = _bare_agent()
         agent.is_interrupted = False
         agent._user_input_timeout = 0.2
-        result = agent.wait_for_user_input("q?")
-        assert result == "[等待用户输入超时，任务已中断]"
-        assert agent.is_interrupted is True
+        with pytest.raises(TaskPaused) as exc_info:
+            agent.wait_for_user_input("q?")
+        assert "等待用户回答超时" in str(exc_info.value)
+        assert "q?" in str(exc_info.value)
+        # Timeout must NOT kill the task — it pauses to background instead
+        assert agent.is_interrupted is False
 
     def test_returns_user_answer(self):
         agent = _bare_agent()
