@@ -31,7 +31,7 @@ echo [1/4] Preparing build environment...
 echo   Building frontend with Vite...
 where npm >nul 2>&1
 if !errorlevel! equ 0 (
-    if not exist "node_modules" call npm install
+    if not exist "node_modules\@vitejs\plugin-vue" call npm install
     call npm run build
 ) else (
     echo   ERROR: npm not found — frontend build required for packaging!

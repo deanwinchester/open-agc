@@ -162,7 +162,8 @@ if %errorlevel% neq 0 (
 
 if exist "package.json" (
     echo Building frontend assets with Vite...
-    if not exist "node_modules" (
+    :: node_modules 可能来自旧版本（缺新依赖）——除目录缺失外，关键依赖缺失也要重装
+    if not exist "node_modules\@vitejs\plugin-vue" (
         echo Installing Node.js dependencies...
         call npm install
     )
