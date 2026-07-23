@@ -80,7 +80,8 @@ class SubAgent:
                  session_whitelist=None,
                  network_whitelist=None,
                  permission_whitelist=None,
-                 session_id=None):
+                 session_id=None,
+                 context_brief: str = ""):
         self.task = task
         self.max_iterations = max_iterations
         self.progress_callback = progress_callback
@@ -91,10 +92,18 @@ class SubAgent:
         self._network_whitelist = network_whitelist or set()
         self._permission_whitelist = permission_whitelist or set()
         self._session_id = session_id
+        self.context_brief = context_brief or ""
 
         # Build system prompt
         now = _time.strftime("%Y-%m-%d %H:%M:%S")
         tool_list = "\n".join(f"  - {t}" for t in tools)
+        # Sub-agents run isolated from the main conversation; the brief
+        # carries the goal / recent user messages / session paths so the
+        # sub-agent never has to "find the repository" by blind scanning.
+        brief_section = (
+            f"\n\n## 会话上下文\n{self.context_brief}"
+            if self.context_brief else ""
+        )
         self.messages = [
             {
                 "role": "system",
@@ -106,6 +115,7 @@ class SubAgent:
                     f"1. 专注于完成子任务，完成后返回结果摘要\n"
                     f"2. 不要使用未列出的工具\n"
                     f"3. 不要执行超出子任务范围的操作"
+                    f"{brief_section}"
                 )
             }
         ]
