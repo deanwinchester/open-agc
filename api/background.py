@@ -193,7 +193,8 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                     args_preview=event.get("args_preview", ""),
                     session_id=bg_session_id,
                     tool_call_id=event.get("tool_call_id"),
-                    full_args=event.get("tool_args")
+                    full_args=event.get("tool_args"),
+                    sub_task=event.get("sub_task")
                 )
             except Exception:
                 pass
@@ -852,7 +853,7 @@ def _guardian_resume_task(task_id: int) -> None:
             if "step" in e:
                 e["step"] = e.get("step", 0) + _hb_step_offset
             if e.get("event") == "tool_start":
-                add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", ""), session_id=_hb_session)
+                add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", ""), session_id=_hb_session, sub_task=e.get("sub_task"))
             # Persist sandbox approvals so they survive agent recreation
             if e.get("event") == "sandbox_approved":
                 _path = e.get("path", "")
