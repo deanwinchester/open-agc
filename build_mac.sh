@@ -53,7 +53,7 @@ echo "[1/5] Preparing build environment..."
 # Build frontend with Vite (required for packaging)
 echo "  Building frontend with Vite..."
 if command -v npm &> /dev/null; then
-    [ ! -d "node_modules" ] && npm install
+    [ ! -d "node_modules/@vitejs/plugin-vue" ] && npm install
     npm run build
 else
     echo "  ERROR: npm not found — frontend build required for packaging!"

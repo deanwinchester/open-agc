@@ -232,7 +232,9 @@ if [ $NEED_BUILD -eq 1 ]; then
 
     if command -v npm &> /dev/null && [ -f "package.json" ]; then
         echo "Building frontend assets with Vite..."
-        if [ ! -d "node_modules" ]; then
+        # node_modules 可能来自旧版本（缺新依赖）——除目录缺失外，
+        # 关键依赖缺失或 package.json 更新时也要重新安装
+        if [ ! -d "node_modules" ] || [ ! -d "node_modules/@vitejs/plugin-vue" ] || [ "package.json" -nt "node_modules" ]; then
             echo "Installing Node.js dependencies..."
             npm install
         fi
