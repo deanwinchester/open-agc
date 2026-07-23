@@ -16,7 +16,7 @@ from api.state import _active_agents, _background_agents, connected_websockets, 
 from api.task_core import (
     create_task, update_task_status, update_task_type, get_task_context,
     save_task_context, add_task_step, _extract_task_title,
-    _record_task_deliverables, increment_task_resume, _check_goal_completeness,
+    _record_task_deliverables, _check_goal_completeness,
 )
 from tools.shell import interrupt_shell, get_background_processes, get_orphan_processes, cleanup_background_process, adopt_orphan_processes
 
@@ -206,16 +206,18 @@ async def delete_task(task_id: int):
         print(f"[Task] Delete error: {e}")
     # Clean up goal association
     try:
-        from tools.task_plan import load_goals as _lg, save_goals as _sg
-        _goals = _lg()
-        _changed = False
-        for item in _goals.get("items", []):
-            tids = item.get("task_ids", [])
-            if task_id in tids:
-                item["task_ids"] = [t for t in tids if t != task_id]
-                _changed = True
-        if _changed:
-            _sg(_goals)
+        from tools.task_plan import update_goals as _ug
+
+        def _unlink(data):
+            _changed = False
+            for item in data.get("items", []):
+                tids = item.get("task_ids", [])
+                if task_id in tids:
+                    item["task_ids"] = [t for t in tids if t != task_id]
+                    _changed = True
+            return _changed, None
+
+        _ug(_unlink)
     except Exception:
         pass
     return {"status": "success", "message": "Task deleted"}

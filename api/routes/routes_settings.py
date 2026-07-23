@@ -9,7 +9,7 @@ from dotenv import load_dotenv, set_key
 from api.db import DB_PATH
 from api.config import load_config, save_config, CONFIG_PATH
 from api.state import connected_websockets, _llamacpp_download_state, _broadcast_to_websockets, _active_agents, _background_agents, _sandbox_waits
-from api.task_core import create_task, update_task_status, get_task_context, save_task_context, add_task_step
+from api.task_core import create_task, get_task_context, save_task_context, add_task_step, claim_task_for_resume
 from core.paths import get_data_path
 from core.llamacpp_manager import get_llamacpp_manager
 from api.background import _run_background_task
@@ -96,23 +96,39 @@ def log_download_event(download_id: int, event_type: str, message: str = "", det
 def _direct_resume_background_task(task_id: int, user_query: str, context: list,
                                      download_id: int = None):
     """Directly resume a backgrounded task (thread-safe, non-blocking).
-    If download_id is provided, marks background_resumed=1 inside the thread
-    so BgMonitor doesn't double-resume."""
+
+    统一语义「认领即 running，不再降级」：
+    1. download_id 给定时，先用单条原子 UPDATE 消费 background_resumed 标志
+       （``... WHERE id=? AND background_resumed=0``，rowcount 判赢）——
+       与 BgMonitor 下载分支互斥，输家直接放弃；
+    2. 起线程前 ``claim_task_for_resume(tid, ('backgrounded',))`` CAS 认领——
+       与 wake/shell/Guardian/WS 各恢复路径互斥，认领失败说明另一路径已接管。
+    任一关口失败都不再拉起 worker，避免双 agent 烧 token。"""
+    # 1. Atomic flag: exactly one path consumes the download row.
+    if download_id is not None:
+        try:
+            _conn = sqlite3.connect(DB_PATH)
+            _cur = _conn.execute(
+                "UPDATE downloads SET background_resumed=1 WHERE id=? AND background_resumed=0",
+                (download_id,))
+            _flag_won = _cur.rowcount == 1
+            _conn.commit()
+            _conn.close()
+            if not _flag_won:
+                print(f"[Download] Task {task_id}: download #{download_id} already consumed by another path — skip direct resume")
+                return
+        except Exception as _fe:
+            # 标志异常不阻断：下方 CAS 仍是权威关口
+            print(f"[Download] background_resumed flag update failed for #{download_id}: {_fe}")
+    # 2. CAS claim BEFORE spawning the worker (认领即 running)
+    if not claim_task_for_resume(task_id, ('backgrounded',)):
+        print(f"[Download] Task {task_id}: resume claim failed (claimed by another path), skipping")
+        return
     try:
-        def _do_resume():
-            # Mark as resumed FIRST so monitor won't also pick it up
-            if download_id is not None:
-                try:
-                    _conn = sqlite3.connect(DB_PATH)
-                    _conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?", (download_id,))
-                    _conn.commit()
-                    _conn.close()
-                except Exception:
-                    pass
-            update_task_status(task_id, "interrupted",
-                "后台下载触发恢复", interruption_reason="background_complete")
-            _run_background_task(task_id, user_query, context, True)
-        threading.Thread(target=_do_resume, daemon=True).start()
+        threading.Thread(
+            target=_run_background_task,
+            args=(task_id, user_query, context, True),
+            daemon=True).start()
     except Exception as e:
         print(f"[Download] _direct_resume_background_task failed for task {task_id}: {e}")
 

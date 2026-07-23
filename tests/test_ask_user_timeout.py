@@ -160,8 +160,9 @@ class TestResumeWithLateAnswer:
         target, args = patched_bg["ran"]
         assert target is bg._run_background_task
         assert args[0] == 7 and args[1] == "原始任务" and args[3] is True
-        # Status flipped to interrupted/background_complete for the resume path
-        assert (7, "interrupted", "background_complete") in patched_bg["status_updates"]
+        # 认领即 running：CAS 后不再降级 interrupted（阶段7 收敛，_run_background_task
+        # 内部自行置 running），本函数不应再产生任何 update_task_status 调用
+        assert patched_bg["status_updates"] == []
 
     def test_completed_task_returns_terminal_status(self, patched_bg):
         patched_bg["row"] = ("completed", "q", "", None)

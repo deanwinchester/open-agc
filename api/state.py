@@ -109,8 +109,8 @@ def _broadcast_task_history(task_id: int, session_id: int, task_status: str = "i
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT step_number, tool_name, tool_label, args_preview, result_preview, full_result, full_args, success, thinking_content "
-            "FROM task_steps WHERE task_id=? ORDER BY created_at ASC", (task_id,)).fetchall()
+            "SELECT step_number, tool_name, tool_label, args_preview, result_preview, full_result, full_args, success, thinking_content, sub_task "
+            "FROM task_steps WHERE task_id=? ORDER BY id ASC", (task_id,)).fetchall()
         conn.close()
         if not rows:
             return
@@ -126,6 +126,7 @@ def _broadcast_task_history(task_id: int, session_id: int, task_status: str = "i
                 "full_args": r["full_args"] or "",
                 "success": bool(r["success"]),
                 "thinking_content": r["thinking_content"] if "thinking_content" in r.keys() else None,
+                "sub_task": r["sub_task"] or "",
             })
         _broadcast_to_websockets({
             "type": "history_steps", "task_id": task_id,

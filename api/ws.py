@@ -17,7 +17,7 @@ from api.task_core import (
     save_message, handle_task_completion, claim_task_for_resume,
     add_task_step, _extract_task_title, _record_task_deliverables, _load_session_context,
     _resolve_task_for_query, _resolve_goal_for_query, _check_goal_completeness, _get_task_step_count,
-    _get_step_offset,
+    _get_step_offset, QUEUED_TO_LIVE_AGENT,
 )
 from core.paths import get_data_path
 from core.llamacpp_manager import get_llamacpp_manager
@@ -27,6 +27,24 @@ from agent.agent import OpenAGCAgent
 from tools.shell import interrupt_shell
 # Import background helper for task history broadcast
 from api.state import _broadcast_task_history
+
+
+def _link_resolved_goal(resolved_goal: int, ws_task_id) -> bool:
+    """把 WS 任务回链到其解析出的大目标（锁内追加、去重）。
+
+    resolved_goal <= 0 或 ws_task_id 为空时不动作。返回是否发生回链。
+    抽出为模块级函数以便单测（ws.py:run 循环在 agent 跑完后调用）。
+    """
+    if not (resolved_goal and resolved_goal > 0 and ws_task_id):
+        return False
+    try:
+        from api.task_core import _link_task_to_goal
+        if _link_task_to_goal(resolved_goal, ws_task_id):
+            print(f"[WS] Linked task #{ws_task_id} to goal #{resolved_goal}")
+            return True
+    except Exception as e:
+        print(f"[WS] Goal link-back error: {e}")
+    return False
 
 
 def _map_history_message(role: str, content: str):
@@ -74,6 +92,26 @@ def _load_session_history(session_id: int, limit: int = 20) -> list:
     except Exception as e:
         print(f"Failed to load chat history: {e}")
         return []
+
+
+def _user_facing(response: str):
+    """剥离内部协议前缀，返回可落库/可广播的聊天文本；不应展示时返回 None。
+
+    内部协议串仅供 handle_task_completion 做状态解析（状态解析必须拿原文），
+    本函数只用于「落库聊天消息」与「广播 message 事件」两个出口：
+    - [TASK_BACKGROUNDED] → None：task_backgrounded 事件已单独提示，
+      聊天消息与 message 广播都不再出现原文；
+    - [MAX_ITERATIONS_REACHED] → 剥前缀 + 可继续提示。
+    """
+    if not response:
+        return response
+    if response.startswith("[TASK_BACKGROUNDED]"):
+        return None
+    if response.startswith("[MAX_ITERATIONS_REACHED]"):
+        body = response[len("[MAX_ITERATIONS_REACHED]"):].strip()
+        hint = "（已达最大步数，任务已暂停——发送「继续」可接着执行）"
+        return f"{body}\n\n{hint}" if body else hint
+    return response
 
 
 async def websocket_endpoint(websocket: WebSocket):
@@ -194,8 +232,8 @@ async def websocket_endpoint(websocket: WebSocket):
             if newer_msgs == 0:
                 steps = cursor.execute(
                     "SELECT step_number, tool_name, tool_label, args_preview, "
-                    "result_preview, full_result, full_args, success, thinking_content FROM task_steps "
-                    "WHERE task_id=? ORDER BY created_at",
+                    "result_preview, full_result, full_args, success, thinking_content, sub_task FROM task_steps "
+                    "WHERE task_id=? ORDER BY id",
                     (last_task["id"],)).fetchall()
                 if steps:
                     await _safe_send({
@@ -229,6 +267,15 @@ async def websocket_endpoint(websocket: WebSocket):
             # worker thread so the event loop keeps serving WS/HTTP.
             ws_task_id = await asyncio.get_running_loop().run_in_executor(
                 None, _resolve_task_for_query, ws_session_id, query)
+            if ws_task_id == QUEUED_TO_LIVE_AGENT:
+                # 消息已排入存活的后台 agent（其完成路径会自行广播结果）——
+                # 本条消息只落库，不再为它开第二个 agent 循环。
+                agent_is_running = False
+                try:
+                    save_message("user", query, ws_session_id)
+                except Exception:
+                    pass
+                return (None, None)
         step_offset = 0
 
         # Always compute step offset from existing steps for ANY existing task,
@@ -482,11 +529,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 session_history = [{k:v for k,v in m.items() if k != '_timestamp'} for m in session_history]
                 agent.messages.extend(session_history)
 
-            # Save the first user query so it survives crashes in the messages table
-            try:
-                save_message("user", query, ws_session_id)
-            except Exception as _msg_e:
-                print(f"[WS] Save user message failed: {_msg_e}")
+            # Save the first user query so it survives crashes in the messages table.
+            # resume 时 query 是合成提示（"【系统提示】任务已恢复…"）而非用户原话，
+            # 不落库——聊天里不应出现内部合成文本。
+            if not resume_task_id:
+                try:
+                    save_message("user", query, ws_session_id)
+                except Exception as _msg_e:
+                    print(f"[WS] Save user message failed: {_msg_e}")
 
             loop = asyncio.get_event_loop()
             
@@ -671,10 +721,12 @@ async def websocket_endpoint(websocket: WebSocket):
             _session_enabled_tools[ws_session_id] = getattr(agent, 'active_tool_names', set())
 
             # ── Store response for reconnecting clients (before heavy DB) ──
-            # Only skip [TASK_BACKGROUNDED] (internal protocol, not user-facing)
-            if response and not response.startswith("[TASK_BACKGROUNDED]"):
+            # 内部协议串不入缓存（[TASK_BACKGROUNDED] → None 不存；
+            # [MAX_ITERATIONS_REACHED] 剥前缀）
+            _uf_pending = _user_facing(response)
+            if _uf_pending:
                 _pending_final_responses[ws_session_id] = {
-                    "content": response,
+                    "content": _uf_pending,
                     "task_id": ws_task_id,
                 }
 
@@ -715,12 +767,16 @@ async def websocket_endpoint(websocket: WebSocket):
                             _tb_ws_task_id, _tb_response, _bg_messages, _tb_session_id,
                             wake_minutes=_tb_wake,
                         )
-                        # Save agent response (fast DB write)
+                        # Save agent response (fast DB write) — 落库前剥内部
+                        # 协议串；backgrounded 响应不进聊天（task_backgrounded
+                        # 事件已单独提示）。状态解析仍用原文 _tb_response。
                         if _r != 'interrupted_user':
-                            try:
-                                save_message("agent", _tb_response, _tb_session_id)
-                            except Exception:
-                                pass
+                            _uf_save = _user_facing(_tb_response)
+                            if _uf_save:
+                                try:
+                                    save_message("agent", _uf_save, _tb_session_id)
+                                except Exception:
+                                    pass
 
                         if _r == 'backgrounded':
                             if _bg_pid:
@@ -793,9 +849,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         task_id=ws_task_id,
                         skip_rag=True,
                     )
-                    # If retry succeeded, log and return
+                    # If retry succeeded, log and return（落库前剥内部协议串）
                     try:
-                        save_message("agent", response, ws_session_id)
+                        _uf_retry = _user_facing(response)
+                        if _uf_retry:
+                            save_message("agent", _uf_retry, ws_session_id)
                     except Exception as _retry_save_e:
                         print(f"[WS] Save retry message failed: {_retry_save_e}")
                     print(f"[WS] Auto-retry succeeded for task {ws_task_id}")
@@ -818,8 +876,8 @@ async def websocket_endpoint(websocket: WebSocket):
             # response to any reconnected client via the pending response mechanism.
             # The main loop handles sending for the normal (alive) case.
             try:
-                _resp = locals().get('response')
-                if not ws_alive and _resp and not _resp.startswith("[TASK_BACKGROUNDED]"):
+                _resp = _user_facing(locals().get('response'))
+                if not ws_alive and _resp:
                     _broadcast_to_websockets({
                         "type": "message", "role": "agent",
                         "content": _resp, "session_id": ws_session_id,
@@ -868,8 +926,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         # ── Timeout: no user message received ──
                         # Recovery is handled by the background guardian.
                         continue
-                        if not is_heartbeat:
-                            continue
 
                 user_msg = json.loads(data)
                 msg_type = user_msg.get("type", "query")
@@ -934,6 +990,11 @@ async def websocket_endpoint(websocket: WebSocket):
                                 if _late_t:
                                     _tid2 = _late_t[0]
                                     _uq2 = _late_t[1] or ""
+                                    # CAS: 认领即 running，不再降级 interrupted；认领失败说明
+                                    # Guardian/BgMonitor 已接管，放弃本次恢复避免双 agent
+                                    if not claim_task_for_resume(_tid2, ('backgrounded', 'interrupted')):
+                                        print(f"[WS] Task #{_tid2}: late-approval resume claim failed (claimed by another path), skipping")
+                                        continue
                                     _ctx2 = get_task_context(_tid2)
                                     if _ctx2 is None:
                                         _ctx2 = []
@@ -941,8 +1002,6 @@ async def websocket_endpoint(websocket: WebSocket):
                                         f"【系统通知】你之前因沙箱权限等待超时而中断。路径 {_path} 已获得用户授权，"
                                         f"请重新尝试之前被阻止的操作。"})
                                     save_task_context(_tid2, _ctx2)
-                                    update_task_status(_tid2, "interrupted",
-                                        "延迟授权触发恢复", interruption_reason="background_complete")
                                     print(f"[WS] Resuming task #{_tid2} after late sandbox approval")
                                     import threading as _thr
                                     from api.background import _run_background_task
@@ -990,6 +1049,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         print(f"[WS] Late tool_reply resume error: {_tr_err}")
                     continue
 
+                # 本条消息关联到的大目标 id（仅普通消息分支会被赋值）
+                _resolved_goal = 0
+
                 if msg_type == "resume":
                     # Resume an interrupted task
                     task_id = user_msg.get("task_id")
@@ -1018,8 +1080,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             conn2.row_factory = sqlite3.Row
                             steps = conn2.execute(
                                 "SELECT step_number, tool_name, tool_label, args_preview, "
-                                "result_preview, full_result, full_args, success, thinking_content FROM task_steps "
-                                "WHERE task_id=? ORDER BY created_at", (task_id,)).fetchall()
+                                "result_preview, full_result, full_args, success, thinking_content, sub_task FROM task_steps "
+                                "WHERE task_id=? ORDER BY id", (task_id,)).fetchall()
                             # Also fetch the original task goal
                             task_row = conn2.execute(
                                 "SELECT user_query FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -1123,13 +1185,24 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Run the agent
                 response, ws_task_id = await run_agent_with_progress(query, retry_model, agent_profile_name, images=ws_images, resume_task_id=resume_id_for_run)
 
+                if response is None and ws_task_id is None:
+                    # 消息已排入存活的后台 agent，其完成路径会自行广播结果
+                    continue
+
+                # Link the task back to its resolved goal (锁内追加，防并发丢更新)
+                _link_resolved_goal(_resolved_goal, ws_task_id)
+
                 # Send the final response via broadcast (reaches ALL connected
                 # sockets, bypasses ws_alive poison). This is the single send point.
-                _broadcast_to_websockets({
-                    "type": "message", "role": "agent",
-                    "content": response, "session_id": ws_session_id,
-                    "task_id": ws_task_id,
-                })
+                # 内部协议串不出现在聊天：backgrounded 已由 task_backgrounded
+                # 事件单独提示；max_iterations 剥前缀 + 可继续提示。
+                _uf_final = _user_facing(response)
+                if _uf_final:
+                    _broadcast_to_websockets({
+                        "type": "message", "role": "agent",
+                        "content": _uf_final, "session_id": ws_session_id,
+                        "task_id": ws_task_id,
+                    })
                 # Clear pending response — successfully dispatched to all sockets
                 _pending_final_responses.pop(ws_session_id, None)
                 

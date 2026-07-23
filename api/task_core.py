@@ -9,12 +9,19 @@ from typing import Optional
 
 from api.db import DB_PATH, db_connect
 from api.config import load_config
-from api.state import _pending_sandbox_approvals, _active_agents, _guardian_resume_lock
+from api.state import (
+    _pending_sandbox_approvals, _active_agents, _background_agents,
+    _guardian_resume_lock,
+)
 
 _CONTINUATION_PREFIXES = [
     "继续", "继续搞", "继续做", "继续下载", "接着", "retry", "continue",
     "再来", "再试", "重新", "唤醒", "恢复", "resume", "next", "yes",
 ]
+
+# _resolve_task_for_query 返回哨兵：消息已排入存活的后台 agent，
+# 调用方不得再为该消息开启新的 agent 循环（同一任务双 agent 会写乱步骤流）
+QUEUED_TO_LIVE_AGENT = -1
 
 
 # Staleness threshold for 'running' tasks. Must exceed the worst-case
@@ -93,32 +100,7 @@ def create_task(title: str, user_query: str, task_type: str = 'oneshot',
     task_id = cursor.lastrowid
     conn.commit()
     conn.close()
-    # Generate task goal asynchronously
-    threading.Thread(
-        target=_generate_task_goal_background,
-        args=(task_id, user_query, session_id),
-        daemon=True
-    ).start()
     return task_id
-
-
-def _generate_task_goal_background(task_id: int, query: str, session_id: int):
-    """Use LLM to generate a task goal summary asynchronously."""
-    try:
-        from core.llm_client import LLMClient
-        cfg = load_config()
-        llm = LLMClient(default_model=cfg.get("default_model", "moonshot/kimi-latest"))
-        resp, _ = llm.chat([{"role": "user", "content": (
-            f"根据用户的问题，用一句话概括任务目标（不超过 50 字）：\n\n{query[:500]}"
-        )}])
-        goal = (resp.choices[0].message.content or "").strip()
-        if goal and len(goal) > 10:
-            conn = db_connect()
-            conn.execute("UPDATE tasks SET task_goal=? WHERE id=?", (goal[:500], task_id))
-            conn.commit()
-            conn.close()
-    except Exception:
-        pass
 
 
 def _record_task_deliverables(task_id: int):
@@ -221,16 +203,20 @@ def update_task_type(task_id: int, task_type: str):
 def claim_task_for_resume(task_id: int, allowed_statuses: tuple) -> bool:
     """Atomically claim a task for resume (compare-and-set).
 
-    Flips status to 'running' only when the task's current status is in
-    ``allowed_statuses``. SQLite serializes writers, so under concurrent
-    resume paths exactly one caller gets True. Every resume path must call
-    this BEFORE spawning its worker thread; losers must skip the resume.
+    Flips status to 'running' and increments ``resume_count`` only when the
+    task's current status is in ``allowed_statuses``. SQLite serializes
+    writers, so under concurrent resume paths exactly one caller gets True.
+    Every resume path must call this BEFORE spawning its worker thread;
+    losers must skip the resume. 统一语义「认领即 running，不再降级」：
+    认领成功后任何路径都不得再把状态写回 interrupted；resume_count 收敛到
+    本函数唯一计数，wake/shell/下载/Guardian/Scheduler 各路径自然计数。
     """
     try:
         conn = db_connect()
         placeholders = ",".join("?" for _ in allowed_statuses)
         cursor = conn.execute(
-            f"UPDATE tasks SET status='running', updated_at=CURRENT_TIMESTAMP "
+            f"UPDATE tasks SET status='running', resume_count=resume_count+1, "
+            f"updated_at=CURRENT_TIMESTAMP "
             f"WHERE id=? AND status IN ({placeholders})",
             (task_id, *allowed_statuses))
         claimed = cursor.rowcount == 1
@@ -307,18 +293,42 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
                         "执行线程失联（无步骤更新超时），已自动标记",
                         interruption_reason="stale_running")
                 else:
+                    # 复用前先查活：存活的后台 agent 已持有该任务，直接把消息
+                    # 排给它，而不是再开一个 agent 复用同一任务（双 agent 写
+                    # 同一任务会写乱步骤流）。调用方见哨兵后不再开跑。
+                    _bg = _background_agents.get(tid)
+                    if _bg is not None and not getattr(_bg, 'is_interrupted', False):
+                        try:
+                            _bg.queue_message(query)
+                            print(f"[Task] Task {tid} owned by a live background agent — "
+                                  f"queued message instead of reusing (session {session_id})")
+                            return QUEUED_TO_LIVE_AGENT
+                        except Exception as _q_err:
+                            print(f"[Task] Queue to live background agent failed: {_q_err}")
                     print(f"[Task] Reusing running task {tid} for session {session_id}")
                     return tid
             elif status in ('completed', 'interrupted', 'backgrounded', 'background_failed'):
+                # 窗口看 updated_at 而非 created_at：add_task_step 心跳持续刷新
+                # updated_at，长寿命任务的 created_at 早已掉出窗口（误判新话题）
                 try:
-                    created_dt = datetime.strptime(created, '%Y-%m-%d %H:%M:%S')
-                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                    updated_dt = datetime.strptime(updated_at, '%Y-%m-%d %H:%M:%S')
+                    updated_dt = updated_dt.replace(tzinfo=timezone.utc)
                     now = datetime.now(timezone.utc)
-                    is_recent = (now - created_dt) < timedelta(minutes=30)
+                    is_recent = (now - updated_dt) < timedelta(minutes=30)
                 except Exception:
                     is_recent = False
 
-                if is_recent and len(query.strip()) > 10:
+                _q = query.strip().lower()
+                # 显式续接词（继续/接着/resume…）无视长度一律续接
+                _is_continuation = any(
+                    kw and (_q.startswith(kw) or _q == kw)
+                    for kw in _CONTINUATION_PREFIXES)
+                # >10 字盲续仅限未完结状态（interrupted/backgrounded）——
+                # completed/background_failed 已收官，长消息按新话题开新任务
+                _blind_continue = (len(query.strip()) > 10
+                                   and status in ('interrupted', 'backgrounded'))
+
+                if is_recent and (_is_continuation or _blind_continue):
                     print(f"[Task] Continuing task {tid} for session {session_id}")
                     update_task_status(tid, "running")
                     return tid
@@ -444,6 +454,16 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
     save_task_context(task_id, agent_messages)
     _record_task_deliverables(task_id)
     update_task_status(task_id, "completed", summary)
+    # 成功完成即清零恢复计数：Scheduler 点火/各恢复路径的 CAS 每次 +1，
+    # 不清零会单调累积——长寿命 cron 任务一次普通中断就会被 Guardian
+    # 判超限置 background_failed（且高计数触发长退避）
+    try:
+        conn = db_connect()
+        conn.execute("UPDATE tasks SET resume_count=0 WHERE id=?", (task_id,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
     _check_goal_completeness(task_id)
     return 'completed'
 
@@ -530,7 +550,7 @@ def get_task_context(task_id: int) -> Optional[list]:
         user_query = row["user_query"] or ""
         steps = conn.execute(
             "SELECT tool_name, tool_call_id, args_preview, full_args, result_preview, "
-            "full_result, success, created_at FROM task_steps WHERE task_id=? ORDER BY created_at",
+            "full_result, success, created_at FROM task_steps WHERE task_id=? ORDER BY id",
             (task_id,)
         ).fetchall()
         conn.close()
@@ -573,16 +593,6 @@ def _get_task_step_count(task_id: int) -> int:
     except Exception:
         return 0
 
-
-def increment_task_resume(task_id: int):
-    """Increment the resume_count for a task."""
-    try:
-        conn = db_connect()
-        conn.execute("UPDATE tasks SET resume_count = resume_count + 1 WHERE id=?", (task_id,))
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
 
 
 def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: str = None,
@@ -671,13 +681,96 @@ def _resolve_goal_for_query(query: str, recent_context: str = "") -> int:
 
     return 0
 
+
+_GOAL_MAX_REMEDIATION = 3
+
+
+def _spawn_goal_task_run(task_id: int, query: str) -> None:
+    """Fire-and-forget background run for a goal-created task (patrol/remediation).
+
+    Deferred import: api.background imports api.task_core at module level."""
+    try:
+        from api.background import _run_background_task
+        threading.Thread(target=_run_background_task,
+                         args=(task_id, query, None, False), daemon=True).start()
+    except Exception as e:
+        print(f"[Goal] Failed to spawn background run for task {task_id}: {e}")
+
+
+def _link_task_to_goal(goal_id: int, task_id: int) -> bool:
+    """Append task_id to goal.task_ids under the goals lock. Returns True if linked."""
+    from tools.task_plan import update_goals
+
+    def _link(data):
+        for g in data.get("items", []):
+            if g.get("id") == goal_id:
+                tids = g.setdefault("task_ids", [])
+                if not isinstance(tids, list):
+                    tids = g["task_ids"] = []
+                if task_id not in tids:
+                    tids.append(task_id)
+                g["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                return True, True
+        return False, False
+
+    return bool(update_goals(_link))
+
+
+def remediate_goal(goal_id: int, reason: str, summaries: str = "",
+                   session_id: int = 1, spawn: bool = True) -> str:
+    """判 NO / 巡检发现目标未完成时的补救入口（带 resume_count 上限）。
+
+    goal.resume_count < _GOAL_MAX_REMEDIATION：创建补救任务（query 带目标
+    desc + 已有任务摘要 + 判 NO 理由），resume_count+1，回链后后台开跑。
+    超限：置 stuck 并写 reason。
+    返回 'remediated' | 'stuck' | 'missing'。
+    """
+    from tools.task_plan import update_goals
+
+    def _bump(data):
+        for g in data.get("items", []):
+            if g.get("id") == goal_id:
+                rc = g.get("resume_count", 0) or 0
+                if rc >= _GOAL_MAX_REMEDIATION:
+                    g["status"] = "stuck"
+                    g["reason"] = reason[:200]
+                    g["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    return True, ("stuck", g.get("desc", ""))
+                g["resume_count"] = rc + 1
+                g["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                return True, ("remediate", g.get("desc", ""))
+        return False, ("missing", "")
+
+    action, desc = update_goals(_bump)
+    if action == "missing":
+        return "missing"
+    if action == "stuck":
+        print(f"[Goal] Goal #{goal_id} remediation limit "
+              f"({_GOAL_MAX_REMEDIATION}) exceeded — marked stuck")
+        return "stuck"
+
+    query = (
+        f"【系统自动创建】补救大目标 #{goal_id}: {desc}\n\n"
+        + (f"已有任务摘要：\n{summaries}\n\n" if summaries else "")
+        + f"判定未完成/需继续的理由：{reason}\n\n"
+        f"请分析已有进展，继续完成该大目标。"
+    )
+    new_tid = create_task(f"补救目标: {desc[:80]}", query, session_id=session_id)
+    _link_task_to_goal(goal_id, new_tid)
+    if spawn:
+        _spawn_goal_task_run(new_tid, query)
+    print(f"[Goal] Created remediation task #{new_tid} for goal #{goal_id}")
+    return "remediated"
+
+
 def _check_goal_completeness(task_id: int) -> int:
     """Check if the goal containing this task_id has all tasks completed.
-    If all done, use LLM to judge if the goal is fulfilled.
-    Returns: 0=incomplete, 1=confirmed complete and archived, -1=unknown.
+    If all done, use LLM to judge if the goal is fulfilled; 判 NO 时走
+    remediate_goal 补救（超限置 stuck）。
+    Returns: 0=incomplete, 1=confirmed complete and archived, -1=unknown/judged NO.
     """
     try:
-        from tools.task_plan import load_goals, save_goals
+        from tools.task_plan import load_goals, update_goals
         goals = load_goals()
         goal = None
         for g in goals.get("items", []):
@@ -687,55 +780,71 @@ def _check_goal_completeness(task_id: int) -> int:
         if not goal:
             return 0
 
-        task_ids = goal.get("task_ids", [])
+        goal_id = goal["id"]
+        goal_desc = goal.get("desc", "")
+        task_ids = list(goal.get("task_ids", []))
         if not task_ids:
             return 0
 
         conn = db_connect()
+        conn.row_factory = sqlite3.Row
+        # failed 不算"已完结"：有失败任务的目标不得判完成
         incomplete = conn.execute(
             f"SELECT COUNT(*) FROM tasks WHERE id IN ({','.join('?' for _ in task_ids)}) "
-            f"AND status NOT IN ('completed', 'failed')",
+            f"AND status != 'completed'",
             task_ids
         ).fetchone()[0]
-        conn.close()
-
         if incomplete > 0:
+            conn.close()
             return 0
 
-        from core.llm_client import LLMClient
-        cfg = load_config()
-        llm = LLMClient(default_model=cfg.get("default_model", "moonshot/kimi-latest"))
-
         result_summaries = []
-        conn2 = db_connect()
-        conn2.row_factory = sqlite3.Row
+        session_id = 1
         for _tid in task_ids:
-            _row = conn2.execute(
-                "SELECT user_query, result_summary FROM tasks WHERE id=?", (_tid,)
+            _row = conn.execute(
+                "SELECT user_query, result_summary, session_id FROM tasks WHERE id=?", (_tid,)
             ).fetchone()
             if _row:
                 summary = _row["result_summary"] or _row["user_query"] or ""
                 result_summaries.append(f"任务 #{_tid}: {summary}")
-        conn2.close()
+                if _tid == task_id and _row["session_id"]:
+                    session_id = _row["session_id"]
+        conn.close()
+        summaries_text = "\n".join(result_summaries)
+
+        # LLM 调用前不持有 goals 写锁；判完再重新 load 改单条 save（缩小竞态窗口）
+        from core.llm_client import LLMClient
+        cfg = load_config()
+        llm = LLMClient(default_model=cfg.get("default_model", "moonshot/kimi-latest"))
 
         prompt = (
-            f"大目标：{goal.get('desc', '')}\n\n"
-            f"已完成子任务：\n" + "\n".join(result_summaries) + "\n\n"
+            f"大目标：{goal_desc}\n\n"
+            f"已完成子任务：\n" + summaries_text + "\n\n"
             f"问题：此大目标是否已完成？如果是，仅回复 YES；如果否、仅完成部分或不确定，仅回复 NO。"
         )
         resp, _ = llm.chat([{"role": "user", "content": prompt}])
         text = (resp.choices[0].message.content or "").strip().upper()
 
         if text.startswith("YES"):
-            goal["status"] = "done"
-            from datetime import datetime as _dt
-            goal["updated"] = _dt.now().strftime("%Y-%m-%d %H:%M")
-            save_goals(goals)
-            print(f"[Goal] Goal #{goal['id']} completed and archived")
-            return 1
-        else:
-            print(f"[Goal] Goal #{goal['id']} not yet complete (LLM judged NO)")
-            return -1
+            def _mark_done(data):
+                for g in data.get("items", []):
+                    if g.get("id") == goal_id:
+                        g["status"] = "done"
+                        g["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        g.pop("reason", None)
+                        return True, True
+                return False, False
+
+            if update_goals(_mark_done):
+                print(f"[Goal] Goal #{goal_id} completed and archived")
+                return 1
+            return 0
+
+        # 判 NO：创建补救任务（超限置 stuck）
+        print(f"[Goal] Goal #{goal_id} not yet complete (LLM judged NO)")
+        remediate_goal(goal_id, reason=f"LLM 判定目标未完成（{text[:80]}）",
+                       summaries=summaries_text, session_id=session_id)
+        return -1
     except Exception as e:
         print(f"[Goal] Completeness check error: {e}")
         return -1
