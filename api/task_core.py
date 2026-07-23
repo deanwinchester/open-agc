@@ -589,17 +589,17 @@ def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: st
                   args_preview: str = None, result_preview: str = None, full_result: str = None,
                   success: bool = True, thinking_content: str = None, session_id: int = None,
                   tool_call_id: str = None, full_args: str = None,
-                  generated_files: str = None):
+                  generated_files: str = None, sub_task: str = None):
     """Insert a task step record."""
     try:
         conn = db_connect()
         conn.execute(
             "INSERT INTO task_steps (task_id, step_number, tool_name, tool_label, args_preview, "
             "result_preview, full_result, success, thinking_content, session_id, tool_call_id, "
-            "full_args, generated_files) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "full_args, generated_files, sub_task) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (task_id, step_number, tool_name, tool_label, args_preview, result_preview,
              full_result, 1 if success else 0, thinking_content, session_id, tool_call_id,
-             full_args, generated_files or "")
+             full_args, generated_files or "", sub_task or "")
         )
         # Liveness heartbeat: a live agent records steps, so keep the parent
         # task's updated_at fresh. _is_task_stale() relies on this to tell a

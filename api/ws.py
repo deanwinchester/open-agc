@@ -296,7 +296,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             args_preview=event.get("args_preview", ""),
                             session_id=ws_session_id,
                             tool_call_id=event.get("tool_call_id"),
-                            full_args=event.get("tool_args")
+                            full_args=event.get("tool_args"),
+                            sub_task=event.get("sub_task")
                         )
                     except Exception as e:
                         print(f"[Task] Failed to add step: {e}")

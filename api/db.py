@@ -228,6 +228,7 @@ def _run_migrations(cursor):
             ("tool_call_id", "TEXT"),
             ("full_args", "TEXT"),
             ("generated_files", "TEXT DEFAULT ''"),
+            ("sub_task", "TEXT DEFAULT ''"),
         ],
         "downloads": [
             ("task_id", "INTEGER"),
