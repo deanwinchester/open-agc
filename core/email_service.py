@@ -99,6 +99,21 @@ def fetch_emails(imap_server, username, password, criteria='ALL', limit=10, mark
         print(f"Error fetching emails: {e}")
         return []
 
+def mark_email_seen(imap_server, username, password, mail_id):
+    """Mark a single message as seen (\\Seen flag). Returns True on success."""
+    if not mail_id:
+        return False
+    try:
+        mail = imaplib.IMAP4_SSL(imap_server)
+        mail.login(username, password)
+        mail.select("inbox")
+        mail.store(str(mail_id), '+FLAGS', '\\Seen')
+        mail.logout()
+        return True
+    except Exception as e:
+        print(f"Error marking email seen: {e}")
+        return False
+
 def send_email(smtp_server, username, password, to_addr, subject, body):
     """Send an email."""
     try:

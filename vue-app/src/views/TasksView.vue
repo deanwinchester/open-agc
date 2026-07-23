@@ -21,9 +21,11 @@ const router = useRouter();
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 const PAGE_SIZE = 50;
 const POLL_MS = 5000;
-// 这些状态视为「仍活跃」，列表页存在活跃任务时轮询刷新
+// 这些状态视为「仍活跃」，列表页存在活跃任务时轮询刷新。
+// 'detached' 为历史遗留状态：后端已无任何写入点（全仓 grep 无 status='detached'
+// 的 UPDATE），保留仅用于兼容旧数据库中可能残留的行，新数据不会出现。
 const ACTIVE_STATUSES = new Set(['running', 'detached', 'backgrounded']);
-// 可中断的状态
+// 可中断的状态（'detached' 同上，仅为旧数据兼容保留）
 const INTERRUPTIBLE = new Set(['running', 'detached', 'backgrounded']);
 
 const loading = ref(true);
