@@ -585,6 +585,8 @@ export default {
     agentBusy: 'Agent 正在执行任务，请先等待完成或停止当前任务',
     expandSteps: '展开步骤 ▾',
     collapseSteps: '收起步骤 ▴',
+    systemNotices: '系统通知',
+    noticesSuffix: '条',
     thinkingProcess: '思考过程',
     llmResponse: '助手回复',
     modelSwitched: '模型已切换',

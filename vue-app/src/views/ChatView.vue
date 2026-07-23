@@ -47,6 +47,30 @@ const ws = useWsStore();
 const sessions = ref([]);
 const currentSessionId = ref(null);
 const items = ref([]); // {kind:'msg'|'progress'|'ask', ...} 渲染顺序即对话顺序
+
+// 系统通知折叠分组：连续 ≥2 条 system 消息合并为一个可展开组，避免大量
+// 下载/后台通知把执行步骤顶出视野。组展开状态按组 key 记忆。
+const expandedNoticeGroups = reactive(new Set());
+function toggleNoticeGroup(key) {
+  if (expandedNoticeGroups.has(key)) expandedNoticeGroups.delete(key);
+  else expandedNoticeGroups.add(key);
+}
+const displayItems = computed(() => {
+  const out = [];
+  let run = null;
+  const flush = () => {
+    if (!run) return;
+    if (run.length >= 2) out.push({ kind: 'notice-group', key: `ng-${run[0].key}`, notices: run });
+    else out.push(...run);
+    run = null;
+  };
+  for (const it of items.value) {
+    if (it.kind === 'msg' && it.role === 'system') (run || (run = [])).push(it);
+    else { flush(); out.push(it); }
+  }
+  flush();
+  return out;
+});
 const liveCard = ref(null); // 当前实时进度卡片（同时也在 items 中）
 const thinking = reactive({ visible: false, text: '' });
 const running = ref(false);
@@ -813,7 +837,7 @@ onUnmounted(() => {
             >{{ t.loadMore }}</el-button>
           </div>
 
-          <template v-for="item in items" :key="item.key">
+          <template v-for="item in displayItems" :key="item.key">
             <MessageItem v-if="item.kind === 'msg'" :item="item" />
             <ProgressCard
               v-else-if="item.kind === 'progress'"
@@ -823,6 +847,15 @@ onUnmounted(() => {
             />
             <div v-else-if="item.kind === 'ask'" class="ask-row">
               <AskUserForm :entry="item" @submit="onSubmitAsk" />
+            </div>
+            <div v-else-if="item.kind === 'notice-group'" class="notice-group">
+              <button type="button" class="ng-header" @click="toggleNoticeGroup(item.key)">
+                📢 {{ t.systemNotices }} · {{ item.notices.length }} {{ t.noticesSuffix }}
+                <span class="ng-arrow">{{ expandedNoticeGroups.has(item.key) ? '▾' : '▸' }}</span>
+              </button>
+              <div v-if="expandedNoticeGroups.has(item.key)" class="ng-body">
+                <MessageItem v-for="n in item.notices" :key="n.key" :item="n" />
+              </div>
             </div>
           </template>
 
@@ -935,6 +968,38 @@ onUnmounted(() => {
   max-width: 860px;
   margin: 0 auto;
   padding: 16px;
+}
+
+/* 系统通知折叠组：紧凑居中 chip，避免刷屏 */
+.notice-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.ng-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 14px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 999px;
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color var(--panda-transition), border-color var(--panda-transition);
+}
+
+.ng-header:hover {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-5);
+}
+
+.ng-body {
+  margin-top: 8px;
+  width: 100%;
 }
 
 .load-more {

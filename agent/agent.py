@@ -906,7 +906,12 @@ class OpenAGCAgent:
             print(f"[Agent] Failed to import _sandbox_waits: {e}")
             return f"Sandbox authorization failed (internal error): {sb.path}"
         entry = {"event": wait_event, "result": result_holder,
-                 "session_id": self.session_id, "request_id": request_id}
+                 "session_id": self.session_id, "request_id": request_id,
+                 # Payload for re-broadcast: a client that missed the original
+                 # event (disconnect / other session) gets the modal on connect.
+                 "payload": {"path": sb.path, "tool_name": tool_name,
+                             "block_type": block_type, "description": desc_text,
+                             "category": category_text}}
         _sandbox_waits[request_id] = entry
         # Legacy fallback key for clients that reply without a request_id
         # (matched by session_id in ws.py / /api/sandbox/approve).

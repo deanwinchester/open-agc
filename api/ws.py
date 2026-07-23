@@ -94,6 +94,33 @@ async def websocket_endpoint(websocket: WebSocket):
             "error": _llamacpp_download_state.get("error", "")
         })
 
+    # Re-broadcast active sandbox waits for this session — a client that was
+    # disconnected (or viewing another session) when the event fired still
+    # gets the approval modal on (re)connect, instead of the wait silently
+    # timing out. Entries are stored under both request_id and session_id
+    # keys, so dedupe by request_id.
+    _seen_waits = set()
+    for _entry in list(_sandbox_waits.values()):
+        if not isinstance(_entry, dict):
+            continue
+        _rid = _entry.get("request_id")
+        if not _rid or _rid in _seen_waits or _entry.get("session_id") != ws_session_id:
+            continue
+        _seen_waits.add(_rid)
+        _pl = _entry.get("payload")
+        if not _pl:
+            continue
+        try:
+            await websocket.send_json({
+                "type": "progress",
+                "event": "sandbox_blocked",
+                "session_id": ws_session_id,
+                "request_id": _rid,
+                **_pl,
+            })
+        except Exception as _sb_e:
+            print(f"[WS] sandbox re-broadcast error: {_sb_e}")
+
     # Broadcast history_steps if this session has a recent or in-progress task
     try:
         _hb_conn = db_connect()
