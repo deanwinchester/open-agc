@@ -268,7 +268,15 @@ class OpenAGCAgent:
             except Exception:
                 budget_cfg = {}
 
-        self.token_budget = TokenBudget(config=budget_cfg if budget_cfg else None)
+        # TokenBudget 优先级：config.json 的 context_budget 显式配置优先；
+        # 否则按模型上下文窗口（llm_client 初始化时从 litellm model_cost /
+        # llamacpp_ctx_size 解析）设置 max_total_tokens；再退化为内置默认。
+        if budget_cfg:
+            self.token_budget = TokenBudget(config=budget_cfg)
+        else:
+            _model_window = getattr(self.llm, "model_context_window", 0) or 0
+            self.token_budget = TokenBudget(
+                config={"max_total_tokens": _model_window} if _model_window > 0 else None)
 
         # Initialize smart memory store before reflection/knowledge engines
         self.memory_store = MemoryStore(
@@ -1768,6 +1776,39 @@ class OpenAGCAgent:
         return compress_shell_output(result, tool_name)
     def _compress_tool_result(self, result: str, tool_name: str) -> str:
         return compress_tool_result(result, tool_name)
+
+    # 写入侧截断上限（字符数，按工具类型）：写入 self.messages 的单条工具
+    # 结果不得超过该 cap，保证上下文窗口不被单条巨型结果挤爆。
+    _TOOL_RESULT_WRITE_CAPS = {
+        "read_file": 8000,
+        "fetch_url": 8000,
+        "execute_shell": 12000,
+        "execute_python": 12000,
+    }
+    _TOOL_RESULT_WRITE_CAP_DEFAULT = 4000
+
+    def _truncate_tool_result_for_context(self, result: str, tool_name: str) -> str:
+        """工具结果写入 messages 前的上下文截断（写入侧防线）。
+
+        超出按工具类型的 cap 时先走 compress_tool_result（头 + 评分中段 + 尾），
+        仍超 cap 时硬截断兜底，保证写入结果不超 cap。
+
+        与进度事件里的 _full_cap 分工：本方法只裁写入 self.messages 的上下文
+        内容；_full_cap 只裁 full_result（前端展示 / 落库 task_steps），不影响
+        上下文。
+        """
+        cap = self._TOOL_RESULT_WRITE_CAPS.get(
+            tool_name, self._TOOL_RESULT_WRITE_CAP_DEFAULT)
+        if len(result) <= cap:
+            return result
+        compressed = self._compress_tool_result(result, tool_name)
+        if len(compressed) <= cap:
+            return compressed
+        # 硬截断兜底（压缩器对单行超长等极端输入可能不缩反胀）：
+        # 后缀计入 cap，保证总长度不超 cap。
+        suffix = "\n...(truncated)"
+        return compressed[:cap - len(suffix)] + suffix
+
     def _fold_tool_calls(self, messages: List[Dict], force: bool = False) -> List[Dict]:
         return fold_tool_calls(messages, force=force)
     def _llm_compact_messages(self, messages, target_token_savings=None):
@@ -1911,6 +1952,9 @@ class OpenAGCAgent:
         self.is_interrupted = False
         self.task_id = task_id
         self._consecutive_failures = 0
+        # 失败尝试记录同样随新任务清空——否则上一任务的避坑清单会泄漏进
+        # 本任务的 system prompt（跨任务污染）。
+        self.failed_attempts = []
         self.progress_callback = progress_callback
         # Check if user marked this task as completed while agent was idle
         if getattr(self, '_completed_by_user', False):
@@ -1992,28 +2036,6 @@ class OpenAGCAgent:
                 attempts_str = "\n".join([f"- {attempt}" for attempt in self.failed_attempts])
                 system_content += f"\n\n## 历史失败尝试记录 (避坑指南)\n你过去曾尝试过以下操作但失败了，**请仔细分析原因，绝对不要原样重复**：\n{attempts_str}\n"
 
-            # Inject task plan if task_id is set
-            if self.task_id:
-                try:
-                    from tools.task_plan import load_plan as _load_plan, format_plan_for_prompt as _fmt_plan
-                    # Prefer DB plan_id (O(1) lookup), fallback to scanning JSON files
-                    _plan = None
-                    try:
-                        import sqlite3 as _sq3
-                        from core.paths import get_data_path as _gdp
-                        _conn = _sq3.connect(_gdp("chat_history.db"))
-                        _row = _conn.execute("SELECT plan_id FROM tasks WHERE id=?", (self.task_id,)).fetchone()
-                        _conn.close()
-                        if _row and _row[0]:
-                            _plan = _load_plan(plan_id=_row[0])
-                    except Exception:
-                        pass
-                    if not _plan:
-                        _plan = _load_plan(plan_id=None, task_id=self.task_id)
-                    if _plan:
-                        system_content += "\n\n" + _fmt_plan(_plan)
-                except Exception:
-                    pass
             # Inject goal list
             try:
                 from tools.task_plan import load_goals as _load_goals, format_goal_list_for_prompt as _fmt_goals
@@ -2040,7 +2062,9 @@ class OpenAGCAgent:
                     pass
             self.messages[0]["content"] = system_content
 
-        # Always inject task plan, even with skip_rag=True (for resume scenarios)
+        # 任务计划注入（唯一注入点，带标题段 + 去重守卫；skip_rag=True 的
+        # resume 场景也覆盖）。原先 system prompt 重建段里的第一段无标题注入
+        # 已删除——两段并存会导致计划文本在系统提示里出现两次。
         if self.messages and self.messages[0]["role"] == "system" and self.task_id:
             try:
                 from tools.task_plan import load_plan as _load_plan, format_plan_for_prompt as _fmt_plan
@@ -2666,8 +2690,14 @@ class OpenAGCAgent:
                         screenshot_urls.append((img_url, "[image_view 读取的本地图片 — 请查看图片内容并继续后续操作]"))
                     result_str = replace_image_markers(result_str)
 
-                    # Context Compaction: compress long tool results to preserve context window
-                    # result_str = self._compress_tool_result(result_str, function_name)
+                    # Context Compaction（写入侧截断）：超长工具结果按工具类型
+                    # cap 后写入 messages（read_file/fetch_url 8000、
+                    # execute_shell/execute_python 12000、其余 4000），超出先走
+                    # compress_tool_result（头+评分中段+尾），仍超则硬截断。
+                    # 与下方 _full_cap 的分工：这里裁的是写入 self.messages 的
+                    # 上下文内容；_full_cap 只裁进度事件 full_result（前端展示/
+                    # 落库 task_steps），不影响上下文。
+                    result_str = self._truncate_tool_result_for_context(result_str, function_name)
 
                     # Notify: tool done
                     if progress_callback:
@@ -2851,11 +2881,14 @@ class OpenAGCAgent:
                     except Exception:
                         _ttl = 3600
                     compacted = self.token_budget.time_based_microcompact(self.messages, ttl=_ttl)
+                    # 无条件写回：time_based_microcompact 会为缺失的消息补
+                    # _timestamp——第一轮写回时间戳，TTL 过后第二轮才能据此
+                    # 识别冷区并清理老旧工具结果。恢复路径对 _timestamp 的
+                    # 剥离逻辑保持不变（api/background.py、api/ws.py）。
                     if compacted is not None and compacted is not self.messages:
-                        if any("[Old tool result" in (m.get("content") or "") for m in compacted):
-                            self.messages = compacted
-                            if verbose:
-                                print(f"[Agent] Time-based microcompact (ttl={_ttl}s)")
+                        self.messages = compacted
+                        if verbose:
+                            print(f"[Agent] Time-based microcompact (ttl={_ttl}s)")
 
                     # --- Token Budget Compression ---
                     import sys as _dbg_sys

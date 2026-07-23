@@ -15,12 +15,10 @@ import pytest
 
 @pytest.fixture()
 def tmp_db(tmp_path, monkeypatch):
-    """把 api.db.DB_PATH 指到临时库，并屏蔽 create_task 触发的 LLM 线程。"""
+    """把 api.db.DB_PATH 指到临时库。"""
     import api.db as db_mod
-    import api.task_core as tc
     monkeypatch.setattr(db_mod, "DB_PATH", str(tmp_path / "test.db"))
     db_mod.init_db()
-    monkeypatch.setattr(tc, "_generate_task_goal_background", lambda *a, **k: None)
     return db_mod
 
 

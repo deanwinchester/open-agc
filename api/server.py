@@ -611,6 +611,7 @@ _bg.start_email_listener()
 _bg.start_task_scheduler()
 _bg.start_background_monitor()
 _bg.start_guardian_loop()
+_bg.start_stale_rescue_loop()
 
 # Call local startup reconciliation
 reconcile_tasks()

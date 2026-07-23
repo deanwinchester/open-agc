@@ -387,6 +387,12 @@ class LLMClient:
         os.environ["LLAMACPP_API_BASE"] = self.llamacpp_api_base
         self.llamacpp_ctx_size = config.get("llamacpp_ctx_size", 32768)
 
+        # 按模型解析上下文窗口（max input tokens）：llamacpp/sglang 用
+        # llamacpp_ctx_size，其余模型查 litellm model_cost 的 max_input_tokens。
+        # 解析失败为 0，由调用方回落默认值。写入 agent 的 TokenBudget，
+        # 并替代 chat() 里原先硬编码的 truncation max_tokens。
+        self.model_context_window = self._resolve_context_window(self.default_model)
+
         # Kimi Code subscription endpoint (Anthropic-compatible)
         self.kimi_code_api_key = config.get("api_keys", {}).get("kimi_code", "") or os.environ.get("KIMI_CODE_API_KEY", "")
         self.kimi_code_api_base = "https://api.kimi.com/coding/"
@@ -399,6 +405,42 @@ class LLMClient:
                 os.environ[var] = local_hosts
             elif "localhost" not in current or "127.0.0.1" not in current:
                 os.environ[var] = f"{current.rstrip(',')},{local_hosts}"
+
+    def _resolve_context_window(self, model: Optional[str]) -> int:
+        """Resolve the model's context window (max input tokens).
+
+        llamacpp/sglang use the configured local ctx size; other models are
+        looked up in litellm's model_cost map (``max_input_tokens``, falling
+        back to ``max_tokens``). Returns 0 when the window cannot be
+        determined — callers fall back to their defaults.
+        """
+        if not model:
+            return 0
+        ml = model.lower()
+        if "llamacpp" in ml or "sglang" in ml:
+            try:
+                return int(self.llamacpp_ctx_size)
+            except (TypeError, ValueError):
+                return 0
+        # Provider prefixes vary (openai/gpt-4o vs gpt-4o); kimi_code maps to
+        # the anthropic/ endpoint in _build_model_kwargs. Try all spellings.
+        candidates = [model]
+        if "/" in model:
+            candidates.append(model.split("/", 1)[1])
+        if ml.startswith("kimi_code/"):
+            candidates.append("anthropic/" + model.split("/", 1)[1])
+        try:
+            model_cost = getattr(litellm, "model_cost", None) or {}
+            for cand in candidates:
+                info = model_cost.get(cand)
+                if not info:
+                    continue
+                window = info.get("max_input_tokens") or info.get("max_tokens")
+                if window:
+                    return int(window)
+        except Exception:
+            pass
+        return 0
 
     def _estimate_tokens(self, messages: List[Dict[str, Any]]) -> int:
         """Rough token count estimate. ~3 chars per token for mixed Chinese/English."""
@@ -629,6 +671,20 @@ class LLMClient:
                              tools: Optional[List[Dict[str, Any]]] = None,
                              stream: bool = False) -> Dict[str, Any]:
         """Build common kwargs for litellm.completion — handles llamacpp and orphan removal."""
+        # 剥离 reasoning_content（思考模型响应里的字段，会随 resume 旧快照
+        # 重新进入消息列表；多数 provider 对未知 message 键直接 400）。
+        # 单点覆盖下面所有渠道分支与 ContextWindowExceeded 重试重建路径。
+        # _timestamp（microcompact 注入）同样不属于任何 provider 的合法字段，
+        # OpenAI 兼容路径会原样透传，一并剥离。
+        if any(isinstance(m, dict) and ("reasoning_content" in m or "_timestamp" in m) for m in messages):
+            stripped = []
+            for m in messages:
+                if isinstance(m, dict) and ("reasoning_content" in m or "_timestamp" in m):
+                    m = dict(m)
+                    m.pop("reasoning_content", None)
+                    m.pop("_timestamp", None)
+                stripped.append(m)
+            messages = stripped
         kwargs = {
             "model": model,
             "messages": messages,
@@ -697,7 +753,10 @@ class LLMClient:
                         response = litellm.completion(**kwargs)
                     except ContextWindowExceededError:
                         print(f"[LLMClient] Context window exceeded for {attempt_model}, compressing...")
-                        truncated = self._truncate_for_context(messages, max_tokens=1000000)
+                        # 用初始化时解析的模型窗口 × 0.9 替代硬编码 1000000；
+                        # 解析失败（0）时回落 128k（与 TokenBudget 默认一致）。
+                        _window = getattr(self, "model_context_window", 0) or 128000
+                        truncated = self._truncate_for_context(messages, max_tokens=int(_window * 0.9))
                         if len(truncated) < len(messages):
                             note = {"role": "system", "content": (
                                 "[上下文压缩] 较早的对话历史已被截断以适应该模型的上下文窗口。"
