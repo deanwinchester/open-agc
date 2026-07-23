@@ -87,6 +87,16 @@ class DispatchSubagentTool(BaseTool):
             max_iterations = 10
         max_iterations = max(1, min(max_iterations, 30))
 
+        # Sub-agents are context-isolated: forward the session brief (goal /
+        # recent user messages / paths) when the agent provides one.
+        context_brief = ""
+        _brief_fn = getattr(agent, "_build_context_brief", None)
+        if callable(_brief_fn):
+            try:
+                context_brief = _brief_fn() or ""
+            except Exception:
+                context_brief = ""
+
         sub = SubAgent(
             task=task,
             tools=tools,
@@ -103,6 +113,7 @@ class DispatchSubagentTool(BaseTool):
                                   or getattr(agent, "_session_permission_whitelist", None)),
             session_id=(kwargs.get("_session_id")
                         or getattr(agent, "session_id", None)),
+            context_brief=context_brief,
         )
         # SandboxBlocked propagates to the main loop's handler (sub-agents
         # have no user-authorization channel of their own).
