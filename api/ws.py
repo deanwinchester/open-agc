@@ -534,14 +534,28 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "error": "用户中断"
                                 })
                         elif user_msg.get("type") == "tool_reply":
-                            agent.user_input_queue.put(user_msg.get("answer"))
-                            # Also unblock any background agents waiting for user input
                             _answer = user_msg.get("answer", "")
-                            for _tid, _bg_a in list(_background_agents.items()):
+                            if getattr(agent, 'is_interrupted', False):
+                                # Agent already stopping/stopped — the queue would
+                                # never be read. Inject + resume via the shared
+                                # late-answer path instead of silently dropping it.
                                 try:
-                                    _bg_a.user_input_queue.put_nowait(_answer)
-                                except Exception as _queue_e:
-                                    print(f"[WS] Background agent queue error (task {_tid}): {_queue_e}")
+                                    from api.background import resume_task_with_late_answer
+                                    if ws_task_id:
+                                        _tr_res = resume_task_with_late_answer(ws_task_id, _answer)
+                                        await _safe_send({"type": "system_message",
+                                                          "message": _tr_res.get("message", ""),
+                                                          "session_id": ws_session_id})
+                                except Exception as _tr_err:
+                                    print(f"[WS] tool_reply fallback error: {_tr_err}")
+                            else:
+                                agent.user_input_queue.put(user_msg.get("answer"))
+                                # Also unblock any background agents waiting for user input
+                                for _tid, _bg_a in list(_background_agents.items()):
+                                    try:
+                                        _bg_a.user_input_queue.put_nowait(_answer)
+                                    except Exception as _queue_e:
+                                        print(f"[WS] Background agent queue error (task {_tid}): {_queue_e}")
                         elif user_msg.get("type") == "sandbox_response":
                             sid = user_msg.get("session_id", ws_session_id)
                             action = user_msg.get("action", "deny_once")
@@ -720,10 +734,13 @@ async def websocket_endpoint(websocket: WebSocket):
                                 except Exception:
                                     pass
                             # Send task_backgrounded notification from background thread
+                            _bg_msg = "后台命令执行中，完成后自动恢复"
+                            if _r == 'backgrounded' and _tb_response and "等待用户回答超时" in _tb_response:
+                                _bg_msg = "等待回答超时，任务已挂起。回答问题后自动恢复"
                             _broadcast_to_websockets({
                                 "type": "task_backgrounded",
                                 "task_id": _tb_ws_task_id,
-                                "message": "后台命令执行中，完成后自动恢复",
+                                "message": _bg_msg,
                                 "session_id": _tb_session_id,
                             })
                             return
@@ -935,6 +952,41 @@ async def websocket_endpoint(websocket: WebSocket):
                                     ).start()
                             except Exception as _late_err:
                                 print(f"[WS] Late sandbox resume error: {_late_err}")
+                    continue
+
+                if msg_type == "tool_reply":
+                    # No agent running on this connection (paused to background
+                    # or finished). Don't silently drop the answer: deliver to a
+                    # live session agent if one exists, otherwise inject it into
+                    # the paused task's context and resume (same path as the
+                    # REST POST /api/tasks/{id}/reply fallback).
+                    _ans = user_msg.get("answer", "")
+                    if not _ans:
+                        continue
+                    try:
+                        _live_sess_agents = _active_agents.get(ws_session_id, {})
+                        _live_agent = next((a for a in _live_sess_agents.values()
+                                            if not getattr(a, 'is_interrupted', False)), None)
+                        if _live_agent is not None:
+                            _live_agent.user_input_queue.put(_ans)
+                            continue
+                        from api.background import resume_task_with_late_answer
+                        _tr_conn = db_connect()
+                        _tr_row = _tr_conn.execute(
+                            "SELECT id FROM tasks WHERE session_id=? "
+                            "AND status IN ('backgrounded','interrupted') "
+                            "AND (interruption_reason IS NULL OR interruption_reason != 'user') "
+                            "ORDER BY id DESC LIMIT 1", (ws_session_id,)).fetchone()
+                        _tr_conn.close()
+                        if _tr_row:
+                            _tr_res = resume_task_with_late_answer(_tr_row[0], _ans)
+                            await _safe_send({"type": "system_message",
+                                              "message": _tr_res.get("message", ""),
+                                              "session_id": ws_session_id})
+                        else:
+                            print(f"[WS] Late tool_reply: no paused task for session {ws_session_id}")
+                    except Exception as _tr_err:
+                        print(f"[WS] Late tool_reply resume error: {_tr_err}")
                     continue
 
                 if msg_type == "resume":

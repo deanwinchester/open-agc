@@ -513,17 +513,28 @@ async def reset_task_resume_count(task_id: int):
 async def reply_to_background_task(task_id: int, body: dict):
     """Reply to a background task that called ask_user_question.
     Puts the answer into the agent's user_input_queue to unblock it.
+    If no live agent holds the task (ask_user wait timed out and the task
+    was background-paused), injects the answer into the task context and
+    resumes it instead of returning 404.
     """
     answer = body.get("answer", "")
     if not answer:
         raise HTTPException(status_code=400, detail="answer is required")
     from api.state import _background_agents
     agent = _background_agents.get(task_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Task not found or not running in background")
-    try:
-        from queue import Queue
-        agent.user_input_queue.put_nowait(answer)
-        return {"status": "success", "message": f"Answer delivered to task #{task_id}"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to deliver answer: {e}")
+    if agent and not getattr(agent, "is_interrupted", False):
+        try:
+            agent.user_input_queue.put_nowait(answer)
+            return {"status": "success", "message": f"Answer delivered to task #{task_id}"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to deliver answer: {e}")
+    # No live agent — inject the answer into context and resume the task
+    from api.background import resume_task_with_late_answer
+    result = resume_task_with_late_answer(task_id, answer)
+    if result.get("ok"):
+        return {"status": "success", "message": result["message"], "resumed": True}
+    if result.get("error") == "not_found":
+        raise HTTPException(status_code=404, detail=result["message"])
+    # Terminal/conflict states — explicit status instead of a bare 404
+    return {"status": result.get("error"), "task_status": result.get("status"),
+            "message": result["message"]}

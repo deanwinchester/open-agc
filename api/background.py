@@ -334,6 +334,70 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     finally:
         _background_agents.pop(task_id, None)
 
+
+def resume_task_with_late_answer(task_id: int, answer: str) -> dict:
+    """Inject a late user answer into an ask-paused task and resume it.
+
+    Shared by REST ``POST /api/tasks/{id}/reply`` and the WS ``tool_reply``
+    fallback: used when no live agent holds the task's ``user_input_queue``
+    (e.g. ask_user wait timed out and the task was background-paused).
+    The answer is appended to the saved context as a user message so the
+    resumed agent sees "question already asked + already answered" and
+    continues without re-asking. Returns a dict describing the outcome:
+    ``{"ok": True}`` on resume, otherwise ``{"ok": False, "error": ...}``.
+    """
+    try:
+        conn = db_connect()
+        row = conn.execute(
+            "SELECT status, user_query, result_summary, interruption_reason "
+            "FROM tasks WHERE id=?", (task_id,)).fetchone()
+        conn.close()
+    except Exception as e:
+        return {"ok": False, "error": "db_error", "message": str(e)}
+    if not row:
+        return {"ok": False, "error": "not_found",
+                "message": f"任务 #{task_id} 不存在"}
+    status, user_query, summary, int_reason = row[0], row[1] or "", row[2] or "", row[3]
+    if status in ("completed", "failed"):
+        label = "已完成" if status == "completed" else "已失败"
+        return {"ok": False, "error": "terminal", "status": status,
+                "message": f"任务 #{task_id} {label}，无需再回答"}
+    if status == "running":
+        return {"ok": False, "error": "running", "status": status,
+                "message": f"任务 #{task_id} 正在运行，回答暂无法投递"}
+    if status == "interrupted" and int_reason == "user":
+        return {"ok": False, "error": "user_interrupted", "status": status,
+                "message": f"任务 #{task_id} 已被用户中断"}
+    # CAS: atomically claim the task so guardian/BgMonitor/another reply
+    # can't resume it concurrently.
+    if not claim_task_for_resume(task_id, ("backgrounded", "interrupted")):
+        return {"ok": False, "error": "claim_failed",
+                "message": f"任务 #{task_id} 已被其他路径恢复，请稍候"}
+    # Recover the original question from the pause summary (best effort) so
+    # the resumed agent can match the answer to what it asked.
+    question = ""
+    _qm = re.search(r"问题[:：]\s*(.+)$", summary or "")
+    if _qm:
+        question = _qm.group(1).strip()
+    q_part = f"（你此前的问题：{question}）" if question else ""
+    ctx = get_task_context(task_id) or []
+    ctx.append({"role": "user", "content": (
+        f"【系统通知】用户已回答你此前的问题{q_part}。\n"
+        f"用户回答: {answer}\n"
+        "请直接利用该回答继续执行未完成的任务，不要重复提问。"
+    )})
+    save_task_context(task_id, ctx)
+    update_task_status(task_id, "interrupted", "用户已回答，恢复执行",
+                       interruption_reason="background_complete")
+    threading.Thread(
+        target=_run_background_task,
+        args=(task_id, user_query, ctx, True),
+        daemon=True
+    ).start()
+    print(f"[BgTask] Task #{task_id}: late answer injected, resuming")
+    return {"ok": True, "status": "resumed",
+            "message": f"回答已注入，任务 #{task_id} 已恢复执行"}
+
 def _normalize_next_run_at_utc():
     """One-time normalization: recompute next_run_at (UTC) for all enabled schedules.
 

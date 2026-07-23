@@ -2780,9 +2780,11 @@ class OpenAGCAgent:
         Block the agent thread and wait for user input from the frontend.
 
         Polls the queue with a 1s timeout so task interrupts are honored
-        (a stopped task never leaks this thread), and gives up after a total
-        timeout (default 300s, overridable via ``self._user_input_timeout``),
-        which is treated as an interrupt.
+        (a stopped task never leaks this thread). After a total timeout
+        (default 1800s, overridable via ``self._user_input_timeout``) the
+        task is NOT killed: raises ``TaskPaused`` so run_turn moves the task
+        to background-paused — a late answer via WS tool_reply or
+        POST /api/tasks/{id}/reply injects it into the context and resumes.
         """
         if self.progress_callback:
             self.progress_callback({
@@ -2797,7 +2799,7 @@ class OpenAGCAgent:
 
         # Block until the websocket sends a response, waking periodically to
         # check for interrupts.
-        total_timeout = getattr(self, "_user_input_timeout", 300.0)
+        total_timeout = getattr(self, "_user_input_timeout", 1800.0)
         deadline = _time.time() + total_timeout
         while True:
             if getattr(self, "is_interrupted", False):
@@ -2806,6 +2808,10 @@ class OpenAGCAgent:
                 return self.user_input_queue.get(timeout=1.0)
             except queue.Empty:
                 if _time.time() >= deadline:
-                    # Total timeout — treat as interrupt so the agent loop unwinds
-                    self.is_interrupted = True
-                    return "[等待用户输入超时，任务已中断]"
+                    # Total timeout — pause to background (same flow as the
+                    # sandbox-auth timeout) instead of killing the task. The
+                    # question is embedded so a late answer can be matched to
+                    # it when the task is resumed.
+                    raise TaskPaused(
+                        "等待用户回答超时，任务转入后台挂起。"
+                        f"请回答此前的问题后任务自动恢复。问题: {str(question)[:120]}")
