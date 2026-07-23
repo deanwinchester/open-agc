@@ -64,6 +64,83 @@ def _detect_system_env() -> str:
     return detect_system_env()
 
 
+# ── Delegation context-isolation fix (debugging-continuation gate) ──
+# Absolute paths mentioned in the conversation (Windows D:\... / D:/... and
+# common POSIX roots). Used to build the context brief handed to sub-agents
+# and to detect topic overlap between a pasted error and recent turns.
+# Segment charset excludes whitespace and sentence punctuation but keeps CJK
+# (paths like D:\中新社\...). Space-containing paths (D:\My Documents\proj)
+# are matched via continuation segments that must contain a separator and
+# must not themselves be a new drive path (so "D:\a D:\b" stays two paths).
+# The drive branch requires a non-letter left boundary and rejects "://" so
+# URLs like https://cdn.example.com/x.png are never matched.
+_PATH_SEG = r"[^\s\"'“”‘’，。；：、:)\]}<>|*,!?]"
+_PATH_CONT = (
+    r"(?: +(?![A-Za-z]:[\\/])(?=[A-Za-z0-9_.])"
+    + _PATH_SEG + r"*[\\/]" + _PATH_SEG + r"*)*"
+)
+_SESSION_PATH_RE = re.compile(
+    r"[\"'“]([A-Za-z]:[\\/][^\"'”]+)[\"'”]"                      # quoted path
+    + r"|(?<![A-Za-z])[A-Za-z]:[\\/](?!/)" + _PATH_SEG + r"*" + _PATH_CONT
+    + r"|(?<![A-Za-z0-9:/])/(?:home|Users|opt|srv|mnt|data|var)/"
+    + _PATH_SEG + r"*" + _PATH_CONT
+)
+# Inputs that look like a pasted error log / failure report.
+_ERROR_LOG_RE = re.compile(
+    r"\b(error|exception|traceback|failed|failure)\b|报错|错误|异常|启动失败",
+    re.IGNORECASE,
+)
+# Generic words excluded from topic-overlap matching (log noise).
+_TOPIC_STOPWORDS = {
+    "error", "errors", "exception", "traceback", "failed", "failure",
+    "warning", "caused", "java", "spring", "boot", "http", "https",
+    "main", "test", "file", "data", "info", "null", "none", "true", "false",
+}
+_DRIVE_COMPONENT_RE = re.compile(r"[a-z]:")
+
+
+def _message_text(msg: Dict) -> str:
+    """Plain text of a message (content may be a multimodal list)."""
+    c = msg.get("content") or ""
+    if isinstance(c, list):
+        return " ".join(str(i.get("text", "")) for i in c if isinstance(i, dict))
+    return str(c)
+
+
+def _session_paths(text: str) -> List[str]:
+    """Extract absolute paths from text, cleaned of trailing punctuation."""
+    out = []
+    for m in _SESSION_PATH_RE.finditer(text or ""):
+        p = (m.group(1) or m.group(0)).strip().rstrip("\\/.")
+        if "://" in p:  # belt-and-braces: never treat a URL as a path
+            continue
+        if len(p) >= 4:
+            out.append(p)
+    return out
+
+
+def _topic_tokens(text: str) -> set:
+    """Topic tokens: path components (project/file names) + identifiers."""
+    tokens = set()
+    for p in _session_paths(text):
+        tokens.add(p.lower())
+        for comp in re.split(r"[\\/]", p):
+            comp = comp.strip().lower()
+            if _DRIVE_COMPONENT_RE.fullmatch(comp):
+                continue  # bare drive letter ("d:") carries no topic signal
+            if len(comp) >= 2:
+                tokens.add(comp)
+                if "." in comp:
+                    stem = comp.rsplit(".", 1)[0]
+                    if len(stem) >= 2:
+                        tokens.add(stem)
+    for tok in re.findall(r"[A-Za-z][A-Za-z0-9_\-]{3,}", text or ""):
+        t = tok.lower()
+        if t not in _TOPIC_STOPWORDS:
+            tokens.add(t)
+    return tokens
+
+
 # ── Shared post-process worker (module-level singleton) ──
 # One queue + one daemon worker thread per process, NOT per agent instance:
 # api/ws.py creates a new agent per chat message, so a per-instance worker
@@ -252,6 +329,9 @@ class OpenAGCAgent:
             f"\n## 4. 失败处理\n"
             f"如果某个方法失败，先分析错误原因再换策略。不要盲目重试同样的操作，"
             f"也不要因为一次失败就完全放弃可行的方法。\n"
+            f"修复配置或代码后，必须用 execute_shell 或 execute_python 实际验证"
+            f"（编译、运行或检查输出），确认问题真正解决；"
+            f"严禁只做未经验证的参数调整（如反复横跳引号、格式）就再次提交结果。\n"
             f"\n# 工具使用指南\n"
             f"\n## 工具优先级（按推荐顺序）\n"
             f"1. write_file / edit_file / apply_patch — 创建和修改文件（首选文件操作方式；多文件多处批量修改用 apply_patch）\n"
@@ -1455,9 +1535,95 @@ class OpenAGCAgent:
             return tool_name
         return None
 
+    def _build_context_brief(self) -> str:
+        """Build a short delegation brief from conversation history.
+
+        Sub-agents run with an isolated context and cannot see this session;
+        the brief carries the essentials: current task goal (latest user
+        message), absolute paths mentioned in the session (deduped, max 5),
+        and summaries of the last few user messages (100 chars each).
+        Returns at most 500 chars.
+
+        Budget order matters: goal and paths are written first, then message
+        summaries fill whatever budget remains — in long debugging sessions
+        the path line must survive the 500-char cap (it is what keeps the
+        sub-agent from blind-scanning for the repository).
+        """
+        msgs = getattr(self, "messages", None) or []
+        user_texts = [
+            _message_text(m).strip()
+            for m in msgs if m.get("role") == "user"
+        ]
+        user_texts = [t for t in user_texts if t]
+
+        lines = []
+        if user_texts:
+            goal = user_texts[-1].replace("\n", " ")[:100]
+            lines.append(f"当前任务目标：{goal}")
+
+        paths = []
+        for m in msgs:
+            if m.get("role") not in ("user", "assistant"):
+                continue
+            for p in _session_paths(_message_text(m)):
+                if p not in paths:
+                    paths.append(p)
+        if paths:
+            lines.append("会话涉及路径：" + "；".join(paths[:5]))
+
+        # Fill remaining budget with recent user-message summaries.
+        brief = "\n".join(lines)
+        for t in user_texts[-5:]:
+            line = "- " + t.replace("\n", " ")[:100]
+            if len(brief) + 1 + len(line) > 500:
+                break
+            lines.append(line)
+            brief = "\n".join(lines)
+
+        return brief[:500]
+
+    def _is_debugging_continuation(self, user_input: str) -> bool:
+        """True when input is a pasted error/log and the recent conversation
+        is already working the same topic (shared path or project name).
+
+        Such input is a debugging continuation — the fix is usually obvious
+        from conversation context (e.g. create a missing table), so it must
+        stay in the main loop instead of being delegated to sub-agents that
+        cannot see this session.
+        """
+        if not _ERROR_LOG_RE.search(user_input or ""):
+            return False
+        msgs = getattr(self, "messages", None) or []
+        assistant_texts = []
+        for m in reversed(msgs):
+            if m.get("role") != "assistant":
+                continue
+            c = _message_text(m).strip()
+            if c:
+                assistant_texts.append(c)
+            if len(assistant_texts) >= 2:
+                break
+        if not assistant_texts:
+            return False
+        input_tokens = _topic_tokens(user_input)
+        if not input_tokens:
+            # Pure-Chinese error pastes yield no path/identifier tokens at
+            # all. With a session in progress, conservatively treat it as a
+            # continuation: the accident this gate fixes was over-delegation,
+            # and a false "stay in main loop" costs far less than delegating
+            # a context-free sub-agent that blind-scans for the repository.
+            return True
+        # The last (up to) 2 assistant turns must both touch the same topic.
+        return all(_topic_tokens(t) & input_tokens for t in assistant_texts)
+
     def _should_delegate(self, user_input: str) -> bool:
         """Assess whether a task is complex enough to warrant sub-agent delegation."""
         text = user_input.lower()
+        # Highest-priority gate: a pasted error log that continues the current
+        # debugging thread is fixed in the main loop, never delegated.
+        _gate = getattr(self, "_is_debugging_continuation", None)
+        if _gate and _gate(user_input):
+            return False
         # Check for decomposition keywords
         complexity_keywords = [
             "分别", "同时", "多个", "所有", "each", "all", "every",
@@ -1488,12 +1654,19 @@ class OpenAGCAgent:
 
     def _decompose_task(self, task_input: str) -> List[Dict]:
         """Use LLM to decompose a complex task into sub-tasks."""
+        _brief_fn = getattr(self, "_build_context_brief", None)
+        brief = _brief_fn() if _brief_fn else ""
+        context_section = (
+            f"\n会话上下文（子代理看不到主对话，分解时必须以此为依据）：\n{brief}\n"
+            if brief else ""
+        )
         prompt = f"""将以下任务分解为可执行子任务。
-
+{context_section}
 任务：{task_input}
 
 要求：
 - 每个子任务应独立、可完成
+- 子任务必须基于以上会话上下文中提到的项目路径直接执行，不得安排"寻找/定位代码仓库"之类的子任务（除非上下文中确实没有可用路径）
 - 为每个子任务标注需要的工具类型（可选：filesystem, code, web, analysis, deploy, monitor, research）
 - 标注子任务间的依赖关系（depends_on 为依赖的子任务 id 列表）
 
@@ -1896,6 +2069,10 @@ class OpenAGCAgent:
             if verbose: print(f"[Agent] Delegating to sub-agents...")
             plans = self._decompose_task(user_input)
             if plans:
+                # Brief carried into every sub-agent (isolated context fix):
+                # they cannot see this conversation, so hand them the goal,
+                # recent user messages and session paths up front.
+                context_brief = self._build_context_brief()
                 sub_results = []
                 completed = set()
                 # Normalize plans: guarantee id/task keys so malformed LLM
@@ -1937,6 +2114,7 @@ class OpenAGCAgent:
                                 network_whitelist=self._session_network_whitelist,
                                 permission_whitelist=self._session_permission_whitelist,
                                 session_id=self.session_id,
+                                context_brief=context_brief,
                             )
                             batch_futures[executor.submit(sub.run)] = plan
                         for future in concurrent.futures.as_completed(batch_futures):
