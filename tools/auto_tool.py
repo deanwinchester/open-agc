@@ -127,6 +127,12 @@ Output ONLY the Python code, no explanation."""
 #
 # Modules that generated code may NEVER import: process execution, system
 # control, raw network, FFI/low-level memory, dynamic loading.
+_LAST_REJECT_REASON = ""
+
+def get_last_reject_reason() -> str:
+    """Reason of the most recent validate_tool_code rejection (for user-facing notices)."""
+    return _LAST_REJECT_REASON
+
 _BLOCKED_MODULES = {
     # process execution / system control / dynamic loading
     "subprocess", "sys", "signal", "multiprocessing", "runpy", "importlib",
@@ -149,6 +155,9 @@ _RESTRICTED_MODULE_MEMBERS = {
         "listdir", "makedirs", "getcwd", "walk",
         "environ",    # read access to env vars (documented: values could leak)
         "sep", "name", "linesep",
+        # delete calls allowed but path-validated like open() writes
+        # (see _DELETE_CALLS + _validate_delete_call)
+        "remove", "unlink",
     },
     "requests": {
         "get", "post", "put", "patch", "delete", "head", "options",
@@ -157,6 +166,7 @@ _RESTRICTED_MODULE_MEMBERS = {
     "shutil": {
         "copy", "copy2", "copyfile", "copytree", "move", "which",
         "disk_usage", "make_archive", "unpack_archive",
+        "rmtree",  # path-validated (see _DELETE_CALLS)
     },
     # io.open / codecs.open are alternates to builtin open() — they get the
     # same path/mode rules (see _validate_open_call). The rest of each
@@ -206,6 +216,26 @@ def _is_absolute_path_literal(p: str) -> bool:
         or p.startswith("~")
         or bool(re.match(r'^[a-zA-Z]:[\\/]', p))
     )
+
+
+# Delete-style calls allowed through the whitelist, but their path argument
+# gets the same treatment as open() writes: literal absolute paths rejected.
+_DELETE_CALLS = {
+    ("shutil", "rmtree"),
+    ("os", "remove"),
+    ("os", "unlink"),
+}
+
+
+def _validate_delete_call(node: "ast.Call", member: str) -> Optional[str]:
+    """Check a delete call (rmtree/remove/unlink). Reject literal absolute paths."""
+    if not node.args:
+        return None
+    path_arg = node.args[0]
+    if isinstance(path_arg, ast.Constant) and isinstance(path_arg.value, str) and \
+            _is_absolute_path_literal(path_arg.value):
+        return f"{member} with absolute path {path_arg.value!r}"
+    return None
 
 
 def _validate_open_call(node: "ast.Call") -> Optional[str]:
@@ -322,6 +352,8 @@ def validate_tool_code(code: str) -> bool:
         return False
 
     def _reject(reason: str) -> bool:
+        global _LAST_REJECT_REASON
+        _LAST_REJECT_REASON = reason
         print(f"[AutoTool] Code rejected: {reason}")
         return False
 
@@ -407,6 +439,10 @@ def validate_tool_code(code: str) -> bool:
                     reason = _validate_open_call(node)
                 elif _is_path_constructor(func, aliases):
                     reason = _validate_path_constructor(node)
+                elif resolved and len(resolved.split(".", 1)) == 2 and \
+                        tuple(resolved.split(".", 1)) in _DELETE_CALLS:
+                    # from shutil/os import rmtree/remove/unlink
+                    reason = _validate_delete_call(node, resolved)
             elif isinstance(func, ast.Attribute):
                 if func.attr == "open" and isinstance(func.value, ast.Name) and \
                         aliases.get(func.value.id, func.value.id) in ("io", "codecs"):
@@ -414,6 +450,11 @@ def validate_tool_code(code: str) -> bool:
                     reason = _validate_open_call(node)
                 elif _is_path_constructor(func, aliases):
                     reason = _validate_path_constructor(node)
+                elif isinstance(func.value, ast.Name):
+                    # Delete-style calls: shutil.rmtree(...)/os.remove(...)/os.unlink(...)
+                    _mod = aliases.get(func.value.id, func.value.id)
+                    if (_mod, func.attr) in _DELETE_CALLS:
+                        reason = _validate_delete_call(node, f"{_mod}.{func.attr}")
             if reason:
                 return _reject(reason)
 

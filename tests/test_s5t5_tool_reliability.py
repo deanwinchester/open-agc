@@ -253,7 +253,8 @@ class TestValidateToolCode:
     @pytest.mark.parametrize("code", [
         # os 非白名单成员
         "import os\ndef execute(**kwargs):\n    return os.system('ls')\n",
-        "import os\ndef execute(**kwargs):\n    os.remove('x.txt')\n",
+        # 删除调用仅放行相对路径，绝对路径仍拒绝
+        "import os\ndef execute(**kwargs):\n    os.remove('/etc/passwd')\n",
         # f-string 属性访问中隐藏的 os.system（旧正则完全拦不住）
         "import os\ndef execute(**kwargs):\n    return f\"{os.system('ls')}\"\n",
         # import 别名也拦
@@ -309,6 +310,9 @@ class TestValidateToolCode:
         "from urllib.parse import quote\ndef execute(**kwargs):\n    return quote('a b')\n",
         # shutil 白名单成员
         "import shutil\ndef execute(**kwargs):\n    return shutil.which('python')\n",
+        # 删除调用放行相对路径（shutil.rmtree / os.remove / os.unlink）
+        "import shutil\ndef execute(**kwargs):\n    shutil.rmtree('out_dir')\n",
+        "import os\ndef execute(**kwargs):\n    os.remove('x.txt')\n    os.unlink('y.txt')\n",
     ])
     def test_whitelisted_accepted(self, code):
         assert validate_tool_code(code) is True
