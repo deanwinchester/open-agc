@@ -29,6 +29,16 @@ _sandbox_waits: dict = {}
 # Pending sandbox approvals: {session_id: [paths]} — late approvals applied on task resume
 _pending_sandbox_approvals: dict = {}
 
+# Session-level sudo password cache: {session_id: str}
+# A new agent instance is created per message, so the instance-level cache
+# alone loses the sudo authorization — the password popup then appears (or
+# fails to appear) unpredictably. This store survives agent re-creation.
+# Passwords live here only (never sent to the LLM, never persisted to disk).
+_session_sudo_passwords: Dict[int, str] = {}
+
+# Session-level permission whitelist: {session_id: set(categories)}
+_session_permission_whitelists: Dict[int, set] = {}
+
 
 def check_protected_pid(pid: int) -> bool:
     """Check if a PID belongs to the Open-AGC server or its parent processes.

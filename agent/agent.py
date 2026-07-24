@@ -228,6 +228,11 @@ class OpenAGCAgent:
         self._session_network_whitelist: set = set()  # Session-approved network domains
         self._session_sudo_password: str = ""  # Cached sudo password for session (never sent to LLM)
         self._pending_sudo_password: str = ""  # One-shot password for next tool call
+        # Hydrate session-scoped sudo password / permission whitelist from the
+        # shared store (api.state): a new agent instance is created per message,
+        # so instance-level caches alone lose prior sudo authorization, making
+        # the password popup appear (or fail to appear) unpredictably.
+        self._hydrate_session_shared()
         # Load config to check disabled skills
         disabled_skills = []
         config_path = get_data_path("config.json")
@@ -949,6 +954,52 @@ class OpenAGCAgent:
         except Exception:
             pass
 
+    def _hydrate_session_shared(self):
+        """Load session-scoped sudo password / permission whitelist from the
+        shared store (api.state) into this instance.
+
+        The instance whitelist becomes the *same* set object as the shared one,
+        so later ``.add()`` calls propagate to other instances of this session.
+        """
+        if self.session_id is None:
+            return
+        try:
+            from api.state import _session_sudo_passwords, _session_permission_whitelists
+            shared_wl = _session_permission_whitelists.get(self.session_id)
+            if shared_wl is not None:
+                self._session_permission_whitelist = shared_wl
+            self._session_sudo_password = _session_sudo_passwords.get(self.session_id, "")
+        except Exception:
+            pass
+
+    def _get_shared_sudo_password(self) -> str:
+        """Read the session-level shared sudo password (authoritative source;
+        also refreshes the instance-level cache)."""
+        if self.session_id is None:
+            return ""
+        try:
+            from api.state import _session_sudo_passwords
+            pw = _session_sudo_passwords.get(self.session_id, "") or ""
+            if pw:
+                self._session_sudo_password = pw
+            return pw
+        except Exception:
+            return ""
+
+    def _sync_permission_shared(self, category: str, sudo_pw: str = ""):
+        """Write an approved permission category (and sudo password, if any)
+        into the session-level shared store so they survive agent re-creation."""
+        if self.session_id is None:
+            return
+        try:
+            from api.state import _session_sudo_passwords, _session_permission_whitelists
+            if category:
+                _session_permission_whitelists.setdefault(self.session_id, set()).add(category)
+            if sudo_pw:
+                _session_sudo_passwords[self.session_id] = sudo_pw
+        except Exception:
+            pass
+
     def _handle_sandbox_blocked(self, sb, tool_name, tool_args, progress_callback):
         """Pause agent loop and wait for user to approve/deny sandbox path access."""
         import threading
@@ -1116,12 +1167,14 @@ class OpenAGCAgent:
             elif action in ("approve_once", "approve_session"):
                 self._session_permission_whitelist.add(category)
                 print(f"[Agent] Permission approved (session): {category}")
+                _sudo_pw = ""
                 if category == "sudo":
                     _sudo_pw = result_holder.get("password", "")
                     if not _sudo_pw:
                         return "Operation denied: sudo requires a password but none was provided."
                     self._session_sudo_password = _sudo_pw
                     self._pending_sudo_password = _sudo_pw
+                self._sync_permission_shared(category, _sudo_pw)
                 return None  # Retry
             elif action == "approve_always":
                 if category != "sudo":
@@ -1154,6 +1207,8 @@ class OpenAGCAgent:
                         return "Operation denied: sudo requires a password but none was provided."
                     self._session_sudo_password = _sudo_pw
                     self._pending_sudo_password = _sudo_pw
+                self._sync_permission_shared(
+                    category, self._session_sudo_password if category == "sudo" else "")
                 return None  # Retry
             return f"Operation denied by user: {desc}"
 
@@ -2537,8 +2592,10 @@ class OpenAGCAgent:
                                         "_session_id": self.session_id,
                                     }
                                     # Pass sudo password to the shell tool only (never logged, never sent to LLM,
-                                    # never exposed to other tools)
-                                    _sudo_pw = self._pending_sudo_password or self._session_sudo_password
+                                    # never exposed to other tools). Shared session store is authoritative.
+                                    _sudo_pw = (self._pending_sudo_password
+                                                or self._get_shared_sudo_password()
+                                                or self._session_sudo_password)
                                     if _sudo_pw and function_name == "execute_shell":
                                         extra_kwargs["_sudo_password"] = _sudo_pw
                                         self._pending_sudo_password = ""  # Clear one-shot after passing

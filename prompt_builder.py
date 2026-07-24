@@ -49,8 +49,8 @@ def detect_system_env() -> str:
     sudo_hint = ""
     if sudo_available and system != "Windows":
         sudo_hint = ("sudo 可用。注意：在子进程中运行时，sudo 没有 TTY 无法交互式输入密码。"
-                     "需要使用 -S 从 stdin 读密码，或用 -n 跳过密码（需 NOPASSWD 配置），"
-                     "或使用 `echo password | sudo -S command`")
+                     "需要密码时直接重试该命令，系统会弹出密码输入框请用户输入"
+                     "（密码不经过你，也不要在命令行中拼接密码）。")
 
     parts = [
         f"# 系统环境",

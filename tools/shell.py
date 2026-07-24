@@ -9,7 +9,7 @@ import tempfile
 from typing import Any, Dict, Optional, Callable
 from pydantic import Field
 
-from tools.base import BaseTool
+from tools.base import BaseTool, SandboxBlocked
 
 # Module-level process tracking for interrupt support
 _current_process: Optional[subprocess.Popen] = None
@@ -49,6 +49,21 @@ def interrupt_shell() -> bool:
             _current_process = None
             return True
     return False
+
+
+def _sudo_safe_env() -> dict:
+    """Return a copy of os.environ with GUI askpass helpers disabled.
+
+    On desktop Linux (e.g. UOS), sudo may invoke a GUI askpass helper when no
+    TTY is available, making the process hang silently with zero output. Drop
+    SUDO_ASKPASS/SSH_ASKPASS and point SUDO_ASKPASS at /bin/false so sudo fails
+    fast instead of hanging invisibly. Applied to sudo commands only.
+    """
+    env = os.environ.copy()
+    env.pop("SUDO_ASKPASS", None)
+    env.pop("SSH_ASKPASS", None)
+    env["SUDO_ASKPASS"] = "/bin/false"
+    return env
 
 
 class ShellTool(BaseTool):
@@ -189,15 +204,35 @@ class ShellTool(BaseTool):
                 pass
         from tools.permissions import check_command_permission, extract_urls_from_command, _check_domain_allowed
         permission_whitelist = kwargs.get("_permission_whitelist", set())
+        # Union with the session-level shared whitelist: fresh agent instances
+        # and sub-agents may carry an empty/stale instance-level set.
+        try:
+            from api.state import _session_permission_whitelists
+            _sid = kwargs.get("_session_id")
+            _shared_wl = _session_permission_whitelists.get(_sid) if _sid is not None else None
+            if _shared_wl:
+                permission_whitelist = set(permission_whitelist) | _shared_wl
+        except Exception:
+            pass
         allowed, perm_msg, perm_cat, perm_desc = check_command_permission(command, config, session_whitelist=permission_whitelist)
         if not allowed:
-            from tools.base import SandboxBlocked
             raise SandboxBlocked(command, sandbox_dir="permission", tool_name="execute_shell",
                                  category=perm_cat, description=perm_desc)
 
         # -- Sudo handling: use sudo -S to read password from stdin --
         # Password comes from user via popup (never from LLM). Written to proc.stdin after Popen.
         _sudo_password = kwargs.get("_sudo_password", "")
+        if not _sudo_password:
+            # Fall back to the session-level shared cache — sub-agents and fresh
+            # agent instances don't carry the instance-level cache, but share
+            # the same session_id.
+            try:
+                from api.state import _session_sudo_passwords
+                _sid = kwargs.get("_session_id")
+                if _sid is not None:
+                    _sudo_password = _session_sudo_passwords.get(_sid, "") or ""
+            except Exception:
+                pass
         _is_sudo = re.match(r'^\s*(sudo\s+)', command)
         if _is_sudo:
             if _sudo_password:
@@ -215,7 +250,6 @@ class ShellTool(BaseTool):
                 continue  # Session-approved domain
             domain_ok, domain_msg = _check_domain_allowed(url, config)
             if not domain_ok:
-                from tools.base import SandboxBlocked
                 raise SandboxBlocked(url, sandbox_dir="network", tool_name="execute_shell")
 
         # Sandbox Mode Enforcement
@@ -246,6 +280,8 @@ class ShellTool(BaseTool):
                     "stdout": subprocess.DEVNULL,
                     "stderr": subprocess.DEVNULL,
                 }
+                if _is_sudo:
+                    popen_kwargs["env"] = _sudo_safe_env()
                 if sys.platform == "win32":
                     popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 proc = subprocess.Popen(command, **popen_kwargs)
@@ -277,6 +313,8 @@ class ShellTool(BaseTool):
                     "stdout": out_file,
                     "stderr": subprocess.STDOUT,
                 }
+                if _is_sudo:
+                    popen_kwargs["env"] = _sudo_safe_env()
                 if sys.platform == "win32":
                     popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 _t0 = time.time()
@@ -378,8 +416,7 @@ class ShellTool(BaseTool):
                             return (
                                 f"[HUNG] 进程在 {elapsed}s 内无任何输出，已终止。\n"
                                 f"可能原因：sudo 需要密码但无终端输入、命令卡在交互式提示、或进程死锁。\n"
-                                f"建议：sudo 命令请添加 -S 从 stdin 读密码，或 -n 跳过密码，"
-                                f"或使用 `echo password | sudo -S command`。\n"
+                                f"建议：重新执行该命令，系统将弹出密码输入框。\n"
                                 f"命令: {command[:200]}"
                             )
 
@@ -478,15 +515,22 @@ class ShellTool(BaseTool):
                 result += f"\nExit Code: {proc.returncode}  |  Time: {elapsed}s"
 
                 # -- Sudo failure detection --
-                # If sudo -n was used (no password available) and it failed, inform the LLM
+                # sudo -n was used (no cached password) and failed: trigger the
+                # authorization popup (SandboxBlocked, category='sudo') instead of
+                # returning a text hint no code acts upon. The agent's retry loop
+                # re-runs the command with the cached password via sudo -S.
                 if _is_sudo and not _sudo_password and proc.returncode != 0:
-                    if re.search(r'(?:a password is required|no password was provided|sorry, try again|sudo:)', full_output, re.IGNORECASE):
-                        result += (
-                            "\n\n⚠️ sudo 命令执行失败：需要密码但未提供。"
-                            "请重新尝试该 sudo 命令，系统会弹出密码输入框供用户输入。"
-                        )
+                    if re.search(r'(?:a password is required|no password was provided|sorry, try again)', full_output, re.IGNORECASE):
+                        raise SandboxBlocked(command, sandbox_dir="permission",
+                                             tool_name="execute_shell",
+                                             category="sudo",
+                                             description="需要 sudo 密码")
                 return result
 
+        except SandboxBlocked:
+            # Authorization popup trigger — must propagate to the agent's retry
+            # loop, not be swallowed into an error string.
+            raise
         except Exception as e:
             with _current_process_lock:
                 _current_process = None
