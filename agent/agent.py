@@ -1552,7 +1552,12 @@ class OpenAGCAgent:
 
         code = generate_tool_code(task_input, tool_sequence,
                                    "Success", llm_client)
-        if not code or not validate_tool_code(code):
+        if not code:
+            self._notify_tool_gen_failed("LLM 未返回有效代码")
+            return None
+        if not validate_tool_code(code):
+            from tools.auto_tool import get_last_reject_reason
+            self._notify_tool_gen_failed(f"安全校验拒绝：{get_last_reject_reason()}")
             return None
 
         # Extract name from TOOL_SCHEMA
@@ -1584,11 +1589,13 @@ class OpenAGCAgent:
 
         filepath = save_tool_code(code, tool_name, self._session_auto_tools_dir())
         if not filepath:
+            self._notify_tool_gen_failed("保存工具文件失败")
             return None
 
         from tools.auto_tool import load_dynamic_tool
         tool_instance = load_dynamic_tool(filepath)
         if not tool_instance:
+            self._notify_tool_gen_failed("生成的代码加载失败（语法或运行错误）")
             return None
 
         if self._register_dynamic_tool(tool_name, tool_instance):
@@ -1597,6 +1604,21 @@ class OpenAGCAgent:
                 _dyn_dirs[tool_name] = self._session_auto_tools_dir()
             return tool_name
         return None
+
+    def _notify_tool_gen_failed(self, reason: str):
+        """自动工具生成失败时通知用户（此前静默丢弃，用户找不到工具也不知道原因）。"""
+        print(f"[Agent] Auto-tool generation failed: {reason}")
+        try:
+            from api.ws import save_message
+            from api.state import _broadcast_to_websockets
+            text = f"⚠️ 自动工具生成未通过：{reason}。本次不会生成可复用工具。"
+            save_message("system", text, self.session_id)
+            _broadcast_to_websockets({
+                "type": "system_message", "content": text,
+                "session_id": self.session_id,
+            })
+        except Exception as e:
+            print(f"[Agent] Tool-gen notify error: {e}")
 
     def _build_context_brief(self) -> str:
         """Build a short delegation brief from conversation history.
