@@ -189,9 +189,11 @@ class TestDelegation:
 
         # No KeyError; plan missing keys ran with synthesized defaults
         assert "子任务 2" in seen_tasks
-        # Unresolvable subtask surfaced in the report instead of being dropped
-        assert "未执行" in result
-        assert "任务C" in result
+        # 新契约：委派不再以报告收尾，报告写入 messages，主代理继续执行
+        assert agent._delegated_this_turn is True
+        report = "\n".join(str(m.get("content", "")) for m in agent.messages)
+        assert "未执行" in report
+        assert "任务C" in report
 
     def test_failed_dependency_subtask_reported_as_unexecuted(self, monkeypatch):
         plans = [
@@ -202,8 +204,9 @@ class TestDelegation:
 
         result = agent.run_turn("复杂任务", verbose=False, skip_rag=True)
 
-        assert "未执行" in result
-        assert "依赖失败任务" in result
+        report = "\n".join(str(m.get("content", "")) for m in agent.messages)
+        assert "未执行" in report
+        assert "依赖失败任务" in report
 
 
 # ── Fix 3: interjection index ──
