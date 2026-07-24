@@ -1717,6 +1717,10 @@ class OpenAGCAgent:
 
     def _should_delegate(self, user_input: str) -> bool:
         """Assess whether a task is complex enough to warrant sub-agent delegation."""
+        # 本轮已委派过一次：子代理结果已在上下文中，剩余工作由主代理完成，
+        # 防止"委派→继续→再委派"循环。
+        if getattr(self, "_delegated_this_turn", False):
+            return False
         text = user_input.lower()
         # Highest-priority gate: a pasted error log that continues the current
         # debugging thread is fixed in the main loop, never delegated.
@@ -1828,12 +1832,14 @@ class OpenAGCAgent:
             tc = result.get("tool_calls", 0)
             files = result.get("output_files", [])
             steps = result.get("steps", [])
+            task_goal = result.get("task", "")
+            goal_line = f"**目标**：{task_goal}\n\n" if task_goal else ""
             parts.append(
                 f"### 子任务 {i} [{status}] （{duration:.1f}s, {tc} 步）\n"
-                f"{summary}\n"
+                f"{goal_line}{summary}\n"
             )
             if steps:
-                step_lines = ["\n**执行步骤：**"]
+                step_lines = ["<details><summary>执行步骤（点击展开）</summary>\n"]
                 for si, step in enumerate(steps, 1):
                     s_status = "✅" if step.get("success") else "❌"
                     tool_name = step.get("tool", "?")
@@ -1841,6 +1847,7 @@ class OpenAGCAgent:
                     step_lines.append(
                         f"- {s_status} `{tool_name}` {args}"
                     )
+                step_lines.append("</details>")
                 parts.append("\n".join(step_lines) + "\n")
             if files:
                 parts.append(f"📄 产出文件: {', '.join(files)}\n")
@@ -2043,6 +2050,7 @@ class OpenAGCAgent:
         self.is_interrupted = False
         self.task_id = task_id
         self._consecutive_failures = 0
+        self._delegated_this_turn = False
         # 失败尝试记录同样随新任务清空——否则上一任务的避坑清单会泄漏进
         # 本任务的 system prompt（跨任务污染）。
         self.failed_attempts = []
@@ -2248,6 +2256,8 @@ class OpenAGCAgent:
                                     sb, plan, progress_callback)
                             except Exception as e:
                                 result = {"success": False, "summary": str(e)}
+                            # 带上子任务目标，报告才能看出每个子代理在做什么
+                            result["task"] = plan.get("task", "")
                             sub_results.append(result)
                             if result.get("success"):
                                 completed.add(plan.get("id"))
@@ -2277,14 +2287,14 @@ class OpenAGCAgent:
                 result_text = self._synthesize_results(user_input, sub_results)
                 self.messages.append({"role": "assistant", "content": result_text})
 
-                # Let the main agent reflect on sub-agent results for a natural final response
-                try:
-                    reflection, _ = self.llm.chat(messages=self.messages, tools=None)
-                    final = reflection.choices[0].message.content or result_text
-                    self.messages.append({"role": "assistant", "content": final})
-                    return final
-                except Exception:
-                    return result_text
+                # 委派结果只是中间产物：子任务可能只是探测/准备工作。
+                # 注入继续指引并落入主循环，让主代理基于子代理结果继续完成
+                # 原始任务，而不是直接以报告收尾。
+                self.messages.append({"role": "user", "content": (
+                    "【系统提示】子代理阶段已完成。请基于以上子代理的执行结果，评估原始任务"
+                    "是否已真正完成：如果目标尚未达成（例如子任务只做了探测、准备工作），"
+                    "请继续亲自执行剩余部分，不要仅以子代理报告收尾。")})
+                self._delegated_this_turn = True
 
         step = 1
 
