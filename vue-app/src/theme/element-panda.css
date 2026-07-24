@@ -11,6 +11,15 @@
 html, body { margin: 0; padding: 0; height: 100%; }
 #app { height: 100%; }
 
+/* 滚动条抖动振荡修复（Linux/Firefox 覆盖式滚动条随 hover 出现/消失，
+   导致整个布局横移、弹窗在两个位置间狂闪）：始终预留滚动条槽，
+   布局不再随滚动条显隐而抖动。 */
+html { scrollbar-gutter: stable; }
+.content, .menu, .msg-list, .msg-list-inner,
+.el-table__body-wrapper, .el-overlay, .detail-pre {
+  scrollbar-gutter: stable;
+}
+
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   background: var(--el-bg-color-page, #f4f6f5);
