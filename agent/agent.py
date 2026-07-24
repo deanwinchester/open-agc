@@ -888,6 +888,20 @@ class OpenAGCAgent:
                 words.add(ch)
         return words
 
+    def _resolve_reflection_input(self, user_input: str) -> str:
+        """恢复执行时，反思应关联原始任务而非合成恢复提示。"""
+        if not user_input.startswith("【系统提示】任务已恢复") or not self.task_id:
+            return user_input
+        try:
+            from api.db import db_connect
+            row = db_connect().execute(
+                "SELECT user_query FROM tasks WHERE id=?", (self.task_id,)).fetchone()
+            if row and row[0]:
+                return row[0]
+        except Exception:
+            pass
+        return user_input
+
     def _check_pending_messages(self, current_query: str = "") -> str:
         """Poll pending message queue.
 
@@ -1390,7 +1404,7 @@ class OpenAGCAgent:
             print(f"[Agent] KG extraction error: {e}")
         cat = self._classify_task_category(user_input)
         self._save_task_stats(cat, current_iter, False)
-        self._enqueue_post_process(user_input, duration, False)
+        self._enqueue_post_process(self._reflection_task_input, duration, False)
 
     # Task categories for adaptive config
     TASK_CATEGORIES = {
@@ -2047,6 +2061,10 @@ class OpenAGCAgent:
         # (resume paths pass None).
         user_input = user_input or ""
 
+        # 反思/统计用的任务描述：恢复路径的 user_input 是合成提示
+        # ("【系统提示】任务已恢复…")，反思应关联原始任务而非恢复动作本身
+        self._reflection_task_input = self._resolve_reflection_input(user_input)
+
         _task_start = _time.time()
 
         memory_context = ""
@@ -2303,7 +2321,7 @@ class OpenAGCAgent:
                self._pending_final_answer or
                self._correction_attempts < self._max_correction_attempts):
             if self.is_interrupted:
-                self._record_skill_feedback(success=False, task_input=user_input,
+                self._record_skill_feedback(success=False, task_input=self._reflection_task_input,
                                             duration=_time.time() - _task_start)
                 cat = self._classify_task_category(user_input)
                 self._save_task_stats(cat, current_iter, False)
@@ -3035,7 +3053,7 @@ class OpenAGCAgent:
                 cat = self._classify_task_category(user_input)
                 self._save_task_stats(cat, current_iter, True)
                 # Defer reflection + auto-tool to the serial post-process worker
-                self._enqueue_post_process(user_input, _time.time() - _task_start, True)
+                self._enqueue_post_process(self._reflection_task_input, _time.time() - _task_start, True)
                 # If there are rejected interjections, attach them to the response
                 if self._rejected_interjection:
                     import json as _rj
