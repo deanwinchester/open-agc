@@ -177,16 +177,18 @@ body {
    全局组件打磨（不改结构，只统一观感）
    ================================================================== */
 
-/* 卡片：12px 圆角 + 柔和绿灰阴影 + hover 微浮起 */
+/* 卡片：12px 圆角 + 柔和绿灰阴影 + hover 阴影加深
+   （不再用 hover 浮起 translateY——transform 会让 el-card 成为 fixed 定位
+   弹窗遮罩的包含块，遮罩被限制在卡片区域内而非全屏，鼠标进出卡片时
+   遮罩在"全屏/局部"间狂闪） */
 .el-card {
   border-radius: var(--el-card-border-radius);
   box-shadow: var(--panda-shadow-card);
-  transition: box-shadow var(--panda-transition), transform var(--panda-transition);
+  transition: box-shadow var(--panda-transition);
 }
 
 .el-card:hover {
   box-shadow: var(--panda-shadow-card-hover);
-  transform: translateY(-1px);
 }
 
 /* 按钮：过渡 + 字重（EP 默认 0.1s，略加长更顺滑） */
