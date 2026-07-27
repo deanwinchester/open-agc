@@ -4,6 +4,20 @@ import tempfile
 from typing import Any, Dict
 from tools.base import BaseTool
 
+
+def _mask(text: str) -> str:
+    """Mask known secret values (passwords / credential URIs) in text.
+
+    Local import to avoid circular imports; never raises — on any error the
+    original text is returned unchanged.
+    """
+    try:
+        from core.secrets import mask_secrets
+        return mask_secrets(text)
+    except Exception:
+        return text
+
+
 class PythonREPLTool(BaseTool):
     name: str = "execute_python"
     description: str = "执行 Python 代码并返回 stdout/stderr。"
@@ -80,7 +94,17 @@ class PythonREPLTool(BaseTool):
         blocked = self._check_dangerous_python(code)
         if blocked:
             return blocked
-            
+
+        # ── Secrets substitution ──
+        # Real values replace {{secret:name.field}} placeholders ONLY in the code
+        # written to the temp file for the child process. The placeholder version
+        # (`code`) is what appears in logs, context and messages.
+        try:
+            from core.secrets import substitute_refs
+            exec_code = substitute_refs(code)
+        except Exception:
+            exec_code = code
+
         # Read sandbox config
         import json
         from core.paths import get_data_path
@@ -100,7 +124,7 @@ class PythonREPLTool(BaseTool):
         # Create a temporary file to run the python code cleanly
         # Keep it in the system temp folder to avoid triggering uvicorn WatchFiles
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as temp:
-            temp.write(code)
+            temp.write(exec_code)
             temp_path = temp.name
 
         try:
@@ -137,7 +161,7 @@ class PythonREPLTool(BaseTool):
                 if _re_ps.search(r'\b(Popen|run\b.*start|subprocess\b.*start)', code):
                     output += ("\n[SERVER_PROCESS] Python代码启动了后台进程，"
                                "进程可能仍在运行。如需等待可调用 pause_and_wait。")
-                return output
+                return _mask(output)
 
             except subprocess.TimeoutExpired:
                 # Kill the entire process tree (avoids orphan ffmpeg etc.)
@@ -157,10 +181,10 @@ class PythonREPLTool(BaseTool):
                 output += "后台进程（如 ffmpeg/Popen）的资源句柄阻止了脚本退出，已强制终止。"
                 output += "\n如需启动长期运行的进程，请使用 execute_shell + detach=True，"
                 output += "或在 Python 中将 stdout/stderr 重定向到 subprocess.DEVNULL。"
-                return output
+                return _mask(output)
 
         except Exception as e:
-            return f"Error executing python code: {str(e)}"
+            return f"Error executing python code: {_mask(str(e))}"
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)

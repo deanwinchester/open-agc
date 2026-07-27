@@ -11,7 +11,7 @@ router = APIRouter()
 @router.post("/api/sandbox/approve")
 async def approve_sandbox_request(body: dict):
     """Approve a sandbox path via persistent config."""
-    from api.state import _sandbox_waits
+    from api.state import _sandbox_waits, resolve_sandbox_wait
     sid = body.get("session_id", body.get("sid", 1))
     # Prefer the unique request_id (concurrent waits in one session). Only fall
     # back to the legacy session_id key when the client sent no request_id —
@@ -19,12 +19,8 @@ async def approve_sandbox_request(body: dict):
     req_id = body.get("request_id")
     wait = _sandbox_waits.get(req_id) if req_id else _sandbox_waits.get(sid)
     if wait:
-        action = body.get("action", "deny_once")
-        wait["result"]["action"] = action
-        wait["result"]["path"] = body.get("path", "")
-        if body.get("password"):
-            wait["result"]["password"] = body["password"]
-        wait["event"].set()
+        # Secret form fields pass through in-memory (see api.state)
+        resolve_sandbox_wait(wait, body)
     return {"status": "ok"}
 
 

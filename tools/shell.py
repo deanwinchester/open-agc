@@ -31,6 +31,19 @@ _interactive_procs_lock = threading.Lock()
 SHELL_OUTPUT_DIR = None
 
 
+def _mask(text: str) -> str:
+    """Mask known secret values (passwords / credential URIs) in text.
+
+    Local import to avoid circular imports; never raises — on any error the
+    original text is returned unchanged.
+    """
+    try:
+        from core.secrets import mask_secrets
+        return mask_secrets(text)
+    except Exception:
+        return text
+
+
 def _get_shell_output_dir():
     global SHELL_OUTPUT_DIR
     if SHELL_OUTPUT_DIR is None:
@@ -269,6 +282,17 @@ class ShellTool(BaseTool):
             except Exception as e:
                 print(f"[ShellTool] Warning: failed to load sandbox config: {e}")
 
+        # ── Secrets substitution ──
+        # Replace {{secret:name.field}} placeholders with real values ONLY in the
+        # command handed to the child process. `command` (with placeholders) is
+        # what gets logged, tracked, shown in popups and returned — credentials
+        # never leave this process in any message or output.
+        try:
+            from core.secrets import substitute_refs
+            exec_command = substitute_refs(command)
+        except Exception:
+            exec_command = command
+
         is_background = _is_background_command(command)
 
         try:
@@ -284,7 +308,7 @@ class ShellTool(BaseTool):
                     popen_kwargs["env"] = _sudo_safe_env()
                 if sys.platform == "win32":
                     popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-                proc = subprocess.Popen(command, **popen_kwargs)
+                proc = subprocess.Popen(exec_command, **popen_kwargs)
                 # Register the background process for monitoring
                 task_id = kwargs.get("_task_id") or kwargs.get("task_id", 0)
                 if task_id and task_id != 0:
@@ -318,7 +342,7 @@ class ShellTool(BaseTool):
                 if sys.platform == "win32":
                     popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 _t0 = time.time()
-                proc = subprocess.Popen(command, **popen_kwargs)
+                proc = subprocess.Popen(exec_command, **popen_kwargs)
 
                 # Feed sudo password via stdin (for sudo -S). Password never appears in
                 # command line, process listing, or LLM context. stdin closed after writing.
@@ -375,6 +399,8 @@ class ShellTool(BaseTool):
                                     # Truncate to last 2000 chars for progress
                                     preview = (new_text[-2000:] if len(new_text) > 2000
                                                else new_text)
+                                    # Live echo to the frontend must be masked too
+                                    preview = _mask(preview)
                                     progress_cb({
                                         "event": "shell_output",
                                         "text": preview,
@@ -447,7 +473,7 @@ class ShellTool(BaseTool):
                                     "timeout": timeout,
                                     "alive": True,
                                 }
-                        tail = _read_tail(out_path, 3000)
+                        tail = _mask(_read_tail(out_path, 3000))
                         hint = ""
                         server_tag = ""
                         if detach or _looks_like_server(command, tail) or _detect_background_launcher(command):
@@ -505,7 +531,7 @@ class ShellTool(BaseTool):
                         _current_process = None
 
                 # Read full output
-                full_output = _read_tail(out_path, 30000)
+                full_output = _mask(_read_tail(out_path, 30000))
                 elapsed = round(time.time() - _t0, 1)
 
                 result = ""
@@ -534,7 +560,7 @@ class ShellTool(BaseTool):
         except Exception as e:
             with _current_process_lock:
                 _current_process = None
-            return f"Error executing shell command: {str(e)}"
+            return f"Error executing shell command: {_mask(str(e))}"
 
 
 def get_background_processes() -> dict:

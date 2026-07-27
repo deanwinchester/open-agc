@@ -15,8 +15,12 @@ import { ref, computed, nextTick, onUnmounted } from 'vue';
 import { ElMessage } from 'element-plus';
 import { Picture, Paperclip, Microphone, Promotion } from '@element-plus/icons-vue';
 import zh from '../../i18n/zh';
+import { request } from '../../api/client';
+import SecretConfirmModal from './SecretConfirmModal.vue';
+import { detectSecrets, describeHit, suggestName, buildOutTexts } from '../../utils/secretDetect';
 
 const t = zh.chat;
+const tSecret = zh.chat.secretConfirm;
 // 与旧 app.js:1601 一致的单文件上限
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 // 与旧 app.js:1498 一致的图片上限
@@ -54,17 +58,83 @@ function withPanelClose(fn) {
 const canSend = computed(() => props.connected
   && (text.value.trim() || pendingImages.value.length || attachedFiles.value.length));
 
-function submit() {
-  const v = text.value.trim();
-  if ((!v && pendingImages.value.length === 0 && attachedFiles.value.length === 0) || !props.connected) return;
+function doSend(v) {
   emit('send', {
-    text: v,
+    text: v.text,
+    displayText: v.displayText,
     images: [...pendingImages.value],
     files: attachedFiles.value.map((f) => ({ ...f })),
   });
   text.value = '';
   pendingImages.value = [];
   attachedFiles.value = [];
+}
+
+// ── 凭据检测（入口 B）：发送前命中模式 → 不直接发送，弹 SecretConfirmModal ──
+// 弹窗期间输入区内容保持不动，三个动作都确认后才一次性发送并清空。
+const secretModalOpen = ref(false);
+const secretHits = ref([]);      // 命中详情（含明文片段，仅留在本组件内存）
+const secretText = ref('');      // 暂存的待发文本
+const secretSuggested = ref({});
+
+function submit() {
+  const v = text.value.trim();
+  if ((!v && pendingImages.value.length === 0 && attachedFiles.value.length === 0) || !props.connected) return;
+  if (v) {
+    const hits = detectSecrets(v);
+    if (hits.length > 0) {
+      secretHits.value = hits;
+      secretText.value = v;
+      secretSuggested.value = {
+        name: suggestName(hits[0].type),
+        type: hits[0].type,
+        username: hits[0].username || '',
+        host: hits[0].host || '',
+      };
+      secretModalOpen.value = true;
+      return;
+    }
+  }
+  doSend({ text: v });
+}
+
+async function onSecretResolve({ action, form }) {
+  const v = secretText.value;
+  const hits = secretHits.value;
+  if (action === 'keep') {
+    doSend({ text: v });
+    return;
+  }
+  if (action === 'discard') {
+    const { discardText } = buildOutTexts(v, hits, '');
+    doSend({ text: discardText, displayText: discardText });
+    return;
+  }
+  // save：先入本机凭证库，失败则不发送（避免明文外泄），文本保留在输入框
+  const first = hits[0];
+  const body = {
+    name: form.name,
+    type: form.type,
+    host: form.host,
+    username: form.username,
+    password: first.password || first.value,
+  };
+  // URI 路径段解析出的库名（如 mongodb://u:p@h:50000/admin → admin）；
+  // 无路径则不传该字段，保留库中旧值
+  if (first.database) body.database = first.database;
+  try {
+    await request('/api/secrets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    ElMessage.error(`${tSecret.saveFailed}: ${err.message}`);
+    return;
+  }
+  const { placeholderText, displayText } = buildOutTexts(v, hits, form.name);
+  ElMessage.success(tSecret.saved);
+  doSend({ text: placeholderText, displayText });
 }
 
 function onKeydown(e) {
@@ -355,6 +425,14 @@ onUnmounted(() => {
 
     <input ref="imageFileInput" type="file" accept="image/*" multiple hidden @change="onImagePicked" />
     <input ref="fileUploadInput" type="file" multiple hidden @change="onFilePicked" />
+
+    <!-- 凭据检测确认窗：命中时不直接发送，由 resolve 动作决定发送形态 -->
+    <SecretConfirmModal
+      v-model="secretModalOpen"
+      :hit-labels="secretHits.map(describeHit)"
+      :suggested="secretSuggested"
+      @resolve="onSecretResolve"
+    />
   </div>
 </template>
 

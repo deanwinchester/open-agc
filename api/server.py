@@ -58,6 +58,7 @@ from api.routes.routes_stats import router as stats_router
 from api.routes.routes_goals import router as goals_router
 from api.routes.routes_tasks import router as tasks_router
 from api.routes.routes_settings import router as settings_router
+from api.routes.routes_secrets import router as secrets_router
 
 # Load environment variables
 env_file = get_data_path(".env")
@@ -111,6 +112,7 @@ app.include_router(stats_router)
 app.include_router(goals_router)
 app.include_router(tasks_router)
 app.include_router(settings_router)
+app.include_router(secrets_router)
 
 # Initialize benchmark and download route modules with dependencies
 init_benchmark_routes(
