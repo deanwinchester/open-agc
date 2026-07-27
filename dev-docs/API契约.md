@@ -247,7 +247,7 @@
 | └ `event=thinking` / `usage` / `model_switched` / `response` | agent/agent.py | `iteration`, token 用量等 | 思考状态/用量展示 |
 | └ `event=tool_start` / `tool_done` | agent/agent.py、agent/sub_agent.py | `step`, `tool`, `tool_label`, `args_preview` / `result_preview`, `success` | 步骤卡片开始/完成渲染 |
 | └ `event=ask_user` | agent/agent.py:2395 | `question`, `task_id`, `background` | 后台提问：渲染回复输入框，提交走 `POST /api/tasks/{id}/reply`；自动切到聊天视图 |
-| └ `event=sandbox_blocked` / `sandbox_approved` | agent/agent.py | `block_type`（path/network/permission）, `path`, `category?`, `description?`, `request_id` | `showSandboxBlockedModal` 授权弹窗，结果经 WS `sandbox_response` 或 REST `/api/sandbox/approve` 回传（回传须带原 `request_id`） |
+| └ `event=sandbox_blocked` / `sandbox_approved` | agent/agent.py | `block_type`（path/network/permission）, `path`, `category?`, `description?`, `request_id` | `showSandboxBlockedModal` 授权弹窗，结果经 WS `sandbox_response` 或 REST `/api/sandbox/approve` 回传（回传须带原 `request_id`）。`category=secret`（request_secret 工具）时弹窗切换为凭据收集表单，`sandbox_response` 附带 `secret_name/secret_type/host/username/note` 与 `password`，仅经内存透传到 agent 后写入本机凭证库（core/secrets），不回传给 LLM |
 | └ `event=task_backgrounded` | agent/agent.py | `task_id` | 步骤卡片标记转入后台 |
 | `message` | api/ws.py、api/background.py | `role`（agent/system/user；`tool_step` 前端跳过）, `content`, `session_id`, `task_id?`, `background?` | `appendMessage` 渲染最终回复；语音播报（如开启） |
 | `error` | api/ws.py、api/background.py | `content`, `original_query?`, `session_id` | 前台：重试条 `showRetryBar`；后台：系统消息 |

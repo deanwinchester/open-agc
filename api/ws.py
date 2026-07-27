@@ -11,6 +11,7 @@ from api.state import (
     _sandbox_waits, _pending_sandbox_approvals, _session_enabled_tools,
     _llamacpp_download_state, _apply_pending_sandbox_approvals,
     _broadcast_to_websockets, _ws_send_safe, _pending_final_responses,
+    resolve_sandbox_wait,
 )
 from api.task_core import (
     create_task, update_task_status, update_task_type, get_task_context, save_task_context,
@@ -45,6 +46,34 @@ def _link_resolved_goal(resolved_goal: int, ws_task_id) -> bool:
     except Exception as e:
         print(f"[WS] Goal link-back error: {e}")
     return False
+
+
+def _try_store_late_secret(user_msg: dict):
+    """迟到凭据提交（授权等待超时后）直接入 vault，返回用户提示；非凭据提交返回 None。
+
+    前端凭据弹窗恒带 secret_name/secret_type 字段（ChatView.vue:onSandboxRespond，
+    拒绝时不带这些字段）。若把这类消息当普通迟到授权处理，path（LLM 建议的
+    凭据名）会被误当沙箱路径加白名单，密码则被静默丢弃——所以前台与后台会话的
+    late-approval 分支都先过这里。抽出为模块级函数以便单测。
+    """
+    if not (user_msg.get("secret_name") or user_msg.get("secret_type")):
+        return None
+    name = user_msg.get("secret_name") or ""
+    try:
+        from core.secrets import upsert_secret
+        upsert_secret(
+            name=name,
+            type=user_msg.get("secret_type"),
+            host=user_msg.get("host"),
+            username=user_msg.get("username"),
+            password=user_msg.get("password"),
+            note=user_msg.get("note"),
+        )
+        print(f"[WS] Late secret submission stored in vault: {name}")
+        return f"凭据 {name} 已入库。"
+    except Exception as e:
+        print(f"[WS] Late secret submission failed: {e}")
+        return f"凭据入库失败：{e}"
 
 
 def _map_history_message(role: str, content: str):
@@ -617,21 +646,26 @@ async def websocket_endpoint(websocket: WebSocket):
                             req_id = user_msg.get("request_id")
                             wait = _sandbox_waits.get(req_id) if req_id else _sandbox_waits.get(sid)
                             if wait:
-                                wait["result"]["action"] = action
-                                wait["result"]["path"] = user_msg.get("path", "")
-                                if user_msg.get("password"):
-                                    wait["result"]["password"] = user_msg["password"]
-                                wait["event"].set()
+                                # Secret form fields pass through in-memory (see api.state)
+                                resolve_sandbox_wait(wait, user_msg)
                                 print(f"[WS] Sandbox response: {action} for {sid} (req={req_id})")
                             elif action in ("approve_once", "approve_dir", "approve_always", "approve_session"):
-                                # Late approval: apply to running agent's whitelist directly
-                                _path = user_msg.get("path", "")
-                                if _path and hasattr(agent, '_session_sandbox_whitelist'):
-                                    import os as _ws_os
-                                    _ws_dir = _ws_os.path.dirname(_ws_os.path.abspath(_path))
-                                    agent._session_sandbox_whitelist.add(_ws_dir)
-                                    agent._session_sandbox_whitelist.add(_path)
-                                    print(f"[WS] Late sandbox approval applied to running agent: {_path}")
+                                # Late secret submission (auth wait timed out):
+                                # store into the vault — never whitelist/resume.
+                                _late_secret_msg = _try_store_late_secret(user_msg)
+                                if _late_secret_msg:
+                                    await _safe_send({"type": "system_message",
+                                                      "message": _late_secret_msg,
+                                                      "session_id": sid})
+                                else:
+                                    # Late approval: apply to running agent's whitelist directly
+                                    _path = user_msg.get("path", "")
+                                    if _path and hasattr(agent, '_session_sandbox_whitelist'):
+                                        import os as _ws_os
+                                        _ws_dir = _ws_os.path.dirname(_ws_os.path.abspath(_path))
+                                        agent._session_sandbox_whitelist.add(_ws_dir)
+                                        agent._session_sandbox_whitelist.add(_path)
+                                        print(f"[WS] Late sandbox approval applied to running agent: {_path}")
                         else:
                             # Non-blocking input: queue message to agent
                             q = user_msg.get("query", user_msg.get("text", ""))
@@ -966,13 +1000,18 @@ async def websocket_endpoint(websocket: WebSocket):
                     req_id = user_msg.get("request_id")
                     wait = _sandbox_waits.get(req_id) if req_id else _sandbox_waits.get(sid)
                     if wait:
-                        wait["result"]["action"] = action
-                        wait["result"]["path"] = user_msg.get("path", "")
-                        if user_msg.get("password"):
-                            wait["result"]["password"] = user_msg["password"]
-                        wait["event"].set()
+                        # Secret form fields pass through in-memory (see api.state)
+                        resolve_sandbox_wait(wait, user_msg)
                         print(f"[WS] Sandbox response: {action} for session {sid} (req={req_id})")
                     elif action in ("approve_once", "approve_dir", "approve_always", "approve_session"):
+                        # Late secret submission (auth wait timed out): store
+                        # into the vault — never whitelist, never resume.
+                        _late_secret_msg = _try_store_late_secret(user_msg)
+                        if _late_secret_msg:
+                            await _safe_send({"type": "system_message",
+                                              "message": _late_secret_msg,
+                                              "session_id": sid})
+                            continue
                         # Late approval after wait timed out — save and resume task
                         _path = user_msg.get("path", "")
                         if _path:

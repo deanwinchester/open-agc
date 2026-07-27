@@ -471,6 +471,12 @@ async def get_task_logs(task_id: int, lines: int = 50):
     with open(output_path, "r", encoding="utf-8", errors="replace") as f:
         all_lines = f.readlines()
     selected = all_lines[-lines:]
+    # Raw shell output files may contain credentials — mask before returning
+    try:
+        from core.secrets import mask_secrets
+        selected = [mask_secrets(line) for line in selected]
+    except Exception:
+        pass
     return {"logs": "".join(selected), "lines": selected}
 
 
@@ -484,6 +490,14 @@ async def kill_task_process(task_id: int):
         try:
             with open(pinfo["output_file"], "r", encoding="utf-8", errors="replace") as f:
                 output_text = f.read()
+        except Exception:
+            pass
+    # Raw shell output files may contain credentials — mask before the text
+    # is sliced into task context / task status
+    if output_text:
+        try:
+            from core.secrets import mask_secrets
+            output_text = mask_secrets(output_text)
         except Exception:
             pass
     cleanup_background_process(task_id)

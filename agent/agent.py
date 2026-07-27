@@ -51,6 +51,7 @@ from tools.plugin_dev import DevelopPluginTool
 from tools.reader_lm import ReaderLMTool
 from tools.compact_context import CompactContextTool
 from tools.subagent_dispatch import DispatchSubagentTool
+from tools.request_secret import RequestSecretTool
 
 
 from agent.context_manager import (
@@ -381,6 +382,15 @@ class OpenAGCAgent:
             f"1. 使用 shell_send(pid=xxx, input=\"...\") 向进程发送输入并读取响应（扩展工具，未启用时先 search_available_tools 启用）\n"
             f"2. 发送 exit 或 quit 退出交互模式\n"
             f"3. 或调用 pause_and_wait 保持进程运行\n"
+            f"\n## 凭据与凭证库\n"
+            f"任务需要密码、API Key、数据库账号等凭据时：\n"
+            f"1. 先查看系统提示中的「已保存凭据」列表（如有）；已有合适的凭据就直接用 "
+            f"{{{{secret:名称.字段}}}} 引用（username/password/host/uri/note），"
+            f"执行 shell/python 时系统会自动替换为真实值。\n"
+            f"2. 没有合适的凭据时，调用 request_secret 工具（扩展工具，需先 search_available_tools 启用）"
+            f"向用户收集——系统会弹出表单让用户填写并自动存入本地凭证库。\n"
+            f"3. 严禁直接向用户索要明文凭据，也严禁把凭据明文写进命令、代码、文件或回复中。\n"
+            f"4. 如果对话中出现了明文凭据，提醒用户改用凭证库保存。\n"
             f"\n{{system_env}}\n"
             f"\n# 项目创建规范\n"
             f"当需要创建新项目或实现多文件功能时，请遵循以下流程：\n"
@@ -563,6 +573,7 @@ class OpenAGCAgent:
             "parse_html": ReaderLMTool() if ReaderLMTool.is_available() else None,
             "compact_context": CompactContextTool(),
             "dispatch_subagent": DispatchSubagentTool(),
+            "request_secret": RequestSecretTool(),
         }
 
         # Add to core tool names so it's always available
@@ -605,6 +616,7 @@ class OpenAGCAgent:
             "manage_task": "查看和管理任务",
             "parse_html": "HTML 转 Markdown",
             "dispatch_subagent": "分派子代理",
+            "request_secret": "向用户收集凭据",
         }
 
         # Load auto-generated tools (persisted from previous sessions)
@@ -793,6 +805,28 @@ class OpenAGCAgent:
         # Inject knowledge graph context
         if kg_context:
             prompt += f"\n\n{kg_context}"
+
+        # Inject secrets vault view (for-llm): masked metadata only — the
+        # password value NEVER enters the system prompt. Same data as
+        # GET /api/secrets/for-llm (core.secrets.list_secrets).
+        try:
+            from core.secrets import list_secrets as _list_vault_secrets
+            _vault = _list_vault_secrets()
+            if _vault:
+                _sec_lines = [
+                    f"- {_s['name']} ({_s.get('type', 'generic')}@{_s.get('host') or '-'},"
+                    f" 用户 {_s.get('username_masked') or '-'})"
+                    for _s in _vault
+                ]
+                prompt += (
+                    "\n--- 已保存凭据（本地凭证库，仅元信息，绝不含明文）---\n"
+                    + "\n".join(_sec_lines)
+                    + "\n引用方式：{{secret:名称.username}} / {{secret:名称.password}} / "
+                    "{{secret:名称.host}} / {{secret:名称.uri}}（执行 shell/python 时自动替换为真实值，"
+                    "不要索要或输出明文）。需要新凭据时用 request_secret 工具向用户收集。\n"
+                )
+        except Exception:
+            pass
 
         return prompt
 
@@ -1053,8 +1087,11 @@ class OpenAGCAgent:
         # Wait for user response
         wait_event = threading.Event()
         result_holder = {"action": "timeout"}
+        # api.state is the home of _sandbox_waits (api.server merely re-exports
+        # it) — importing the light state module avoids pulling the whole
+        # server (and its import-time DB init) into the agent loop.
         try:
-            from api.server import _sandbox_waits
+            from api.state import _sandbox_waits
         except Exception as e:
             print(f"[Agent] Failed to import _sandbox_waits: {e}")
             return f"Sandbox authorization failed (internal error): {sb.path}"
@@ -1103,6 +1140,12 @@ class OpenAGCAgent:
             _clear_wait_entry()
         except Exception:
             pass
+
+        # ── Secret collection (request_secret popup → credential vault) ──
+        # The popup form fields were passed through by ws.py into result_holder
+        # (in-memory only). The vault write happens here, agent-side.
+        if getattr(sb, "category", "") == "secret":
+            return self._handle_secret_collection(sb, action, result_holder)
 
         if is_network:
             # Network domain authorization
@@ -1305,6 +1348,50 @@ class OpenAGCAgent:
                 print(f"[Agent] Failed to persist denied_path: {e}")
         # deny_once or deny_always or timeout → return error
         return f"Sandbox access denied by user: {sb.path}"
+
+    def _handle_secret_collection(self, sb, action: str, result_holder: dict):
+        """Vault-write side of request_secret: upsert the popup form fields into
+        core.secrets. Plaintext exists only in result_holder (in-memory) until
+        persisted to the local vault — it is never logged or sent to the LLM.
+
+        Returns None on success so the caller retries the tool: the retried
+        RequestSecretTool sees ``_last_saved_secret`` and returns the
+        confirmation text ({{secret:name}} reference, no plaintext) with
+        tool_success=True. A non-None return means collection failed or was
+        denied and becomes the tool result directly.
+        """
+        if not str(action or "").startswith("approve"):
+            return ("用户取消了凭据收集。不要向用户索要明文凭据；"
+                    "如确需凭据，可稍后再次调用 request_secret，或改用其他方式。")
+        try:
+            from core.secrets import upsert_secret, get_secret
+            name = (result_holder.get("secret_name") or "").strip() \
+                   or (sb.path or "").strip()
+            if not name:
+                name = f"secret_{int(_time.time())}"
+            stype = (result_holder.get("secret_type") or "").strip() or "generic"
+            host = (result_holder.get("host") or "").strip()
+            username = result_holder.get("username") or ""
+            password = result_holder.get("password") or ""
+            note = result_holder.get("note") or ""
+            if not password:
+                return ("凭据未保存：密码/密钥为必填项但本次提交为空。"
+                        "如仍需凭据，请再次调用 request_secret。")
+            # 同名覆盖：授权弹窗的提交本身就是用户确认，直接覆盖但记录日志。
+            existed = get_secret(name) is not None
+            entry = upsert_secret(name=name, type=stype, host=host,
+                                  username=username, password=password, note=note)
+            print(f"[Agent] Secret {'overwritten' if existed else 'saved'} via "
+                  f"request_secret popup: {name} ({entry.get('type')}@{entry.get('host') or '-'})")
+            # Hand confirmation metadata (no plaintext) to the retried tool call.
+            self._last_saved_secret = {"name": name, "type": entry.get("type") or stype,
+                                       "host": entry.get("host") or ""}
+            return None
+        except ValueError as e:
+            return (f"凭据未保存：{e}。如需重试，请用合法名称"
+                    f"（仅字母/数字/_/-）再次调用 request_secret。")
+        except Exception as e:
+            return f"凭据保存失败：{e}"
 
     def _handle_subagent_sandbox_blocked(self, sb, plan, progress_callback):
         """Route a SandboxBlocked re-raised by a sub-agent into the main auth flow.
@@ -2714,8 +2801,9 @@ class OpenAGCAgent:
                                         tool_success = False
                                         break
                                     # User approved — notify server to persist this approval
-                                    # so it survives agent recreation on task resume
-                                    if progress_callback:
+                                    # so it survives agent recreation on task resume.
+                                    # Secrets are vault entries, not sandbox paths: skip.
+                                    if progress_callback and getattr(sb, "category", "") != "secret":
                                         progress_callback({
                                             "event": "sandbox_approved",
                                             "path": sb.path,
@@ -2796,6 +2884,15 @@ class OpenAGCAgent:
                     if img_url:
                         screenshot_urls.append((img_url, "[image_view 读取的本地图片 — 请查看图片内容并继续后续操作]"))
                     result_str = replace_image_markers(result_str)
+
+                    # Secrets masking BEFORE truncation (single choke point, covers
+                    # ALL tools): a truncation cut through a password/URI would let
+                    # the pieces escape whole-string matching — mask first.
+                    try:
+                        from core.secrets import mask_secrets as _mask_secret_values
+                        result_str = _mask_secret_values(result_str)
+                    except Exception:
+                        pass
 
                     # Context Compaction（写入侧截断）：超长工具结果按工具类型
                     # cap 后写入 messages（read_file/fetch_url 8000、

@@ -272,8 +272,6 @@ class SubAgent:
                                     **extra_kwargs,
                                     **func_args,
                                 )
-                            if len(result) > 15000:
-                                result = result[:15000] + "\n...[truncated]"
                             success = True
                         except SandboxBlocked:
                             # Sub-agents have no channel to ask the user for
@@ -283,6 +281,17 @@ class SubAgent:
                             raise
                         except Exception as e:
                             result = f"Error executing {func_name}: {e}"
+
+                    # Secrets masking BEFORE truncation (same choke point as the
+                    # main agent loop): a cut through a credential would let the
+                    # pieces escape whole-string matching — mask first.
+                    try:
+                        from core.secrets import mask_secrets as _mask_secret_values
+                        result = _mask_secret_values(str(result))
+                    except Exception:
+                        result = str(result)
+                    if len(result) > 15000:
+                        result = result[:15000] + "\n...[truncated]"
 
                     self.messages.append({
                         "role": "tool",
