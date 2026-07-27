@@ -233,15 +233,44 @@ class ConfigureSystemTool(BaseTool):
 
     def _remove_plugin(self, name: str) -> str:
         import shutil
+        from datetime import datetime
         from core.security import resolve_under
+        from core.paths import get_user_plugins_dir
+
+        user_dir = get_user_plugins_dir()
+        # 用户开发的插件在 data/plugins，内置插件在仓库 plugins/——两处都找
+        target = None
+        for base in (user_dir, "plugins"):
+            try:
+                cand = resolve_under(base, name)
+            except ValueError:
+                return f"非法插件名: {name}"
+            if os.path.isdir(cand):
+                target = cand
+                break
+        if not target:
+            return f"插件 {name} 不存在（已查找 {user_dir} 与 plugins/）"
+
+        # 若插件处于已加载状态先卸载，避免残留旧路由/模块
         try:
-            target = resolve_under("plugins", name)
-        except ValueError:
-            return f"非法插件名: {name}"
-        if not os.path.exists(target):
-            return f"插件目录 {target} 不存在"
-        shutil.rmtree(target)
-        return f"插件 {name} 已删除"
+            from core.plugin_manager import unload_plugin
+            unload_plugin(name)
+        except Exception:
+            pass
+
+        # 删除保护：移动到回收站 data/plugins/_trash/<name>_<timestamp>/（可恢复）。
+        # _trash 以 _ 前缀命名，不参与插件扫描（plugin_manager 跳过 _/. 前缀目录）。
+        trash_root = os.path.join(user_dir, "_trash")
+        os.makedirs(trash_root, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = os.path.join(trash_root, f"{name}_{ts}")
+        suffix = 2
+        while os.path.exists(dest):
+            dest = os.path.join(trash_root, f"{name}_{ts}_{suffix}")
+            suffix += 1
+        shutil.move(target, dest)
+        return (f"插件 {name} 已移至回收站：{dest}\n"
+                f"（未真正删除；需要恢复时把该目录移回 {user_dir} 并重新扫描即可）")
 
     def _toggle_plugin(self, name: str) -> str:
         from core.plugin_manager import toggle_plugin

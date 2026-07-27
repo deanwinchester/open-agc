@@ -87,11 +87,42 @@ async def get_plugins():
     return {"plugins": all_plugins, "plugins_dir": str(_user_plugins_dir)}
 
 
+def _plugins_to_preserve_on_scan() -> set:
+    """Loaded plugins that must survive a scan because unloading would orphan live state.
+
+    open-agc-train's TrainingEngine is a module-level singleton (engine.py
+    get_training_engine); an active training job runs in a background thread
+    owned by that engine. Unload+reload would purge the module and create a new
+    engine with an empty job table — pause/abort/status would hit the new
+    instance while the old thread keeps running untracked (and a second
+    training could be started concurrently). Keeping the plugin loaded makes
+    discover_plugins() reuse the existing instance and engine.
+    """
+    preserved = set()
+    try:
+        from core.plugin_manager import get_plugin
+        info = get_plugin("open-agc-train")
+        engine = (info.instance.state or {}).get("engine") if info and info.instance else None
+        if engine is not None and engine.get_state().get("active"):
+            preserved.add("open-agc-train")
+    except Exception:
+        pass  # 检测失败不得阻塞扫描
+    return preserved
+
+
 @router.post("/api/plugins/scan")
 async def scan_plugins():
-    """Re-scan and mount plugins."""
+    """Re-scan and mount plugins.
+
+    Unloads currently loaded plugins first (including their sys.modules
+    entries) so code changes take effect on re-discovery — no server restart
+    needed. Plugins with live state (active training, see
+    _plugins_to_preserve_on_scan) are kept loaded and remounted as-is.
+    Frontend vue-entry.js is re-read from disk by the static mount.
+    """
     import api.server as _srv
-    from core.plugin_manager import discover_plugins, list_plugins
+    from core.plugin_manager import discover_plugins, list_plugins, unload_all_plugins
+    unload_all_plugins(except_names=_plugins_to_preserve_on_scan())
     all_plugins = []
     for d in _all_plugin_dirs():
         all_plugins.extend(discover_plugins(plugins_dir=d,
