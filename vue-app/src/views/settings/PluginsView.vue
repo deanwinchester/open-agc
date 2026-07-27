@@ -1,13 +1,14 @@
 <script setup>
-// 设置 · 插件管理（批次 1b）：迁移旧 view-settings-plugins 的本地管理部分。
+// 设置 · 插件管理：本地管理（列表/启停/扫描/git 安装/卸载）+ 插件市场
+// （/api/marketplace 远程索引，搜索/安装，Vue 迁移期曾跳过，本文件已补齐）。
 // 数据契约（api/routes/routes_plugins.py，见 dev-docs/API契约.md）：
 // - GET /api/plugins → {plugins: [{name, version, description, enabled, loaded, author, homepage}], plugins_dir}
 // - POST /api/plugins/scan → {status, count, plugins}
 // - POST /api/plugins/{name}/toggle → {status, enabled}
 // - POST /api/plugins/install {name, url}（注意请求字段是 url，不是 repo_url）
 // - DELETE /api/plugins/{name}
-// 旧视图的插件市场（/api/marketplace 远程 JSON）本批次跳过，仅做本地插件管理。
-import { onMounted, ref } from 'vue';
+// - GET /api/marketplace → {marketplace: {plugins: [{name, version, description, author, rating, installs, verified, source.repo}]}}
+import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Refresh, Search } from '@element-plus/icons-vue';
 import { cachedFetch, invalidateCache, request } from '../../api/client';
@@ -140,7 +141,56 @@ function statusOf(p) {
     : { label: t.statusDisabled, type: 'info' };
 }
 
-onMounted(loadPlugins);
+onMounted(() => {
+  loadPlugins();
+  loadMarketplace();
+});
+
+// ── 插件市场（/api/marketplace 远程索引） ──
+const mpLoading = ref(false);
+const mpPlugins = ref([]);
+const mpSearch = ref('');
+
+async function loadMarketplace() {
+  mpLoading.value = true;
+  try {
+    const data = await request('/api/marketplace');
+    mpPlugins.value = data?.marketplace?.plugins || [];
+  } catch (err) {
+    ElMessage.error(`${t.mpLoadFailed}: ${err.message}`);
+  } finally {
+    mpLoading.value = false;
+  }
+}
+
+const mpFiltered = computed(() => {
+  const q = mpSearch.value.trim().toLowerCase();
+  if (!q) return mpPlugins.value;
+  return mpPlugins.value.filter((p) =>
+    ((p.name || '') + (p.description || '') + (p.tags || []).join(' ')).toLowerCase().includes(q));
+});
+
+async function installFromMarket(p) {
+  const repo = p.source?.repo || '';
+  if (!repo) { ElMessage.warning(t.mpNoSource); return; }
+  p.installing = true;
+  try {
+    const res = await request('/api/plugins/install', {
+      method: 'POST', headers: JSON_HEADERS,
+      body: JSON.stringify({ name: p.name, url: `https://github.com/${repo}.git` }),
+    });
+    if (res?.status === 'ok' || res?.status === 'success') {
+      ElMessage.success(t.mpInstallOk);
+      refresh();
+    } else {
+      ElMessage.error(res?.detail || t.installFailed);
+    }
+  } catch (err) {
+    ElMessage.error(`${t.installFailed}: ${err.message}`);
+  } finally {
+    p.installing = false;
+  }
+}
 </script>
 
 <template>
@@ -211,6 +261,38 @@ onMounted(loadPlugins);
         <div class="field-hint">{{ t.installHint }}</div>
       </el-form>
     </el-card>
+
+    <!-- 插件市场 -->
+    <el-card class="settings-card" shadow="never">
+      <template #header>
+        <div class="card-header">
+          <span class="card-title">{{ t.mpTitle }}</span>
+          <el-input v-model="mpSearch" :placeholder="t.mpSearchPlaceholder" clearable class="mp-search" />
+        </div>
+      </template>
+      <div v-loading="mpLoading">
+        <div v-if="!mpFiltered.length && !mpLoading" class="empty-state">
+          <div class="empty-icon">🛒</div>
+          <p>{{ t.mpEmpty }}</p>
+        </div>
+        <div v-for="p in mpFiltered" :key="p.name" class="plugin-row">
+          <div class="plugin-info">
+            <div class="plugin-title">
+              <strong>📦 {{ p.name }}</strong>
+              <span class="plugin-version">v{{ p.version }}</span>
+              <el-tag v-if="p.verified" size="small" type="success" disable-transitions>✓ {{ t.mpVerified }}</el-tag>
+            </div>
+            <div class="plugin-meta">{{ p.description }}</div>
+            <div class="plugin-meta">{{ p.author || '--' }} · ⭐ {{ p.rating || '--' }} · 📥 {{ p.installs || 0 }}</div>
+          </div>
+          <div class="plugin-actions">
+            <el-button size="small" type="primary" :loading="p.installing" @click="installFromMarket(p)">
+              {{ p.installing ? t.installing : t.install }}
+            </el-button>
+          </div>
+        </div>
+      </div>
+    </el-card>
   </div>
 </template>
 
@@ -234,6 +316,11 @@ onMounted(loadPlugins);
 
 .settings-card {
   margin-bottom: 20px;
+}
+
+.mp-search {
+  width: 220px;
+  margin-left: auto;
 }
 
 .card-header .card-title {

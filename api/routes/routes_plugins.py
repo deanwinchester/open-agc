@@ -79,10 +79,12 @@ def _find_plugin_dir(name: str) -> str:
 @router.get("/api/plugins")
 async def get_plugins():
     from core.plugin_manager import list_all_plugins
-    all_plugins = []
-    for d in _all_plugin_dirs():
-        all_plugins.extend(list_all_plugins(d))
-    return {"plugins": all_plugins, "plugins_dir": str(_all_plugin_dirs())}
+    # 只扫描用户插件目录（data/plugins）一次：已加载的插件（含仓库内置的
+    # open-agc-train）经 _loaded_plugins 呈现一次；此前对内置+用户两个目录
+    # 各调一次 list_all_plugins，每次都会带上 _loaded_plugins，导致内置插件
+    # 在列表中出现两次。
+    all_plugins = list_all_plugins(_user_plugins_dir)
+    return {"plugins": all_plugins, "plugins_dir": str(_user_plugins_dir)}
 
 
 @router.post("/api/plugins/scan")
