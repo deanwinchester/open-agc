@@ -586,6 +586,26 @@ def _is_backoff_elapsed(updated_at_str: str, resume_count: int) -> bool:
 
 # _SERVER_START_TIME imported from api.state
 
+
+def _read_masked_output_tail(path: str, max_chars: int) -> str:
+    """Read the tail of a raw shell output file with secret values masked.
+
+    Mask BEFORE tail-cutting so a cut can never split a credential and let it
+    escape whole-string matching. Returns "" on any read error.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as rf:
+            text = rf.read()
+    except Exception:
+        return ""
+    try:
+        from core.secrets import mask_secrets
+        text = mask_secrets(text)
+    except Exception:
+        pass
+    return text[-max_chars:]
+
+
 def start_background_monitor():
     """Monitor backgrounded tasks — check download/process completion and auto-resume."""
     def monitor_loop():
@@ -852,11 +872,8 @@ def start_background_monitor():
                             cleanup_background_process(str(tid))
                             full_out = ""
                             if out_file and _os.path.exists(out_file):
-                                try:
-                                    with open(out_file, "r", encoding="utf-8", errors="replace") as rf:
-                                        full_out = rf.read()[-5000:]
-                                except Exception:
-                                    pass
+                                # Masked read: raw output may contain credentials
+                                full_out = _read_masked_output_tail(out_file, 5000)
                                 try:
                                     _os.remove(out_file)
                                 except Exception:

@@ -33,6 +33,7 @@ MANIFEST
 
 # Data
 /data/
+data/secrets.json
 bin/
 /eval/results/
 

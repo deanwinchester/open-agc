@@ -10,6 +10,7 @@ const navItems = [
   { path: '/settings/skills', label: zh.settings.nav.skills },
   { path: '/settings/mcp', label: zh.settings.nav.mcpAgents },
   { path: '/settings/plugins', label: zh.settings.nav.plugins },
+  { path: '/settings/secrets', label: zh.settings.nav.secrets },
 ];
 </script>
 

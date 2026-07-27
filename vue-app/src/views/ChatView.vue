@@ -9,6 +9,7 @@
 //   {type:'retry', query?}                       重试上一轮（query 缺省时服务端用 last_query）
 //   {type:'tool_reply', answer}                  回复前台 ask_user
 //   {type:'sandbox_response', session_id, action, path, password?, request_id?}  沙箱授权回复
+//     （category='secret' 时附带 secret_name/secret_type/host/username/note 表单字段）
 // 服务端 → 客户端：见底部 REPORT 注释与各 on* 处理器。
 //
 // 已知旧版缺陷的修正：
@@ -498,10 +499,11 @@ function onSend(payload) {
     const fileList = files.map((f) => 'uploads/' + f.name).join(', ');
     query = query ? `${query}\n\n[已上传文件: ${fileList}]` : `请处理我上传的文件: ${fileList}`;
   }
-  // 气泡显示原始输入（无文字时按旧版显示 [图片]/[文件] 占位，app.js:1694）
+  // 气泡显示原始输入（无文字时按旧版显示 [图片]/[文件] 占位，app.js:1694）；
+  // displayText 为凭据打码版（入口 B，ChatInput 可选上抛），优先于原文
   appendItem({
     kind: 'msg', key: nextKey(), role: 'user',
-    content: text || (images.length > 0 ? t.imageOnlyContent : t.fileOnlyContent),
+    content: p.displayText || text || (images.length > 0 ? t.imageOnlyContent : t.fileOnlyContent),
     images: images.length > 0 ? images : null,
     files: files.length > 0 ? files : null,
   });
@@ -582,7 +584,8 @@ async function onSubmitAsk(entry, answer) {
   }
 }
 
-function onSandboxRespond({ action, password }) {
+function onSandboxRespond(payload) {
+  const { action, password } = payload;
   const msg = {
     type: 'sandbox_response',
     session_id: currentSessionId.value,
@@ -591,6 +594,15 @@ function onSandboxRespond({ action, password }) {
   };
   if (sandboxState.requestId) msg.request_id = sandboxState.requestId;
   if (password) msg.password = password;
+  // 凭据收集表单（category='secret'）：全部字段透传到 agent 的 result_holder，
+  // ws.py 仅放内存，由 agent 写入本机凭证库；拒绝时弹窗侧本就不带这些字段
+  if (sandboxState.category === 'secret') {
+    msg.secret_name = payload.secretName || '';
+    msg.secret_type = payload.secretType || 'generic';
+    msg.host = payload.host || '';
+    msg.username = payload.username || '';
+    msg.note = payload.note || '';
+  }
   if (!ws.send(msg)) ElMessage.error(t.sandbox.sendFailed);
   sandboxState.visible = false;
 }

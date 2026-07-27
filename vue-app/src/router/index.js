@@ -10,6 +10,7 @@ import ModelsView from '../views/settings/ModelsView.vue';
 import SkillsView from '../views/settings/SkillsView.vue';
 import McpView from '../views/settings/McpView.vue';
 import PluginsView from '../views/settings/PluginsView.vue';
+import SecretsView from '../views/settings/SecretsView.vue';
 
 const routes = [
   { path: '/', redirect: '/chat' },
@@ -28,6 +29,7 @@ const routes = [
       { path: 'skills', name: 'settings-skills', component: SkillsView, meta: { title: '设置' } },
       { path: 'mcp', name: 'settings-mcp', component: McpView, meta: { title: '设置' } },
       { path: 'plugins', name: 'settings-plugins', component: PluginsView, meta: { title: '设置' } },
+      { path: 'secrets', name: 'settings-secrets', component: SecretsView, meta: { title: '设置' } },
     ],
   },
   { path: '/debug', name: 'debug', component: DebugView, meta: { title: '调试' } },

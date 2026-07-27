@@ -44,10 +44,16 @@ class SessionLogger:
         })
 
     def log_tool_result(self, tool_name: str, result: str, success: bool = True):
+        # Mask before truncation: callers (agent.py) pass the raw tool result,
+        # and non-shell/python tools do no tool-layer masking — without this a
+        # vault password echoed by read_file/fetch_url would land here in
+        # plaintext. Masking the full string first also keeps a password
+        # straddling the 8000-char cut from leaking half-masked.
+        from core.secrets import mask_secrets
         self._write({
             "type": "tool_result",
             "tool": tool_name,
-            "result": (result or "")[:8000],
+            "result": mask_secrets(result or "")[:8000],
             "success": success
         })
 

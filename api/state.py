@@ -29,6 +29,26 @@ _sandbox_waits: dict = {}
 # Pending sandbox approvals: {session_id: [paths]} — late approvals applied on task resume
 _pending_sandbox_approvals: dict = {}
 
+
+def resolve_sandbox_wait(wait: dict, msg: dict) -> None:
+    """Populate a sandbox wait's result holder from a client response and set
+    the event. Single implementation shared by ws.py (both sandbox_response
+    paths) and /api/sandbox/approve.
+
+    For category='secret' waits (request_secret popup) the form fields are
+    passed through to the agent's result_holder — in-memory only: never
+    logged, never written to messages or disk by this layer.
+    """
+    wait["result"]["action"] = msg.get("action", "deny_once")
+    wait["result"]["path"] = msg.get("path", "")
+    if msg.get("password"):
+        wait["result"]["password"] = msg["password"]
+    if (wait.get("payload") or {}).get("category") == "secret":
+        for _k in ("secret_name", "secret_type", "host", "username", "note"):
+            if msg.get(_k) is not None:
+                wait["result"][_k] = msg[_k]
+    wait["event"].set()
+
 # Session-level sudo password cache: {session_id: str}
 # A new agent instance is created per message, so the instance-level cache
 # alone loses the sudo authorization — the password popup then appears (or
