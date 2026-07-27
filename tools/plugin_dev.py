@@ -16,7 +16,16 @@ class DevelopPluginTool(BaseTool):
     """Scaffold and develop new plugins for the Open-AGC system."""
 
     name: str = "develop_plugin"
-    description: str = "开发新插件：生成脚手架（目录、路由、菜单、静态文件）或安装插件。用户要求扩展系统插件功能时用。"
+    description: str = (
+        "开发新插件：生成脚手架（plugin.json、__init__.py、Vue 视图入口 static/vue-entry.js）"
+        "或校验插件代码。前端契约：plugin.json 声明 \"vue_entry\": \"vue-entry.js\"，入口文件是插件"
+        " static/ 下的原生 ES module，default export 为 setup(ctx)，返回"
+        " {views: [{path, title, icon?, component}]}；component 必须用 ctx.Vue.defineComponent"
+        " 创建（模板字符串由主应用编译，el-* 组件可直接使用）；每个视图自动挂载到路由"
+        " /plugins/<插件名>/<path> 并出现在侧边栏插件区。修改插件代码或 vue-entry.js 后，"
+        "调用 POST /api/plugins/scan（或设置页「扫描新插件」按钮）即可热更新，无需重启服务。"
+        "用户要求扩展系统插件功能时用。"
+    )
 
     def get_openai_schema(self) -> Dict[str, Any]:
         return {
@@ -30,7 +39,7 @@ class DevelopPluginTool(BaseTool):
                         "action": {
                             "type": "string",
                             "enum": ["scaffold", "install"],
-                            "description": "scaffold=生成新插件脚手架；install=安装插件。",
+                            "description": "scaffold=生成新插件脚手架；install=校验插件代码。",
                         },
                         "plugin_name": {
                             "type": "string",
@@ -56,21 +65,17 @@ class DevelopPluginTool(BaseTool):
                             "type": "string",
                             "description": "可选，routes.py 代码（API 路由）。",
                         },
-                        "menu_section": {
-                            "type": "string",
-                            "description": "侧边栏菜单位置（如 tools、training、data）。",
-                        },
                         "menu_label": {
                             "type": "string",
-                            "description": "侧边栏菜单显示名称。",
+                            "description": "侧边栏插件分区显示名称（写入 plugin.json 的 menu.label）。",
                         },
                         "menu_icon": {
                             "type": "string",
-                            "description": "侧边栏菜单图标 emoji。",
+                            "description": "侧边栏菜单图标 emoji（默认 🔌）。",
                         },
                         "has_static": {
                             "type": "boolean",
-                            "description": "是否需要静态文件目录。",
+                            "description": "是否生成 static/vue-entry.js 示例视图（默认 true，推荐；插件 UI 契约参考样例）。",
                         },
                     },
                     "required": ["action", "plugin_name"],
@@ -95,10 +100,12 @@ class DevelopPluginTool(BaseTool):
         desc = kwargs.get("description", f"{name} 插件")
         version = kwargs.get("version", "1.0.0")
         author = kwargs.get("author", "Open-AGC")
-        menu_section = kwargs.get("menu_section", "")
         menu_label = kwargs.get("menu_label", "")
         menu_icon = kwargs.get("menu_icon", "🔌")
-        has_static = kwargs.get("has_static", False)
+        # has_static 语义：是否生成 static/vue-entry.js 示例视图（新 SPA 前端契约）
+        has_static = kwargs.get("has_static", True)
+        if has_static is None:
+            has_static = True
 
         os.makedirs(plugin_dir, exist_ok=True)
 
@@ -110,15 +117,12 @@ class DevelopPluginTool(BaseTool):
             "author": author,
             "python_module": mod_name,
         }
-        if menu_section and menu_label:
-            manifest["menu"] = {
-                "section": menu_section,
-                "label": menu_label,
-                "icon": menu_icon,
-                "views": [
-                    {"id": f"{mod_name}-main", "label": menu_label}
-                ],
-            }
+        if has_static:
+            # 新 SPA 插件 UI 契约：入口为 static/vue-entry.js（default export setup(ctx)）
+            manifest["vue_entry"] = "vue-entry.js"
+        if menu_label:
+            # menu 仅保留 label/icon，用于侧边栏插件分区标题与图标
+            manifest["menu"] = {"label": menu_label, "icon": menu_icon}
 
         with open(os.path.join(plugin_dir, "plugin.json"), "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
@@ -137,25 +141,27 @@ class DevelopPluginTool(BaseTool):
             with open(os.path.join(plugin_dir, "routes.py"), "w", encoding="utf-8") as f:
                 f.write(routes_code)
 
-        # -- static/ --
+        # -- static/vue-entry.js --
         if has_static:
             static_dir = os.path.join(plugin_dir, "static")
             os.makedirs(static_dir, exist_ok=True)
-            with open(os.path.join(static_dir, "index.html"), "w", encoding="utf-8") as f:
-                f.write(self._default_static_html(name, menu_label or name))
+            self._write_vue_entry(static_dir, name, menu_label or name)
 
         summary_parts = [
             f"✅ 插件 {name} 脚手架已生成",
             f"  目录: {plugin_dir}/",
-            f"  plugin.json — 清单文件",
-            f"  __init__.py — 插件入口",
+            f"  plugin.json — 清单文件（含 vue_entry 前端入口声明）",
+            f"  __init__.py — 插件后端入口",
         ]
         if routes_code:
             summary_parts.append("  routes.py — API 路由")
         if has_static:
-            summary_parts.append("  static/ — 静态文件目录")
+            summary_parts.append("  static/vue-entry.js — 前端视图入口（契约参考样例，可直接改）")
         summary_parts.append("")
-        summary_parts.append("使用 `action=install` 安装插件使其生效。")
+        summary_parts.append(
+            "下一步：编辑代码后调用 POST /api/plugins/scan（或设置页「扫描新插件」）"
+            "即可热更新生效，无需重启服务。视图路由为 /plugins/%s/main。" % name
+        )
         return "\n".join(summary_parts)
 
     def _write_default_init(self, plugin_dir: str, name: str, mod_name: str, has_static: bool) -> None:
@@ -195,21 +201,109 @@ def init_plugin(context: PluginContext) -> PluginInstance:
         with open(os.path.join(plugin_dir, "__init__.py"), "w", encoding="utf-8") as f:
             f.write(code)
 
-    def _default_static_html(self, name: str, label: str) -> str:
-        return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{label}</title>
-</head>
-<body>
-<div class="plugin-container">
-  <h1>{label}</h1>
-  <p>{name} 插件已加载。</p>
-</div>
-</body>
-</html>"""
+    def _write_vue_entry(self, static_dir: str, name: str, label: str) -> None:
+        """Write static/vue-entry.js — 新 SPA 插件 UI 契约的可用参考样例。
+
+        契约：default export setup(ctx) → { views: [{path, title, icon?, component}] }，
+        视图挂载到 /plugins/<name>/<path>。本模板同时是 agent 开发插件 UI 的布局基准
+        （整页容器 + 居中内容区 max-width 860px + el-card），避免「右侧样式坏」问题。
+        """
+        # Plain string + placeholder replace（模板内含大量 {}，不能用 f-string/format）
+        tmpl = '''// ============================================================
+// __LABEL__（__NAME__）— Open-AGC 插件前端入口（Vue3 SPA 契约）
+//
+// 契约要点（与 dev-docs/API契约.md「插件 Vue 视图契约」一致）：
+//   1. plugin.json 声明 "vue_entry": "vue-entry.js"，本文件经插件静态目录暴露：
+//      /static/plugins/<name>/vue-entry.js
+//   2. 本文件是原生 ES module，default export 为 setup(ctx)，
+//      返回 { views: [{ path, title, icon?, component }] }（也可 async 返回）。
+//   3. component 必须用 ctx.Vue.defineComponent 创建（与主应用同一 Vue 实例；
+//      模板字符串由主应用运行时编译，Element Plus 的 el-* 组件可直接使用，
+//      主题 CSS 变量与主应用共享）。
+//   4. 每个 view 挂载为路由 /plugins/<name>/<path>，并出现在侧边栏插件区。
+//   5. 修改本文件或插件 Python 代码后：调用 POST /api/plugins/scan
+//      （或设置页「扫描新插件」按钮）即可热更新，无需重启服务。
+//
+// ctx 可用能力：
+//   ctx.pluginName                  插件名
+//   ctx.Vue                         Vue 命名空间（defineComponent/ref/computed/onMounted/...）
+//   ctx.apiFetch                    主应用 API client：request(url, options)，自动 JSON 解析与错误规范化
+//   ctx.ElMessage / ctx.ElMessageBox  Element Plus 反馈组件
+//   ctx.wsOn(type, fn)              订阅主应用 WebSocket 事件（返回退订函数）
+//   ctx.navigate(path)              router.push 封装（插件内跳转）
+// ============================================================
+
+// 注入本插件的局部样式（class 统一加 __NAME__- 前缀，避免污染全局）
+function injectStyles() {
+  const id = '__NAME__-styles';
+  if (document.getElementById(id)) return;
+  const style = document.createElement('style');
+  style.id = id;
+  style.textContent = `
+.__NAME__-page { padding: 24px; box-sizing: border-box; }
+.__NAME__-inner { max-width: 860px; margin: 0 auto; }
+.__NAME__-title { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
+.__NAME__-desc { margin: 0 0 16px; color: var(--el-text-color-secondary); font-size: 13px; }
+`;
+  document.head.appendChild(style);
+}
+
+export default function setup(ctx) {
+  const { Vue, apiFetch, ElMessage } = ctx;
+  injectStyles();
+
+  const MainView = Vue.defineComponent({
+    name: '__NAME__-main',
+    setup() {
+      const message = Vue.ref('加载中…');
+      const loading = Vue.ref(false);
+
+      async function load() {
+        loading.value = true;
+        try {
+          // 插件后端路由默认挂在 /api/plugin/<name>/ 前缀下（见 __init__.py）
+          const data = await apiFetch('/api/plugin/__NAME__/hello');
+          message.value = (data && data.message) || '后端无返回';
+        } catch (err) {
+          message.value = '请求失败：' + err.message;
+        } finally {
+          loading.value = false;
+        }
+      }
+
+      function notify() {
+        ElMessage.success('__LABEL__ 运行正常');
+      }
+
+      Vue.onMounted(load);
+      return { message, loading, notify };
+    },
+    // 布局规范：外层整页容器 + 居中内容区（max-width 860px）+ el-card，
+    // 与主应用其余页面视觉保持一致；不要裸写无容器的模板
+    template: `
+      <div class="__NAME__-page">
+        <div class="__NAME__-inner">
+          <h2 class="__NAME__-title">__LABEL__</h2>
+          <p class="__NAME__-desc">__NAME__ 插件 · 示例视图</p>
+          <el-card shadow="never" v-loading="loading">
+            <p>{{ message }}</p>
+            <el-button type="primary" @click="notify">测试通知</el-button>
+          </el-card>
+        </div>
+      </div>
+    `,
+  });
+
+  return {
+    views: [
+      { path: 'main', title: '__LABEL__', component: MainView },
+    ],
+  };
+}
+'''
+        code = tmpl.replace("__NAME__", name).replace("__LABEL__", label)
+        with open(os.path.join(static_dir, "vue-entry.js"), "w", encoding="utf-8") as f:
+            f.write(code)
 
     def _install(self, name: str) -> str:
         plugin_dir = os.path.join(self._plugins_base(), name)
@@ -240,7 +334,8 @@ def init_plugin(context: PluginContext) -> PluginInstance:
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
                 if hasattr(mod, "init_plugin"):
-                    return f"插件 {name} 代码验证通过。重启服务后生效（或重新扫描 `/api/plugins/scan`）。"
+                    return (f"插件 {name} 代码验证通过。调用 POST /api/plugins/scan "
+                            f"（或设置页「扫描新插件」）即可热更新生效，无需重启服务。")
                 return f"插件 {name} 缺少 init_plugin 函数"
         except Exception as e:
             return f"插件 {name} 加载失败: {e}"

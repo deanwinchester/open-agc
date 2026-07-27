@@ -95,6 +95,9 @@ def discover_plugins(plugins_dir: str = "plugins",
 
     loaded = []
     for entry in sorted(os.listdir(plugins_dir)):
+        # Skip private/housekeeping dirs (e.g. the _trash recycle bin)
+        if entry.startswith("_") or entry.startswith("."):
+            continue
         plugin_dir = os.path.join(plugins_dir, entry)
         if not os.path.isdir(plugin_dir):
             continue
@@ -235,8 +238,34 @@ def load_plugin(name: str, plugins_dir: str = "plugins",
     return info
 
 
+def _purge_plugin_modules(info: PluginInfo) -> None:
+    """Remove the plugin's modules from sys.modules.
+
+    Without this, a subsequent load_plugin() would get the cached (stale)
+    module objects and code changes would only take effect after a server
+    restart. Covers every import path load_plugin() can produce:
+    ``<plugins_basename>.<name>``, bare ``<name>`` (sys.path fallback),
+    plus the manifest's python_module — each with their submodules.
+    """
+    candidates = {info.name}
+    python_module = (info.manifest or {}).get("python_module", "")
+    if python_module:
+        candidates.add(python_module)
+    if info.plugin_dir:
+        plugins_basename = os.path.basename(os.path.dirname(os.path.abspath(info.plugin_dir)))
+        if plugins_basename:
+            candidates.update(f"{plugins_basename}.{c}" for c in list(candidates))
+    doomed = [
+        m for m in sys.modules
+        if m in candidates or any(m.startswith(c + ".") for c in candidates)
+    ]
+    for m in doomed:
+        sys.modules.pop(m, None)
+    importlib.invalidate_caches()
+
+
 def unload_plugin(name: str) -> bool:
-    """Unload a plugin."""
+    """Unload a plugin (and purge its modules from sys.modules for hot reload)."""
     global _loaded_plugins
     if name not in _loaded_plugins:
         return False
@@ -247,7 +276,23 @@ def unload_plugin(name: str) -> bool:
         except Exception:
             pass
     del _loaded_plugins[name]
+    _purge_plugin_modules(info)
     return True
+
+
+def unload_all_plugins(except_names=None) -> int:
+    """Unload every loaded plugin (except *except_names*). Returns the number unloaded.
+
+    Used by the scan endpoint so re-discovery picks up code changes
+    without a server restart. Plugins in *except_names* stay loaded — e.g.
+    open-agc-train with an active training job, whose engine is a module-level
+    singleton owned by a background thread (see routes_plugins.scan_plugins).
+    """
+    skip = set(except_names or ())
+    names = [n for n in list(_loaded_plugins.keys()) if n not in skip]
+    for n in names:
+        unload_plugin(n)
+    return len(names)
 
 
 def get_plugin(name: str) -> Optional[PluginInfo]:
@@ -295,6 +340,9 @@ def list_all_plugins(plugins_dir: str = "plugins") -> List[dict]:
         os.makedirs(plugins_dir, exist_ok=True)
     if os.path.isdir(plugins_dir):
         for entry in os.listdir(plugins_dir):
+            # Skip private/housekeeping dirs (e.g. the _trash recycle bin)
+            if entry.startswith("_") or entry.startswith("."):
+                continue
             d = os.path.join(plugins_dir, entry)
             if not os.path.isdir(d) or entry in seen:
                 continue
