@@ -161,17 +161,16 @@ async def websocket_endpoint(websocket: WebSocket):
             "error": _llamacpp_download_state.get("error", "")
         })
 
-    # Re-broadcast active sandbox waits for this session — a client that was
-    # disconnected (or viewing another session) when the event fired still
-    # gets the approval modal on (re)connect, instead of the wait silently
-    # timing out. Entries are stored under both request_id and session_id
-    # keys, so dedupe by request_id.
+    # Re-broadcast active sandbox waits to the newly connected client.
+    # 授权等待不分会话重放：本应用是单用户个人助理，任何会话产生的权限
+    # 请求都应在任何打开的页面上可见（此前只重放当前会话的等待，导致
+    # 其他会话的请求永远看不到而超时）。
     _seen_waits = set()
     for _entry in list(_sandbox_waits.values()):
         if not isinstance(_entry, dict):
             continue
         _rid = _entry.get("request_id")
-        if not _rid or _rid in _seen_waits or _entry.get("session_id") != ws_session_id:
+        if not _rid or _rid in _seen_waits:
             continue
         _seen_waits.add(_rid)
         _pl = _entry.get("payload")
@@ -181,7 +180,7 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_json({
                 "type": "progress",
                 "event": "sandbox_blocked",
-                "session_id": ws_session_id,
+                "session_id": _entry.get("session_id", ws_session_id),
                 "request_id": _rid,
                 **_pl,
             })
