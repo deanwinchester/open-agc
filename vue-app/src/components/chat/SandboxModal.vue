@@ -47,10 +47,13 @@ const isSudo = computed(() => props.data.category === 'sudo');
 const isSecret = computed(() => props.data.category === 'secret');
 
 const title = computed(() => {
-  if (isSecret.value) return t.secretTitle;
-  if (props.data.blockType === 'network') return t.networkTitle;
-  if (props.data.blockType === 'permission') return t.permissionTitle;
-  return t.pathTitle;
+  let base;
+  if (isSecret.value) base = t.secretTitle;
+  else if (props.data.blockType === 'network') base = t.networkTitle;
+  else if (props.data.blockType === 'permission') base = t.permissionTitle;
+  else base = t.pathTitle;
+  // 授权不分会话展示：来自其他会话的请求在标题标注来源
+  return props.data.fromSession ? `${base}（来自会话 #${props.data.fromSession}）` : base;
 });
 
 const descText = computed(() => {
