@@ -12,6 +12,7 @@ import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Refresh, Search } from '@element-plus/icons-vue';
 import { cachedFetch, invalidateCache, request } from '../../api/client';
+import { refreshPluginViews } from '../../plugins/registry';
 import zh from '../../i18n/zh';
 
 const t = zh.settings.plugins;
@@ -85,6 +86,9 @@ async function scan() {
   scanning.value = true;
   try {
     const res = await request('/api/plugins/scan', { method: 'POST' });
+    // 后端已热重载插件代码；同步刷新前端插件视图（破缓存重载 vue-entry.js、
+    // 移除旧路由/导航后重新注册），无需刷新页面
+    await refreshPluginViews();
     ElMessage.success(`${t.scanDonePrefix}${res?.count ?? 0}${t.scanDoneSuffix}`);
     refresh();
   } catch (err) {

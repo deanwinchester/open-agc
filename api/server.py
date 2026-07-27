@@ -160,17 +160,9 @@ for _pd in [_plugins_dir, _user_plugins_dir]:
         _plugins.extend(discover_plugins(plugins_dir=_pd, broadcast_fn=_plugin_broadcast,
                           server_config=load_config() if "load_config" in dir() else {}))
 
-def _mount_plugins(app, plugins):
-    for p in plugins:
-        inst = p.instance
-        if inst and inst.router:
-            prefix = inst.router_prefix or f"/api/plugin/{p.name}"
-            app.include_router(inst.router, prefix=prefix)
-            print(f"[Server] Mounted plugin router: {p.name} -> {prefix}")
-        if inst and inst.static_dir and os.path.isdir(inst.static_dir):
-            from fastapi.staticfiles import StaticFiles
-            app.mount(f"/static/plugins/{p.name}", StaticFiles(directory=inst.static_dir), name=f"plugin_{p.name}_static")
-            print(f"[Server] Mounted plugin static: {p.name}")
+# _mount_plugins 的实现移到 api/plugin_mount.py（import-light，幽灵路由剪除可单测）；
+# 此处保留原名以兼容 routes_plugins.py 的 _srv._mount_plugins 调用。
+from api.plugin_mount import mount_plugins as _mount_plugins
 
 _mount_plugins(app, _plugins)
 print(f"[Server] Loaded {len(_plugins)} plugin(s)")

@@ -21,11 +21,17 @@
 //   - ElMessage / ElMessageBox: Element Plus 反馈组件（插件无法自行 import element-plus）
 //   - wsOn(type, fn): 订阅主应用 WebSocket 事件（返回退订函数；未连接时自动建立连接）
 //   - navigate(path): router.push 封装（插件内跳转，如创建训练后跳到监控页）
+//
+// 热更新：后端 POST /api/plugins/scan 重新加载插件代码后，前端调用
+// refreshPluginViews()（PluginsView 的扫描动作已接线）：import URL 带 ?t=
+// 时间戳破缓存重新拉取 vue-entry.js，旧路由经 router.removeRoute 移除后
+// 重新注册，旧导航项同步替换 —— 无需刷新页面、无需重启服务。
 
 import * as Vue from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { request } from '../api/client';
 import { useWsStore } from '../stores/ws';
+import { buildPluginEntryUrl, createRegistrationTracker, removeNavByName } from './registry-utils';
 
 // 侧边栏插件导航（响应式，App.vue 直接渲染）。
 // 元素形状：{ name, label, icon, views: [{ path, title, icon? }] }
@@ -49,26 +55,50 @@ function makeCtx(router, plugin) {
   };
 }
 
+// 已注册插件视图的记录：name -> { routeNames: [] }。
+// 作用一：保证 initPluginRegistry 可重入（重复调用不产生重复路由/导航）；
+// 作用二：重注册/刷新时按记录 removeRoute 移除旧路由。
+const _tracker = createRegistrationTracker();
+// 首次 init 时保存的 router，供 refreshPluginViews() 使用。
+let _router = null;
+
+// 移除某插件已注册的视图（路由 + 侧边栏导航项）；未注册过则为无操作。
+function removePluginRegistration(router, name) {
+  const rec = _tracker.take(name);
+  if (rec) {
+    for (const routeName of rec.routeNames) {
+      if (router.hasRoute(routeName)) router.removeRoute(routeName);
+    }
+  }
+  removeNavByName(pluginNav, name);
+}
+
 async function loadPluginViews(router, plugin) {
-  const url = `/static/plugins/${plugin.name}/${plugin.vue_entry}`;
+  // 同一插件重新注册（热更新）前，先移除其旧路由与旧导航项
+  removePluginRegistration(router, plugin.name);
+  // import URL 加时间戳破浏览器缓存，保证拿到最新 vue-entry.js
+  const url = buildPluginEntryUrl(plugin.name, plugin.vue_entry, Date.now());
   const mod = await import(/* @vite-ignore */ url);
   const setup = mod.default;
   if (typeof setup !== 'function') {
     console.warn(`[plugins] ${plugin.name}: vue_entry default export 不是函数，跳过`);
-    return;
+    return [];
   }
   const result = await setup(makeCtx(router, plugin));
   const views = (result && result.views) || [];
   const navViews = [];
+  const routeNames = [];
   for (const v of views) {
     if (!v || !v.path || !v.component) continue;
     const fullPath = `/plugins/${plugin.name}/${v.path}`;
+    const routeName = `plugin-${plugin.name}-${v.path}`;
     router.addRoute({
       path: fullPath,
-      name: `plugin-${plugin.name}-${v.path}`,
+      name: routeName,
       component: v.component,
       meta: { title: v.title || v.path, plugin: plugin.name },
     });
+    routeNames.push(routeName);
     navViews.push({ path: fullPath, title: v.title || v.path, icon: v.icon || '' });
   }
   if (navViews.length) {
@@ -79,13 +109,12 @@ async function loadPluginViews(router, plugin) {
       views: navViews,
     });
   }
+  return routeNames;
 }
-
-// 已完成视图注册的插件名（保证 initPluginRegistry 可重入：重复调用不产生重复路由/导航）。
-const _registered = new Set();
 
 // 应用启动时调用一次（main.js，mount 之后，保证 pinia 已激活）。
 export async function initPluginRegistry(router) {
+  _router = router;
   let data;
   try {
     data = await request('/api/plugins');
@@ -105,10 +134,10 @@ export async function initPluginRegistry(router) {
     plugins.push(p);
   }
   for (const p of plugins) {
-    if (_registered.has(p.name)) continue;
+    if (_tracker.has(p.name)) continue;
     try {
-      await loadPluginViews(router, p);
-      _registered.add(p.name); // 成功后才标记，失败允许下次重试
+      const routeNames = await loadPluginViews(router, p);
+      _tracker.set(p.name, routeNames); // 成功后才标记，失败允许下次重试
     } catch (err) {
       console.error(`[plugins] 加载插件视图失败: ${p.name}`, err);
     }
@@ -117,4 +146,15 @@ export async function initPluginRegistry(router) {
   // catch-all 路由已先匹配并重定向到 /chat。注册完成后 replace 当前路径触发
   // 重解析，让新注册的插件路由接管；对相同路径的 replace 是安全无副作用的。
   router.replace(router.currentRoute.value.fullPath);
+}
+
+// 后端扫描（POST /api/plugins/scan）成功后调用：清掉全部已注册插件视图
+// （removeRoute + 移除导航项），再重新拉取 /api/plugins 并注册。
+// vue-entry.js 经 ?t= 时间戳重新加载，前端热更新无需刷新页面。
+export async function refreshPluginViews() {
+  if (!_router) return;
+  for (const name of _tracker.names()) {
+    removePluginRegistration(_router, name);
+  }
+  await initPluginRegistry(_router);
 }
