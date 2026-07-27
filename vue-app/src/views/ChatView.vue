@@ -86,6 +86,7 @@ const downloadBanner = reactive({ visible: false, label: '', pct: 0 });
 const sandboxState = reactive({
   visible: false, path: '', toolName: '', blockType: 'path', description: '', category: '',
   requestId: '', // 唯一等待 id：随 sandbox_response 回传，ws.py 据此精确匹配（兼容旧会话键）
+  fromSession: 0, // 授权请求来源会话（非当前会话时弹窗标注，授权不分会话展示）
 });
 
 // ── 头部栏：agent 选择 / 当前模型 badge / token 用量（对齐旧聊天页头部） ──
@@ -280,10 +281,10 @@ function onStatus(data) {
 }
 
 function onProgress(data) {
-  if (!isForCurrent(data)) return;
   const ev = data.event;
 
-  // 沙箱授权与后台提问不依赖进度卡片状态
+  // 沙箱授权不分会话：单用户部署下任何会话产生的权限请求都必须可见
+  // （此前被 isForCurrent 过滤，其他会话的请求静默超时）。弹窗标注来源会话。
   if (ev === 'sandbox_blocked') {
     sandboxState.path = data.path || '';
     sandboxState.toolName = data.tool_name || data.tool || '?';
@@ -291,9 +292,14 @@ function onProgress(data) {
     sandboxState.description = data.description || '';
     sandboxState.category = data.category || '';
     sandboxState.requestId = data.request_id || '';
+    sandboxState.fromSession = data.session_id && data.session_id !== currentSessionId.value
+      ? data.session_id : 0;
     sandboxState.visible = true;
     return;
   }
+
+  if (!isForCurrent(data)) return;
+
   if (ev === 'ask_user') { handleAskUser(data); return; }
   if (ev === 'task_backgrounded') return; // 由顶层 task_backgrounded 事件统一提示
 
