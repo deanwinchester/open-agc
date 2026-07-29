@@ -82,9 +82,12 @@ class ShellSendTool(BaseTool):
 
         # Read new output since last read position
         out_file = ""
-        for tid, p in get_background_processes().items():
-            if p.get("pid") == pid:
-                out_file = p.get("output_file", "")
+        for _tid, _procs in get_background_processes().items():
+            for _pk, _p in _procs.items():
+                if _p.get("pid") == pid:
+                    out_file = _p.get("output_file", "")
+                    break
+            if out_file:
                 break
 
         if out_file and os.path.exists(out_file):

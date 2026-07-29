@@ -7,8 +7,11 @@
 // - POST /api/tasks/schedule {title, query, cron, session_id=1}（注意字段是 query/cron，
 //   旧前端发送 user_query/schedule_cron 与后端模型不符，创建一直失败——本视图按实际契约实现）
 // - PUT /api/tasks/{id}/schedule {title, query, cron, session_id}、POST /api/tasks/{id}/toggle-schedule
-// - GET /api/processes → {processes{id:{pid,command,alive,uptime,output_file,...}}}（含孤儿进程，验收修复 B 接入）
-// - POST /api/tasks/{id}/kill（进程终止，仅对数字任务 id 有效）
+// - GET /api/processes → {processes, discovered[]}（含孤儿进程，验收修复 B 接入）
+//   processes 键为 "{task_id}:{pid}"（一任务多进程展平；孤儿进程仍为 orphan_id），
+//   每项含 task_id/pid/command/output_file/started_at/uptime/alive，可带 detached:true；
+//   discovered 为 OS 扫描发现的、与工作目录相关但未追踪的进程 {pid,name,cmdline,create_time,uptime}
+// - POST /api/processes/{pid}/kill（按 pid 终止进程树，tracked/discovered 通用；后端有安全校验，失败返回 403/404）
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
@@ -90,7 +93,8 @@ async function loadTasks({ silent = false } = {}) {
 
 // ── 进程管理（验收修复 B）：列表行内进程徽标 + 顶部「全部进程」折叠面板 ──
 
-const processes = ref({}); // {taskId 或 orphan_id: {pid,command,alive,uptime,output_file,...}}
+const processes = ref({}); // {"{task_id}:{pid}" 或 orphan_id: {task_id?,pid,command,alive,uptime,detached?,...}}
+const discoveredProcs = ref([]); // OS 扫描发现的未追踪进程 [{pid,name,cmdline,create_time,uptime}]
 const processesLoading = ref(false);
 const processPanelOpen = ref([]); // el-collapse v-model（数组）
 
@@ -99,9 +103,12 @@ async function loadProcesses({ silent = true } = {}) {
   try {
     const data = await request('/api/processes');
     processes.value = data?.processes || {};
+    // 旧后端无 discovered 字段，兜底为空数组（分区不显示）
+    discoveredProcs.value = Array.isArray(data?.discovered) ? data.discovered : [];
   } catch (err) {
     if (!silent) ElMessage.error(`${t.processes.loadFailed}: ${err.message}`);
     processes.value = {};
+    discoveredProcs.value = [];
   } finally {
     if (!silent) processesLoading.value = false;
   }
@@ -112,8 +119,18 @@ const processList = computed(() =>
 );
 
 function aliveProcess(task) {
-  const p = processes.value[String(task.id)];
-  return p && p.alive ? p : null;
+  // 一任务可有多个进程：按 task_id 匹配，取第一个存活进程供徽标显示
+  return processList.value.find((p) => p.alive && String(p.task_id) === String(task.id)) || null;
+}
+
+function aliveCount(task) {
+  return processList.value.filter((p) => p.alive && String(p.task_id) === String(task.id)).length;
+}
+
+// 行对应的任务 id：新格式取项内 task_id；旧格式（键即 task_id）回退用 id。孤儿进程返回 null。
+function rowTaskId(row) {
+  const tid = row.task_id ?? row.id;
+  return isNumericId(tid) ? String(tid) : null;
 }
 
 function isNumericId(id) {
@@ -127,14 +144,16 @@ function fmtUptime(sec) {
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
 
-async function killProcessById(id) {
+// 按 pid 终止单个进程树：tracked（含孤儿）与 discovered 行通用，
+// 后端强制安全校验（仅 sandbox 相关进程），失败时 err.message 即后端 detail。
+async function killProcess(proc) {
   try {
-    await ElMessageBox.confirm(`#${id} — ${t.processes.killConfirm}`, t.processes.kill, { type: 'warning' });
+    await ElMessageBox.confirm(`PID ${proc.pid} — ${t.processes.killConfirm}`, t.processes.kill, { type: 'warning' });
   } catch {
     return; // 用户取消
   }
   try {
-    await request(`/api/tasks/${id}/kill`, { method: 'POST' });
+    await request(`/api/processes/${proc.pid}/kill`, { method: 'POST' });
     ElMessage.success(t.processes.killSuccess);
     loadProcesses({ silent: true });
     loadTasks({ silent: true });
@@ -337,8 +356,8 @@ onUnmounted(() => {
           <el-table v-else :data="processList" size="small">
             <el-table-column :label="t.processes.colTask" width="100">
               <template #default="{ row }">
-                <el-link v-if="isNumericId(row.id)" type="primary" @click="router.push(`/tasks/${row.id}`)">
-                  #{{ row.id }}
+                <el-link v-if="rowTaskId(row)" type="primary" @click="router.push(`/tasks/${rowTaskId(row)}`)">
+                  #{{ rowTaskId(row) }}
                 </el-link>
                 <span v-else class="orphan-label">{{ t.processes.orphan }}</span>
               </template>
@@ -352,27 +371,56 @@ onUnmounted(() => {
             <el-table-column :label="t.processes.colUptime" width="110" align="right">
               <template #default="{ row }">{{ fmtUptime(row.uptime) }}</template>
             </el-table-column>
-            <el-table-column :label="t.processes.colStatus" width="90" align="center">
+            <el-table-column :label="t.processes.colStatus" width="150" align="center">
               <template #default="{ row }">
                 <el-tag size="small" :type="row.alive ? 'success' : 'info'" disable-transitions>
                   {{ row.alive ? t.processes.alive : t.processes.dead }}
+                </el-tag>
+                <el-tag v-if="row.detached" size="small" type="warning" disable-transitions class="detached-tag">
+                  {{ t.processes.detached }}
                 </el-tag>
               </template>
             </el-table-column>
             <el-table-column :label="t.processes.colActions" width="90" align="center">
               <template #default="{ row }">
                 <el-button
-                  v-if="isNumericId(row.id) && row.alive"
+                  v-if="row.alive && row.pid"
                   size="small"
                   type="danger"
                   plain
-                  @click="killProcessById(row.id)"
+                  @click="killProcess(row)"
                 >
                   {{ t.processes.kill }}
                 </el-button>
               </template>
             </el-table-column>
           </el-table>
+          <!-- 发现的进程：OS 扫描命中工作目录但未被任务追踪，为空时整块不显示 -->
+          <div v-if="discoveredProcs.length" class="discovered-section">
+            <div class="discovered-head">
+              <span class="discovered-title">🔍 {{ t.processes.discoveredTitle }}（{{ discoveredProcs.length }}）</span>
+              <p class="discovered-desc">{{ t.processes.discoveredDesc }}</p>
+            </div>
+            <el-table :data="discoveredProcs" size="small">
+              <el-table-column prop="pid" :label="t.processes.colPid" width="90" />
+              <el-table-column prop="name" :label="t.processes.colName" width="140" show-overflow-tooltip />
+              <el-table-column :label="t.processes.colCmdline" min-width="220" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <code class="proc-cmd">{{ row.cmdline }}</code>
+                </template>
+              </el-table-column>
+              <el-table-column :label="t.processes.colUptime" width="110" align="right">
+                <template #default="{ row }">{{ fmtUptime(row.uptime) }}</template>
+              </el-table-column>
+              <el-table-column :label="t.processes.colActions" width="90" align="center">
+                <template #default="{ row }">
+                  <el-button size="small" type="danger" plain @click="killProcess(row)">
+                    {{ t.processes.kill }}
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
         </div>
       </el-collapse-item>
     </el-collapse>
@@ -462,7 +510,7 @@ onUnmounted(() => {
               {{ t.sessionPrefix }}{{ task.session_id }}<template v-if="task.session_name"> · {{ task.session_name }}</template>
             </span>
             <span v-if="aliveProcess(task)" class="process-badge">
-              ⚙ {{ t.processes.badge }} PID {{ aliveProcess(task).pid }}
+              ⚙ {{ t.processes.badge }} PID {{ aliveProcess(task).pid }}<template v-if="aliveCount(task) > 1"> ×{{ aliveCount(task) }}</template>
             </span>
             <span v-if="isScheduled(task) && task.schedule_cron" class="schedule-info">
               {{ task.schedule_enabled ? t.schedule.enabled : t.schedule.disabled }} | <code>{{ task.schedule_cron }}</code>
@@ -642,6 +690,29 @@ onUnmounted(() => {
 .proc-cmd {
   font-size: 12px;
   color: var(--el-text-color-regular);
+}
+
+/* 「已脱离追踪」徽标：跟在存活状态后，醒目但不刺眼（warning 浅色 tag） */
+.detached-tag {
+  margin-left: 6px;
+}
+
+/* 发现的进程分区：与上方追踪表同面板内分隔 */
+.discovered-section {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+
+.discovered-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.discovered-desc {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 /* 进程徽标：meta 行内小 chip（等宽） */

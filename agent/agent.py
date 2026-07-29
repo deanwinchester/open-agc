@@ -368,6 +368,19 @@ class OpenAGCAgent:
             f"当执行耗时操作（下载模型/安装依赖/训练等），shell 返回 [Still Running] 时，"
             f"应立即调用 pause_and_wait 工具（扩展工具，未启用时先 search_available_tools）暂停自己。系统会保存上下文，后台任务完成后自动恢复执行。"
             f"不要让用户干等着，也不要反复重试。\n"
+            f"\n## 大任务检查点\n"
+            f"执行大批量/长耗时任务（大规模数据导出、批量处理、分批抓取等）时，"
+            f"必须在沙箱工作目录下维护进度检查点文件（确切路径见「当前任务检查点」段，"
+            f"格式为 .checkpoints/task_<任务ID>.json），每处理完一批就立即更新。字段：\n"
+            f"- task: 任务描述\n"
+            f"- total: 总条数/总量\n"
+            f"- done: 已处理条数\n"
+            f"- last_cursor: 最后处理位置的游标/主键/偏移量（断点续跑的关键，必须精确）\n"
+            f"- phase: 当前阶段\n"
+            f"- files_dir: 交付物目录\n"
+            f"- updated_at: 更新时间（ISO 格式）\n"
+            f"任务被中断后恢复时，系统会把该检查点内容注入上下文；届时必须从 last_cursor 断点继续，"
+            f"严禁清理现场从头重跑、严禁重复处理已完成部分。\n"
             f"\n## Python 后台进程\n"
             f"如果使用 execute_python 启动长期运行的进程（如 ffmpeg 录屏、服务器等），"
             f"必须将 stdout/stderr 重定向到 subprocess.DEVNULL 或文件，否则父进程会"
@@ -2248,6 +2261,15 @@ class OpenAGCAgent:
                         # Only inject when title is a meaningful goal (> 5 chars)
                         if len(_goal) > 5 and _goal not in system_content:
                             system_content += f"\n\n## 当前任务目标\n始终聚焦于此目标，不要偏离：\n\n{_goal[:200]}\n"
+                    # 告知数字任务 ID 与检查点文件路径（「大任务检查点」约定的
+                    # 落盘位置）——任务 ID 只在运行期经 run_turn 传入，静态提示
+                    # 里无法写死；恢复时服务端读取同一文件把断点注入上下文。
+                    _ckpt_path = os.path.join(self.sandbox_dir or os.getcwd(),
+                                              ".checkpoints", f"task_{self.task_id}.json")
+                    system_content += (
+                        f"\n\n## 当前任务检查点\n当前任务 ID: {self.task_id}。"
+                        f"执行大批量/长耗时任务时，必须把进度检查点维护到 `{_ckpt_path}`"
+                        f"（字段与规则见「大任务检查点」约定），每处理完一批就更新。\n")
                 except Exception:
                     pass
             self.messages[0]["content"] = system_content

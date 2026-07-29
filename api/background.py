@@ -18,7 +18,7 @@ from api.task_core import (
     add_task_step, _extract_task_title, _record_task_deliverables,
     _load_session_context, _get_task_step_count, _check_goal_completeness,
     _is_task_stale, _get_step_offset, _STALE_RUNNING_MINUTES,
-    remediate_goal, _link_task_to_goal,
+    remediate_goal, _link_task_to_goal, format_checkpoint_notice,
 )
 from tools.shell import (
     get_background_processes, cleanup_background_process,
@@ -271,6 +271,12 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
         query = (f"【系统指令 - 自动恢复】你之前因为执行步骤过多被系统自动中断了。"
                  f"请根据之前的上下文继续完成未完成的任务。"
                  f"原始任务: {user_query}")
+        # 有上下文快照时检查点提示已由 get_task_context 注入；无快照时这里
+        # 兜底拼进恢复查询，保证断点信息不丢（ws 手动恢复路径同口径）。
+        if not context_messages:
+            _ck_notice = format_checkpoint_notice(task_id)
+            if _ck_notice:
+                query += f"\n\n{_ck_notice}"
 
         # Broadcast reconstructed history steps so they appear in the session
         _broadcast_task_history(task_id, bg_session_id, "running")
@@ -436,6 +442,67 @@ def resume_task_with_late_answer(task_id: int, answer: str) -> dict:
     print(f"[BgTask] Task #{task_id}: late answer injected, resuming")
     return {"ok": True, "status": "resumed",
             "message": f"回答已注入，任务 #{task_id} 已恢复执行"}
+
+
+def resume_task_manual(task_id: int, extra_instruction: str = "") -> dict:
+    """任务管理界面「继续」按钮的手动恢复入口（REST POST /api/tasks/{id}/resume）。
+
+    与 WS {type:'resume'}（api/ws.py）同一条恢复链路的纯 REST 版本：
+    活后台 agent 持有任务 → 指令排队投递；否则 状态校验 →
+    claim_task_for_resume CAS 认领（认领即 running，同时清历史中断原因）
+    → 附加指令注入恢复上下文 → _run_background_task 后台恢复。
+    可恢复状态与 WS 路径对齐：interrupted/backgrounded/background_failed/
+    failed/completed。返回 {"ok": ...} 结果字典（同 resume_task_with_late_answer）。
+    """
+    try:
+        conn = db_connect()
+        row = conn.execute(
+            "SELECT status, user_query FROM tasks WHERE id=?", (task_id,)).fetchone()
+        conn.close()
+    except Exception as e:
+        return {"ok": False, "error": "db_error", "message": str(e)}
+    if not row:
+        return {"ok": False, "error": "not_found",
+                "message": f"任务 #{task_id} 不存在"}
+    status, user_query = row[0], row[1] or ""
+    extra = (extra_instruction or "").strip()
+    # 活后台 agent 持有该任务：不另开恢复，把继续指令排队给它（同 WS 语义）
+    _bg_agent = _background_agents.get(task_id)
+    if _bg_agent is not None and not getattr(_bg_agent, 'is_interrupted', False):
+        try:
+            _bg_agent.queue_message(
+                f"[用户继续指令] {extra}" if extra else "继续执行未完成的任务")
+            return {"ok": True, "status": "queued",
+                    "message": f"任务 #{task_id} 正在运行，指令已排队投递"}
+        except Exception as e:
+            return {"ok": False, "error": "queue_failed",
+                    "message": f"指令投递失败: {e}"}
+    # CAS 允许的状态集合与 WS resume 一致（WS 原语义：任何非 running 均可恢复）
+    _RESUMABLE = ('interrupted', 'backgrounded', 'background_failed',
+                  'failed', 'completed')
+    if status not in _RESUMABLE:
+        return {"ok": False, "error": "not_resumable", "status": status,
+                "message": f"任务 #{task_id} 正在运行，无需恢复"
+                if status == "running" else
+                f"任务 #{task_id} 当前状态（{status}）不可恢复"}
+    # CAS: 原子认领，Guardian/BgMonitor/WS 等其他恢复路径不会并发双跑
+    if not claim_task_for_resume(task_id, _RESUMABLE):
+        return {"ok": False, "error": "claim_failed", "status": status,
+                "message": f"任务 #{task_id} 已被其他路径恢复，请稍候"}
+    ctx = get_task_context(task_id) or []
+    if extra:
+        # 附加指令作为最后一条 user 消息注入恢复上下文（agent 恢复时最先看到）
+        ctx.append({"role": "user", "content": f"【用户附加指令】{extra}"})
+        save_task_context(task_id, ctx)
+    threading.Thread(
+        target=_run_background_task,
+        args=(task_id, user_query, ctx or None, True),
+        daemon=True
+    ).start()
+    print(f"[BgTask] Task #{task_id}: manual resume via REST"
+          + (" (with extra instruction)" if extra else ""))
+    return {"ok": True, "status": "resumed",
+            "message": f"任务 #{task_id} 已恢复执行"}
 
 def _normalize_next_run_at_utc():
     """One-time normalization: recompute next_run_at (UTC) for all enabled schedules.
@@ -606,6 +673,176 @@ def _read_masked_output_tail(path: str, max_chars: int) -> str:
     return text[-max_chars:]
 
 
+def _flip_bg_to_interrupted(conn, task_id: int, summary: str, reason: str) -> bool:
+    """Guarded backgrounded→interrupted flip for startup reconcile.
+
+    WHERE status='backgrounded' 守卫：BgMonitor 的 wake 点火与启动 reconcile
+    几乎同时启动，若任务已被抢先 CAS 认领（running），不覆写、不重复恢复。
+    语义与 update_task_status(..., 'interrupted') 一致（清 wake_at、刷新
+    updated_at）。返回是否成功翻转。
+    """
+    cur = conn.execute(
+        "UPDATE tasks SET status='interrupted', result_summary=?, "
+        "interruption_reason=?, wake_at=NULL, updated_at=CURRENT_TIMESTAMP "
+        "WHERE id=? AND status='backgrounded'",
+        (summary, reason, task_id))
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def reconcile_backgrounded_after_restart():
+    """服务器重启后统一恢复 backgrounded 任务。
+
+    旧逻辑只处理有下载锚点的任务：无锚点（无 wake_at/无进程/无下载）的任务
+    重启后永远滞留 backgrounded。现统一：所有仍 backgrounded 的任务都置
+    interrupted 并注入「服务器重启，请继续执行」系统通知，随后走
+    claim_task_for_resume CAS + _run_background_task 恢复链路（resume_count
+    自然计数）。下载锚点语义保留（完成/失败文案与 background_resumed 原子
+    标志），只是不再只有它们被恢复。
+
+    防恢复风暴：沿用 _is_backoff_elapsed 退避（按重启前的 updated_at 判定——
+    标记 interrupted 会刷新 updated_at，必须先快照）与 max_resume_count 上限
+    （超限置 background_failed）；退避未到期的任务留在 interrupted，等下次
+    启动 reconcile 或 Guardian（heartbeat 开启时）接管。heartbeat 默认关闭、
+    Guardian 不做 interrupted 恢复，因此必须在启动时主动 reconcile。
+    """
+    try:
+        conn = db_connect()
+        # 0. 快照所有 backgrounded 任务（updated_at 用于退避判定——后面的
+        #    update_task_status 会刷新它，必须先取出来）
+        bg_rows = conn.execute(
+            "SELECT id, user_query, resume_count, max_resume_count, updated_at "
+            "FROM tasks WHERE status='backgrounded'"
+        ).fetchall()
+        bg_by_id = {r["id"]: dict(r) for r in bg_rows}
+
+        # 1. 下载完成锚点（原语义：完成文案 + background_resumed 原子标志）。
+        #    状态翻转带守卫：BgMonitor 的 wake 点火与本函数几乎同时启动，
+        #    可能已抢先 CAS 认领（running）——不覆写、不重复恢复。
+        pairs = conn.execute(
+            "SELECT d.id as dl_id, d.task_id FROM downloads d "
+            "JOIN tasks t ON t.id = d.task_id "
+            "WHERE d.status = 'completed' AND d.background_resumed = 0 "
+            "AND t.status = 'backgrounded'"
+        ).fetchall()
+        anchored = set()
+        flipped = set()  # 本函数成功翻转 backgrounded→interrupted 的任务
+        for p in pairs:
+            tid = p["task_id"]
+            if not _flip_bg_to_interrupted(
+                    conn, tid, "服务器重启，后台任务已完成", "background_complete"):
+                print(f"[Startup] Task {tid}: already claimed by another path, skipping")
+                continue
+            anchored.add(tid)
+            flipped.add(tid)
+            ctx = get_task_context(tid)
+            if ctx:
+                ctx.append({"role": "user", "content": (
+                    "【系统通知】服务器重启，后台下载任务已完成，文件已就绪。"
+                    "请继续执行之前未完成的任务。"
+                )})
+                save_task_context(tid, ctx)
+            conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?",
+                         (p["dl_id"],))
+            conn.commit()
+            print(f"[Startup] Recovered backgrounded task {tid} from completed download {p['dl_id']}")
+
+        # 2. 下载失败锚点（原语义：只通知会话，不触发恢复）
+        failed_pairs = conn.execute(
+            "SELECT DISTINCT d.id as dl_id, d.task_id, d.label, d.filename, d.error_message, "
+            "(SELECT session_id FROM task_steps WHERE task_id = d.task_id AND session_id IS NOT NULL LIMIT 1) as session_id "
+            "FROM downloads d "
+            "JOIN tasks t ON t.id = d.task_id "
+            "WHERE d.status = 'failed' AND d.background_resumed = 0 "
+            "AND t.status IN ('completed', 'interrupted', 'background_failed')"
+        ).fetchall()
+        for p in failed_pairs:
+            label = p["label"] or p["filename"] or f"download #{p['dl_id']}"
+            err = p["error_message"] or "未知错误"
+            session_id = p["session_id"] or 1
+            save_message("system",
+                f"❌ 下载失败: {label}\n错误信息: {err}",
+                session_id)
+            conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?",
+                         (p["dl_id"],))
+            conn.commit()
+            print(f"[Startup] Recovered failed download #{p['dl_id']} (task {p['task_id']}) — message saved to session {session_id}")
+
+        # 3. 其余 backgrounded 任务（无完成下载锚点，含原"进程信息丢失"分支）：
+        #    统一置 interrupted + 注入「服务器重启，请继续执行」通知
+        #    （带与步骤 1 相同的 status='backgrounded' 守卫，防与 BgMonitor 抢认领）
+        for tid in bg_by_id:
+            if tid in anchored:
+                continue
+            # 重启前登记且仍存活的进程：注册表已持久化并在启动时复活，
+            # 留给 BgMonitor 自然接管（继续监控/完成后恢复），这里不置
+            # interrupted、不重复恢复。
+            try:
+                from tools.shell import get_background_processes_for_task
+                from core.process import pid_alive as _pid_alive
+                _tp = get_background_processes_for_task(tid)
+                if any(_pid_alive(i.get("pid")) for i in _tp.values() if i.get("pid")):
+                    print(f"[Startup] Task {tid}: tracked process still alive — leaving to BgMonitor")
+                    continue
+            except Exception:
+                pass
+            try:
+                if not _flip_bg_to_interrupted(
+                        conn, tid, "服务器重启，请继续执行", "server_restart"):
+                    print(f"[Startup] Task {tid}: already claimed by another path, skipping")
+                    continue
+                flipped.add(tid)
+                ctx = get_task_context(tid)
+                if ctx:
+                    ctx.append({"role": "user", "content": (
+                        "【系统通知】服务器重启，后台进程信息已丢失。"
+                        "请检查之前的工作状态，继续执行之前未完成的任务。"
+                    )})
+                    save_task_context(tid, ctx)
+                print(f"[Startup] Task {tid}: marked interrupted (server restart)")
+            except Exception as e:
+                print(f"[Startup] Task {tid}: recovery error: {e}")
+
+        # 4. 统一恢复（只处理本函数成功翻转的任务）：max_resume_count 上限 +
+        #    _is_backoff_elapsed 退避 + claim_task_for_resume CAS（认领即
+        #    running）+ _run_background_task
+        _cfg_mrc = load_config().get("max_resume_count", 10)
+        for tid in flipped:
+            row = bg_by_id[tid]
+            try:
+                _rc = row.get("resume_count") or 0
+                _mrc = row.get("max_resume_count") or _cfg_mrc
+                if _rc >= _mrc:
+                    conn.execute(
+                        "UPDATE tasks SET status='background_failed', result_summary=?, "
+                        "interruption_reason='max_resume_exceeded', updated_at=CURRENT_TIMESTAMP "
+                        "WHERE id=? AND status='interrupted'",
+                        (f"自动恢复次数超限（{_rc}/{_mrc}），已停止自动恢复", tid))
+                    conn.commit()
+                    print(f"[Startup] Task {tid}: resume_count {_rc}/{_mrc} exceeded — marked background_failed")
+                    continue
+                if not _is_backoff_elapsed(row.get("updated_at"), _rc):
+                    print(f"[Startup] Task {tid}: backoff not elapsed (resume_count={_rc}), resume deferred")
+                    continue
+                # CAS: 认领即 running；认领失败说明另一路径已接管，放弃本次恢复
+                if not claim_task_for_resume(tid, ('interrupted',)):
+                    print(f"[Startup] Task {tid}: resume claim failed (claimed by another path), skipping")
+                    continue
+                ctx = get_task_context(tid)
+                threading.Thread(
+                    target=_run_background_task,
+                    args=(tid, row.get("user_query") or "", ctx, True),
+                    daemon=True
+                ).start()
+                print(f"[Startup] Task {tid}: resumed after server restart")
+            except Exception as e:
+                print(f"[Startup] Task {tid}: resume error: {e}")
+
+        conn.close()
+    except Exception as e:
+        print(f"[Startup] Background recovery error: {e}")
+
+
 def start_background_monitor():
     """Monitor backgrounded tasks — check download/process completion and auto-resume."""
     def monitor_loop():
@@ -622,6 +859,17 @@ def start_background_monitor():
                 ).fetchall()
                 if bg_tasks:
                     print(f"[BgMonitor] Found {len(bg_tasks)} backgrounded task(s) to check")
+                # 惰性回收僵尸进程条目：任何状态任务的死 pid 条目都清（下方逐
+                # 任务检查只覆盖 backgrounded——running/interrupted 等任务名下
+                # 的死条目此前永远显示"运行中"）。本轮要处理的 backgrounded
+                # 任务排除在外：其死条目留给下方分支判定（关系"全死才恢复"）。
+                try:
+                    from tools.shell import reap_dead_background_processes
+                    reap_dead_background_processes(
+                        alive_fn=pid_alive,
+                        exclude_task_ids={str(t["id"]) for t in bg_tasks})
+                except Exception as _reap_e:
+                    print(f"[BgMonitor] Reap error: {_reap_e}")
                 for task in bg_tasks:
                     tid = task["id"]
 
@@ -722,12 +970,12 @@ def start_background_monitor():
                     try:
                         from tools.shell import (get_background_processes, cleanup_background_process,
                                                   get_orphan_processes, cleanup_orphan_process,
-                                                  adopt_orphan_processes)
+                                                  adopt_orphan_processes, detach_background_process)
                         bg_procs = get_background_processes()
-                        pinfo = bg_procs.get(str(tid))
+                        task_procs = bg_procs.get(str(tid))  # {pid: info}，一任务多进程
 
                         # Fallback 1: try orphan pool if main pool misses
-                        if not pinfo:
+                        if not task_procs:
                             orphan_procs = get_orphan_processes()
                             if orphan_procs:
                                 # Try to adopt orphans matching this task's session/time
@@ -739,12 +987,12 @@ def start_background_monitor():
                                 if adopted:
                                     # Re-read after adoption
                                     bg_procs = get_background_processes()
-                                    pinfo = bg_procs.get(str(tid))
-                                    if pinfo:
+                                    task_procs = bg_procs.get(str(tid))
+                                    if task_procs:
                                         print(f"[BgMonitor] Task {tid}: adopted orphan process")
 
                         # Fallback 2: handle backgrounded tasks with no process info (e.g. after restart)
-                        if not pinfo:
+                        if not task_procs:
                             try:
                                 updated_str = task["updated_at"] or task["created_at"]
                                 if updated_str:
@@ -804,72 +1052,94 @@ def start_background_monitor():
                             except Exception as ts_err:
                                 print(f"[BgMonitor] Task {tid}: time-check error: {ts_err}")
 
-                        if pinfo:
-                            pid = pinfo.get("pid")
-                            out_file = pinfo.get("output_file", "")
-                            command = pinfo.get("command", "")
-                            should_resume = False
-                            try:
+                        if task_procs:
+                            # 一任务多进程：按 pid 逐个判活——任务的所有 pid 都死了
+                            # 才触发恢复；部分存活继续等（绝不提前判完成）。
+                            _alive_entries = []
+                            _dead_keys = []
+                            for _pk, _pi in task_procs.items():
+                                _p = _pi.get("pid")
                                 # NOTE: os.kill(pid, 0) would TERMINATE the process on
                                 # Windows (TerminateProcess), so use psutil-based check.
-                                if not pid_alive(pid):
-                                    raise OSError(f"process {pid} not found")
-                                # Process still running — check if output file stopped growing
-                                if out_file and _os.path.exists(out_file):
-                                    cur_size = _os.path.getsize(out_file)
-                                    prev = _output_staleness.get(str(tid), {})
+                                if _p and pid_alive(_p):
+                                    _alive_entries.append(_pi)
+                                else:
+                                    _dead_keys.append(_pk)
+                            should_resume = not _alive_entries
+                            if should_resume:
+                                # 全部死亡：取最近登记进程的输出/命令用于恢复通知
+                                _latest = max(task_procs.values(),
+                                              key=lambda i: i.get("started_at") or 0)
+                                out_file = _latest.get("output_file", "")
+                                command = _latest.get("command", "")
+                                cleanup_background_process(str(tid))
+                            else:
+                                # 清掉已死 pid 的条目（活条目继续监控）
+                                for _dk in _dead_keys:
+                                    cleanup_background_process(str(tid), _dk)
+                                # 统一保守语义（不分长/短任务）：进程活着就绝不
+                                # 判完成。输出冻结满 ~15min（_STALL_FREEZE_ROUNDS
+                                # 轮 × 10s）的进程移入 orphan 池（detached 标记）
+                                # 而不是丢弃——进程继续跑、不删输出文件，在进程
+                                # 管理中仍可见可杀；任务的进程全部脱离后写兜底
+                                # wake_at（+30min）让任务被自动收回询问用户。
+                                _detached = []
+                                for _pi in _alive_entries:
+                                    _p = _pi.get("pid")
+                                    _of = _pi.get("output_file", "")
+                                    if not (_of and _os.path.exists(_of)):
+                                        continue
+                                    _sk = f"{tid}:{_p}"
+                                    cur_size = _os.path.getsize(_of)
+                                    prev = _output_staleness.get(_sk, {})
                                     prev_size = prev.get("size", -1)
                                     if cur_size == prev_size and cur_size >= 0:
                                         # File not growing — increment staleness counter
                                         new_count = prev.get("count", 0) + 1
                                         since = prev.get("since") or _time.time()
-                                        _output_staleness[str(tid)] = {"size": cur_size, "count": new_count, "since": since}
-                                        # 统一保守语义（不分长/短任务）：进程活着就绝不
-                                        # 判完成。输出冻结满 ~15min（_STALL_FREEZE_ROUNDS
-                                        # 轮 × 10s）才解除追踪——如实告知"仍在运行、
-                                        # 无输出 N 分钟"，不删输出文件，并写兜底 wake_at
-                                        # （+30min）让任务被自动收回询问用户。
+                                        _output_staleness[_sk] = {"size": cur_size, "count": new_count, "since": since}
                                         if new_count >= _STALL_FREEZE_ROUNDS:
                                             stall_min = max(1, int((_time.time() - since) / 60))
-                                            print(f"[BgMonitor] Task {tid}: pid {pid} alive but output frozen ~{stall_min}min — untracking (process left running)")
-                                            cleanup_background_process(str(tid))
-                                            _output_staleness.pop(str(tid), None)
-                                            try:
-                                                _wake_dt = (datetime.now(timezone.utc) + timedelta(minutes=30)).strftime('%Y-%m-%d %H:%M:%S')
-                                                conn.execute(
-                                                    "UPDATE tasks SET wake_at=? WHERE id=? AND wake_at IS NULL",
-                                                    (_wake_dt, tid))
-                                                conn.commit()
-                                            except Exception as _wk_e:
-                                                print(f"[BgMonitor] Task {tid}: fallback wake_at error: {_wk_e}")
-                                            ctx = get_task_context(tid)
-                                            if ctx:
-                                                ctx.append({"role": "user", "content": (
-                                                    f"【系统通知】后台进程（PID {pid}）仍在运行，但已约 {stall_min} 分钟无输出，"
-                                                    f"已解除进程追踪。系统将在约 30 分钟后自动唤醒本任务确认进展；"
-                                                    f"也可手动在任务管理中终止进程或恢复任务。"
-                                                )})
-                                                save_task_context(tid, ctx)
-                                            continue
+                                            print(f"[BgMonitor] Task {tid}: pid {_p} alive but output frozen ~{stall_min}min — detaching to orphan pool (process left running)")
+                                            detach_background_process(str(tid), _p)
+                                            _output_staleness.pop(_sk, None)
+                                            _detached.append((_p, stall_min))
                                     else:
                                         # File still growing — reset staleness
-                                        _output_staleness[str(tid)] = {"size": cur_size, "count": 0}
-                            except OSError:
-                                # Process has terminated — resume task
-                                should_resume = True
-                                cleanup_background_process(str(tid))
+                                        _output_staleness[_sk] = {"size": cur_size, "count": 0}
+                                if _detached and not get_background_processes().get(str(tid)):
+                                    # 任务名下已无任何被追踪进程（全部冻结脱离）：
+                                    # 兜底 wake_at + 如实告知（进程未丢，在 orphan 区）
+                                    _p, stall_min = _detached[-1]
+                                    try:
+                                        _wake_dt = (datetime.now(timezone.utc) + timedelta(minutes=30)).strftime('%Y-%m-%d %H:%M:%S')
+                                        conn.execute(
+                                            "UPDATE tasks SET wake_at=? WHERE id=? AND wake_at IS NULL",
+                                            (_wake_dt, tid))
+                                        conn.commit()
+                                    except Exception as _wk_e:
+                                        print(f"[BgMonitor] Task {tid}: fallback wake_at error: {_wk_e}")
+                                    ctx = get_task_context(tid)
+                                    if ctx:
+                                        ctx.append({"role": "user", "content": (
+                                            f"【系统通知】后台进程（PID {_p}）仍在运行，但已约 {stall_min} 分钟无输出，"
+                                            f"已转入进程管理列表（标记为已脱离监控，可手动终止）。"
+                                            f"系统将在约 30 分钟后自动唤醒本任务确认进展；也可手动恢复任务。"
+                                        )})
+                                        save_task_context(tid, ctx)
 
                             if not should_resume:
-                                continue  # Process still active, skip this check
+                                continue  # 进程仍存活（或刚脱离追踪），不恢复
 
-                            # ── Common resume path (process dead OR output stalled) ──
+                            # ── Common resume path (all tracked processes dead) ──
                             # CAS: 认领即 running，不再降级 interrupted；认领失败说明
                             # 另一路径（wake/下载直启/Guardian/WS）已接管，放弃本次恢复。
                             if not claim_task_for_resume(tid, ('backgrounded',)):
                                 print(f"[BgMonitor] Task {tid}: resume claim failed (claimed by another path), skipping")
                                 continue
                             _output_staleness.pop(str(tid), None)
-                            cleanup_background_process(str(tid))
+                            for _sk in [k for k in _output_staleness if k.startswith(f"{tid}:")]:
+                                _output_staleness.pop(_sk, None)
                             full_out = ""
                             if out_file and _os.path.exists(out_file):
                                 # Masked read: raw output may contain credentials

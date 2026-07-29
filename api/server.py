@@ -371,82 +371,8 @@ def reconcile_tasks():
 
 reconcile_tasks()
 
-def reconcile_backgrounded_after_restart():
-    """After server restart, check for completed downloads and lost shell processes
-    linked to backgrounded tasks."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        pairs = conn.execute(
-            "SELECT d.id as dl_id, d.task_id, t.status as task_status FROM downloads d "
-            "JOIN tasks t ON t.id = d.task_id "
-            "WHERE d.status = 'completed' AND d.background_resumed = 0 "
-            "AND t.status = 'backgrounded'"
-        ).fetchall()
-        for p in pairs:
-            tid = p["task_id"]
-            ctx = get_task_context(tid)
-            if ctx:
-                ctx.append({"role": "user", "content": (
-                    "【系统通知】服务器重启，后台下载任务已完成，文件已就绪。"
-                    "请继续执行之前未完成的任务。"
-                )})
-                update_task_status(tid, "interrupted",
-                    "服务器重启，后台任务已完成", interruption_reason="background_complete")
-                save_task_context(tid, ctx)
-                conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?",
-                             (p["dl_id"],))
-                conn.commit()
-                print(f"[Startup] Recovered backgrounded task {tid} from completed download {p['dl_id']}")
-        # Also reconcile failed downloads linked to any task
-        failed_pairs = conn.execute(
-            "SELECT DISTINCT d.id as dl_id, d.task_id, d.label, d.filename, d.error_message, "
-            "(SELECT session_id FROM task_steps WHERE task_id = d.task_id AND session_id IS NOT NULL LIMIT 1) as session_id "
-            "FROM downloads d "
-            "JOIN tasks t ON t.id = d.task_id "
-            "WHERE d.status = 'failed' AND d.background_resumed = 0 "
-            "AND t.status IN ('completed', 'interrupted', 'background_failed')"
-        ).fetchall()
-        for p in failed_pairs:
-            label = p["label"] or p["filename"] or f"download #{p['dl_id']}"
-            err = p["error_message"] or "未知错误"
-            session_id = p["session_id"] or 1
-            save_message("system",
-                f"❌ 下载失败: {label}\n错误信息: {err}",
-                session_id)
-            conn.execute("UPDATE downloads SET background_resumed=1 WHERE id=?",
-                         (p["dl_id"],))
-            conn.commit()
-            print(f"[Startup] Recovered failed download #{p['dl_id']} (task {p['task_id']}) — message saved to session {session_id}")
-
-        # Reconcile backgrounded tasks whose shell process info was lost (in-memory dict)
-        lost_tasks = conn.execute(
-            "SELECT id FROM tasks WHERE status='backgrounded' "
-            "AND id NOT IN (SELECT DISTINCT task_id FROM downloads WHERE status='completed' AND background_resumed=0)"
-        ).fetchall()
-        if lost_tasks:
-            print(f"[Startup] Found {len(lost_tasks)} backgrounded task(s) with lost process info (server restart)")
-            for t in lost_tasks:
-                try:
-                    tid = t["id"]
-                    ctx = get_task_context(tid)
-                    if ctx:
-                        ctx.append({"role": "user", "content": (
-                            "【系统通知】服务器重启，后台命令的进程信息已丢失。"
-                            "请检查之前的工作状态，如有需要请重新执行。"
-                        )})
-                        save_task_context(tid, ctx)
-                    update_task_status(tid, "interrupted",
-                        "服务器重启，后台进程信息丢失", interruption_reason="process_lost")
-                    print(f"[Startup] Task {tid}: marked interrupted (process info lost on restart)")
-                except Exception as e:
-                    print(f"[Startup] Task {tid}: recovery error: {e}")
-
-        conn.close()
-    except Exception as e:
-        print(f"[Startup] Background recovery error: {e}")
-
-# Note: reconcile_backgrounded_after_restart() is called later after all helper functions are defined
+# reconcile_backgrounded_after_restart 移至 api.background（统一定义于恢复链路
+# 所在模块，便于测试）；启动时通过 _bg.reconcile_backgrounded_after_restart() 调用。
 
 # Initialize StatsManager singleton with correct database
 from core.stats_manager import get_stats_manager
@@ -607,9 +533,18 @@ _bg.start_background_monitor()
 _bg.start_guardian_loop()
 _bg.start_stale_rescue_loop()
 
+# Restore persisted background process registry BEFORE reconcile: tasks whose
+# pre-restart processes are still alive stay backgrounded and BgMonitor takes
+# over (reconcile skips them), instead of being flipped to interrupted.
+try:
+    from tools.shell import restore_background_processes as _restore_bg_procs
+    _restore_bg_procs()
+except Exception as _rbp_e:
+    print(f"[Server] Background process restore error: {_rbp_e}")
+
 # Call local startup reconciliation
 reconcile_tasks()
-reconcile_backgrounded_after_restart()
+_bg.reconcile_backgrounded_after_restart()
 
 # Run security audit on configuration
 try:
