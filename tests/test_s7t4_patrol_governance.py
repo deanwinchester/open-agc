@@ -6,8 +6,9 @@
 - Item 2：复位前查活句柄——_background_agents / _active_agents 有该 task
   活句柄时跳过（线程活着就不是孤尸）
 - Item 3：停滞判定保守化——静默进程未满 _STALL_FREEZE_ROUNDS（90 轮 ≈ 15min）
-  不被判完成、不删输出文件；满阈值解除追踪但如实告知"仍在运行、无输出 N 分钟"
-- Item 4：解除追踪写兜底 wake_at（+30min）；BgMonitor 无 pinfo 分支对超 6h
+  不被判完成、不删输出文件；满阈值移入 orphan 池（detached 标记，不丢弃）
+  并如实告知"仍在运行、无输出 N 分钟"
+- Item 4：脱离追踪写兜底 wake_at（+30min）；BgMonitor 无进程信息分支对超 6h
   无寄托（无进程/无 wake/无下载）任务置 background_failed
 - Item 5：邮件 mark_seen 移到落库成功后（顺序源码级断言 + store 行为级）；
   回信文案按真实终态区分（completed/failed/interrupted/backgrounded）
@@ -36,6 +37,13 @@ def tmp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db_mod, "DB_PATH", db_file)
     db_mod.init_db()
     return db_mod
+
+
+@pytest.fixture(autouse=True)
+def _isolated_bg_store(tmp_path, monkeypatch):
+    """注册表写-through 持久化重定向到临时目录，不碰真实 data/。"""
+    import tools.shell as sh
+    monkeypatch.setattr(sh, "_BG_STORE_PATH", str(tmp_path / "background_processes.json"))
 
 
 def _insert_task(db_mod, status="running", updated_at=None, wake_at=None,
@@ -174,9 +182,10 @@ def _install_monitor_harness(monkeypatch, bg, run_rounds=8):
 
 
 def _patch_shell_idle(monkeypatch, tid, out_file):
-    """进程活着、输出文件恒定不变的 shell 环境。返回进程表（供 mock cleanup 同步删除）。"""
-    procs = {str(tid): {"pid": 424242, "output_file": str(out_file),
-                        "command": "sleep 9999", "started_at": 1.0}}
+    """进程活着、输出文件恒定不变的 shell 环境（一任务多进程结构：
+    {task_id: {pid: info}}）。返回进程表（供 mock detach 同步删除）。"""
+    procs = {str(tid): {"424242": {"pid": 424242, "output_file": str(out_file),
+                                   "command": "sleep 9999", "started_at": 1.0}}}
     monkeypatch.setattr("tools.shell.get_background_processes", lambda: dict(procs))
     monkeypatch.setattr("tools.shell.get_orphan_processes", lambda: {})
     monkeypatch.setattr("tools.shell.adopt_orphan_processes", lambda *a, **k: 0)
@@ -220,8 +229,9 @@ class TestStallConservative:
         assert row["status"] == "backgrounded"
         assert row["wake_at"] is None
 
-    def test_frozen_output_untracks_honestly_and_sets_fallback_wake(self, tmp_db, monkeypatch, tmp_path):
-        """满阈值：解除追踪但如实告知仍在运行、不删输出文件、写兜底 wake_at(+30min)。"""
+    def test_frozen_output_detaches_honestly_and_sets_fallback_wake(self, tmp_db, monkeypatch, tmp_path):
+        """满阈值：进程移入 orphan 池（detached 标记，不丢弃、不删输出文件），
+        如实告知仍在运行、写兜底 wake_at(+30min)。"""
         import api.background as bg
         from api.task_core import save_task_context, get_task_context
         monkeypatch.setattr(bg, "_STALL_FREEZE_ROUNDS", 3)     # 阈值拉低，快速触发
@@ -231,13 +241,14 @@ class TestStallConservative:
         out_file.write_text("partial output", encoding="utf-8")
         procs = _patch_shell_idle(monkeypatch, tid, out_file)
         monkeypatch.setattr(bg, "pid_alive", lambda pid: True)
-        cleaned = []
+        detached = []
 
-        def _fake_cleanup(key):
-            cleaned.append(key)
-            procs.pop(key, None)  # 与真实 cleanup 一致：解除后 pinfo 消失
+        def _fake_detach(task_id, pid):
+            detached.append((task_id, pid))
+            procs.pop(task_id, None)  # 与真实 detach 一致：脱离后主表条目消失
+            return f"detached_{task_id}_{pid}_1"
 
-        monkeypatch.setattr("tools.shell.cleanup_background_process", _fake_cleanup)
+        monkeypatch.setattr("tools.shell.detach_background_process", _fake_detach)
         spawned, rounds_done, release_loop = _install_monitor_harness(
             monkeypatch, bg, run_rounds=8)
 
@@ -247,7 +258,7 @@ class TestStallConservative:
             assert rounds_done.wait(timeout=20), "monitor loop did not run 8 rounds"
         finally:
             release_loop.set()
-        assert cleaned == [str(tid)]                           # 已解除追踪
+        assert detached == [(str(tid), 424242)]               # 已移入 orphan 池
         assert spawned == []                                   # 进程活着 → 不恢复
         assert out_file.exists()                               # 不删输出文件
         row = _task_row(tmp_db, tid)
@@ -262,6 +273,7 @@ class TestStallConservative:
         ctx = get_task_context(tid)
         last = ctx[-1]["content"]
         assert "仍在运行" in last and "无输出" in last
+        assert "脱离监控" in last
         assert "执行完毕" not in last
 
 

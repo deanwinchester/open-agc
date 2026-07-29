@@ -395,8 +395,8 @@ def test_mask_before_truncate_leaves_no_residue(vault):
 
 def _make_tasks_client(monkeypatch, out_file):
     import api.routes.routes_tasks as rt
-    monkeypatch.setattr(rt, "get_background_processes",
-                        lambda: {"7": {"output_file": str(out_file)}})
+    monkeypatch.setattr(rt, "get_background_processes_for_task",
+                        lambda tid: {"1234": {"output_file": str(out_file)}})
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     app = FastAPI()

@@ -3,9 +3,9 @@
 // 数据契约（api/routes/routes_tasks.py）：
 // - GET /api/tasks/{id} → {task{..., output_files[], steps[]}}（steps 用分页端点另取）
 // - GET /api/tasks/{id}/steps?page=&page_size= → {steps[], total, page, page_size, total_pages}（created_at DESC）
-// - GET /api/tasks/{id}/process → {process{pid,command,alive,uptime,output_file} | null}
+// - GET /api/tasks/{id}/process → {process | null, processes[{pid,command,alive,uptime,output_file,reaped?,output_file_deleted?}]}
 // - GET /api/tasks/{id}/logs?lines= → {logs, lines[]}
-// - POST /api/tasks/{id}/interrupt | /complete | /kill | /reset-resume-count；DELETE /api/tasks/{id}
+// - POST /api/tasks/{id}/interrupt | /complete | /kill | /reset-resume-count | /resume {extra_instruction?}；DELETE /api/tasks/{id}
 // 旧实现已知问题，此处规避：
 // - 步骤分页闭包错位：步骤详情弹窗直接使用当前页数组里的 step 对象（Vue 响应式 props），无闭包捕获旧页数据
 // - _logRefreshInterval 泄漏：本组件所有 interval 统一登记，onUnmounted 全部清理
@@ -26,6 +26,11 @@ const STEP_POLL_MS = 5000;
 const LOG_POLL_MS = 3000;
 const LOG_LINE_OPTIONS = [50, 100, 200, 500];
 const INTERRUPTIBLE = new Set(['running', 'detached', 'backgrounded']);
+// 可手动恢复（▶ 继续）的状态：与 POST /api/tasks/{id}/resume 放行集合对齐
+// （completed 虽在服务端允许集合内，但已收官任务不提供「继续」入口）
+const RESUMABLE = new Set(['interrupted', 'backgrounded', 'background_failed', 'failed']);
+// 「中断原因」区块只在真正处于中断语义的状态展示——进行中/已完成一律不显示历史原因
+const INTERRUPT_SEMANTIC = new Set(['interrupted', 'background_failed']);
 
 // ── 任务元信息 ──
 
@@ -52,12 +57,17 @@ function statusPill(status) {
 const typeLabel = computed(() => zh.tasks.type[task.value?.task_type] || task.value?.task_type || zh.tasks.type.oneshot);
 const canInterrupt = computed(() => task.value && INTERRUPTIBLE.has(task.value.status));
 const canComplete = computed(() => task.value && task.value.status !== 'completed');
+const canResume = computed(() => task.value && RESUMABLE.has(task.value.status));
 const isRunning = computed(() => task.value && INTERRUPTIBLE.has(task.value.status));
 const interruptReasonText = computed(() => {
   const reason = task.value?.interruption_reason;
   if (!reason) return '';
   return t.reasons[reason] || reason;
 });
+// 历史中断原因只对中断语义状态可见（进行中/已完成/失败不显示）
+const showInterruptReason = computed(() =>
+  Boolean(interruptReasonText.value) && INTERRUPT_SEMANTIC.has(task.value?.status)
+);
 const tokenInfo = computed(() => {
   const tk = task.value;
   if (!tk) return null;
@@ -139,9 +149,12 @@ function openStepDetail(st, index) {
   stepDialog.value = true;
 }
 
-// ── 进程信息 ──
+// ── 进程信息（多行：主表存活进程 + 一次性回收行） ──
 
-const processInfo = ref(null);
+// GET /api/tasks/{id}/process → {process, processes[]}：逐行渲染 processes
+// （兼容旧契约：无 processes 字段时回退单行 process）。alive:false →「已结束」
+// 灰色徽标；reaped 行是死 pid 被惰性回收的一次性回显，下次拉取自然消失。
+const processList = ref([]);
 const processLoading = ref(false);
 const PROC_POLL_MS = 5000;
 let procTimerId = null;
@@ -153,9 +166,9 @@ function stopProcTimer() {
   }
 }
 
-// 进程存活时保持 5s 轮询；消失/死亡即停止（onUnmounted 统一清理）
+// 有进程存活时保持 5s 轮询；全部结束/消失即停止（onUnmounted 统一清理）
 function syncProcTimer() {
-  if (processInfo.value?.alive) {
+  if (processList.value.some((p) => p.alive)) {
     if (!procTimerId) procTimerId = setInterval(() => loadProcess({ silent: true }), PROC_POLL_MS);
   } else {
     stopProcTimer();
@@ -166,18 +179,20 @@ async function loadProcess({ silent = false } = {}) {
   if (!silent) processLoading.value = true;
   try {
     const data = await request(`/api/tasks/${taskId}/process`);
-    processInfo.value = data?.process || null;
+    processList.value = Array.isArray(data?.processes) && data.processes.length
+      ? data.processes
+      : (data?.process ? [data.process] : []);
   } catch {
-    processInfo.value = null;
+    processList.value = [];
   } finally {
     if (!silent) processLoading.value = false;
     syncProcTimer();
   }
 }
 
-const processUptimeMin = computed(() =>
-  processInfo.value?.uptime ? Math.floor(processInfo.value.uptime / 60) : 0
-);
+function uptimeMin(p) {
+  return p?.uptime ? Math.floor(p.uptime / 60) : 0;
+}
 
 async function killProcess() {
   try {
@@ -192,6 +207,32 @@ async function killProcess() {
     loadProcess({ silent: true });
   } catch (err) {
     ElMessage.error(`${t.process.killFailed}: ${err.message}`);
+  }
+}
+
+// ── 进程日志查看弹窗（复用 GET /api/tasks/{id}/logs tail 端点） ──
+
+const procLogDialog = ref(false);
+const procLogText = ref('');
+const procLogLoading = ref(false);
+
+async function viewProcessLog(p) {
+  procLogDialog.value = true;
+  procLogText.value = '';
+  // 回收行已标记输出文件被删：直接提示，不再请求
+  if (p?.output_file_deleted) {
+    procLogText.value = t.process.logDeleted;
+    return;
+  }
+  procLogLoading.value = true;
+  try {
+    const data = await request(`/api/tasks/${taskId}/logs?lines=200`);
+    procLogText.value = typeof data?.logs === 'string' && data.logs ? data.logs : t.logs.empty;
+  } catch {
+    // 404 等情况：日志文件已被清理
+    procLogText.value = t.process.logDeleted;
+  } finally {
+    procLogLoading.value = false;
   }
 }
 
@@ -295,6 +336,33 @@ async function completeTask() {
   }
 }
 
+// ▶ 继续：弹出附加指令输入框（可留空），确认后走 POST /api/tasks/{id}/resume
+async function resumeTask() {
+  let extra = '';
+  try {
+    const r = await ElMessageBox.prompt(t.actions.resumePromptText, t.actions.resumePromptTitle, {
+      confirmButtonText: t.actions.resume,
+      cancelButtonText: zh.goals.cancel,
+      inputPlaceholder: t.actions.resumePromptPlaceholder,
+    });
+    extra = (r?.value || '').trim();
+  } catch {
+    return;
+  }
+  try {
+    const resp = await request(`/api/tasks/${taskId}/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(extra ? { extra_instruction: extra } : {}),
+    });
+    ElMessage.success(resp?.message || t.actions.resumeSuccess);
+    loadTask({ silent: true });
+    loadProcess({ silent: true });
+  } catch (err) {
+    ElMessage.error(`${t.actions.resumeFailed}: ${err.message}`);
+  }
+}
+
 async function deleteTask() {
   try {
     await ElMessageBox.confirm(t.actions.deleteConfirmText, t.actions.deleteConfirmTitle, {
@@ -385,6 +453,9 @@ onUnmounted(() => {
         </div>
 
         <div class="action-bar">
+          <el-button v-if="canResume" size="small" type="primary" plain @click="resumeTask">
+            ▶ {{ t.actions.resume }}
+          </el-button>
           <el-button v-if="canInterrupt" size="small" type="warning" plain @click="interruptTask">
             ⏹ {{ t.actions.interrupt }}
           </el-button>
@@ -413,7 +484,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div v-if="interruptReasonText" class="section">
+        <div v-if="showInterruptReason" class="section">
           <div class="section-title">{{ t.interruptReason }}</div>
           <div class="section-block">{{ interruptReasonText }}</div>
         </div>
@@ -438,8 +509,8 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 进程信息（存在后台进程时显示） -->
-        <div v-if="processInfo" class="section">
+        <!-- 进程信息（存在后台进程/回收行时显示；一任务可多进程，逐行渲染） -->
+        <div v-if="processList.length" class="section">
           <div class="section-title process-title-row">
             <span>{{ t.process.title }}</span>
             <el-button
@@ -451,20 +522,34 @@ onUnmounted(() => {
               @click="loadProcess()"
             />
           </div>
-          <div class="section-block process-row">
-            <span class="process-status">
-              <span class="dot" :class="{ alive: processInfo.alive }"></span>
-              {{ processInfo.alive ? t.process.alive : t.process.dead }}
-            </span>
-            <span>PID: {{ processInfo.pid }}</span>
-            <span>{{ t.process.uptimePrefix }}{{ processUptimeMin }}{{ t.process.uptimeSuffix }}</span>
-            <code class="process-cmd" :title="processInfo.command">{{ processInfo.command }}</code>
-            <el-button v-if="processInfo.alive" size="small" type="danger" plain @click="killProcess">
-              ⏹ {{ t.process.kill }}
-            </el-button>
-          </div>
-          <div v-if="processInfo.output_file" class="process-output">
-            {{ t.process.outputFile }}: <code>{{ processInfo.output_file }}</code>
+          <div v-for="p in processList" :key="p.pid" class="section-block process-block">
+            <div class="process-row">
+              <span class="process-status" :class="{ ended: !p.alive }">
+                <span class="dot" :class="{ alive: p.alive }"></span>
+                {{ p.alive ? t.process.alive : t.process.dead }}
+              </span>
+              <span>PID: {{ p.pid }}</span>
+              <span>{{ t.process.uptimePrefix }}{{ uptimeMin(p) }}{{ t.process.uptimeSuffix }}</span>
+              <code class="process-cmd" :title="p.command">{{ p.command }}</code>
+              <el-button
+                v-if="p.output_file || p.output_file_deleted"
+                size="small"
+                type="primary"
+                plain
+                @click="viewProcessLog(p)"
+              >
+                📄 {{ t.process.viewLog }}
+              </el-button>
+              <el-button v-if="p.alive" size="small" type="danger" plain @click="killProcess">
+                ⏹ {{ t.process.kill }}
+              </el-button>
+            </div>
+            <div v-if="p.output_file" class="process-output">
+              {{ t.process.outputFile }}: <code>{{ p.output_file }}</code>
+            </div>
+            <div v-else-if="p.output_file_deleted" class="process-output">
+              {{ t.process.outputFileDeleted }}
+            </div>
           </div>
         </div>
       </el-card>
@@ -566,6 +651,11 @@ onUnmounted(() => {
           <div class="section-block">{{ activeStep.thinking_content }}</div>
         </div>
       </template>
+    </el-dialog>
+
+    <!-- 进程日志弹窗（进程区块「查看日志」） -->
+    <el-dialog v-model="procLogDialog" :title="t.process.logTitle" width="640px">
+      <pre class="dialog-pre tall" v-loading="procLogLoading">{{ procLogText }}</pre>
     </el-dialog>
   </div>
 </template>
@@ -698,6 +788,16 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+/* 已结束进程：整体灰色徽标语义（圆点默认灰，文字同步弱化） */
+.process-status.ended {
+  color: var(--el-text-color-placeholder);
+}
+
+/* 一任务多进程：行与行之间留间隔 */
+.process-block + .process-block {
+  margin-top: 8px;
 }
 
 .dot {

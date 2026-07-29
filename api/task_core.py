@@ -178,6 +178,10 @@ def update_task_status(task_id: int, status: str,
         if interruption_reason is not None:
             fields.append("interruption_reason=?")
             params.append(interruption_reason)
+        elif status in ('running', 'completed'):
+            # 翻转到 running/completed 时清掉历史中断原因——那是上一次中断的
+            # 记录，任务已恢复执行/已收官，继续保留会误导前端展示。
+            fields.append("interruption_reason=NULL")
         # Clear wake_at when interrupting or completing
         if status in ('interrupted', 'completed', 'background_failed'):
             fields.append("wake_at=NULL")
@@ -204,7 +208,9 @@ def claim_task_for_resume(task_id: int, allowed_statuses: tuple) -> bool:
     """Atomically claim a task for resume (compare-and-set).
 
     Flips status to 'running' and increments ``resume_count`` only when the
-    task's current status is in ``allowed_statuses``. SQLite serializes
+    task's current status is in ``allowed_statuses``. 认领同时把
+    ``interruption_reason`` 清 NULL——历史中断原因属于上一次中断，任务已
+    恢复执行，继续保留会误导前端「中断原因」区块。SQLite serializes
     writers, so under concurrent resume paths exactly one caller gets True.
     Every resume path must call this BEFORE spawning its worker thread;
     losers must skip the resume. 统一语义「认领即 running，不再降级」：
@@ -216,7 +222,7 @@ def claim_task_for_resume(task_id: int, allowed_statuses: tuple) -> bool:
         placeholders = ",".join("?" for _ in allowed_statuses)
         cursor = conn.execute(
             f"UPDATE tasks SET status='running', resume_count=resume_count+1, "
-            f"updated_at=CURRENT_TIMESTAMP "
+            f"interruption_reason=NULL, updated_at=CURRENT_TIMESTAMP "
             f"WHERE id=? AND status IN ({placeholders})",
             (task_id, *allowed_statuses))
         claimed = cursor.rowcount == 1
@@ -226,6 +232,47 @@ def claim_task_for_resume(task_id: int, allowed_statuses: tuple) -> bool:
     except Exception as e:
         print(f"[Task] Claim resume error: {e}")
         return False
+
+
+def kill_tracked_background_process(task_id, notify: bool = True) -> list:
+    """Kill ALL tracked background shell processes of a task being interrupted.
+
+    任务→进程方向的中断同步：一任务可能登记多个后台进程（重试/多开），
+    全部都要随任务终止。内部先 kill_tree 终止进程树、再清跟踪表（顺序
+    不能反，失败也会清表）；杀进程失败不阻断中断流程本身。notify 时在
+    任务上下文注入系统通知——成功列出全部被终止的 pid，失败如实说明
+    "终止失败、进程可能仍在运行"。返回被终止的 pid 列表；无跟踪进程
+    或杀进程异常时返回空列表。
+    """
+    from tools.shell import kill_background_process_for_task
+    try:
+        pids = kill_background_process_for_task(task_id)
+    except Exception as e:
+        print(f"[Task] kill_tree failed for task {task_id}: {e}")
+        if notify:
+            try:
+                ctx = get_task_context(task_id)
+                if ctx is not None:
+                    ctx.append({"role": "user", "content": (
+                        "【系统通知】任务已中断，但关联的后台进程终止失败，"
+                        "进程可能仍在运行，请检查并手动处理残留进程。"
+                    )})
+                    save_task_context(task_id, ctx)
+            except Exception:
+                pass
+        return []
+    if pids and notify:
+        try:
+            ctx = get_task_context(task_id)
+            if ctx is not None:
+                pid_list = ", ".join(str(p) for p in pids)
+                ctx.append({"role": "user", "content": (
+                    f"【系统通知】关联的后台进程（PID {pid_list}）已随任务中断一并终止。"
+                )})
+                save_task_context(task_id, ctx)
+        except Exception:
+            pass
+    return pids
 
 
 def _resolve_task_goal_via_llm(session_id: int, query: str) -> str:
@@ -524,6 +571,76 @@ def save_task_context(task_id: int, messages: list):
         print(f"[Task] Save context error: {e}")
 
 
+# ── 大任务检查点（断点续跑）──
+# 约定：agent 执行大批量/长耗时任务（大规模导出、批量处理等）时，在沙箱工作
+# 目录下维护 .checkpoints/task_<task_id>.json（字段 task/total/done/
+# last_cursor/phase/files_dir/updated_at），每处理完一批就更新；任务恢复时
+# 由本模块读取并注入上下文，agent 从 last_cursor 继续而非从头重跑。
+_CHECKPOINT_NOTICE_PREFIX = "【系统提示】大任务检查点"
+
+
+def get_checkpoint_dir() -> str:
+    """沙箱工作目录下的检查点目录（sandbox_dir 解析口径与 routes/server 一致）。"""
+    try:
+        cfg = load_config() or {}
+    except Exception:
+        cfg = {}
+    sandbox = cfg.get("sandbox_dir") or os.path.abspath(os.path.join(os.getcwd(), "workspace"))
+    return os.path.join(sandbox, ".checkpoints")
+
+
+def read_task_checkpoint(task_id: int) -> Optional[dict]:
+    """读取 .checkpoints/task_<task_id>.json；缺失/损坏/非 JSON 对象时返回 None，不抛异常。"""
+    try:
+        path = os.path.join(get_checkpoint_dir(), f"task_{task_id}.json")
+        if not os.path.isfile(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def format_checkpoint_notice(task_id: int) -> str:
+    """把任务检查点格式化为恢复注入文本；无有效检查点时返回空串。
+
+    三条恢复路径（ws 手动恢复 / _run_background_task / 重启 reconcile）共用：
+    主注入点在 get_task_context；无上下文快照时的兜底注入见各恢复查询拼接处。
+    """
+    data = read_task_checkpoint(task_id)
+    if not data:
+        return ""
+    return (
+        f"{_CHECKPOINT_NOTICE_PREFIX}：检测到大任务进度检查点 "
+        f".checkpoints/task_{task_id}.json，内容如下：\n"
+        f"{json.dumps(data, ensure_ascii=False)}\n"
+        f"上次进度 done={data.get('done', '?')}/total={data.get('total', '?')}，"
+        f"last_cursor={data.get('last_cursor')}。"
+        "请从 last_cursor 游标处继续处理，严禁清理现场从头重跑、"
+        "严禁重复处理已完成部分；后续每处理完一批请继续更新该检查点文件。"
+    )
+
+
+def _with_checkpoint_notice(task_id: int, messages: list) -> list:
+    """在恢复上下文末尾注入最新检查点提示。
+
+    快照里可能已存历次恢复留下的旧提示（进度/updated_at 已过时），先剔除
+    再追加，保证上下文里至多一条且永远是最新读盘结果。
+    """
+    notice = format_checkpoint_notice(task_id)
+    if not notice:
+        return messages
+    kept = [
+        m for m in messages
+        if not (m.get("role") == "user"
+                and isinstance(m.get("content"), str)
+                and m["content"].startswith(_CHECKPOINT_NOTICE_PREFIX))
+    ]
+    kept.append({"role": "user", "content": notice})
+    return kept
+
+
 def get_task_context(task_id: int) -> Optional[list]:
     """Load saved context with fallback reconstruction from task_steps + messages."""
     try:
@@ -542,7 +659,7 @@ def get_task_context(task_id: int) -> Optional[list]:
                 result = json.loads(snapshot)
                 if isinstance(result, list) and len(result) > 1:
                     conn.close()
-                    return result
+                    return _with_checkpoint_notice(task_id, result)
             except Exception:
                 pass
 
@@ -575,7 +692,7 @@ def get_task_context(task_id: int) -> Optional[list]:
                 "name": s["tool_name"],
                 "content": s["full_result"] or s["result_preview"] or ""
             })
-        return entries
+        return _with_checkpoint_notice(task_id, entries)
     except Exception as e:
         print(f"[Task] Get context error: {e}")
         return None

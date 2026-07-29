@@ -17,8 +17,12 @@ from api.task_core import (
     create_task, update_task_status, update_task_type, get_task_context,
     save_task_context, add_task_step, _extract_task_title,
     _record_task_deliverables, _check_goal_completeness,
+    kill_tracked_background_process,
 )
-from tools.shell import interrupt_shell, get_background_processes, get_orphan_processes, cleanup_background_process, adopt_orphan_processes
+from tools.shell import (
+    interrupt_shell, get_background_processes, get_background_processes_for_task,
+    get_orphan_processes, adopt_orphan_processes,
+)
 
 router = APIRouter()
 
@@ -150,6 +154,9 @@ async def interrupt_task(task_id: int):
             _bg_a.is_interrupted = True
             _bg_a._completed_by_user = True
     interrupt_shell()
+    # 中断任务时联动终止其注册的后台进程（先 kill_tree 杀进程树再清跟踪表；
+    # 杀失败不阻断中断流程本身），并在任务上下文注入系统通知
+    kill_tracked_background_process(task_id)
     # 中断任务时联动取消进行中的模型下载（此前 globals().get 恒为 None，是死代码）
     if _llamacpp_download_state.get("active"):
         _llamacpp_download_state["cancelled"] = True
@@ -250,12 +257,36 @@ async def complete_task(task_id: int):
             _bg_a.is_interrupted = True
     # Kill shell process
     interrupt_shell()
-    # Update DB
+    # Update DB（顺带清掉历史中断原因：已收官任务不再属于中断语义）
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE tasks SET status='completed', updated_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
+    conn.execute("UPDATE tasks SET status='completed', interruption_reason=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
     conn.commit()
     conn.close()
     return {"status": "success", "message": "任务已标记为完成，agent 已停止"}
+
+
+class ResumeTaskRequest(BaseModel):
+    extra_instruction: Optional[str] = None
+
+
+@router.post("/api/tasks/{task_id}/resume")
+async def resume_task(task_id: int, req: ResumeTaskRequest = None):
+    """手动恢复任务（任务详情页「▶ 继续」按钮，可带附加指令）。
+
+    与 WS {type:'resume'} 同一恢复链路（api.background.resume_task_manual）：
+    活 agent 排队投递 / CAS 认领 + 附加指令注入恢复上下文 + 后台恢复。
+    只有 interrupted/backgrounded/background_failed/failed/completed 可恢复；
+    running 或其他状态 409，任务不存在 404。
+    """
+    from api.background import resume_task_manual
+    result = resume_task_manual(task_id, (req.extra_instruction or "") if req else "")
+    if result.get("ok"):
+        return {"status": "success", "resumed": result.get("status") == "resumed",
+                "message": result["message"]}
+    if result.get("error") == "not_found":
+        raise HTTPException(status_code=404, detail=result["message"])
+    # 不可恢复状态 / 认领冲突 —— 明确 409 而非含糊 200
+    raise HTTPException(status_code=409, detail=result["message"])
 
 
 # ── Schedule ──
@@ -347,29 +378,260 @@ async def update_schedule(task_id: int, req: ScheduleTaskRequest):
 
 # ── Process Management ──
 
+def _sandbox_dir_from_config() -> Optional[str]:
+    """与 tools/shell.py 口径一致：sandbox_mode 开启时返回 sandbox_dir 绝对路径。"""
+    try:
+        config = load_config()
+        if not config.get("sandbox_mode", True):
+            return None
+        sandbox_dir = config.get("sandbox_dir") or os.path.abspath(
+            os.path.join(os.getcwd(), "workspace"))
+        return os.path.abspath(sandbox_dir)
+    except Exception:
+        return None
+
+
+def _path_within(path: str, root_norm: str) -> bool:
+    """path 等于 root 或为其子孙路径（root_norm 已 normcase+abspath+去尾斜杠）。
+
+    路径边界匹配：`workspace2` 这类兄弟目录不会误命中（旧实现是子串
+    包含，无边界）。
+    """
+    try:
+        p = os.path.normcase(os.path.abspath(path))
+    except Exception:
+        return False
+    return p == root_norm or p.startswith(root_norm + os.sep)
+
+
+def _pid_matches_sandbox(proc, sandbox_dir: str) -> bool:
+    """进程的 cwd 或 cmdline 中的路径 token 命中 sandbox 目录（路径边界匹配）。"""
+    root = os.path.normcase(os.path.abspath(sandbox_dir)).rstrip("/\\") or \
+        os.path.normcase(os.path.abspath(sandbox_dir))
+    try:
+        cwd = proc.cwd()
+        if cwd and _path_within(cwd, root):
+            return True
+    except Exception:
+        pass
+    try:
+        cmdline = proc.cmdline() or []
+    except Exception:
+        return False
+    for token in cmdline:
+        if not token or not isinstance(token, str):
+            continue
+        candidates = [token]
+        if "=" in token:  # --dir=/path/to/x 形式
+            candidates.append(token.split("=", 1)[1])
+        for cand in candidates:
+            t = cand.strip().strip('"').strip("'")
+            if not t:
+                continue
+            # 只尝试像路径的 token（含路径分隔符），普通参数不当路径解析
+            if os.sep not in t and (os.altsep is None or os.altsep not in t):
+                continue
+            if _path_within(t, root):
+                return True
+    return False
+
+
+def _discover_sandbox_processes(exclude_pids: set, limit: int = 50) -> list:
+    """OS 扫描兜底：cwd/cmdline 命中 sandbox 目录、却不在追踪表里的进程。
+
+    排除本服务进程自身及其祖先（check_protected_pid 只保护向上的父链，
+    agent 启动的子进程照常可见）。每项给 pid/name/cmdline(截断)/create_time/uptime。
+    """
+    import psutil
+    from api.state import check_protected_pid
+    sandbox_dir = _sandbox_dir_from_config()
+    if not sandbox_dir:
+        return []
+    found = []
+    now = _time.time()
+    for proc in psutil.process_iter(["pid", "name", "create_time"]):
+        try:
+            pid = proc.pid
+            if pid in exclude_pids or check_protected_pid(pid):
+                continue
+            if not _pid_matches_sandbox(proc, sandbox_dir):
+                continue
+            try:
+                cmdline = " ".join(str(c) for c in proc.cmdline())[:200]
+            except Exception:
+                cmdline = ""
+            create_time = proc.create_time()
+            found.append({
+                "pid": pid,
+                "name": proc.name(),
+                "cmdline": cmdline,
+                "create_time": create_time,
+                "uptime": max(0, round(now - create_time, 1)),
+            })
+        except Exception:
+            continue
+    found.sort(key=lambda p: p["create_time"], reverse=True)
+    return found[:limit]
+
+
+def _reaped_row(entry: dict) -> dict:
+    """把僵尸回收条目整形成响应行：alive/reaped 标志明确；输出文件还在
+    → 保留路径（想查日志有据可循），已删 → output_file_deleted 标记。"""
+    of = entry.get("output_file", "")
+    exists = bool(of) and os.path.exists(of)
+    now = _time.time()
+    started = entry.get("started_at")
+    return {
+        "pid": entry.get("pid"),
+        "task_id": entry.get("task_id"),
+        "command": entry.get("command", ""),
+        "started_at": started,
+        "alive": False,
+        "reaped": True,
+        "uptime": round(now - started, 1) if started else 0,
+        "output_file": of if exists else "",
+        "output_file_deleted": bool(of) and not exists,
+    }
+
+
 @router.get("/api/processes")
 async def list_processes():
-    """List all running background shell processes (including orphans).
+    """List all running background shell processes (tracked + orphans + OS scan).
 
-    Each process includes:
-    - alive: whether the PID is actually still running (os.kill check)
-    - uptime: seconds since process started
+    processes: 每进程一行——主表按 {task_id:pid} 展平（一任务可多个进程），
+    orphan 池保持 orphan_id 键；每项含 task_id/pid/command/started_at/alive/uptime。
+    返回前惰性回收死 pid 条目（任何状态的任务都可能留僵尸条目）；本次
+    被回收的条目带 alive=false/reaped=true 标志返回一次，之后便不再出现。
+    discovered: psutil 全盘扫描兜底，cwd/cmdline 命中 sandbox 目录但未被
+    追踪的野生进程（排除服务自身及祖先、已在 bg/orphan 表里的 pid）。
     """
     from tools.shell_interact import _is_pid_alive
+    from tools.shell import reap_dead_background_processes
+    reaped = reap_dead_background_processes()
     procs = {}
-    for tid, info in get_background_processes().items():
-        pinfo = dict(info)
-        pid = pinfo.get("pid")
-        pinfo["alive"] = _is_pid_alive(pid) if pid else False
-        pinfo["uptime"] = _time.time() - pinfo.get("started_at", _time.time()) if pinfo.get("started_at") else 0
-        procs[tid] = pinfo
+    tracked_pids = set()
+    for tid, task_procs in get_background_processes().items():
+        for pid_key, info in task_procs.items():
+            pinfo = dict(info)
+            pid = pinfo.get("pid")
+            if pid:
+                tracked_pids.add(int(pid))
+            pinfo["task_id"] = tid
+            pinfo["alive"] = _is_pid_alive(pid) if pid else False
+            pinfo["uptime"] = _time.time() - pinfo.get("started_at", _time.time()) if pinfo.get("started_at") else 0
+            procs[f"{tid}:{pid_key}"] = pinfo
     for oid, info in get_orphan_processes().items():
         pinfo = dict(info)
         pid = pinfo.get("pid")
+        if pid:
+            tracked_pids.add(int(pid))
         pinfo["alive"] = _is_pid_alive(pid) if pid else False
         pinfo["uptime"] = _time.time() - pinfo.get("started_at", _time.time()) if pinfo.get("started_at") else 0
         procs[oid] = pinfo
-    return {"processes": procs}
+    for entry in reaped:
+        row = _reaped_row(entry)
+        pid = row["pid"]
+        key = (f"{entry['task_id']}:{pid}" if entry.get("task_id")
+               else entry.get("orphan_id") or f"reaped:{pid}")
+        procs[key] = row
+    try:
+        discovered = _discover_sandbox_processes(tracked_pids)
+    except Exception as e:
+        print(f"[Processes] OS scan error: {e}")
+        discovered = []
+    return {"processes": procs, "discovered": discovered}
+
+
+@router.post("/api/processes/{pid}/kill")
+async def kill_wild_process(pid: int):
+    """Kill a process tree by pid (kill_tree 整棵树)——进程页统一的终止入口。
+
+    安全约束（服务端强制重校验，防端点被用来杀任意进程）：
+    - Open-AGC 服务自身及其祖先：403（最先检查）；
+    - pid 在注册表（主表或 orphan 池）：放行——登记即归属，与 sandbox
+      开关无关（否则 sandbox_mode 关闭时进程页终止按钮全部 403）；
+    - 不在注册表（discovered 野生进程）：必须 cwd/cmdline 命中 sandbox
+      目录（路径边界匹配），否则 403；进程不存在 404；sandbox 未启用 403。
+
+    杀完同步清追踪表；若 pid 属于某任务且是该任务最后一个存活进程，
+    复用 /api/tasks/{id}/kill 的状态同步语义（守卫 UPDATE 置 interrupted、
+    注入通知、置 agent 中断标志）——否则"条目被移除而非由活转死"会让
+    BgMonitor 的"全死才恢复"永不触发，backgrounded 任务最长卡 6 小时。
+    任务还有其他存活 pid 时只清该 pid 条目，不动任务。
+    """
+    import psutil
+    from api.state import check_protected_pid
+    from core.process import kill_tree as _kill_tree, pid_alive as _pid_alive
+    from tools.shell import (find_task_for_pid, find_orphan_for_pid,
+                             cleanup_background_pid, cleanup_orphan_pid,
+                             cleanup_background_process,
+                             get_background_processes_for_task)
+    if pid <= 0:
+        raise HTTPException(status_code=400, detail="Invalid pid")
+    if check_protected_pid(pid):
+        raise HTTPException(status_code=403,
+                            detail=f"PID {pid} 是 Open-AGC 服务进程或其祖先，禁止终止")
+    owner = find_task_for_pid(pid)                        # (task_id, info) | None
+    orphan_hit = None if owner else find_orphan_for_pid(pid)  # (orphan_id, info) | None
+    if owner is None and orphan_hit is None:
+        # discovered 野生进程：必须命中 sandbox 归属（路径边界匹配）
+        sandbox_dir = _sandbox_dir_from_config()
+        if not sandbox_dir:
+            raise HTTPException(status_code=403,
+                                detail="Sandbox 未启用，无法校验进程归属，拒绝终止")
+        try:
+            proc = psutil.Process(pid)
+            matched = _pid_matches_sandbox(proc, sandbox_dir)
+        except psutil.NoSuchProcess:
+            raise HTTPException(status_code=404, detail=f"PID {pid} 不存在")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"进程校验失败: {e}")
+        if not matched:
+            raise HTTPException(status_code=403,
+                                detail=f"PID {pid} 的 cwd/cmdline 与 sandbox 目录无关，拒绝终止")
+    info = owner[1] if owner else (orphan_hit[1] if orphan_hit else None)
+    _kill_tree(pid)
+    # 同步清出追踪表（若曾被追踪）
+    cleanup_background_pid(pid)
+    cleanup_orphan_pid(pid)
+    resp = {"status": "success", "killed_pid": pid}
+    if owner is not None:
+        tid_str = owner[0]
+        resp["task_id"] = tid_str
+        try:
+            tid_int = int(tid_str)
+        except (TypeError, ValueError):
+            tid_int = None
+        if tid_int is not None:
+            # 顺手回收该任务其余死条目，再判定是否还有存活进程
+            remaining = get_background_processes_for_task(tid_int)
+            for _k, _info in list(remaining.items()):
+                if not _info.get("pid") or not _pid_alive(_info["pid"]):
+                    cleanup_background_process(tid_str, _k)
+                    remaining.pop(_k, None)
+            if remaining:
+                # 还有其他存活 pid：只清条目，不动任务
+                resp["task_interrupted"] = False
+                resp["remaining_pids"] = [i.get("pid") for i in remaining.values()]
+            else:
+                # 最后一个进程已被杀：复用 /api/tasks/{id}/kill 的状态同步语义
+                output_text = ""
+                if info and info.get("output_file"):
+                    try:
+                        with open(info["output_file"], "r", encoding="utf-8", errors="replace") as f:
+                            output_text = f.read()
+                    except Exception:
+                        pass
+                if output_text:
+                    try:
+                        from core.secrets import mask_secrets
+                        output_text = mask_secrets(output_text)
+                    except Exception:
+                        pass
+                resp["task_interrupted"] = _interrupt_task_after_process_kill(tid_int, output_text)
+    return resp
 
 
 @router.get("/api/agent/effectiveness")
@@ -426,35 +688,51 @@ async def get_agent_effectiveness():
 
 @router.get("/api/tasks/{task_id}/process")
 async def get_task_process(task_id: int):
-    """Get process info for a task. Also adopts orphan processes if found."""
+    """Get process info for a task (ALL tracked processes,真实 alive 标志).
+
+    返回前惰性回收 pid 已死的条目（任何状态的任务都可能留僵尸条目——
+    BgMonitor 只盯 backgrounded，running 任务的死条目此前永远显示
+    "运行中"）；本次被回收的条目带 alive=false/reaped=true 标志返回一次
+    （输出文件还在→保留路径，已删→output_file_deleted 标记）。Also
+    adopts orphans.
+    """
+    from tools.shell_interact import _is_pid_alive
+    from tools.shell import reap_dead_background_processes
     # Try to adopt any orphans that might belong to this task
     adopt_orphan_processes(task_id)
-    procs = get_background_processes()
-    pinfo = procs.get(str(task_id))
-    if not pinfo:
-        pinfo = get_orphan_processes().get(str(task_id))
-    if not pinfo:
-        return {"process": None}
-    uptime = _time.time() - pinfo.get("started_at", _time.time())
-    return {
-        "process": {
-            "pid": pinfo.get("pid"),
-            "command": pinfo.get("command", ""),
-            "alive": True,
-            "uptime": round(uptime, 1),
-            "output_file": pinfo.get("output_file", ""),
-        }
-    }
+    reaped = [e for e in reap_dead_background_processes()
+              if e.get("task_id") == str(task_id)]
+    procs = get_background_processes_for_task(task_id)
+    orphan = get_orphan_processes().get(str(task_id))
+    if orphan:
+        procs = dict(procs)
+        procs[str(orphan.get("pid") or "orphan")] = orphan
+    now = _time.time()
+    rows = [{
+        "pid": info.get("pid"),
+        "command": info.get("command", ""),
+        "alive": _is_pid_alive(info.get("pid")) if info.get("pid") else False,
+        "uptime": round(now - info.get("started_at", now), 1),
+        "output_file": info.get("output_file", ""),
+    } for info in procs.values()]
+    rows.extend(_reaped_row(e) for e in reaped)
+    if not rows:
+        return {"process": None, "processes": []}
+    # 兼容旧契约：process 返回第一个存活进程（无存活则给第一个回收行——
+    # alive=false 如实呈现，不再谎称"运行中"）；processes 给出全部
+    alive_rows = [r for r in rows if r.get("alive")]
+    return {"process": alive_rows[0] if alive_rows else rows[0], "processes": rows}
 
 
 @router.get("/api/tasks/{task_id}/logs")
 async def get_task_logs(task_id: int, lines: int = 50):
     """Get tail of a task's process output file."""
-    procs = get_background_processes()
-    pinfo = procs.get(str(task_id))
-    if pinfo and pinfo.get("output_file"):
-        output_path = pinfo["output_file"]
-    else:
+    output_path = None
+    for _pk, pinfo in get_background_processes_for_task(task_id).items():
+        if pinfo.get("output_file"):
+            output_path = pinfo["output_file"]
+            break
+    if not output_path:
         conn = sqlite3.connect(DB_PATH)
         row = conn.execute("SELECT output_files FROM tasks WHERE id=?", (task_id,)).fetchone()
         conn.close()
@@ -480,18 +758,74 @@ async def get_task_logs(task_id: int, lines: int = 50):
     return {"logs": "".join(selected), "lines": selected}
 
 
+def _interrupt_task_after_process_kill(task_id: int, output_text: str) -> bool:
+    """进程被杀后的任务状态同步（/api/tasks/{id}/kill 与
+    /api/processes/{pid}/kill 共用）。
+
+    有输出则注入 "Process killed by user. + 输出尾部" 上下文；状态同步走
+    守卫式 UPDATE（对齐 api/background.py 的 _flip_bg_to_interrupted
+    先例）——仅 backgrounded/running 才翻转 interrupted（reason=user，
+    resume_count 复位，清 wake_at），rowcount 判断是否真正翻转；窗口内
+    刚 completed 的任务不被覆写（result_summary、resume_count 连带不动）。
+    UPDATE 自身失败（库异常）时保持原有行为（仍置 interrupted）。翻转
+    成功时同步置运行中 agent 的中断标志（机制同 WS/REST interrupt 路径，
+    防双 agent 并行）。返回是否真正翻转。
+    """
+    if output_text:
+        context = get_task_context(task_id) or []
+        context.append({"role": "system", "content": f"Process killed by user.\n---Output---\n{output_text[-3000:]}"})
+        save_task_context(task_id, context)
+    task_interrupted = False
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.execute(
+            "UPDATE tasks SET status='interrupted', result_summary=?, "
+            "interruption_reason='user', resume_count=0, wake_at=NULL, "
+            "updated_at=CURRENT_TIMESTAMP "
+            "WHERE id=? AND status IN ('backgrounded','running')",
+            (output_text[-200:], task_id))
+        conn.commit()
+        task_interrupted = cur.rowcount == 1
+    except Exception:
+        update_task_status(task_id, "interrupted", output_text[-200:], interruption_reason="user")
+        conn.execute("UPDATE tasks SET resume_count=0 WHERE id=?", (task_id,))
+        conn.commit()
+        task_interrupted = True
+    conn.close()
+    if task_interrupted:
+        # 同步置运行中 agent 的中断标志——否则 agent 继续跑而 UI 显示
+        # interrupted，且 Guardian/WS resume 的 CAS 可认领同一任务导致双
+        # agent 并行。找不到活实例（如重启后状态残留）时只翻转状态即可。
+        for _agents in _active_agents.values():
+            for _aid, _a in list(_agents.items()):
+                if _aid == task_id:
+                    _a.is_interrupted = True
+                    _a._completed_by_user = True
+        for _tid, _bg_a in list(_background_agents.items()):
+            if _tid == task_id:
+                _bg_a.is_interrupted = True
+                _bg_a._completed_by_user = True
+    return task_interrupted
+
+
 @router.post("/api/tasks/{task_id}/kill")
 async def kill_task_process(task_id: int):
-    """Kill the background shell process for a task."""
-    procs = get_background_processes()
-    pinfo = procs.get(str(task_id))
+    """Kill ALL background shell processes tracked for a task.
+
+    手动杀进程入口（进程→任务方向的中断同步）：一任务可能登记多个后台
+    进程（重试/多开），全部 kill_tree 终止后再清理跟踪表——顺序不能反；
+    任务处于 backgrounded/running 时同步置 interrupted（reason=user），
+    其他状态的任务保持原状态不变。
+    """
+    task_procs = get_background_processes_for_task(task_id)
     output_text = ""
-    if pinfo and pinfo.get("output_file"):
-        try:
-            with open(pinfo["output_file"], "r", encoding="utf-8", errors="replace") as f:
-                output_text = f.read()
-        except Exception:
-            pass
+    for _pk, pinfo in task_procs.items():
+        if pinfo.get("output_file"):
+            try:
+                with open(pinfo["output_file"], "r", encoding="utf-8", errors="replace") as f:
+                    output_text += f.read() + "\n"
+            except Exception:
+                pass
     # Raw shell output files may contain credentials — mask before the text
     # is sliced into task context / task status
     if output_text:
@@ -500,17 +834,19 @@ async def kill_task_process(task_id: int):
             output_text = mask_secrets(output_text)
         except Exception:
             pass
-    cleanup_background_process(task_id)
-    if output_text:
-        context = get_task_context(task_id) or []
-        context.append({"role": "system", "content": f"Process killed by user.\n---Output---\n{output_text[-3000:]}"})
-        save_task_context(task_id, context)
-    update_task_status(task_id, "interrupted", output_text[-200:], interruption_reason="user")
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE tasks SET resume_count=0 WHERE id=?", (task_id,))
-    conn.commit()
-    conn.close()
-    return {"status": "success", "message": "Process killed"}
+    # 有跟踪记录才杀进程；helper 内部先杀整组进程树再 pop 跟踪表，
+    # 杀失败不阻断后续状态同步。上下文通知由下方 output 注入承担，不重复注入。
+    killed_pids = kill_tracked_background_process(task_id, notify=False) if task_procs else []
+    task_interrupted = _interrupt_task_after_process_kill(task_id, output_text)
+    if killed_pids:
+        message = f"Process killed ({len(killed_pids)})" if len(killed_pids) > 1 else "Process killed"
+    elif task_interrupted:
+        message = "Task interrupted (no tracked process)"
+    else:
+        message = "No tracked process"
+    return {"status": "success", "message": message,
+            "killed_pid": killed_pids[0] if killed_pids else None,
+            "killed_pids": killed_pids, "task_interrupted": task_interrupted}
 
 
 @router.post("/api/tasks/{task_id}/reset-resume-count")
