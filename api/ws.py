@@ -18,7 +18,8 @@ from api.task_core import (
     save_message, handle_task_completion, claim_task_for_resume,
     add_task_step, _extract_task_title, _record_task_deliverables, _load_session_context,
     _resolve_task_for_query, _resolve_goal_for_query, _check_goal_completeness, _get_task_step_count,
-    _get_step_offset, QUEUED_TO_LIVE_AGENT,
+    _get_step_offset, QUEUED_TO_LIVE_AGENT, kill_tracked_background_process,
+    format_checkpoint_notice,
 )
 from core.paths import get_data_path
 from core.llamacpp_manager import get_llamacpp_manager
@@ -596,10 +597,16 @@ async def websocket_endpoint(websocket: WebSocket):
                             # Also interrupt background agents — but ONLY those
                             # belonging to this session (don't kill other
                             # sessions' email/scheduled background tasks)
+                            _session_bg_tids = []
                             for tid, bg_agent in list(_background_agents.items()):
                                 if getattr(bg_agent, 'session_id', None) == ws_session_id:
                                     bg_agent.is_interrupted = True
+                                    _session_bg_tids.append(tid)
                             interrupt_shell()
+                            # 联动终止这些任务注册的后台进程（先 kill_tree 杀
+                            # 进程树再清跟踪表；杀失败不阻断中断流程本身）
+                            for _tid in ([ws_task_id] if ws_task_id else []) + _session_bg_tids:
+                                kill_tracked_background_process(_tid)
                             # Cancel any active download
                             if _llamacpp_download_state.get("active"):
                                 _llamacpp_download_state["cancelled"] = True
@@ -814,13 +821,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         if _r == 'backgrounded':
                             if _bg_pid:
                                 try:
-                                    from tools.shell import get_background_processes as _gbp
+                                    from tools.shell import (
+                                        get_background_processes as _gbp,
+                                        register_background_process as _rbp,
+                                    )
                                     _bg_procs = _gbp()
                                     if str(_tb_ws_task_id) not in _bg_procs:
-                                        from tools.shell import _background_process_info as _bgi
-                                        from tools.shell import _background_process_lock as _bgl
-                                        with _bgl:
-                                            _bgi[str(_tb_ws_task_id)] = {"pid": _bg_pid, "command": "", "started_at": _time.time()}
+                                        _rbp(_tb_ws_task_id, {"pid": _bg_pid, "command": "", "started_at": _time.time()})
                                 except Exception:
                                     pass
                             # Send task_backgrounded notification from background thread
@@ -1134,6 +1141,12 @@ async def websocket_endpoint(websocket: WebSocket):
                                 session_history = ctx
                             original_goal = (task_row["user_query"] if task_row else "")
                             query = "【系统提示】任务已恢复，请根据历史上下文，从上次中断的地方继续执行任务。"
+                            # 有历史上下文时检查点提示已由 get_task_context 注入；
+                            # 无上下文时兜底拼进恢复查询，保证断点信息不丢。
+                            if not ctx:
+                                _ck_notice = format_checkpoint_notice(task_id)
+                                if _ck_notice:
+                                    query += f"\n\n{_ck_notice}"
                             # Append extra instruction if provided by user
                             extra = user_msg.get("extra_instruction", "").strip()
                             if extra:

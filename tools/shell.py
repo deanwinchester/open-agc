@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import re
+import json
 import signal
 import threading
 import tempfile
@@ -10,18 +11,49 @@ from typing import Any, Dict, Optional, Callable
 from pydantic import Field
 
 from tools.base import BaseTool, SandboxBlocked
+from core.process import kill_tree, pid_alive
 
 # Module-level process tracking for interrupt support
 _current_process: Optional[subprocess.Popen] = None
 _current_process_lock = threading.Lock()
-# Track backgrounded shell processes for monitoring
-_background_process_info: dict = {}  # {task_id: {"pid": int, "output_file": str, "command": str, "started_at": float}}
+# Track backgrounded shell processes for monitoring.
+# 一任务多进程：{task_id: {pid: info}}——同一任务可登记多个后台进程，
+# 新进程不再覆盖旧条目（旧结构一任务一槽位，重启/重试会产生失联野进程）。
+_background_process_info: dict = {}  # {task_id: {pid: {"pid": int, "output_file": str, "command": str, "started_at": float, ...}}}
 _background_process_lock = threading.Lock()
 # Orphan pool: processes backgrounded before a task_id was assigned
 # {orphan_id: {"pid": int, "output_file": str, "command": str, "started_at": float, "session_id": int}}
 _orphan_process_info: dict = {}
 _orphan_process_lock = threading.Lock()
 _orphan_counter = 0
+
+# 持久化注册表路径（lazy 解析；测试可覆盖）。每次注册/注销写-through，
+# 服务重启后按 pid 存活 + create_time 校验复活，不再"重启失忆"。
+_BG_STORE_PATH: Optional[str] = None
+
+
+def _background_store_path() -> str:
+    global _BG_STORE_PATH
+    if _BG_STORE_PATH is None:
+        from core.paths import get_data_path
+        _BG_STORE_PATH = get_data_path("background_processes.json")
+    return _BG_STORE_PATH
+
+
+def _persist_background_processes_locked():
+    """把主表整体写入 data/background_processes.json（低频操作，整文件写）。
+
+    调用方必须持有 _background_process_lock。写失败只告警不抛出——
+    持久化是兜底，不能反过来影响进程执行本身。
+    """
+    try:
+        path = _background_store_path()
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(_background_process_info, f, ensure_ascii=False, indent=1)
+        os.replace(tmp_path, path)
+    except Exception as e:
+        print(f"[Shell] Failed to persist background processes: {e}")
 
 # Interactive process stdin pipes for shell_send tool
 _interactive_procs: dict = {}  # {pid: stdin_writeable}
@@ -309,18 +341,18 @@ class ShellTool(BaseTool):
                 if sys.platform == "win32":
                     popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 proc = subprocess.Popen(exec_command, **popen_kwargs)
-                # Register the background process for monitoring
+                # Register the background process for monitoring (multi-process
+                # per task: keyed by pid, does not overwrite earlier entries)
                 task_id = kwargs.get("_task_id") or kwargs.get("task_id", 0)
                 if task_id and task_id != 0:
-                    with _background_process_lock:
-                        _background_process_info[str(task_id)] = {
-                            "pid": proc.pid,
-                            "output_file": "",
-                            "command": command[:200],
-                            "started_at": _t0,
-                            "timeout": 0,
+                    register_background_process(task_id, {
+                        "pid": proc.pid,
+                        "output_file": "",
+                        "command": command[:200],
+                        "started_at": _t0,
+                        "timeout": 0,
                         "alive": True,
-                        }
+                    })
                 return f"[Background] Command started with PID {proc.pid}." 
             else:
                 # ── File-based streaming output ──
@@ -450,29 +482,22 @@ class ShellTool(BaseTool):
                         task_id = kwargs.get("_task_id") or kwargs.get("task_id", 0)
                         if not task_id or task_id == 0:
                             # No valid task_id yet — put in orphan pool for late binding
-                            global _orphan_counter, _orphan_process_info, _orphan_process_lock
-                            session_id = kwargs.get("_session_id", 1) or 1
-                            with _orphan_process_lock:
-                                _orphan_counter += 1
-                                oid = f"orphan_{int(_t0)}_{_orphan_counter}"
-                                _orphan_process_info[oid] = {
-                                    "pid": proc.pid,
-                                    "output_file": out_path,
-                                    "command": command[:200],
-                                    "started_at": _t0,
-                                    "timeout": timeout,
-                                    "session_id": session_id,
-                                }
+                            register_orphan_process({
+                                "pid": proc.pid,
+                                "output_file": out_path,
+                                "command": command[:200],
+                                "started_at": _t0,
+                                "timeout": timeout,
+                            }, session_id=kwargs.get("_session_id", 1) or 1)
                         else:
-                            with _background_process_lock:
-                                _background_process_info[str(task_id)] = {
-                                    "pid": proc.pid,
-                                    "output_file": out_path,
-                                    "command": command[:200],
-                                    "started_at": _t0,
-                                    "timeout": timeout,
-                                    "alive": True,
-                                }
+                            register_background_process(task_id, {
+                                "pid": proc.pid,
+                                "output_file": out_path,
+                                "command": command[:200],
+                                "started_at": _t0,
+                                "timeout": timeout,
+                                "alive": True,
+                            })
                         tail = _mask(_read_tail(out_path, 3000))
                         hint = ""
                         server_tag = ""
@@ -563,16 +588,297 @@ class ShellTool(BaseTool):
             return f"Error executing shell command: {_mask(str(e))}"
 
 
+def register_background_process(task_id, info: dict) -> None:
+    """Register a background process under its task, keyed by pid.
+
+    一任务多进程：同一 task_id 的多个进程各自登记在 pid 槽位下，互
+    不覆盖（旧结构 {task_id: info} 会被后启动的进程整体顶掉，产生
+    失联野进程）。注册即写-through 到 data/background_processes.json。
+    """
+    pid = info.get("pid")
+    if not task_id or not pid:
+        return
+    with _background_process_lock:
+        _background_process_info.setdefault(str(task_id), {})[str(pid)] = info
+        _persist_background_processes_locked()
+
+
 def get_background_processes() -> dict:
-    """Return dict of tracked background processes: {task_id: info}."""
+    """Return dict of tracked background processes: {task_id: {pid: info}}."""
     with _background_process_lock:
-        return dict(_background_process_info)
+        return {tid: dict(procs) for tid, procs in _background_process_info.items()}
 
 
-def cleanup_background_process(task_id: str):
-    """Remove a background process from tracking."""
+def get_background_processes_for_task(task_id) -> dict:
+    """Return {pid: info} of all tracked background processes for one task."""
     with _background_process_lock:
-        _background_process_info.pop(str(task_id), None)
+        return dict(_background_process_info.get(str(task_id), {}))
+
+
+def cleanup_background_process(task_id: str, pid=None):
+    """Remove background process tracking.
+
+    pid 为 None 时清掉该任务整组；指定 pid 时只清对应条目（组空则连
+    任务键一起删）。清理后同步持久化。
+    """
+    with _background_process_lock:
+        procs = _background_process_info.get(str(task_id))
+        if not procs:
+            return
+        if pid is None:
+            _background_process_info.pop(str(task_id), None)
+        else:
+            procs.pop(str(pid), None)
+            if not procs:
+                _background_process_info.pop(str(task_id), None)
+        _persist_background_processes_locked()
+
+
+def cleanup_background_pid(pid) -> bool:
+    """Remove any tracked entry (across all tasks) matching this pid."""
+    removed = False
+    with _background_process_lock:
+        for tid in list(_background_process_info.keys()):
+            procs = _background_process_info[tid]
+            if str(pid) in procs:
+                procs.pop(str(pid), None)
+                removed = True
+            if not procs:
+                _background_process_info.pop(tid, None)
+        if removed:
+            _persist_background_processes_locked()
+    return removed
+
+
+def kill_background_process_for_task(task_id, max_rounds: int = 3) -> list:
+    """Kill ALL tracked background process trees for a task and drop the group.
+
+    Used when a task is interrupted: every process registered under
+    ``_background_process_info[task_id]`` must die with the task instead of
+    running wild. 有界重试：每轮锁内取当前全部条目、锁外杀、锁内只清本轮
+    捕获的条目——旧实现"锁内拷贝→锁外杀→整组清理"在并发注册窗口内会把
+    新登记的 pid 连带删除却不杀（再造野进程）；窗口内新登记的 pid 会被
+    下一轮抓到照杀，直到无剩余或达上限（更迟的登记由
+    ``reap_dead_background_processes`` 僵尸回收兜底）。A kill failure on
+    one pid does not stop the others; the first exception is re-raised AFTER
+    cleanup so the caller can report the failure honestly (callers must
+    wrap——杀进程失败不得阻断中断流程本身). Returns the list of killed pids
+    (empty when the task had no tracked process).
+    """
+    killed = []
+    first_err: Optional[Exception] = None
+    for _round in range(max(1, max_rounds)):
+        with _background_process_lock:
+            procs = dict(_background_process_info.get(str(task_id), {}))
+        if not procs:
+            break
+        round_keys = list(procs.keys())
+        for info in procs.values():
+            pid = info.get("pid")
+            if not pid:
+                continue
+            try:
+                kill_tree(pid)
+                killed.append(pid)
+            except Exception as e:
+                if first_err is None:
+                    first_err = e
+        # 只清本轮捕获的条目；窗口内新登记的留给下一轮
+        with _background_process_lock:
+            cur = _background_process_info.get(str(task_id))
+            if cur:
+                for k in round_keys:
+                    cur.pop(k, None)
+                if not cur:
+                    _background_process_info.pop(str(task_id), None)
+            _persist_background_processes_locked()
+    if first_err is not None:
+        raise first_err
+    return killed
+
+
+def find_task_for_pid(pid) -> Optional[tuple]:
+    """反查主表：返回 (task_id, info)；pid 不在主表返回 None。"""
+    with _background_process_lock:
+        for tid, procs in _background_process_info.items():
+            if str(pid) in procs:
+                return tid, dict(procs[str(pid)])
+    return None
+
+
+def find_orphan_for_pid(pid) -> Optional[tuple]:
+    """反查 orphan 池：返回 (orphan_id, info)；pid 不在池中返回 None。"""
+    with _orphan_process_lock:
+        for oid, info in _orphan_process_info.items():
+            if info.get("pid") == pid:
+                return oid, dict(info)
+    return None
+
+
+def reap_dead_background_processes(alive_fn=None, exclude_task_ids=None) -> list:
+    """惰性回收：清掉注册表（主表 + orphan 池）中 pid 已死的条目。
+
+    BgMonitor 的逐任务检查只覆盖 backgrounded 任务——其他状态（running/
+    interrupted/completed）任务名下的进程条目死后无人清理，永远显示
+    "运行中"（僵尸条目）。读取路径与监控循环每轮调用本函数兜底。
+    exclude_task_ids 用于 BgMonitor 排除本轮正在处理的 backgrounded
+    任务（其死条目由监控分支自己判定，关系"全死才恢复"的触发）。
+    返回被清条目（附 task_id/orphan_id），并逐条打日志：输出文件还在
+    → 保留路径；已删 → 标记（想查日志的用户有据可循）。清表后持久化。
+    """
+    check = alive_fn or pid_alive
+    excluded = {str(t) for t in (exclude_task_ids or ())}
+    with _background_process_lock:
+        snapshot = {tid: dict(procs) for tid, procs in _background_process_info.items()}
+    dead = []
+    for tid, procs in snapshot.items():
+        if tid in excluded:
+            continue
+        for pid_key, info in procs.items():
+            pid = info.get("pid")
+            if not pid or not check(pid):
+                dead.append((tid, pid_key, info))
+    with _orphan_process_lock:
+        orphan_snapshot = dict(_orphan_process_info)
+    dead_orphans = []
+    for oid, info in orphan_snapshot.items():
+        pid = info.get("pid")
+        if not pid or not check(pid):
+            dead_orphans.append((oid, info))
+    if not dead and not dead_orphans:
+        return []
+    reaped = []
+    with _background_process_lock:
+        for tid, pid_key, info in dead:
+            cur = _background_process_info.get(tid)
+            if not cur or pid_key not in cur:
+                continue
+            cur.pop(pid_key, None)
+            if not cur:
+                _background_process_info.pop(tid, None)
+            reaped.append({**info, "task_id": tid})
+        if dead:
+            _persist_background_processes_locked()
+    with _orphan_process_lock:
+        for oid, info in dead_orphans:
+            if _orphan_process_info.pop(oid, None) is not None:
+                reaped.append({**info, "task_id": None, "orphan_id": oid})
+    for entry in reaped:
+        of = entry.get("output_file", "")
+        if of and os.path.exists(of):
+            state = f"output kept: {of}"
+        elif of:
+            state = f"output already deleted: {of}"
+        else:
+            state = "no output file"
+        print(f"[Shell] Reaped dead background process pid={entry.get('pid')} "
+              f"task={entry.get('task_id') or entry.get('orphan_id')}: {state}")
+    return reaped
+
+
+def detach_background_process(task_id: str, pid, session_id: int = None) -> Optional[str]:
+    """把任务下某个进程条目移入 orphan 池（打 "detached" 标记），返回 orphan_id。
+
+    用于 BgMonitor 的"输出冻结解除追踪"：进程继续跑，但从任务的监控
+    视野中脱离——不丢弃条目，保持进程可见、可杀。detached 条目不会
+    被 adopt_orphan_processes 重新认领回任务（见该函数内的跳过逻辑）。
+    """
+    global _orphan_counter
+    with _background_process_lock:
+        procs = _background_process_info.get(str(task_id))
+        info = procs.pop(str(pid), None) if procs else None
+        if procs is not None and not procs:
+            _background_process_info.pop(str(task_id), None)
+        if info is None:
+            return None
+        _persist_background_processes_locked()
+    info = dict(info)
+    info["detached"] = True
+    info["task_id"] = str(task_id)
+    if session_id is not None:
+        info["session_id"] = session_id
+    with _orphan_process_lock:
+        _orphan_counter += 1
+        oid = f"detached_{task_id}_{pid}_{_orphan_counter}"
+        _orphan_process_info[oid] = info
+    return oid
+
+
+def restore_background_processes() -> int:
+    """服务启动时从 data/background_processes.json 复活进程注册表。
+
+    条目复活的条件：pid 当前存活，且 psutil create_time 与记录的
+    started_at 误差 < 60s（防 pid 复用误判——重启后 pid 可能已被
+    无关进程占用）。不满足的条目直接剔除。返回复活数量。
+    """
+    try:
+        path = _background_store_path()
+        if not os.path.exists(path):
+            return 0
+        with open(path, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+    except Exception as e:
+        print(f"[Shell] Failed to load background process store: {e}")
+        return 0
+    if not isinstance(saved, dict):
+        return 0
+    import psutil
+    restored = 0
+    dropped = 0
+    with _background_process_lock:
+        for tid, procs in saved.items():
+            if not isinstance(procs, dict):
+                continue
+            if "pid" in procs:
+                # 兼容旧版扁平格式 {task_id: info}
+                procs = {str(procs.get("pid")): procs}
+            for pid_key, info in procs.items():
+                if not isinstance(info, dict):
+                    dropped += 1
+                    continue
+                try:
+                    pid = int(info.get("pid") or pid_key)
+                except (TypeError, ValueError):
+                    dropped += 1
+                    continue
+                ok = False
+                try:
+                    if pid_alive(pid):
+                        create_time = psutil.Process(pid).create_time()
+                        started_at = float(info.get("started_at") or 0)
+                        if abs(create_time - started_at) < 60:
+                            ok = True
+                except Exception:
+                    ok = False
+                if ok:
+                    _background_process_info.setdefault(str(tid), {})[str(pid)] = info
+                    restored += 1
+                else:
+                    dropped += 1
+        if restored or dropped:
+            # 回写：文件只剩存活条目（同时完成旧格式升级）
+            _persist_background_processes_locked()
+    if restored:
+        print(f"[Shell] Restored {restored} background process(es) from previous run")
+    return restored
+
+
+def register_orphan_process(info: dict, session_id: int = None) -> str:
+    """Register a background process with no task_id yet (late-binding pool).
+
+    返回 orphan_id；pid 缺失时不登记（无法监控/终止的条目没有意义）。
+    """
+    global _orphan_counter
+    pid = info.get("pid")
+    if not pid:
+        return ""
+    with _orphan_process_lock:
+        _orphan_counter += 1
+        oid = f"orphan_{int(info.get('started_at') or time.time())}_{_orphan_counter}"
+        entry = dict(info)
+        entry["session_id"] = session_id or entry.get("session_id", 1) or 1
+        _orphan_process_info[oid] = entry
+    return oid
 
 
 def get_orphan_processes() -> dict:
@@ -587,10 +893,25 @@ def cleanup_orphan_process(orphan_id: str):
         _orphan_process_info.pop(orphan_id, None)
 
 
+def cleanup_orphan_pid(pid) -> bool:
+    """Remove any orphan entry matching this pid. Returns True if removed."""
+    removed = False
+    with _orphan_process_lock:
+        for oid, info in list(_orphan_process_info.items()):
+            if info.get("pid") == pid:
+                _orphan_process_info.pop(oid, None)
+                removed = True
+    return removed
+
+
 def adopt_orphan_processes(task_id: int, session_id: int = None) -> int:
     """
     Move orphan processes matching the given task_id/session_id from the
     orphan pool into the main background_process_info dict.
+
+    一任务多进程：认领按 pid 入槽，多个 orphan 全部保留（旧写法互相
+    覆盖只剩最后一个）。带 "detached" 标记的条目是 BgMonitor 主动脱离
+    监控的冻结进程，不参与认领，避免刚 detach 又被认领回去。
 
     Returns the number of processes adopted.
     """
@@ -599,6 +920,8 @@ def adopt_orphan_processes(task_id: int, session_id: int = None) -> int:
     with _orphan_process_lock:
         to_adopt = []
         for oid, info in list(_orphan_process_info.items()):
+            if info.get("detached"):
+                continue
             # Match by session_id first (most reliable)
             if session_id is not None and info.get("session_id") == session_id:
                 # Only adopt if the orphan is recent (< 10 min old)
@@ -610,8 +933,12 @@ def adopt_orphan_processes(task_id: int, session_id: int = None) -> int:
 
         for oid in to_adopt:
             info = _orphan_process_info.pop(oid)
+            pid = info.get("pid")
+            if not pid:
+                continue
             with _background_process_lock:
-                _background_process_info[str(task_id)] = info
+                _background_process_info.setdefault(str(task_id), {})[str(pid)] = info
+                _persist_background_processes_locked()
             adopted += 1
 
     if adopted:

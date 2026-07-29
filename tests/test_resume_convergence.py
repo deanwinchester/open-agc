@@ -353,8 +353,8 @@ class TestMonitorResumePaths:
         spawned, loop_started, release_loop = _install_monitor_harness(monkeypatch, bg)
         # 进程已死 → 触发恢复（monitor 循环内是本地 import，须打 tools.shell 源头）
         monkeypatch.setattr("tools.shell.get_background_processes",
-                            lambda: {str(tid): {"pid": 999999, "output_file": "",
-                                                "command": "echo hi", "started_at": 1.0}})
+                            lambda: {str(tid): {"999999": {"pid": 999999, "output_file": "",
+                                                           "command": "echo hi", "started_at": 1.0}}})
         monkeypatch.setattr(bg, "pid_alive", lambda pid: False)
         monkeypatch.setattr("tools.shell.cleanup_background_process", lambda key: None)
         monkeypatch.setattr(bg, "_broadcast_task_history", lambda *a, **k: None)
