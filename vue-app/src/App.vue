@@ -27,6 +27,7 @@ const menus = [
   { path: '/tasks', label: zh.menu.tasks },
   { path: '/goals', label: zh.menu.goals },
   { path: '/downloads', label: zh.menu.downloads },
+  { path: '/sandbox', label: zh.menu.sandbox },
   { path: '/settings', label: zh.menu.settings },
   { path: '/debug', label: zh.menu.debug },
 ];
