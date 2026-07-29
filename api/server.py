@@ -59,6 +59,7 @@ from api.routes.routes_goals import router as goals_router
 from api.routes.routes_tasks import router as tasks_router
 from api.routes.routes_settings import router as settings_router
 from api.routes.routes_secrets import router as secrets_router
+from api.routes.routes_sandbox import router as sandbox_router
 
 # Load environment variables
 env_file = get_data_path(".env")
@@ -113,6 +114,7 @@ app.include_router(goals_router)
 app.include_router(tasks_router)
 app.include_router(settings_router)
 app.include_router(secrets_router)
+app.include_router(sandbox_router)
 
 # Initialize benchmark and download route modules with dependencies
 init_benchmark_routes(
@@ -511,7 +513,7 @@ app.websocket("/ws")(websocket_endpoint)
 # old bookmarks); everything else unmatched is a 404 — notably /api/* must stay a
 # JSON 404 and never be swallowed by a redirect.
 _LEGACY_VIEW_PREFIXES = frozenset({
-    "chat", "tasks", "task-detail", "goals", "downloads", "settings", "debug", "logs",
+    "chat", "tasks", "task-detail", "goals", "downloads", "sandbox", "settings", "debug", "logs",
 })
 
 @app.get("/{full_path:path}")

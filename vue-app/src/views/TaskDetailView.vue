@@ -300,6 +300,27 @@ function onLogAutoChange(val) {
   if (val) logTimerId = setInterval(loadLogs, LOG_POLL_MS);
 }
 
+// ── 交付物（routes_sandbox：检查点 files_dir 与 outputs/task_<id>/ 合并） ──
+
+const artifacts = ref([]);
+
+async function loadArtifacts() {
+  try {
+    const data = await request(`/api/tasks/${taskId}/artifacts`);
+    artifacts.value = Array.isArray(data?.files) ? data.files : [];
+  } catch {
+    artifacts.value = [];
+  }
+}
+
+function fmtSize(bytes) {
+  if (bytes === null || bytes === undefined) return '';
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
 // ── 任务操作 ──
 
 async function interruptTask() {
@@ -401,6 +422,7 @@ onMounted(async () => {
   await loadTask();
   loadSteps();
   loadLogs();
+  loadArtifacts();
   // 总是尝试加载进程信息（端点会先认领孤儿进程）；存活时自动进入 5s 轮询
   loadProcess();
   if (isRunning.value) {
@@ -506,6 +528,18 @@ onUnmounted(() => {
           <div class="section-title">{{ t.outputFiles }}</div>
           <div class="file-chips">
             <span v-for="(f, i) in task.output_files" :key="i" class="meta-chip">📄 {{ f }}</span>
+          </div>
+        </div>
+
+        <!-- 交付物（沙箱分区 outputs/task_<id>/ + 检查点 files_dir；空则不显示） -->
+        <div v-if="artifacts.length" class="section">
+          <div class="section-title">{{ t.artifacts.title }}</div>
+          <div class="section-block artifact-block">
+            <div v-for="(f, i) in artifacts" :key="i" class="artifact-row">
+              <span class="artifact-name" :title="f.name">📄 {{ f.name }}</span>
+              <span class="artifact-meta">{{ fmtSize(f.size) }}</span>
+              <span class="artifact-meta">{{ f.mtime }}</span>
+            </div>
           </div>
         </div>
 
@@ -756,6 +790,35 @@ onUnmounted(() => {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.artifact-block {
+  padding: 6px 12px;
+}
+
+.artifact-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.artifact-row:last-child {
+  border-bottom: none;
+}
+
+.artifact-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-meta {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  flex-shrink: 0;
 }
 
 .process-row {
