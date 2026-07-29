@@ -5,6 +5,7 @@ import TasksView from '../views/TasksView.vue';
 import TaskDetailView from '../views/TaskDetailView.vue';
 import GoalsView from '../views/GoalsView.vue';
 import DownloadsView from '../views/DownloadsView.vue';
+import SandboxView from '../views/SandboxView.vue';
 import SettingsLayout from '../views/settings/SettingsLayout.vue';
 import ModelsView from '../views/settings/ModelsView.vue';
 import SkillsView from '../views/settings/SkillsView.vue';
@@ -19,6 +20,7 @@ const routes = [
   { path: '/tasks/:id(\\d+)', name: 'task-detail', component: TaskDetailView, meta: { title: '任务详情' } },
   { path: '/goals', name: 'goals', component: GoalsView, meta: { title: '目标' } },
   { path: '/downloads', name: 'downloads', component: DownloadsView, meta: { title: '下载' } },
+  { path: '/sandbox', name: 'sandbox', component: SandboxView, meta: { title: '沙箱' } },
   {
     path: '/settings',
     component: SettingsLayout,
