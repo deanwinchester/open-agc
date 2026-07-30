@@ -2,6 +2,7 @@
 import os
 import json
 import re
+import shutil
 import sqlite3
 import asyncio
 import time as _time
@@ -21,7 +22,7 @@ from api.task_core import (
 )
 from tools.shell import (
     interrupt_shell, get_background_processes, get_background_processes_for_task,
-    get_orphan_processes, adopt_orphan_processes,
+    get_orphan_processes, adopt_orphan_processes, _decode_mixed,
 )
 
 router = APIRouter()
@@ -165,8 +166,14 @@ async def interrupt_task(task_id: int):
 
 
 @router.delete("/api/tasks/{task_id}")
-async def delete_task(task_id: int):
-    """Delete a task and its associated data."""
+async def delete_task(task_id: int, delete_artifacts: bool = False):
+    """Delete a task and its associated data.
+
+    delete_artifacts=true（沙箱治理二期）时一并删除交付物目录——覆盖
+    <sandbox>/outputs/task_<id>/ 与检查点 files_dir 两个来源（评审 I3）：
+    realpath 校验（与一期同一判据——逃逸链接只删链接本身不跟随；分区目录
+    拒绝），目录不存在不报错；响应带 artifacts_deleted/artifacts_removed/
+    artifacts_errors 明细。"""
     # Interrupt running agents
     for _agents in _active_agents.values():
         for _aid, _a in list(_agents.items()):
@@ -227,7 +234,72 @@ async def delete_task(task_id: int):
         _ug(_unlink)
     except Exception:
         pass
-    return {"status": "success", "message": "Task deleted"}
+    # 联动删除交付物目录（二期，可选）：覆盖 outputs/task_<id>/ 与检查点
+    # files_dir 两个来源（评审 I3：勾选框依据是两来源合并列表，删除范围须一致）。
+    # realpath 判据与一期 routes_sandbox 一致：逃逸链接只删链接本身不跟随；
+    # 分区目录/沙箱根拒绝删除（记入 errors）；目录不存在不算错误；
+    # files_dir 与 outputs/task_<id> 同目录时只删一次。
+    artifacts_removed = []
+    artifacts_errors = []
+    if delete_artifacts:
+        try:
+            from api.routes.routes_sandbox import (
+                _sandbox_root, _resolve_files_dir, _FORBIDDEN_NAMES)
+            from api.task_core import read_task_checkpoint
+            root = _sandbox_root()
+            root_real = os.path.normcase(os.path.realpath(root))
+            forbidden_reals = {root_real} | {
+                os.path.normcase(os.path.realpath(os.path.join(root, n)))
+                for n in _FORBIDDEN_NAMES}
+            candidates = []  # (display, abs_path, expected_real)
+            outputs_dir = os.path.join(root, "outputs", f"task_{task_id}")
+            if os.path.lexists(outputs_dir):
+                candidates.append((
+                    f"outputs/task_{task_id}", outputs_dir,
+                    os.path.normcase(os.path.join(root_real, "outputs",
+                                                  f"task_{task_id}"))))
+            ckpt = read_task_checkpoint(task_id)
+            if ckpt:
+                files_dir = ckpt.get("files_dir")
+                if isinstance(files_dir, str) and files_dir.strip():
+                    # _resolve_files_dir 已做 realpath 沙箱内校验（越出返回 None，
+                    # 与 artifacts 端点同一口径——逃逸来源跳过不算错误）
+                    resolved = _resolve_files_dir(root, files_dir)
+                    if resolved:
+                        candidates.append((
+                            os.path.relpath(resolved, root), resolved,
+                            os.path.normcase(resolved)))
+            seen = set()
+            for display, path, expected_real in candidates:
+                real = os.path.normcase(os.path.realpath(path))
+                if real in seen:
+                    continue  # files_dir 与 outputs/task_<id> 同目录 → 只删一次
+                seen.add(real)
+                try:
+                    if real != expected_real:
+                        # 逃逸链接（junction/symlink）：只删链接本身，不跟随目标
+                        if os.path.islink(path):
+                            os.remove(path)
+                        else:
+                            os.rmdir(path)
+                    elif real in forbidden_reals:
+                        artifacts_errors.append(
+                            {"path": display, "error": "拒绝删除分区目录"})
+                        continue
+                    elif os.path.isdir(path):
+                        shutil.rmtree(path)
+                    else:
+                        os.remove(path)
+                    artifacts_removed.append(display)
+                except OSError as e:
+                    artifacts_errors.append({"path": display, "error": str(e)})
+        except Exception as e:
+            print(f"[Task] Delete artifacts error: {e}")
+            artifacts_errors.append({"path": "", "error": str(e)})
+    return {"status": "success", "message": "Task deleted",
+            "artifacts_deleted": bool(artifacts_removed),
+            "artifacts_removed": artifacts_removed,
+            "artifacts_errors": artifacts_errors}
 
 
 @router.post("/api/tasks/{task_id}/reset-resume")
@@ -746,8 +818,11 @@ async def get_task_logs(task_id: int, lines: int = 50):
             output_path = None
     if not output_path or not os.path.exists(output_path):
         return {"logs": "", "lines": []}
-    with open(output_path, "r", encoding="utf-8", errors="replace") as f:
-        all_lines = f.readlines()
+    # 进程日志是原始字节，可能逐行混杂 UTF-8/GBK（cmd 内建 vs python 子进程），
+    # 整块 utf-8+replace 会把 GBK 行全变 �；按行解码后再截取行数
+    with open(output_path, "rb") as f:
+        raw = f.read()
+    all_lines = _decode_mixed(raw).splitlines(keepends=True)
     selected = all_lines[-lines:]
     # Raw shell output files may contain credentials — mask before returning
     try:

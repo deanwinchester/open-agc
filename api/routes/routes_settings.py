@@ -344,6 +344,39 @@ def create_download_record(type_: str, label: str, repo_id: str = None,
 router = APIRouter()
 
 
+def _load_janitor_section() -> dict:
+    """GET /api/settings 用：返回合并缺省后的 sandbox_janitor 配置节。"""
+    try:
+        from core.sandbox_janitor import load_janitor_config
+        return load_janitor_config()
+    except Exception:
+        return {"enabled": True, "tmp_ttl_days": 7, "interval_hours": 1.0,
+                "soft_gb": 20, "hard_gb": 50}
+
+
+def _sanitize_janitor_section(raw: dict) -> dict:
+    """POST /api/settings 用：白名单校验 sandbox_janitor 配置节——只收已知键，
+    数值钳制非负（interval_hours 至少 0.01），坏值抛 400 由调用方转成 HTTPException。"""
+    allowed = {"enabled", "tmp_ttl_days", "interval_hours", "soft_gb", "hard_gb"}
+    out = {}
+    for key, value in (raw or {}).items():
+        if key not in allowed:
+            continue
+        if key == "enabled":
+            out[key] = bool(value)
+            continue
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"sandbox_janitor.{key} 必须是数字")
+        if key == "interval_hours":
+            num = max(num, 0.01)
+        else:
+            num = max(num, 0.0)
+        out[key] = int(num) if num == int(num) else num
+    return out
+
+
 class ConfigUpdate(BaseModel):
     # All fields optional: POST /api/settings is incremental — only fields
     # explicitly provided (non-None) are written to config, so partial
@@ -375,6 +408,7 @@ class ConfigUpdate(BaseModel):
     max_resume_count: Optional[int] = None
     max_total_tokens: Optional[int] = None
     tool_tiered_exposure: Optional[bool] = None
+    sandbox_janitor: Optional[Dict[str, Any]] = None
 
 
 
@@ -499,6 +533,8 @@ async def get_settings(session_id: int = None):
         "context_budget": config.get("context_budget", {"max_total_tokens": 128000}),
 
         "mcp_servers": config.get("mcp_servers", {}),
+
+        "sandbox_janitor": _load_janitor_section(),
 
     }
 
@@ -692,6 +728,18 @@ async def update_settings(config_update: ConfigUpdate):
         if config_update.max_resume_count is not None:
 
             config["max_resume_count"] = config_update.max_resume_count
+
+        if config_update.sandbox_janitor is not None:
+
+            section = config.get("sandbox_janitor") or {}
+
+            if not isinstance(section, dict):
+
+                section = {}
+
+            section.update(_sanitize_janitor_section(config_update.sandbox_janitor))
+
+            config["sandbox_janitor"] = section
 
         if config_update.max_total_tokens is not None:
 

@@ -10,8 +10,10 @@ Covers:
   _session_permission_whitelists): readable across "instances" — fresh agent
   hydration and the shell point-of-use fallback by session_id.
 - Sudo env scrub: Popen for sudo commands gets SUDO_ASKPASS=/bin/false and no
-  SSH_ASKPASS (prevents invisible GUI askpass hangs on desktop Linux); other
-  commands' env is untouched.
+  SSH_ASKPASS (prevents invisible GUI askpass hangs on desktop Linux); non-sudo
+  commands inherit the user env plus a PYTHONIOENCODING=utf-8 default
+  (log-encoding fix; PYTHONUTF8 deliberately NOT injected to avoid changing
+  the default encoding of bare open()), without scrubbing.
 
 All tests stub subprocess.Popen — no real sudo, no network, no DB.
 """
@@ -171,6 +173,8 @@ def test_sudo_env_scrub(monkeypatch, tmp_path):
     _session_sudo_passwords[TEST_SID] = "pw"
     monkeypatch.setenv("SUDO_ASKPASS", "/usr/bin/gui-askpass")
     monkeypatch.setenv("SSH_ASKPASS", "/usr/bin/ssh-askpass")
+    monkeypatch.delenv("PYTHONUTF8", raising=False)
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
 
     captured = {}
     _stub_shell(monkeypatch, tmp_path, captured, output=b"ok\n", returncode=0)
@@ -182,8 +186,15 @@ def test_sudo_env_scrub(monkeypatch, tmp_path):
     assert env.get("SUDO_ASKPASS") == "/bin/false"  # original GUI value gone
     assert "SSH_ASKPASS" not in env
 
-    # Non-sudo commands are unaffected: no env override passed to Popen
+    # Non-sudo commands: env is the user environment plus PYTHONIOENCODING
+    # default (log-encoding fix) — no scrubbing, SUDO_ASKPASS untouched.
+    # PYTHONUTF8 不注入：避免改变裸 open() 默认编码（第三方脚本读写既有
+    # GBK 文件会出新乱码）。
     captured2 = {}
     _stub_shell(monkeypatch, tmp_path, captured2, output=b"ok\n", returncode=0)
     tool.execute(command="echo hello", timeout=5)
-    assert "env" not in captured2["popen_kwargs"]
+    env2 = captured2["popen_kwargs"].get("env")
+    assert env2 is not None
+    assert "PYTHONUTF8" not in env2
+    assert env2["PYTHONIOENCODING"] == "utf-8"
+    assert env2.get("SUDO_ASKPASS") == "/usr/bin/gui-askpass"  # inherited, not scrubbed

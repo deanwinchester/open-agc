@@ -535,6 +535,13 @@ _bg.start_background_monitor()
 _bg.start_guardian_loop()
 _bg.start_stale_rescue_loop()
 
+# 沙箱 Janitor（沙箱治理二期）：定时 TTL 清理 tmp/ + 硬水位强制清空
+try:
+    from core.sandbox_janitor import start_sandbox_janitor as _start_sandbox_janitor
+    _start_sandbox_janitor()
+except Exception as _sj_e:
+    print(f"[Server] Sandbox janitor start error: {_sj_e}")
+
 # Restore persisted background process registry BEFORE reconcile: tasks whose
 # pre-restart processes are still alive stay backgrounded and BgMonitor takes
 # over (reconcile skips them), instead of being flipped to interrupted.

@@ -21,6 +21,7 @@
 全部用 tmp_path 构造假 sandbox（monkeypatch sandbox_dir 口径），不碰真实 workspace/。
 """
 import asyncio
+import itertools
 import json
 import os
 import sys
@@ -262,11 +263,39 @@ class TestMove:
 
     def test_move_invalid_dest_rejected(self, sandbox):
         (sandbox / "proj_a").mkdir()
-        for bad in ("etc", "", "../x", "outputs"):
+        for bad in ("etc", "", "../x", ".checkpoints", "TMP"):
             with pytest.raises(HTTPException) as ei:
                 asyncio.run(rs.move_sandbox_entry(
                     rs.SandboxMoveRequest(path="proj_a", dest=bad)))
             assert ei.value.status_code == 400
+
+    def test_move_to_downloads_and_outputs(self, sandbox):
+        """归类目标放开四分区：downloads/outputs 均可作为 dest（评审后用户反馈）。"""
+        (sandbox / "big_setup.exe").write_bytes(b"x")
+        asyncio.run(rs.move_sandbox_entry(
+            rs.SandboxMoveRequest(path="big_setup.exe", dest="downloads")))
+        assert (sandbox / "downloads" / "big_setup.exe").is_file()
+        (sandbox / "report_dir").mkdir()
+        resp = asyncio.run(rs.move_sandbox_entry(
+            rs.SandboxMoveRequest(path="report_dir", dest="outputs")))
+        assert resp["dest"] == "outputs"
+        assert (sandbox / "outputs" / "report_dir").is_dir()
+
+    def test_entries_shows_non_task_outputs_children(self, sandbox):
+        """outputs/ 下非 task_<id> 子目录（如手动归类进来的）应可见为 dir 条目。"""
+        (sandbox / "outputs" / "report_dir").mkdir(parents=True)
+        (sandbox / "outputs" / "task_42").mkdir()
+        data = asyncio.run(rs.list_sandbox_entries())
+        by_path = {e["path"]: e for e in data["entries"]}
+        assert by_path["outputs/report_dir"]["type"] == "dir"
+        assert by_path["outputs/task_42"]["type"] == "deliverable"
+        assert by_path["outputs/task_42"]["task_id"] == 42
+
+    def test_entries_exposes_janitor_config(self, sandbox):
+        data = asyncio.run(rs.list_sandbox_entries())
+        j = data["janitor"]
+        for key in ("enabled", "tmp_ttl_days", "interval_hours", "soft_gb", "hard_gb"):
+            assert key in j
 
     def test_move_forbid_checkpoints(self, sandbox):
         (sandbox / ".checkpoints").mkdir()
@@ -494,9 +523,16 @@ class TestMoveDestLinkGuard:
 class TestBudgetInterval:
     def test_flat_dir_budget_interrupts(self, sandbox, monkeypatch):
         """预算 0 + 每 2 条查一次：10 个文件的扁平目录在第 2 个文件处中断，
-        partial=True 且 file_count 远小于总数（不会跑完 10 次 getsize 才看表）。"""
+        partial=True 且 file_count 远小于总数（不会跑完 10 次 getsize 才看表）。
+
+        确定性假时钟（二期评审修复轮）：真实 wall-clock 下整个遍历可能落在
+        同一 timer tick 内（所有预算检查都不触发）造成偶发失败——把 worker
+        的 _time.time 换成递增假时钟后第 2 条必触发，语义不变。"""
         monkeypatch.setattr(rs, "_STATS_TIME_BUDGET", 0.0)
         monkeypatch.setattr(rs, "_BUDGET_CHECK_INTERVAL", 2)
+        _tick = itertools.count()
+        monkeypatch.setattr(
+            rs, "_time", types.SimpleNamespace(time=lambda: next(_tick)))
         big = sandbox / "big"
         big.mkdir()
         for i in range(10):
