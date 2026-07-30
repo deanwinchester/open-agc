@@ -396,6 +396,8 @@ class OpenAGCAgent:
             f"```python\n"
             f"subprocess.Popen([\"ffmpeg\", \"...\"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
             f"```\n"
+            f"用 subprocess 捕获子进程输出时必须显式指定 encoding=\"utf-8\", errors=\"replace\"——"
+            f"Windows 上文本模式默认编码是 cp936，依赖默认编码会把 UTF-8 输出解码成乱码并写进文件。\n"
             f"启动后**不要 pause_and_wait**，继续执行后续任务。需要停止时再用 shell 命令杀掉进程。\n"
             f"\n## 交互式命令\n"
             f"如果 shell 返回 [Interactive] PID xxx，说明该命令已进入交互模式（如 python、mysql 等）。"
