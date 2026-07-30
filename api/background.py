@@ -23,7 +23,7 @@ from api.task_core import (
 from tools.shell import (
     get_background_processes, cleanup_background_process,
     get_orphan_processes, cleanup_orphan_process,
-    adopt_orphan_processes, interrupt_shell,
+    adopt_orphan_processes, interrupt_shell, _decode_mixed,
 )
 
 _time = __import__('time')
@@ -661,8 +661,9 @@ def _read_masked_output_tail(path: str, max_chars: int) -> str:
     escape whole-string matching. Returns "" on any read error.
     """
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as rf:
-            text = rf.read()
+        # 原始字节可能逐行混杂 UTF-8/GBK，整块 utf-8+replace 会把 GBK 行变 �
+        with open(path, "rb") as rf:
+            text = _decode_mixed(rf.read())
     except Exception:
         return ""
     try:

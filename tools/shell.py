@@ -111,6 +111,94 @@ def _sudo_safe_env() -> dict:
     return env
 
 
+def _python_utf8_env(env: dict) -> dict:
+    """补 PYTHONIOENCODING=utf-8（用户已显式设置则不覆盖）。
+
+    中文 Windows 上 python 子进程 stdio 默认按 cp936 输出，与 cmd 内建命令的
+    GBK、python_repl 的 UTF-8 混杂进同一日志文件，读取侧只能逐行猜编码。
+    规范 python 系子进程 stdio 写 UTF-8 后，混合面收敛为「cmd 内建 GBK +
+    其余 UTF-8」两类，_decode_mixed 按行解码即可正确显示。该键对 sudo
+    安全 env 同样安全（不影响提权语义）。
+
+    不注入 PYTHONUTF8：UTF-8 模式会把裸 open() 的默认编码从 cp936 改成
+    UTF-8，第三方脚本读写既有 GBK 文件（旧数据/.bat/.reg）会出新乱码或
+    UnicodeDecodeError，代价超过收益；PYTHONIOENCODING 只规范 stdio 三道
+    流，不碰 open() 默认值。
+    """
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
+
+
+def _decode_mixed(raw: bytes) -> str:
+    """按行解码混合编码的原始字节：逐行 strict UTF-8，失败的行退回系统区域编码。
+
+    进程日志文件是子进程 stdout 的原始字节（open(out_path, "wb") 直写）。
+    中文 Windows 上 cmd 内建命令输出 GBK、python_repl 脚本输出 UTF-8，同一
+    文件逐行混杂是常态；整块二选一解码必乱一半，故按行 strict UTF-8，失败
+    的行用 locale.getpreferredencoding()（如 cp936）decode。行尾保留 \n；
+    二进制垃圾行（两种编码都失败率高）保底 errors="replace"，不抛异常。
+    行分隔字节（\\n/\\r 等）均 < 0x40，不可能是 GBK 尾字节或 UTF-8 后续
+    字节，按行切分不会切断多字节字符。
+    """
+    if not raw:
+        return ""
+    import locale
+    try:
+        fallback_enc = locale.getpreferredencoding() or "utf-8"
+    except Exception:
+        fallback_enc = "utf-8"
+    parts = []
+    for line in raw.splitlines(keepends=True):
+        try:
+            parts.append(line.decode("utf-8"))
+        except UnicodeDecodeError:
+            try:
+                parts.append(line.decode(fallback_enc, errors="replace"))
+            except Exception:
+                parts.append(line.decode("utf-8", errors="replace"))
+    return "".join(parts)
+
+
+class _LineBuffer:
+    """增量字节流的行/段缓冲：只切出完整段解码，半段字节留到下一轮。
+
+    进度轮询每 0.5s 按字节区间增量读取日志文件，任意切分会把多字节字符
+    切成两半，整块错解成乱码。feed() 只消费到最后一个 \\n 或 \\r 为止
+    （\\r 是 tqdm/pip 类进度条刷新符，前端依赖增量 \\r 模拟进度，原始
+    \\r 字节必须保留，不能只认 \\n 否则进度条到进程结束才出现）；
+    \\n/\\r 均 < 0x40，不可能是 GBK 尾字节或 UTF-8 后续字节，不会切断
+    多字节字符。flush() 在进程结束时冲刷残余。_pending 超过
+    _MAX_PENDING 时按现状发出，防无 \\n/\\r 巨量单行无界累积。
+    """
+
+    _MAX_PENDING = 64 * 1024  # 64KB
+
+    def __init__(self):
+        self._pending = bytearray()
+
+    def feed(self, data: bytes) -> str:
+        """追加新字节，返回已凑齐完整段部分的解码文本（可能为空）。"""
+        if data:
+            self._pending.extend(data)
+        cut = max(self._pending.rfind(b"\n"), self._pending.rfind(b"\r"))
+        if cut >= 0:
+            chunk = bytes(self._pending[:cut + 1])
+            del self._pending[:cut + 1]
+            return _decode_mixed(chunk)
+        if len(self._pending) > self._MAX_PENDING:
+            # 无 \n/\r 的巨量单行：按现状发出，内存有界 + 长行进度可见
+            return self.flush()
+        return ""
+
+    def flush(self) -> str:
+        """冲刷残余半行（进程结束时调用）。"""
+        if not self._pending:
+            return ""
+        chunk = bytes(self._pending)
+        self._pending.clear()
+        return _decode_mixed(chunk)
+
+
 class ShellTool(BaseTool):
     name: str = "execute_shell"
     description: str = ("在本机执行 bash 命令。sudo 弹密码框（密码不入会话，失败提示需要密码时重试一次即可触发）；"
@@ -338,6 +426,9 @@ class ShellTool(BaseTool):
                 }
                 if _is_sudo:
                     popen_kwargs["env"] = _sudo_safe_env()
+                else:
+                    popen_kwargs["env"] = os.environ.copy()
+                _python_utf8_env(popen_kwargs["env"])
                 if sys.platform == "win32":
                     popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 proc = subprocess.Popen(exec_command, **popen_kwargs)
@@ -371,6 +462,9 @@ class ShellTool(BaseTool):
                 }
                 if _is_sudo:
                     popen_kwargs["env"] = _sudo_safe_env()
+                else:
+                    popen_kwargs["env"] = os.environ.copy()
+                _python_utf8_env(popen_kwargs["env"])
                 if sys.platform == "win32":
                     popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 _t0 = time.time()
@@ -397,21 +491,28 @@ class ShellTool(BaseTool):
                 # Background thread: poll output file and emit progress
                 poll_stop = threading.Event()
                 last_pos = 0
+                line_buf = _LineBuffer()
 
-                def _decode_shell_output(path: str, start: int, end: int) -> str:
-                    """Read shell output bytes and decode as UTF-8 with fallback to system encoding."""
+                def _read_new_bytes(path: str, start: int, end: int) -> bytes:
                     with open(path, "rb") as rf:
                         rf.seek(start)
-                        raw = rf.read(end - start)
-                    try:
-                        return raw.decode("utf-8")
-                    except UnicodeDecodeError:
-                        # Fallback: system locale encoding (e.g. cp936 on Chinese Windows)
-                        import locale
-                        try:
-                            return raw.decode(locale.getpreferredencoding(), errors="replace")
-                        except Exception:
-                            return raw.decode("utf-8", errors="replace")
+                        return rf.read(end - start)
+
+                def _emit_progress(text: str, fsize: int):
+                    if not text or not progress_cb or not text.strip():
+                        return
+                    elapsed = time.time() - _t0
+                    # Truncate to last 2000 chars for progress
+                    preview = (text[-2000:] if len(text) > 2000
+                               else text)
+                    # Live echo to the frontend must be masked too
+                    preview = _mask(preview)
+                    progress_cb({
+                        "event": "shell_output",
+                        "text": preview,
+                        "elapsed": round(elapsed, 1),
+                        "total_bytes": fsize,
+                    })
 
                 def _poll_output():
                     nonlocal last_pos
@@ -420,27 +521,27 @@ class ShellTool(BaseTool):
                         try:
                             fsize = os.path.getsize(out_path)
                             if fsize > last_pos:
-                                new_text = _decode_shell_output(out_path, last_pos, fsize)
+                                # Keep raw text (with \r) for frontend progress display.
+                                # _clean_cr is only used for final output reads.
+                                # 行/段缓冲：切到最后一个 \n 或 \r 为止（\r 是
+                                # tqdm 类进度刷新符），半段字节（可能切在多字节
+                                # 字符中间）留到下一轮，避免整块错解成乱码。
+                                new_text = line_buf.feed(_read_new_bytes(out_path, last_pos, fsize))
                                 last_pos = fsize
-                                if new_text and progress_cb:
-                                    # Keep raw text (with \r) for frontend progress display.
-                                    # _clean_cr is only used for final output reads.
-                                    if not new_text.strip():
-                                        continue
-                                    elapsed = time.time() - _t0
-                                    # Truncate to last 2000 chars for progress
-                                    preview = (new_text[-2000:] if len(new_text) > 2000
-                                               else new_text)
-                                    # Live echo to the frontend must be masked too
-                                    preview = _mask(preview)
-                                    progress_cb({
-                                        "event": "shell_output",
-                                        "text": preview,
-                                        "elapsed": round(elapsed, 1),
-                                        "total_bytes": fsize,
-                                    })
+                                _emit_progress(new_text, fsize)
                         except Exception:
                             pass
+                    # 进程结束：最后一轮新字节里 feed 切出的完整行/段与残余
+                    # 半行（最后一行可能无 \n 结尾）都要发出，不可只发残余
+                    try:
+                        fsize = os.path.getsize(out_path)
+                        text = ""
+                        if fsize > last_pos:
+                            text = line_buf.feed(_read_new_bytes(out_path, last_pos, fsize))
+                            last_pos = fsize
+                        _emit_progress(text + line_buf.flush(), fsize)
+                    except Exception:
+                        pass
 
                 poll_thread = threading.Thread(target=_poll_output, daemon=True)
                 poll_thread.start()
@@ -1158,15 +1259,9 @@ def _read_tail(path: str, max_chars: int) -> str:
             return "(no output)"
         with open(path, "rb") as f:
             raw = f.read()
-        # Try UTF-8 first, then system locale
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            import locale
-            try:
-                text = raw.decode(locale.getpreferredencoding(), errors="replace")
-            except Exception:
-                text = raw.decode("utf-8", errors="replace")
+        # 日志文件可能逐行混杂 UTF-8/GBK（cmd 内建 vs python 子进程），
+        # 按行解码避免整块二选一时必乱一半
+        text = _decode_mixed(raw)
         text = _clean_cr(text)
         if len(text) <= max_chars:
             return text

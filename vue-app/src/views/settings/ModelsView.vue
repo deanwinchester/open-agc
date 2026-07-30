@@ -39,6 +39,12 @@ const form = reactive({
   coldCacheTtl: 3600,
   maxResumeCount: 10,
   maxTotalTokens: 128000,
+  // 沙箱自动清理（sandbox_janitor 节）
+  janitorEnabled: true,
+  janitorTtlDays: 7,
+  janitorIntervalHours: 1,
+  janitorSoftGb: 20,
+  janitorHardGb: 50,
 });
 
 // 初始值快照（来自 GET 响应），保存时逐字段对比得出 dirty 集合
@@ -95,6 +101,13 @@ function applySettings(data) {
     cold_cache_ttl: data.cold_cache_ttl ?? 3600,
     max_resume_count: data.max_resume_count ?? 10,
     max_total_tokens: data.context_budget?.max_total_tokens ?? 128000,
+    sandbox_janitor: {
+      enabled: data.sandbox_janitor?.enabled ?? true,
+      tmp_ttl_days: data.sandbox_janitor?.tmp_ttl_days ?? 7,
+      interval_hours: data.sandbox_janitor?.interval_hours ?? 1,
+      soft_gb: data.sandbox_janitor?.soft_gb ?? 20,
+      hard_gb: data.sandbox_janitor?.hard_gb ?? 50,
+    },
   };
   initial.value = init;
 
@@ -111,6 +124,11 @@ function applySettings(data) {
   form.coldCacheTtl = init.cold_cache_ttl;
   form.maxResumeCount = init.max_resume_count;
   form.maxTotalTokens = init.max_total_tokens;
+  form.janitorEnabled = init.sandbox_janitor.enabled;
+  form.janitorTtlDays = init.sandbox_janitor.tmp_ttl_days;
+  form.janitorIntervalHours = init.sandbox_janitor.interval_hours;
+  form.janitorSoftGb = init.sandbox_janitor.soft_gb;
+  form.janitorHardGb = init.sandbox_janitor.hard_gb;
 
   form.provider = providerFromModel(init.default_model);
   form.model = init.default_model;
@@ -204,6 +222,21 @@ function buildPayload() {
   if (form.maxTotalTokens != null && form.maxTotalTokens !== init.max_total_tokens) {
     payload.max_total_tokens = form.maxTotalTokens;
   }
+
+  // sandbox_janitor：逐键对比，只发变化键（后端白名单合并进配置节）
+  const jInit = init.sandbox_janitor;
+  const jCur = {
+    enabled: form.janitorEnabled,
+    tmp_ttl_days: form.janitorTtlDays,
+    interval_hours: form.janitorIntervalHours,
+    soft_gb: form.janitorSoftGb,
+    hard_gb: form.janitorHardGb,
+  };
+  const jDiff = {};
+  for (const [k, v] of Object.entries(jCur)) {
+    if (v != null && v !== jInit[k]) jDiff[k] = v;
+  }
+  if (Object.keys(jDiff).length > 0) payload.sandbox_janitor = jDiff;
 
   return payload;
 }
@@ -388,6 +421,29 @@ onMounted(loadSettings);
           <el-input v-model="form.searxngUrl" :placeholder="t.sandbox.searxngPlaceholder" />
           <div class="field-hint">{{ t.sandbox.searxngHint }}</div>
         </el-form-item>
+        <el-divider content-position="left">{{ t.sandbox.janitorTitle }}</el-divider>
+        <el-form-item :label="t.sandbox.janitorEnabled">
+          <el-switch v-model="form.janitorEnabled" />
+          <div class="field-hint">{{ t.sandbox.janitorEnabledHint }}</div>
+        </el-form-item>
+        <template v-if="form.janitorEnabled">
+          <el-form-item :label="t.sandbox.janitorTtl">
+            <el-input-number v-model="form.janitorTtlDays" :min="0" :max="365" />
+            <div class="field-hint">{{ t.sandbox.janitorTtlHint }}</div>
+          </el-form-item>
+          <el-form-item :label="t.sandbox.janitorInterval">
+            <el-input-number v-model="form.janitorIntervalHours" :min="0.1" :max="168" :step="0.5" />
+            <div class="field-hint">{{ t.sandbox.janitorIntervalHint }}</div>
+          </el-form-item>
+          <el-form-item :label="t.sandbox.janitorSoft">
+            <el-input-number v-model="form.janitorSoftGb" :min="0" :max="100000" />
+            <div class="field-hint">{{ t.sandbox.janitorSoftHint }}</div>
+          </el-form-item>
+          <el-form-item :label="t.sandbox.janitorHard">
+            <el-input-number v-model="form.janitorHardGb" :min="0" :max="100000" />
+            <div class="field-hint">{{ t.sandbox.janitorHardHint }}</div>
+          </el-form-item>
+        </template>
       </el-form>
     </el-card>
 

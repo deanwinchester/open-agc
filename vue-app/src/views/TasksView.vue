@@ -12,7 +12,7 @@
 //   每项含 task_id/pid/command/output_file/started_at/uptime/alive，可带 detached:true；
 //   discovered 为 OS 扫描发现的、与工作目录相关但未追踪的进程 {pid,name,cmdline,create_time,uptime}
 // - POST /api/processes/{pid}/kill（按 pid 终止进程树，tracked/discovered 通用；后端有安全校验，失败返回 403/404）
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, h, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Plus, Refresh, Search, Delete } from '@element-plus/icons-vue';
@@ -234,10 +234,34 @@ async function interruptTask(task) {
   }
 }
 
+// 删除任务：若该任务有交付物（outputs/task_<id>/），确认框提供
+// 「同时删除交付物目录」勾选（默认不勾）——沙箱治理二期 delete_artifacts 联动。
+const deleteArtifacts = ref(false);
+
 async function deleteTask(task) {
+  let hasArtifacts = false;
+  try {
+    const art = await request(`/api/tasks/${task.id}/artifacts`);
+    hasArtifacts = Array.isArray(art?.files) && art.files.length > 0;
+  } catch {
+    hasArtifacts = false; // 查询失败不阻断删除，按无交付物处理
+  }
+  deleteArtifacts.value = false;
+  const message = hasArtifacts
+    ? h('div', null, [
+        h('p', { style: 'margin: 0 0 8px;' }, `#${task.id} ${task.title} — ${t.actions.deleteConfirmText}`),
+        h('label', { style: 'display: flex; align-items: center; gap: 6px; cursor: pointer;' }, [
+          h('input', {
+            type: 'checkbox',
+            onChange: (ev) => { deleteArtifacts.value = ev.target.checked; },
+          }),
+          h('span', null, t.actions.deleteArtifactsLabel),
+        ]),
+      ])
+    : `#${task.id} ${task.title} — ${t.actions.deleteConfirmText}`;
   try {
     await ElMessageBox.confirm(
-      `#${task.id} ${task.title} — ${t.actions.deleteConfirmText}`,
+      message,
       t.actions.deleteConfirmTitle,
       { confirmButtonText: t.actions.delete, cancelButtonText: t.schedule.cancel, type: 'warning' }
     );
@@ -245,8 +269,18 @@ async function deleteTask(task) {
     return;
   }
   try {
-    await request(`/api/tasks/${task.id}`, { method: 'DELETE' });
-    ElMessage.success(t.actions.deleteSuccess);
+    const qs = hasArtifacts && deleteArtifacts.value ? '?delete_artifacts=true' : '';
+    const resp = await request(`/api/tasks/${task.id}${qs}`, { method: 'DELETE' });
+    // 交付物联动删除结果如实提示（评审 I3）：成功 N 项 / 失败 N 项 / 无交付物目录
+    if (hasArtifacts && deleteArtifacts.value) {
+      const removed = Array.isArray(resp?.artifacts_removed) ? resp.artifacts_removed.length : 0;
+      const errors = Array.isArray(resp?.artifacts_errors) ? resp.artifacts_errors.length : 0;
+      if (removed > 0) ElMessage.success(t.actions.deleteArtifactsDeleted.replace('{n}', removed));
+      if (errors > 0) ElMessage.warning(t.actions.deleteArtifactsFailed.replace('{n}', errors));
+      if (!removed && !errors) ElMessage.success(t.actions.deleteArtifactsNone);
+    } else {
+      ElMessage.success(t.actions.deleteSuccess);
+    }
     loadTasks({ silent: true });
   } catch (err) {
     ElMessage.error(`${t.actions.deleteFailed}: ${err.message}`);
