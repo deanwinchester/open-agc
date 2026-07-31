@@ -500,6 +500,14 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
     # -- Normal completion --
     save_task_context(task_id, agent_messages)
     _record_task_deliverables(task_id)
+    # 交付物登记制：把检查点 files_dir 与 generated_files 里 outputs/ 下的目录
+    # 登记进 deliverables 表并关联本任务（归属显式化，删任务按共享情况逐目录决策）。
+    # 登记故障不阻断收官流程（Deferred import：registry 不反向依赖本模块）。
+    try:
+        from api.deliverables_registry import register_task_deliverables
+        register_task_deliverables(task_id)
+    except Exception as _reg_err:
+        print(f"[Task] Deliverables registry error: {_reg_err}")
     update_task_status(task_id, "completed", summary)
     # 成功完成即清零恢复计数：Scheduler 点火/各恢复路径的 CAS 每次 +1，
     # 不清零会单调累积——长寿命 cron 任务一次普通中断就会被 Guardian

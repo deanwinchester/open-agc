@@ -4,7 +4,8 @@
 // 数据契约（api/routes/routes_sandbox.py）：
 // - GET /api/sandbox/entries → {sandbox, total_size, watermark, janitor, entries[]}
 //   条目字段：name/path(相对)/is_dir/type(project|deliverable|temp|installer|dir|file)/
-//   mtime/size/file_count/partial/task_id?(deliverable)/pinned?(tmp 子条目)；
+//   mtime/size/file_count/partial/task_id?(deliverable 兼容单任务)/task_ids?(deliverable
+//   登记制任务关联，可多个)/pinned?(tmp 子条目)；
 //   size 为 null 表示后台统计中；tmp/ 子条目默认收起，点击 tmp 行展开
 //   watermark: {total_size, soft_bytes, hard_bytes, level(ok|soft|hard), partial}
 //   janitor: {enabled, tmp_ttl_days, interval_hours, soft_gb, hard_gb}（规则展示用）
@@ -232,8 +233,14 @@ async function cleanTmp() {
   }
 }
 
-function goTask(e) {
-  if (e.task_id) router.push(`/tasks/${e.task_id}`);
+// deliverable 行的任务关联（登记制：一行可带多个任务；旧字段 task_id 兜底）
+function rowTaskIds(e) {
+  if (Array.isArray(e.task_ids) && e.task_ids.length) return e.task_ids;
+  return e.task_id ? [e.task_id] : [];
+}
+
+function goTask(tid) {
+  if (tid) router.push(`/tasks/${tid}`);
 }
 
 // ── 保留标记（二期）：仅 tmp/ 子条目（path 为 tmp/<名称>）可 pin ──
@@ -382,17 +389,20 @@ function resultTagType(result) {
           </template>
         </el-table-column>
         <el-table-column prop="mtime" :label="t.columns.mtime" width="150" />
-        <el-table-column :label="t.columns.task" width="100">
+        <el-table-column :label="t.columns.task" width="140">
           <template #default="{ row }">
-            <el-button
-              v-if="row.task_id"
-              size="small"
-              text
-              type="primary"
-              @click="goTask(row)"
-            >
-              #{{ row.task_id }}
-            </el-button>
+            <template v-if="rowTaskIds(row).length">
+              <el-button
+                v-for="tid in rowTaskIds(row)"
+                :key="tid"
+                size="small"
+                text
+                type="primary"
+                @click="goTask(tid)"
+              >
+                #{{ tid }}
+              </el-button>
+            </template>
             <span v-else>—</span>
           </template>
         </el-table-column>

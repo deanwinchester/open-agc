@@ -300,17 +300,25 @@ function onLogAutoChange(val) {
   if (val) logTimerId = setInterval(loadLogs, LOG_POLL_MS);
 }
 
-// ── 交付物（routes_sandbox：检查点 files_dir 与 outputs/task_<id>/ 合并） ──
+// ── 交付物（routes_sandbox：登记表 dirs 逐目录带 shared_with/missing；
+// files 为合并兜底列表，无登记目录时按旧版平铺展示） ──
 
 const artifacts = ref([]);
+const artifactDirs = ref([]);
 
 async function loadArtifacts() {
   try {
     const data = await request(`/api/tasks/${taskId}/artifacts`);
     artifacts.value = Array.isArray(data?.files) ? data.files : [];
+    artifactDirs.value = Array.isArray(data?.dirs) ? data.dirs : [];
   } catch {
     artifacts.value = [];
+    artifactDirs.value = [];
   }
+}
+
+function goTask(tid) {
+  if (tid && tid !== taskId) router.push(`/tasks/${tid}`);
 }
 
 function fmtSize(bytes) {
@@ -384,33 +392,61 @@ async function resumeTask() {
   }
 }
 
-// 删除任务：若该任务有交付物（outputs/task_<id>/），确认框提供
-// 「同时删除交付物目录」勾选（默认不勾）——沙箱治理二期 delete_artifacts 联动。
+// 删除任务（登记制共享删除策略）：若任务有登记交付物目录，确认框逐目录列出
+// 复选框——独占目录默认勾选，共享目录（还被其他任务使用）默认不勾并标注；
+// 提交选中清单 artifact_dirs。无登记目录但有未登记交付物文件时，退化为旧的
+// delete_artifacts 单一勾选（未登记 outputs/task_<id>/ 与检查点 files_dir 兜底）。
 const deleteArtifacts = ref(false);
+const deleteDirChecks = ref({});
 
 async function deleteTask() {
-  let hasArtifacts = artifacts.value.length > 0;
-  if (!hasArtifacts) {
-    try {
-      const art = await request(`/api/tasks/${taskId}/artifacts`);
-      hasArtifacts = Array.isArray(art?.files) && art.files.length > 0;
-    } catch {
-      hasArtifacts = false; // 查询失败不阻断删除，按无交付物处理
-    }
+  let art = null;
+  try {
+    art = await request(`/api/tasks/${taskId}/artifacts`);
+  } catch {
+    art = null; // 查询失败不阻断删除，按无交付物处理
   }
+  const dirs = Array.isArray(art?.dirs) ? art.dirs : [];
+  const legacyFiles = !dirs.length && Array.isArray(art?.files) && art.files.length > 0;
   deleteArtifacts.value = false;
-  const message = hasArtifacts
-    ? h('div', null, [
-        h('p', { style: 'margin: 0 0 8px;' }, t.actions.deleteConfirmText),
-        h('label', { style: 'display: flex; align-items: center; gap: 6px; cursor: pointer;' }, [
-          h('input', {
-            type: 'checkbox',
-            onChange: (ev) => { deleteArtifacts.value = ev.target.checked; },
-          }),
-          h('span', null, t.actions.deleteArtifactsLabel),
+  deleteDirChecks.value = {};
+  let message;
+  if (dirs.length) {
+    for (const d of dirs) {
+      // 独占默认勾选；共享默认不勾
+      deleteDirChecks.value[d.dir] = !(Array.isArray(d.shared_with) && d.shared_with.length);
+    }
+    message = h('div', null, [
+      h('p', { style: 'margin: 0 0 8px;' }, t.actions.deleteConfirmText),
+      h('p', { style: 'margin: 0 0 6px;' }, t.actions.deleteArtifactsDirsHint),
+      ...dirs.map((d) => h('label', { style: 'display: flex; align-items: center; gap: 6px; cursor: pointer; margin: 2px 0;' }, [
+        h('input', {
+          type: 'checkbox',
+          checked: deleteDirChecks.value[d.dir],
+          onChange: (ev) => { deleteDirChecks.value[d.dir] = ev.target.checked; },
+        }),
+        h('span', null, [
+          `${d.name || d.dir}（${d.dir}）`,
+          ...(Array.isArray(d.shared_with) && d.shared_with.length
+            ? [` — ${t.actions.deleteArtifactsShared.replace('{ids}', d.shared_with.map((x) => `#${x}`).join(' '))}`]
+            : []),
         ]),
-      ])
-    : t.actions.deleteConfirmText;
+      ])),
+    ]);
+  } else if (legacyFiles) {
+    message = h('div', null, [
+      h('p', { style: 'margin: 0 0 8px;' }, t.actions.deleteConfirmText),
+      h('label', { style: 'display: flex; align-items: center; gap: 6px; cursor: pointer;' }, [
+        h('input', {
+          type: 'checkbox',
+          onChange: (ev) => { deleteArtifacts.value = ev.target.checked; },
+        }),
+        h('span', null, t.actions.deleteArtifactsLabel),
+      ]),
+    ]);
+  } else {
+    message = t.actions.deleteConfirmText;
+  }
   try {
     await ElMessageBox.confirm(message, t.actions.deleteConfirmTitle, {
       confirmButtonText: t.actions.delete,
@@ -421,15 +457,23 @@ async function deleteTask() {
     return;
   }
   try {
-    const qs = hasArtifacts && deleteArtifacts.value ? '?delete_artifacts=true' : '';
+    const selected = dirs.filter((d) => deleteDirChecks.value[d.dir]).map((d) => d.dir);
+    let qs = '';
+    if (dirs.length) {
+      if (selected.length) qs = `?artifact_dirs=${encodeURIComponent(JSON.stringify(selected))}`;
+    } else if (legacyFiles && deleteArtifacts.value) {
+      qs = '?delete_artifacts=true';
+    }
     const resp = await request(`/api/tasks/${taskId}${qs}`, { method: 'DELETE' });
-    // 交付物联动删除结果如实提示（评审 I3）：成功 N 项 / 失败 N 项 / 无交付物目录
-    if (hasArtifacts && deleteArtifacts.value) {
+    // 交付物联动删除结果如实提示：成功 N 项 / 失败 N 项 / 共享保留 N 项 / 无交付物目录
+    if (qs) {
       const removed = Array.isArray(resp?.artifacts_removed) ? resp.artifacts_removed.length : 0;
       const errors = Array.isArray(resp?.artifacts_errors) ? resp.artifacts_errors.length : 0;
+      const skipped = Array.isArray(resp?.skipped_shared) ? resp.skipped_shared.length : 0;
       if (removed > 0) ElMessage.success(t.actions.deleteArtifactsDeleted.replace('{n}', removed));
       if (errors > 0) ElMessage.warning(t.actions.deleteArtifactsFailed.replace('{n}', errors));
-      if (!removed && !errors) ElMessage.success(t.actions.deleteArtifactsNone);
+      if (skipped > 0) ElMessage.info(t.actions.deleteArtifactsSkippedShared.replace('{n}', skipped));
+      if (!removed && !errors && !skipped) ElMessage.success(t.actions.deleteArtifactsNone);
     } else {
       ElMessage.success(t.actions.deleteSuccess);
     }
@@ -567,8 +611,38 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 交付物（沙箱分区 outputs/task_<id>/ + 检查点 files_dir；空则不显示） -->
-        <div v-if="artifacts.length" class="section">
+        <!-- 交付物（登记制：按目录分组展示语义名 + 任务关联；missing 灰显；
+             无登记目录时退化为合并文件平铺列表） -->
+        <div v-if="artifactDirs.length" class="section">
+          <div class="section-title">{{ t.artifacts.title }}</div>
+          <div class="section-block artifact-block">
+            <div
+              v-for="d in artifactDirs"
+              :key="d.dir"
+              class="artifact-dir"
+              :class="{ missing: d.missing }"
+            >
+              <div class="artifact-dir-head">
+                <span class="artifact-name" :title="d.dir">📁 {{ d.name || d.dir }}</span>
+                <span class="artifact-meta">{{ d.dir }}</span>
+                <span v-if="d.missing" class="artifact-missing">{{ t.artifacts.missing }}</span>
+                <a
+                  v-for="tid in [taskId, ...(d.shared_with || [])]"
+                  :key="tid"
+                  class="artifact-task-link"
+                  :title="`#${tid}`"
+                  @click="goTask(tid)"
+                >#{{ tid }}</a>
+              </div>
+              <div v-for="(f, i) in d.files" :key="i" class="artifact-row">
+                <span class="artifact-name" :title="f.name">📄 {{ f.name }}</span>
+                <span class="artifact-meta">{{ fmtSize(f.size) }}</span>
+                <span class="artifact-meta">{{ f.mtime }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-else-if="artifacts.length" class="section">
           <div class="section-title">{{ t.artifacts.title }}</div>
           <div class="section-block artifact-block">
             <div v-for="(f, i) in artifacts" :key="i" class="artifact-row">
@@ -830,6 +904,44 @@ onUnmounted(() => {
 
 .artifact-block {
   padding: 6px 12px;
+}
+
+.artifact-dir {
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  padding: 4px 0;
+}
+
+.artifact-dir:last-child {
+  border-bottom: none;
+}
+
+.artifact-dir.missing {
+  opacity: 0.55;
+}
+
+.artifact-dir-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0;
+}
+
+.artifact-missing {
+  font-size: 12px;
+  color: var(--el-color-warning);
+  flex-shrink: 0;
+}
+
+.artifact-task-link {
+  font-size: 12px;
+  color: var(--el-color-primary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.artifact-dir .artifact-row {
+  border-bottom: none;
+  padding-left: 18px;
 }
 
 .artifact-row {
