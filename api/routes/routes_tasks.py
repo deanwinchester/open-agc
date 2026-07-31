@@ -508,23 +508,39 @@ def _pid_matches_sandbox(proc, sandbox_dir: str) -> bool:
     return False
 
 
+def _protected_pid_set() -> set:
+    """服务进程自身 + 祖先链 pid 集合（每次扫描只算一次）。
+    此前逐进程调 check_protected_pid，每个都重建 Process(server).parents()
+    ——394 个进程 × ~90ms = 35s 同步阻塞事件循环（全站卡死根因）。"""
+    protected = set()
+    try:
+        from api.state import _server_pid
+        import psutil
+        if _server_pid:
+            protected.add(_server_pid)
+            protected.update(a.pid for a in psutil.Process(_server_pid).parents()[:3])
+    except Exception:
+        pass
+    return protected
+
+
 def _discover_sandbox_processes(exclude_pids: set, limit: int = 50) -> list:
     """OS 扫描兜底：cwd/cmdline 命中 sandbox 目录、却不在追踪表里的进程。
 
-    排除本服务进程自身及其祖先（check_protected_pid 只保护向上的父链，
-    agent 启动的子进程照常可见）。每项给 pid/name/cmdline(截断)/create_time/uptime。
+    排除本服务进程自身及其祖先（保护集合每次扫描计算一次，见
+    _protected_pid_set）。每项给 pid/name/cmdline(截断)/create_time/uptime。
     """
     import psutil
-    from api.state import check_protected_pid
     sandbox_dir = _sandbox_dir_from_config()
     if not sandbox_dir:
         return []
+    skip_pids = set(exclude_pids) | _protected_pid_set()
     found = []
     now = _time.time()
     for proc in psutil.process_iter(["pid", "name", "create_time"]):
         try:
             pid = proc.pid
-            if pid in exclude_pids or check_protected_pid(pid):
+            if pid in skip_pids:
                 continue
             if not _pid_matches_sandbox(proc, sandbox_dir):
                 continue
@@ -544,6 +560,30 @@ def _discover_sandbox_processes(exclude_pids: set, limit: int = 50) -> list:
             continue
     found.sort(key=lambda p: p["create_time"], reverse=True)
     return found[:limit]
+
+
+# discovered 扫描结果缓存：进程页有轮询刷新，每次全量扫描（含 cmdline
+# 读取）仍有秒级成本，TTL 内复用结果，请求时按最新追踪表过滤即可。
+import threading as _threading
+_discovered_lock = _threading.Lock()
+_discovered_cache = {"ts": 0.0, "sandbox": None, "items": []}
+_DISCOVERED_TTL = 10.0
+
+
+def _discover_cached(tracked_pids: set) -> list:
+    now = _time.time()
+    sandbox_dir = _sandbox_dir_from_config()
+    with _discovered_lock:
+        fresh = (now - _discovered_cache["ts"] < _DISCOVERED_TTL
+                 and _discovered_cache["sandbox"] == sandbox_dir)
+        items = list(_discovered_cache["items"]) if fresh else None
+    if items is None:
+        items = _discover_sandbox_processes(set())
+        with _discovered_lock:
+            _discovered_cache["ts"] = now
+            _discovered_cache["sandbox"] = sandbox_dir
+            _discovered_cache["items"] = list(items)
+    return [p for p in items if p["pid"] not in tracked_pids]
 
 
 def _reaped_row(entry: dict) -> dict:
@@ -574,9 +614,15 @@ async def list_processes():
     orphan 池保持 orphan_id 键；每项含 task_id/pid/command/started_at/alive/uptime。
     返回前惰性回收死 pid 条目（任何状态的任务都可能留僵尸条目）；本次
     被回收的条目带 alive=false/reaped=true 标志返回一次，之后便不再出现。
-    discovered: psutil 全盘扫描兜底，cwd/cmdline 命中 sandbox 目录但未被
-    追踪的野生进程（排除服务自身及祖先、已在 bg/orphan 表里的 pid）。
+    discovered: psutil 全盘扫描兜底（10s TTL 缓存），cwd/cmdline 命中 sandbox
+    目录但未被追踪的野生进程（排除服务自身及祖先、已在 bg/orphan 表里的 pid）。
+    整个处理移到执行器线程：同步 psutil/DB 操作不得在事件循环上跑（曾因此
+    全站卡死 35s）。
     """
+    return await asyncio.get_running_loop().run_in_executor(None, _build_processes_payload)
+
+
+def _build_processes_payload() -> dict:
     from tools.shell_interact import _is_pid_alive
     from tools.shell import reap_dead_background_processes
     reaped = reap_dead_background_processes()
@@ -607,7 +653,7 @@ async def list_processes():
                else entry.get("orphan_id") or f"reaped:{pid}")
         procs[key] = row
     try:
-        discovered = _discover_sandbox_processes(tracked_pids)
+        discovered = _discover_cached(tracked_pids)
     except Exception as e:
         print(f"[Processes] OS scan error: {e}")
         discovered = []
