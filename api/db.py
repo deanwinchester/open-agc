@@ -145,6 +145,25 @@ def init_db():
             cost_estimate REAL DEFAULT 0.0
         )
     ''')
+    # 交付物登记制：目录 ↔ 任务多对多（归属不再靠 outputs/task_<id>/ 目录名隐含）
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS deliverables (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dir_path TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL DEFAULT '',
+            created_by_task INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS task_deliverables (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            deliverable_id INTEGER NOT NULL,
+            UNIQUE(task_id, deliverable_id)
+        )
+    ''')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS model_call_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -282,6 +301,8 @@ def create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)",
         "CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_task_steps_created ON task_steps(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_task_deliverables_task ON task_deliverables(task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_task_deliverables_deliverable ON task_deliverables(deliverable_id)",
     ]
     for sql in indexes:
         try:

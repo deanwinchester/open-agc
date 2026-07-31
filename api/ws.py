@@ -1176,6 +1176,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     ws_images = user_msg.get("images", None)
                     if not query.strip():
                         continue
+                    # 粘贴图片落盘并把路径告诉 agent（此前只发 base64，
+                    # agent 在文件系统找不到图片位置——用户反馈）
+                    _pasted = _persist_pasted_images(ws_images)
+                    if _pasted:
+                        query += f"\n\n[用户粘贴的图片已保存: {', '.join(_pasted)}]"
 
                     # If an agent is already running for this session (from another WS
                     # connection or previous turn), queue the message instead of starting
@@ -1308,3 +1313,51 @@ async def websocket_endpoint(websocket: WebSocket):
         _active_agents.pop(ws_session_id, None)  # nested dict cleaned up
         _session_enabled_tools.pop(ws_session_id, None)
 
+
+
+def _persist_pasted_images(images: list) -> list:
+    """把聊天窗口粘贴的 base64 图片落盘到 <sandbox>/uploads/，返回
+    uploads/<名> 相对路径列表。
+
+    背景：粘贴图片此前只以 base64 存在于对话消息里（供视觉模型），
+    文件系统上没有对应文件——agent 需要路径去复制/处理时找不到
+    （用户反馈：agent 满盘搜索截图位置）。落盘后把路径注入 query
+    文本（与 [已上传文件: ...] 同一机制），agent 即可寻址。
+    非 data URL 的项（已是路径）跳过。失败静默（不影响视觉输入）。
+    """
+    saved = []
+    if not images or not isinstance(images, list):
+        return saved
+    try:
+        from api.routes.uploads import _uploads_dir
+        uploads = _uploads_dir()
+        os.makedirs(uploads, exist_ok=True)
+    except Exception as e:
+        print(f"[WS] persist pasted images: uploads dir error: {e}")
+        return saved
+    import base64
+    import re as _re
+    import uuid as _uuid
+    idx = 0
+    for img in images:
+        if not isinstance(img, str) or not img.startswith("data:"):
+            continue
+        m = _re.match(r"data:image/(\w+);base64,(.+)", img, _re.DOTALL)
+        if not m:
+            continue
+        ext = {"jpeg": "jpg"}.get(m.group(1).lower(), m.group(1).lower())
+        if ext not in ("jpg", "png", "gif", "webp", "bmp"):
+            ext = "png"
+        idx += 1
+        name = (f"paste_{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
+                f"{_uuid.uuid4().hex[:6]}_{idx}.{ext}")
+        try:
+            raw = base64.b64decode(m.group(2))
+            if not raw:
+                continue
+            with open(os.path.join(uploads, name), "wb") as f:
+                f.write(raw)
+            saved.append(f"uploads/{name}")
+        except Exception as e:
+            print(f"[WS] persist pasted image {name} failed: {e}")
+    return saved

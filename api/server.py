@@ -171,6 +171,15 @@ print(f"[Server] Loaded {len(_plugins)} plugin(s)")
 
 init_db()
 
+# 交付物登记制：启动幂等回填存量归属（outputs/task_*/、检查点 files_dir、
+# task_steps.generated_files → deliverables/task_deliverables；只补缺失行，
+# 不刷新 updated_at——见 api/deliverables_registry.backfill_deliverables）
+try:
+    from api.deliverables_registry import backfill_deliverables
+    backfill_deliverables()
+except Exception as _dbfill_err:
+    print(f"[Server] Deliverables backfill error: {_dbfill_err}")
+
 # ── Create indexes for query performance ──
 
 def reconcile_downloads():
