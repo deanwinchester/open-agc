@@ -545,7 +545,8 @@ class TestDiscoveredScan:
             _FakeProc(505, 0, "protected", cwd=str(sandbox)),    # 服务自身/祖先
         ]
         monkeypatch.setattr(psutil, "process_iter", lambda *a, **k: iter(procs))
-        monkeypatch.setattr(state, "check_protected_pid", lambda pid: pid == 505)
+        # 新机制（35s 卡死修复）：保护集合= _server_pid + 其 parents，每次扫描算一次
+        monkeypatch.setattr(state, "_server_pid", 505)
         found = rt._discover_sandbox_processes({504})
         pids = [p["pid"] for p in found]
         assert 501 in pids and 502 in pids
@@ -918,3 +919,87 @@ class TestZombieReaping:
         assert sh.get_background_processes_for_task(tid) == {}
         assert spawned == []          # 不触发任何恢复（任务本来 running）
         assert _task_row(tmp_db, tid)["status"] == "running"
+
+
+
+# ---------- /api/processes 性能回归（全站卡死 35s 根因） ----------
+
+class TestDiscoverPerformance:
+    """discovered 扫描曾逐进程调 check_protected_pid（每个重建
+    psutil.Process(server).parents()，~90ms × 394 进程 = 35s 同步阻塞
+    事件循环）。修复：保护集合每次扫描算一次 + 结果 10s TTL 缓存 +
+    端点整体移执行器线程。"""
+
+    def _fake_procs(self, n):
+        procs = []
+        for i in range(n):
+            p = types.SimpleNamespace(pid=10000 + i)
+            p.cwd = lambda: "C:\\other"
+            p.cmdline = lambda: ["python", "x.py"]
+            p.name = lambda: "python.exe"
+            p.create_time = lambda: 1700000000.0
+            procs.append(p)
+        return procs
+
+    def test_protected_set_computed_once_per_scan(self, monkeypatch, tmp_path):
+        """N 个进程扫描时 psutil.Process 实例化次数与 N 无关（≤2）。"""
+        import api.routes.routes_tasks as rt
+        import api.state as state
+        monkeypatch.setattr(state, "_server_pid", 999999)  # 不存在也无妨
+        calls = {"n": 0}
+
+        class _FakeProc:
+            def __init__(self, pid):
+                calls["n"] += 1
+                self.pid = pid
+
+            def parents(self):
+                return []
+
+        import psutil as real_psutil
+        monkeypatch.setattr(real_psutil, "Process", _FakeProc)
+        monkeypatch.setattr(real_psutil, "process_iter",
+                            lambda attrs: iter(self._fake_procs(400)))
+        monkeypatch.setattr(rt, "_sandbox_dir_from_config", lambda: str(tmp_path))
+        rt._discover_sandbox_processes(set())
+        assert calls["n"] <= 2, f"psutil.Process 被实例化 {calls['n']} 次（每进程一次即回归）"
+
+    def test_discover_cached_ttl_and_filter(self, monkeypatch, tmp_path):
+        """TTL 内复用扫描结果；tracked pid 在请求时过滤。"""
+        import api.routes.routes_tasks as rt
+        scans = {"n": 0}
+        fake_items = [{"pid": 111, "name": "a", "cmdline": "", "create_time": 1, "uptime": 0},
+                      {"pid": 222, "name": "b", "cmdline": "", "create_time": 2, "uptime": 0}]
+
+        def _fake_scan(exclude):
+            scans["n"] += 1
+            return list(fake_items)
+
+        monkeypatch.setattr(rt, "_discover_sandbox_processes", _fake_scan)
+        monkeypatch.setattr(rt, "_sandbox_dir_from_config", lambda: str(tmp_path))
+        with rt._discovered_lock:
+            rt._discovered_cache.update({"ts": 0.0, "sandbox": None, "items": []})
+        first = rt._discover_cached(set())
+        second = rt._discover_cached({111})
+        assert scans["n"] == 1, "TTL 内不应重复全盘扫描"
+        assert len(first) == 2
+        assert [p["pid"] for p in second] == [222], "tracked pid 应在请求时被过滤"
+
+    def test_list_processes_offloaded_to_executor(self, monkeypatch):
+        """端点不在事件循环内做同步工作：经 run_in_executor 调度。"""
+        import api.routes.routes_tasks as rt
+        used = {"executor": False}
+        loop = asyncio.new_event_loop()
+        real_run = loop.run_in_executor
+
+        def spy(executor, func, *args):
+            used["executor"] = True
+            return real_run(executor, func, *args)
+
+        monkeypatch.setattr(loop, "run_in_executor", spy)
+        try:
+            result = loop.run_until_complete(rt.list_processes())
+        finally:
+            loop.close()
+        assert used["executor"], "list_processes 未移出事件循环"
+        assert "processes" in result and "discovered" in result
