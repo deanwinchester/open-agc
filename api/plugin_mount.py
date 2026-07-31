@@ -36,6 +36,23 @@ def _prune_plugin_routes(app, name: str, prefix: str) -> None:
     app.router.routes[:] = [r for r in app.router.routes if not _stale(r)]
 
 
+def _insert_before_catchall(app, new_routes):
+    """Insert routes before any catch-all (path with full_path:path) so SPA fallback doesn't shadow plugins."""
+    routes = app.router.routes
+    # find first catch-all index
+    catch_idx = None
+    for i, r in enumerate(routes):
+        p = getattr(r, "path", "") or ""
+        if "full_path" in p or p == "/{path:path}":
+            catch_idx = i
+            break
+    if catch_idx is None:
+        routes.extend(new_routes)
+    else:
+        for offset, nr in enumerate(new_routes):
+            routes.insert(catch_idx + offset, nr)
+
+
 def mount_plugins(app, plugins, logger=print) -> None:
     """(Re)mount plugin routers and static dirs on *app*.
 
@@ -59,9 +76,20 @@ def mount_plugins(app, plugins, logger=print) -> None:
         # 路由会被紧随的第二次剪除误删。
         _prune_plugin_routes(app, p.name, prefix)
         if inst.router:
+            # include_router appends; capture new routes then move before catch-all
+            before = len(app.router.routes)
             app.include_router(inst.router, prefix=prefix)
+            new_routes = app.router.routes[before:]
+            del app.router.routes[before:]
+            _insert_before_catchall(app, new_routes)
             logger(f"[Server] Mounted plugin router: {p.name} -> {prefix}")
         if inst.static_dir and os.path.isdir(inst.static_dir):
             from fastapi.staticfiles import StaticFiles
-            app.mount(f"{PLUGIN_STATIC_PREFIX}{p.name}", StaticFiles(directory=inst.static_dir), name=f"plugin_{p.name}_static")
+            mount = StaticFiles(directory=inst.static_dir)
+            # app.mount appends a Mount; move it before catch-all too
+            before = len(app.router.routes)
+            app.mount(f"{PLUGIN_STATIC_PREFIX}{p.name}", mount, name=f"plugin_{p.name}_static")
+            new_routes = app.router.routes[before:]
+            del app.router.routes[before:]
+            _insert_before_catchall(app, new_routes)
             logger(f"[Server] Mounted plugin static: {p.name}")

@@ -65,6 +65,38 @@ class PluginInfo:
 
 _loaded_plugins: Dict[str, PluginInfo] = {}
 
+# 目录内容签名（max mtime）：扫描时只重载代码变过的插件——此前每次 scan 都
+# 全量卸载重导（含 open-agc-train 的重依赖导入），事件循环阻塞数秒导致 WS
+# 断连、进度停更、页面重载时插件菜单拉取失败变空（生产实证）。
+_plugin_dir_signatures: Dict[str, float] = {}
+
+_SIGNATURE_EXTS = {".py", ".js", ".json", ".vue", ".ts", ".css", ".html"}
+
+
+def dir_signature(plugin_dir: str) -> float:
+    """插件目录内容签名：目录内代码/清单文件的最大 mtime（无文件为 0）。
+    os.walk 小目录成本可忽略；签名变化即视为代码变更需要重载。"""
+    latest = 0.0
+    try:
+        for dirpath, dirnames, filenames in os.walk(plugin_dir):
+            dirnames[:] = [d for d in dirnames
+                           if d not in ("__pycache__", "node_modules", ".git")]
+            for fn in filenames:
+                if os.path.splitext(fn)[1].lower() not in _SIGNATURE_EXTS:
+                    continue
+                try:
+                    latest = max(latest, os.path.getmtime(os.path.join(dirpath, fn)))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return latest
+
+
+def get_loaded_signature(name: str):
+    """已加载插件载入时的目录签名；未记录返回 None。"""
+    return _plugin_dir_signatures.get(name)
+
 
 def discover_plugins(plugins_dir: str = "plugins",
                      broadcast_fn: Callable = None,
@@ -228,6 +260,7 @@ def load_plugin(name: str, plugins_dir: str = "plugins",
     )
 
     _loaded_plugins[name] = info
+    _plugin_dir_signatures[name] = dir_signature(plugin_dir)
 
     if instance.on_load:
         try:
@@ -276,6 +309,7 @@ def unload_plugin(name: str) -> bool:
         except Exception:
             pass
     del _loaded_plugins[name]
+    _plugin_dir_signatures.pop(name, None)
     _purge_plugin_modules(info)
     return True
 

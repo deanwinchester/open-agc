@@ -113,15 +113,28 @@ async function loadPluginViews(router, plugin) {
 }
 
 // 应用启动时调用一次（main.js，mount 之后，保证 pinia 已激活）。
-export async function initPluginRegistry(router) {
+// 拉取失败（如服务器正忙/扫描阻塞窗口）时重试——否则本次会话插件菜单
+// 一直空白，只能整页刷新（生产实证：scan 阻塞期间重载页面即复现）。
+const _INIT_RETRY_MAX = 3;
+const _INIT_RETRY_MS = 3000;
+let _initRetryTimer = null;
+
+export async function initPluginRegistry(router, attempt = 1) {
   _router = router;
   let data;
   try {
     data = await request('/api/plugins');
   } catch (err) {
-    console.warn('[plugins] /api/plugins 请求失败，跳过插件视图注册:', err);
+    console.warn(`[plugins] /api/plugins 请求失败(第${attempt}次):`, err);
+    if (attempt < _INIT_RETRY_MAX && _tracker.size === 0) {
+      clearTimeout(_initRetryTimer);
+      _initRetryTimer = setTimeout(() => initPluginRegistry(router, attempt + 1), _INIT_RETRY_MS);
+    }
     return;
   }
+  // 成功拉到数据后清理可能存在的重试计时器
+  clearTimeout(_initRetryTimer);
+  _initRetryTimer = null;
   // /api/plugins 会合并多个插件目录的扫描结果，已加载插件可能出现重复条目
   // （且重复条目可能带陈旧的 enabled 状态）——按 name 去重，first-wins：
   // 先出现的条目来自已加载列表，状态最准确。
