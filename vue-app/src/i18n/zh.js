@@ -237,6 +237,8 @@ export default {
       statusEnabled: '已启用',
       statusDisabled: '已禁用',
       statusNotLoaded: '未加载',
+      viewError: '视图错误',
+      viewErrorPrefix: '前端视图加载失败',
       enable: '启用',
       disable: '禁用',
       toggleFailed: '操作失败',
