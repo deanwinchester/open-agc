@@ -1,5 +1,6 @@
 """Plugins, Marketplace, Sandbox API endpoints."""
 import os
+import asyncio
 from fastapi import APIRouter, HTTPException, Request
 from api.config import load_config
 
@@ -110,19 +111,35 @@ def _plugins_to_preserve_on_scan() -> set:
     return preserved
 
 
-@router.post("/api/plugins/scan")
-async def scan_plugins():
-    """Re-scan and mount plugins.
+def _plugins_unchanged_since_load() -> set:
+    """已加载且目录内容签名未变的插件——scan 时保留不重导。
 
-    Unloads currently loaded plugins first (including their sys.modules
-    entries) so code changes take effect on re-discovery — no server restart
-    needed. Plugins with live state (active training, see
-    _plugins_to_preserve_on_scan) are kept loaded and remounted as-is.
-    Frontend vue-entry.js is re-read from disk by the static mount.
-    """
+    此前每次 scan 全量卸载重导：open-agc-train 这类重依赖插件每次都被
+    purge+reimport（秒级阻塞），且反复重建 module 单例（训练引擎）风险高。
+    签名未变即无代码改动，保留原实例即可；签名变了/新插件/上次加载失败
+    的（不在 _loaded_plugins 里）才会走卸载重导。"""
+    from core.plugin_manager import _loaded_plugins, dir_signature, get_loaded_signature
+    unchanged = set()
+    for name, info in list(_loaded_plugins.items()):
+        try:
+            stored = get_loaded_signature(name)
+            if stored is not None and dir_signature(info.plugin_dir) == stored:
+                unchanged.add(name)
+        except Exception:
+            pass  # 判定失败则不保留（走重导，宁可慢不可错）
+    return unchanged
+
+
+def _do_scan_sync() -> dict:
+    """scan 的同步主体（执行器线程里跑）：卸载→发现→挂载。
+
+    重活（purge sys.modules、重导插件模块、目录遍历）全部是同步 IO/CPU，
+    在事件循环上跑会阻塞数秒——WS ping 超时断连、进度停更、并发页面加载
+    拉取 /api/plugins 失败致菜单变空（生产实证）。移出事件循环。"""
     import api.server as _srv
     from core.plugin_manager import discover_plugins, list_plugins, unload_all_plugins
-    unload_all_plugins(except_names=_plugins_to_preserve_on_scan())
+    preserve = _plugins_to_preserve_on_scan() | _plugins_unchanged_since_load()
+    unload_all_plugins(except_names=preserve)
     all_plugins = []
     for d in _all_plugin_dirs():
         all_plugins.extend(discover_plugins(plugins_dir=d,
@@ -131,6 +148,20 @@ async def scan_plugins():
     _srv._plugins = all_plugins
     _srv._mount_plugins(_srv.app, _srv._plugins)
     return {"status": "ok", "count": len(_srv._plugins), "plugins": list_plugins()}
+
+
+@router.post("/api/plugins/scan")
+async def scan_plugins():
+    """Re-scan and mount plugins.
+
+    Unloads changed plugins (including their sys.modules entries) so code
+    changes take effect on re-discovery — no server restart needed. Plugins
+    with live state (active training, see _plugins_to_preserve_on_scan) and
+    plugins whose code is unchanged since load are kept loaded and remounted
+    as-is. Frontend vue-entry.js is re-read from disk by the static mount.
+    整个扫描在执行器线程执行，不阻塞事件循环。
+    """
+    return await asyncio.get_running_loop().run_in_executor(None, _do_scan_sync)
 
 
 @router.post("/api/plugins/{name}/toggle")

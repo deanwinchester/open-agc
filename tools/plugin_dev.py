@@ -186,6 +186,13 @@ def init_plugin(context: PluginContext) -> PluginInstance:
     router = APIRouter()
     plugin_dir = context.plugin_dir
 
+    # 调用系统默认大模型（跟随「设置」页的默认模型与密钥，禁止自行硬编码
+    # API Key / base_url / 模型名）：
+    # from core.llm_client import LLMClient
+    # llm = LLMClient()
+    # resp, model_used = llm.chat(messages=[{"role": "user", "content": "你好"}])
+    # text = resp.choices[0].message.content
+
     @router.get("/hello")
     async def hello():
         return {"message": "Hello from __NAME__!"}
