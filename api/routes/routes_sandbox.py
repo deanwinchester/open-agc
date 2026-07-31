@@ -3,7 +3,9 @@
 
 分区约定（与 agent 系统提示「沙箱分区」段一致）：
 - projects/            长期项目，永不自动清理
-- outputs/task_<id>/   任务交付物（与大任务检查点 files_dir 口径一致）
+- outputs/<主题语义名>/ 任务交付物（语义命名，同主题任务复用同一目录；
+                       归属走 deliverables/task_deliverables 登记表而非目录名，
+                       task_<id>/ 仅兜底；与大任务检查点 files_dir 口径一致）
 - tmp/                 一次性脚本/中间产物
 - downloads/           安装包等大文件
 
@@ -39,6 +41,7 @@ from pydantic import BaseModel
 
 from api.config import load_config
 from api.task_core import read_task_checkpoint
+from api import deliverables_registry as _dr
 from core import sandbox_janitor as _janitor
 
 router = APIRouter()
@@ -80,14 +83,10 @@ def _fmt_mtime(ts) -> str:
         return ""
 
 
-def _is_under_root(root: str, path: str) -> bool:
-    """realpath 口径判断 path 是否严格位于 sandbox 根内（含根本身）。"""
-    try:
-        root_real = os.path.normcase(os.path.realpath(root))
-        real = os.path.normcase(os.path.realpath(path))
-        return os.path.commonpath([root_real, real]) == root_real
-    except (ValueError, OSError):
-        return False
+# realpath 判据（is_under_root）与 files_dir 解析的单份实现沉在
+# deliverables_registry——登记表写入侧也要用同一口径，本模块由那里导入复用，
+# 避免 registry → routes_sandbox 反向依赖成环。
+_is_under_root = _dr.is_under_root
 
 
 def _resolve_top_level(rel_path: str):
@@ -284,15 +283,20 @@ def _make_entry(root: str, rel_path: str, name: str, abs_path: str, is_dir: bool
 
 
 def _deliverable_entries(root: str, outputs_dir: str) -> list:
-    """把 outputs/ 展开一层：task_<id>/ 子目录作为 deliverable 条目；
+    """把 outputs/ 展开一层：交付物子目录作为 deliverable 条目；未登记的
     非 task_<id> 子目录（如手动归类进 outputs 的条目）作为普通 dir 条目展示，
     避免移入后不可见。子目录若是逃逸链接（junction/symlink 指向沙箱外）则
-    跳过并记日志。"""
+    跳过并记日志。
+
+    登记制：已登记目录从登记表取语义名与任务关联（task_ids 可多个——同一
+    主题任务复用同一目录）；task_<id> 命名的目录保留名称解析的 task_id 作
+    兼容；登记表没有的老目录维持原判定（task_<id>→deliverable，其余→dir）。"""
     out = []
     try:
         children = sorted(os.listdir(outputs_dir))
     except OSError:
         return out
+    reg_map = _dr.get_dirs_map([f"outputs/{c}" for c in children])
     for child in children:
         abs_child = os.path.join(outputs_dir, child)
         if not os.path.isdir(abs_child):
@@ -306,6 +310,19 @@ def _deliverable_entries(root: str, outputs_dir: str) -> list:
         if m:
             entry["type"] = "deliverable"
             entry["task_id"] = int(m.group(1))
+            entry["task_ids"] = [int(m.group(1))]
+        info = reg_map.get(_dr.canon_dir_path(rel))
+        if info:
+            entry["type"] = "deliverable"
+            if info.get("name"):
+                entry["name"] = info["name"]  # 语义名以登记表为准
+            tids = list(info.get("task_ids") or [])
+            if m and int(m.group(1)) not in tids:
+                tids.append(int(m.group(1)))
+                tids.sort()
+            entry["task_ids"] = tids
+            if not m and tids:
+                entry["task_id"] = tids[0]  # 兼容旧前端单任务字段
         out.append(entry)
     return out
 
@@ -664,30 +681,26 @@ async def get_janitor_log(limit: int = 50):
 # ── 任务交付物 ──
 
 def _resolve_files_dir(root: str, files_dir: str) -> Optional[str]:
-    """解析检查点 files_dir 为沙箱内真实目录；越出沙箱或不存在时返回 None。
-
-    兼容两种口径：沙箱内相对路径（outputs/task_1、mongo_export）与仓库根
-    相对路径（workspace/mongo_export，检查点历史写法）。"""
-    p = files_dir.strip()
-    candidates = [p] if os.path.isabs(p) else [
-        os.path.join(root, p),
-        os.path.join(os.getcwd(), p),
-    ]
-    for c in candidates:
-        if _is_under_root(root, c) and os.path.isdir(c):
-            return os.path.realpath(c)
-    return None
+    """解析检查点 files_dir（单份实现在 deliverables_registry，此处保留原名
+    以兼容 routes_tasks 等既有调用方）。"""
+    return _dr.resolve_files_dir(root, files_dir)
 
 
 @router.get("/api/tasks/{task_id}/artifacts")
 async def get_task_artifacts(task_id: int):
-    """任务交付物：合并检查点 files_dir 与 outputs/task_<id>/ 两个来源的文件
-    列表（各文件的 name/size/mtime）；两者都不存在时返回空列表。"""
+    """任务交付物：登记制读取 + 未登记来源兜底合并。
+
+    - dirs：登记表里本任务关联的目录，逐项带 dir/name/shared_with（其他关联
+      任务 id 列表）/missing（目录已不存在）/files（该目录自身文件列表）；
+      共享情况供删除确认框逐目录决策（独占默认删、共享默认留）。
+    - files：全部来源合并的文件列表（旧契约不变）——登记目录之外，未登记的
+      检查点 files_dir 与 outputs/task_<id>/ 仍按旧逻辑并入（去重口径一致）。
+    """
     root = _sandbox_root()
     files = []
     seen = set()
 
-    def _scan(dir_abs: str, source: str):
+    def _scan(dir_abs: str, source: str, bucket: list = None):
         try:
             names = sorted(os.listdir(dir_abs))
         except OSError:
@@ -697,33 +710,64 @@ async def get_task_artifacts(task_id: int):
             if not os.path.isfile(fp):
                 continue
             key = os.path.normcase(os.path.realpath(fp))
-            if key in seen:
-                continue
             try:
                 st = os.stat(fp)
             except OSError:
                 continue
-            seen.add(key)
-            files.append({
+            item = {
                 "name": fn,
                 "size": st.st_size,
                 "mtime": _fmt_mtime(st.st_mtime),
                 "source": source,
-            })
+            }
+            if bucket is not None:
+                bucket.append(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append(item)
 
+    # ── 登记表来源 ──
+    dirs_payload = []
+    covered = set()  # 已按登记扫描的目录 realpath（兜底来源去重用）
+    for d in _dr.get_task_dirs(task_id):
+        rel = d["dir_path"]
+        abs_dir = os.path.join(root, rel)
+        dir_files = []
+        missing = True
+        if os.path.isdir(abs_dir):
+            # 与旧 outputs 来源同一 realpath 判据：逃逸链接跳过并记日志（I1）
+            if _is_under_root(root, abs_dir):
+                missing = False
+                covered.add(os.path.normcase(os.path.realpath(abs_dir)))
+                _scan(abs_dir,
+                      "outputs" if rel.split("/")[0] == "outputs" else "checkpoint",
+                      dir_files)
+            else:
+                print(f"[Sandbox] 跳过逃逸链接交付物目录: {abs_dir}")
+        dirs_payload.append({
+            "dir": rel,
+            "name": d["name"] or rel.rsplit("/", 1)[-1],
+            "shared_with": [t for t in d["task_ids"] if t != task_id],
+            "missing": missing,
+            "files": dir_files,
+        })
+
+    # ── 兜底：未登记的检查点 files_dir ──
     ckpt = read_task_checkpoint(task_id)
     if ckpt:
         files_dir = ckpt.get("files_dir")
         if isinstance(files_dir, str) and files_dir.strip():
             resolved = _resolve_files_dir(root, files_dir)
-            if resolved:
+            if resolved and os.path.normcase(resolved) not in covered:
+                covered.add(os.path.normcase(resolved))
                 _scan(resolved, "checkpoint")
-    # outputs 来源同样过 realpath 校验：outputs/task_<id> 若是逃逸链接
-    # （junction/symlink 指向沙箱外），列举会泄露外部文件名——跳过并记日志（I1）
+    # ── 兜底：未登记的 outputs/task_<id>/（realpath 判据同上，I1）──
     outputs_dir = os.path.join(root, "outputs", f"task_{task_id}")
     if os.path.isdir(outputs_dir):
         if _is_under_root(root, outputs_dir):
-            _scan(outputs_dir, "outputs")
+            if os.path.normcase(os.path.realpath(outputs_dir)) not in covered:
+                _scan(outputs_dir, "outputs")
         else:
             print(f"[Sandbox] 跳过逃逸链接交付物目录: {outputs_dir}")
-    return {"task_id": task_id, "files": files}
+    return {"task_id": task_id, "files": files, "dirs": dirs_payload}

@@ -234,31 +234,62 @@ async function interruptTask(task) {
   }
 }
 
-// 删除任务：若该任务有交付物（outputs/task_<id>/），确认框提供
-// 「同时删除交付物目录」勾选（默认不勾）——沙箱治理二期 delete_artifacts 联动。
+// 删除任务（登记制共享删除策略）：若任务有登记交付物目录，确认框逐目录列出
+// 复选框——独占目录默认勾选，共享目录（还被其他任务使用）默认不勾并标注；
+// 提交选中清单 artifact_dirs。无登记目录但有未登记交付物文件时，退化为旧的
+// delete_artifacts 单一勾选。
 const deleteArtifacts = ref(false);
+const deleteDirChecks = ref({});
 
 async function deleteTask(task) {
-  let hasArtifacts = false;
+  let art = null;
   try {
-    const art = await request(`/api/tasks/${task.id}/artifacts`);
-    hasArtifacts = Array.isArray(art?.files) && art.files.length > 0;
+    art = await request(`/api/tasks/${task.id}/artifacts`);
   } catch {
-    hasArtifacts = false; // 查询失败不阻断删除，按无交付物处理
+    art = null; // 查询失败不阻断删除，按无交付物处理
   }
+  const dirs = Array.isArray(art?.dirs) ? art.dirs : [];
+  const legacyFiles = !dirs.length && Array.isArray(art?.files) && art.files.length > 0;
   deleteArtifacts.value = false;
-  const message = hasArtifacts
-    ? h('div', null, [
-        h('p', { style: 'margin: 0 0 8px;' }, `#${task.id} ${task.title} — ${t.actions.deleteConfirmText}`),
-        h('label', { style: 'display: flex; align-items: center; gap: 6px; cursor: pointer;' }, [
-          h('input', {
-            type: 'checkbox',
-            onChange: (ev) => { deleteArtifacts.value = ev.target.checked; },
-          }),
-          h('span', null, t.actions.deleteArtifactsLabel),
+  deleteDirChecks.value = {};
+  const header = `#${task.id} ${task.title} — ${t.actions.deleteConfirmText}`;
+  let message;
+  if (dirs.length) {
+    for (const d of dirs) {
+      // 独占默认勾选；共享默认不勾
+      deleteDirChecks.value[d.dir] = !(Array.isArray(d.shared_with) && d.shared_with.length);
+    }
+    message = h('div', null, [
+      h('p', { style: 'margin: 0 0 8px;' }, header),
+      h('p', { style: 'margin: 0 0 6px;' }, t.actions.deleteArtifactsDirsHint),
+      ...dirs.map((d) => h('label', { style: 'display: flex; align-items: center; gap: 6px; cursor: pointer; margin: 2px 0;' }, [
+        h('input', {
+          type: 'checkbox',
+          checked: deleteDirChecks.value[d.dir],
+          onChange: (ev) => { deleteDirChecks.value[d.dir] = ev.target.checked; },
+        }),
+        h('span', null, [
+          `${d.name || d.dir}（${d.dir}）`,
+          ...(Array.isArray(d.shared_with) && d.shared_with.length
+            ? [` — ${t.actions.deleteArtifactsShared.replace('{ids}', d.shared_with.map((x) => `#${x}`).join(' '))}`]
+            : []),
         ]),
-      ])
-    : `#${task.id} ${task.title} — ${t.actions.deleteConfirmText}`;
+      ])),
+    ]);
+  } else if (legacyFiles) {
+    message = h('div', null, [
+      h('p', { style: 'margin: 0 0 8px;' }, header),
+      h('label', { style: 'display: flex; align-items: center; gap: 6px; cursor: pointer;' }, [
+        h('input', {
+          type: 'checkbox',
+          onChange: (ev) => { deleteArtifacts.value = ev.target.checked; },
+        }),
+        h('span', null, t.actions.deleteArtifactsLabel),
+      ]),
+    ]);
+  } else {
+    message = header;
+  }
   try {
     await ElMessageBox.confirm(
       message,
@@ -269,15 +300,23 @@ async function deleteTask(task) {
     return;
   }
   try {
-    const qs = hasArtifacts && deleteArtifacts.value ? '?delete_artifacts=true' : '';
+    const selected = dirs.filter((d) => deleteDirChecks.value[d.dir]).map((d) => d.dir);
+    let qs = '';
+    if (dirs.length) {
+      if (selected.length) qs = `?artifact_dirs=${encodeURIComponent(JSON.stringify(selected))}`;
+    } else if (legacyFiles && deleteArtifacts.value) {
+      qs = '?delete_artifacts=true';
+    }
     const resp = await request(`/api/tasks/${task.id}${qs}`, { method: 'DELETE' });
-    // 交付物联动删除结果如实提示（评审 I3）：成功 N 项 / 失败 N 项 / 无交付物目录
-    if (hasArtifacts && deleteArtifacts.value) {
+    // 交付物联动删除结果如实提示：成功 N 项 / 失败 N 项 / 共享保留 N 项 / 无交付物目录
+    if (qs) {
       const removed = Array.isArray(resp?.artifacts_removed) ? resp.artifacts_removed.length : 0;
       const errors = Array.isArray(resp?.artifacts_errors) ? resp.artifacts_errors.length : 0;
+      const skipped = Array.isArray(resp?.skipped_shared) ? resp.skipped_shared.length : 0;
       if (removed > 0) ElMessage.success(t.actions.deleteArtifactsDeleted.replace('{n}', removed));
       if (errors > 0) ElMessage.warning(t.actions.deleteArtifactsFailed.replace('{n}', errors));
-      if (!removed && !errors) ElMessage.success(t.actions.deleteArtifactsNone);
+      if (skipped > 0) ElMessage.info(t.actions.deleteArtifactsSkippedShared.replace('{n}', skipped));
+      if (!removed && !errors && !skipped) ElMessage.success(t.actions.deleteArtifactsNone);
     } else {
       ElMessage.success(t.actions.deleteSuccess);
     }

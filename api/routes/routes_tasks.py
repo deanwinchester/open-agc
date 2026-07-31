@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from api.db import DB_PATH
+from api import deliverables_registry as _dr
 from api.config import load_config
 from api.state import _active_agents, _background_agents, connected_websockets, _broadcast_to_websockets, _llamacpp_download_state
 from api.task_core import (
@@ -165,15 +166,82 @@ async def interrupt_task(task_id: int):
     return {"status": "success", "message": "Task marked as interrupted"}
 
 
+def _normalize_artifact_dirs(task_id: int, raw_dirs: list) -> list:
+    """把用户勾选的交付物目录清单规范化为沙箱相对路径列表，并逐项校验
+    （在任何删除动作之前调用；任一项非法即整体 400，fail-closed）。
+
+    校验口径（I1/I2，同类输入全走这一个判据）：
+    - 拒绝绝对路径、.. 段、带驱动器号的非绝对路径（Windows `C:foo` 能穿过
+      os.path.isabs——ntpath 实测——join 后逃逸 root）；
+    - 每项必须落在本任务的交付物目录集合内（登记表 ∪ 未登记兜底来源
+      outputs/task_<id>/ 与检查点 files_dir）——否则可借清单删任意沙箱内
+      路径（如 .checkpoints/task_5.json），绕开"仅顶层条目"限制。
+    """
+    from api.routes.routes_sandbox import _sandbox_root, _resolve_files_dir
+    from api.task_core import read_task_checkpoint
+    root = _sandbox_root()
+    allowed = {_dr.canon_dir_path(d["dir_path"])
+               for d in _dr.get_task_dirs(task_id)}
+    outputs_rel = f"outputs/task_{task_id}"
+    if os.path.lexists(os.path.join(root, "outputs", f"task_{task_id}")):
+        allowed.add(_dr.canon_dir_path(outputs_rel))
+    ckpt = read_task_checkpoint(task_id)
+    if ckpt:
+        files_dir = ckpt.get("files_dir")
+        if isinstance(files_dir, str) and files_dir.strip():
+            resolved = _resolve_files_dir(root, files_dir)
+            if resolved:
+                allowed.add(_dr.canon_dir_path(
+                    os.path.relpath(resolved, root)))
+    norm = []
+    for raw in raw_dirs:
+        s = str(raw).strip()
+        rel_flat = s.replace("\\", "/")
+        parts = [p for p in rel_flat.split("/") if p]
+        if (not parts or os.path.isabs(s) or os.path.splitdrive(s)[0]
+                or any(p in (".", "..") for p in parts)):
+            raise HTTPException(
+                status_code=400, detail=f"非法交付物路径（拒绝绝对路径/../驱动器相对路径）: {s}")
+        rel = _dr.canon_dir_path("/".join(parts))
+        if rel not in allowed:
+            raise HTTPException(
+                status_code=400, detail=f"目录不在本任务的交付物清单内: {rel}")
+        norm.append(rel)
+    return norm
+
+
 @router.delete("/api/tasks/{task_id}")
-async def delete_task(task_id: int, delete_artifacts: bool = False):
+async def delete_task(task_id: int, delete_artifacts: bool = False,
+                      artifact_dirs: Optional[str] = None):
     """Delete a task and its associated data.
 
-    delete_artifacts=true（沙箱治理二期）时一并删除交付物目录——覆盖
-    <sandbox>/outputs/task_<id>/ 与检查点 files_dir 两个来源（评审 I3）：
-    realpath 校验（与一期同一判据——逃逸链接只删链接本身不跟随；分区目录
-    拒绝），目录不存在不报错；响应带 artifacts_deleted/artifacts_removed/
-    artifacts_errors 明细。"""
+    交付物删除（登记制 + 共享删除策略），两种入参互斥、artifact_dirs 优先：
+    - artifact_dirs（query，JSON 数组字符串）：用户逐目录勾选的交付物目录
+      清单（沙箱相对路径，如 ["outputs/唐嫣照片"]）——逐项输入校验（I1/I2，
+      见 _normalize_artifact_dirs）+ realpath 校验后删除；共享目录被显式
+      勾选同样照删（删除后对其他任务标 missing）；
+    - delete_artifacts=true（旧语义保留）：删除本任务全部独占目录（登记表
+      独占项 + outputs/task_<id>/ 与检查点 files_dir 兜底——兜底候选同样先
+      过登记表共享判定（C1），共享目录只进 skipped_shared 绝不进删除清单）。
+
+    realpath 校验与一期同一判据（逃逸链接只删链接本身不跟随；分区目录
+    拒绝），目录不存在不报错；响应带 artifacts_removed/artifacts_errors/
+    skipped_shared 明细。任务行删除后连带删除检查点文件（I3）并清掉该
+    任务的全部交付物关联（deliverables 行保留作历史，目录缺失由查询方标
+    missing）。"""
+    # 解析用户勾选的目录清单（JSON 数组）；非法格式在任何删除动作之前 400
+    selected_dirs = None
+    if artifact_dirs is not None:
+        try:
+            _parsed_dirs = json.loads(artifact_dirs)
+            if not isinstance(_parsed_dirs, list):
+                raise ValueError("not a list")
+            selected_dirs = [str(x) for x in _parsed_dirs]
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400,
+                                detail="artifact_dirs 需为 JSON 数组字符串")
+        # 逐项校验 + 规范化（I1/I2）——在任何删除动作之前完成
+        selected_dirs = _normalize_artifact_dirs(task_id, selected_dirs)
     # Interrupt running agents
     for _agents in _active_agents.values():
         for _aid, _a in list(_agents.items()):
@@ -234,14 +302,13 @@ async def delete_task(task_id: int, delete_artifacts: bool = False):
         _ug(_unlink)
     except Exception:
         pass
-    # 联动删除交付物目录（二期，可选）：覆盖 outputs/task_<id>/ 与检查点
-    # files_dir 两个来源（评审 I3：勾选框依据是两来源合并列表，删除范围须一致）。
-    # realpath 判据与一期 routes_sandbox 一致：逃逸链接只删链接本身不跟随；
-    # 分区目录/沙箱根拒绝删除（记入 errors）；目录不存在不算错误；
-    # files_dir 与 outputs/task_<id> 同目录时只删一次。
+    # 联动删除交付物目录：realpath 判据与一期 routes_sandbox 一致——逃逸链接
+    # 只删链接本身不跟随；分区目录/沙箱根拒绝（记入 errors）；目录不存在不算
+    # 错误；多来源同目录时只删一次。
     artifacts_removed = []
     artifacts_errors = []
-    if delete_artifacts:
+    skipped_shared = []
+    if selected_dirs is not None or delete_artifacts:
         try:
             from api.routes.routes_sandbox import (
                 _sandbox_root, _resolve_files_dir, _FORBIDDEN_NAMES)
@@ -252,28 +319,69 @@ async def delete_task(task_id: int, delete_artifacts: bool = False):
                 os.path.normcase(os.path.realpath(os.path.join(root, n)))
                 for n in _FORBIDDEN_NAMES}
             candidates = []  # (display, abs_path, expected_real)
-            outputs_dir = os.path.join(root, "outputs", f"task_{task_id}")
-            if os.path.lexists(outputs_dir):
-                candidates.append((
-                    f"outputs/task_{task_id}", outputs_dir,
-                    os.path.normcase(os.path.join(root_real, "outputs",
-                                                  f"task_{task_id}"))))
-            ckpt = read_task_checkpoint(task_id)
-            if ckpt:
-                files_dir = ckpt.get("files_dir")
-                if isinstance(files_dir, str) and files_dir.strip():
-                    # _resolve_files_dir 已做 realpath 沙箱内校验（越出返回 None，
-                    # 与 artifacts 端点同一口径——逃逸来源跳过不算错误）
-                    resolved = _resolve_files_dir(root, files_dir)
-                    if resolved:
-                        candidates.append((
-                            os.path.relpath(resolved, root), resolved,
-                            os.path.normcase(resolved)))
+            if selected_dirs is not None:
+                # 用户勾选清单：已在 _normalize_artifact_dirs 逐项校验（I1/I2），
+                # 此处只需拼接候选；删除循环仍逐项 realpath 校验（链接判据）
+                for rel in selected_dirs:
+                    candidates.append((
+                        rel, os.path.join(root, rel),
+                        os.path.normcase(os.path.join(root_real, rel))))
+            else:
+                # delete_artifacts=true 旧语义：登记表独占目录删除、共享跳过
+                # （task_ids 只含存活任务——I3，死任务残留关联不构成共享）
+                for d in _dr.get_task_dirs(task_id):
+                    others = [t for t in d["task_ids"] if t != task_id]
+                    if others:
+                        skipped_shared.append(
+                            {"dir": d["dir_path"], "shared_with": others})
+                        continue
+                    rel = d["dir_path"]
+                    candidates.append((
+                        rel, os.path.join(root, rel),
+                        os.path.normcase(os.path.join(root_real, rel))))
+                # 未登记来源兜底：outputs/task_<id>/ 与检查点 files_dir。
+                # C1：兜底候选先过登记表共享判定——共享目录只进 skipped_shared，
+                # 绝不进删除清单（否则刚被判共享跳过的目录会被兜底分支重新加回，
+                # rmtree 连坐删掉其他任务在用的交付物）。
+                fallback = []
+                outputs_dir = os.path.join(root, "outputs", f"task_{task_id}")
+                if os.path.lexists(outputs_dir):
+                    fallback.append((
+                        f"outputs/task_{task_id}", outputs_dir,
+                        os.path.normcase(os.path.join(root_real, "outputs",
+                                                      f"task_{task_id}"))))
+                ckpt = read_task_checkpoint(task_id)
+                if ckpt:
+                    files_dir = ckpt.get("files_dir")
+                    if isinstance(files_dir, str) and files_dir.strip():
+                        # _resolve_files_dir 已做 realpath 沙箱内校验（越出返回
+                        # None，与 artifacts 端点同一口径——逃逸来源跳过不算错误）
+                        resolved = _resolve_files_dir(root, files_dir)
+                        if resolved:
+                            fallback.append((
+                                os.path.relpath(resolved, root).replace("\\", "/"),
+                                resolved, os.path.normcase(resolved)))
+                if fallback:
+                    reg_map = _dr.get_dirs_map([rel for rel, _, _ in fallback])
+                    skipped_dirs = {s["dir"] for s in skipped_shared}
+                    for rel, abs_path, expected_real in fallback:
+                        info = reg_map.get(_dr.canon_dir_path(rel))
+                        others = ([t for t in info["task_ids"] if t != task_id]
+                                  if info else [])
+                        if others:
+                            if rel not in skipped_dirs:
+                                skipped_shared.append(
+                                    {"dir": rel, "shared_with": others})
+                                skipped_dirs.add(rel)
+                            continue
+                        candidates.append((rel, abs_path, expected_real))
             seen = set()
             for display, path, expected_real in candidates:
+                if not os.path.lexists(path):
+                    continue  # 目录不存在不算错误（登记保留历史）
                 real = os.path.normcase(os.path.realpath(path))
                 if real in seen:
-                    continue  # files_dir 与 outputs/task_<id> 同目录 → 只删一次
+                    continue  # 多来源同目录 → 只删一次
                 seen.add(real)
                 try:
                     if real != expected_real:
@@ -296,10 +404,32 @@ async def delete_task(task_id: int, delete_artifacts: bool = False):
         except Exception as e:
             print(f"[Task] Delete artifacts error: {e}")
             artifacts_errors.append({"path": "", "error": str(e)})
+    # 任务行已删：连带删除检查点文件（I3——残留 .checkpoints/task_<id>.json
+    # 会在任务 id 复用/恢复路径被误读；realpath 判据同一期：.checkpoints 若是
+    # 逃逸链接父级则不跟随，只打印跳过；文件本身是 symlink 时 os.remove 只删
+    # 链接不删目标）并清掉该任务全部交付物关联（放目录删除之后——legacy 分支
+    # 与清单校验依赖读取检查点与关联；deliverables 行保留作历史）
+    try:
+        from api.routes.routes_sandbox import _sandbox_root as _ck_root_fn
+        _ck_root = _ck_root_fn()
+        _ck_path = os.path.join(_ck_root, ".checkpoints", f"task_{task_id}.json")
+        if os.path.lexists(_ck_path):
+            _ck_real = os.path.normcase(os.path.realpath(_ck_path))
+            _ck_expected = os.path.normcase(os.path.join(
+                os.path.normcase(os.path.realpath(_ck_root)),
+                ".checkpoints", f"task_{task_id}.json"))
+            if _ck_real == _ck_expected or os.path.islink(_ck_path):
+                os.remove(_ck_path)
+            else:
+                print(f"[Task] 跳过逃逸链接检查点: {_ck_path}")
+    except Exception as _ck_err:
+        print(f"[Task] Delete checkpoint error: {_ck_err}")
+    _dr.remove_task_links(task_id)
     return {"status": "success", "message": "Task deleted",
             "artifacts_deleted": bool(artifacts_removed),
             "artifacts_removed": artifacts_removed,
-            "artifacts_errors": artifacts_errors}
+            "artifacts_errors": artifacts_errors,
+            "skipped_shared": skipped_shared}
 
 
 @router.post("/api/tasks/{task_id}/reset-resume")
