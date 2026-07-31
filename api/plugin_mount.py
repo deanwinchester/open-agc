@@ -37,20 +37,30 @@ def _prune_plugin_routes(app, name: str, prefix: str) -> None:
 
 
 def _insert_before_catchall(app, new_routes):
-    """Insert routes before any catch-all (path with full_path:path) so SPA fallback doesn't shadow plugins."""
+    """Insert routes before any route that would shadow plugin paths.
+
+    两类遮蔽都要避开（生产实证）：
+    1. SPA catch-all（/{full_path:path}）——遮蔽插件 API 路由；
+    2. 主静态挂载 Mount("/static")（server.py:459）——它先于 catch-all 匹配
+       /static/plugins/** 并在主 static 目录里 404，重扫后插件 vue-entry 全灭。
+    启动时插件挂载先于主 /static 挂载（server.py:169 < :459）所以首发没事，
+    问题只发生在 rescan 重插。取两者中更早的位置插入。"""
     routes = app.router.routes
-    # find first catch-all index
-    catch_idx = None
+    insert_idx = None
     for i, r in enumerate(routes):
         p = getattr(r, "path", "") or ""
-        if "full_path" in p or p == "/{path:path}":
-            catch_idx = i
+        is_catchall = "full_path" in p or p == "/{path:path}"
+        # 主静态挂载（/static 与 /static/vue 都是 Starlette Mount，path 精确匹配；
+        # 插件自己的 /static/plugins/* 挂载已被前置剪除，不会误判）
+        is_main_static = p in ("/static", "/static/vue")
+        if is_catchall or is_main_static:
+            insert_idx = i
             break
-    if catch_idx is None:
+    if insert_idx is None:
         routes.extend(new_routes)
     else:
         for offset, nr in enumerate(new_routes):
-            routes.insert(catch_idx + offset, nr)
+            routes.insert(insert_idx + offset, nr)
 
 
 def mount_plugins(app, plugins, logger=print) -> None:
