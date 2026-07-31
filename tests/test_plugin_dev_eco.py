@@ -390,3 +390,70 @@ class TestScanPreservesActiveTraining:
             assert get_plugin("open-agc-train").instance.state["engine"] is not engine_before
         finally:
             unload_plugin("open-agc-train")
+
+
+# ── 生产实证回归：rescan 后插件 vue-entry 被主 /static 挂载遮蔽 404 ──
+
+class TestPluginRoutesNotShadowed:
+    """启动顺序（server.py）：插件挂载(:169) → 主 /static 挂载(:459) →
+    SPA catch-all(:528)，所以首发正常；但 rescan 重插时若只避 catch-all，
+    插件静态挂载会落到主 /static 之后被遮蔽（实测 vue-entry 全 404）。
+    修复：插入点取 catch-all 与主 /static 挂载中更早者。"""
+
+    def _make_info(self, name, static_dir=None):
+        from fastapi import APIRouter
+        from core.plugin_manager import PluginInfo, PluginInstance
+
+        router = APIRouter()
+
+        @router.get("/hello")
+        async def hello():
+            return {"plugin": name}
+
+        inst = PluginInstance(router=router, router_prefix=f"/api/plugin/{name}",
+                              static_dir=static_dir)
+        return PluginInfo(name=name, version="1", instance=inst, plugin_dir="")
+
+    def _build_app_like_server(self, tmp_path, plugin_static):
+        """按 server.py 的真实顺序建 app：插件 → 主静态 → catch-all。"""
+        from fastapi import FastAPI
+        from fastapi.staticfiles import StaticFiles
+        from api.plugin_mount import mount_plugins
+
+        app = FastAPI()
+        mount_plugins(app, [self._make_info("demo", str(plugin_static))],
+                      logger=lambda *a: None)
+        main_static = tmp_path / "main_static"
+        main_static.mkdir()
+        (main_static / "home.txt").write_text("home", encoding="utf-8")
+        app.mount("/static", StaticFiles(directory=str(main_static)), name="static")
+
+        @app.get("/{full_path:path}")
+        async def spa_fallback(full_path: str):
+            return {"spa": full_path}
+
+        return app
+
+    def test_rescan_keeps_plugin_routes_before_shadows(self, tmp_path):
+        pytest.importorskip("httpx")
+        from fastapi.testclient import TestClient
+        from api.plugin_mount import mount_plugins
+
+        plugin_static = tmp_path / "p_static"
+        plugin_static.mkdir()
+        (plugin_static / "vue-entry.js").write_text("export default 1", encoding="utf-8")
+        app = self._build_app_like_server(tmp_path, plugin_static)
+        c = TestClient(app)
+        # 启动态正常
+        assert c.get("/api/plugin/demo/hello").status_code == 200
+        assert c.get("/static/plugins/demo/vue-entry.js").status_code == 200
+
+        # rescan 重挂载：插件 API 与静态都必须仍在主 /static 与 catch-all 之前
+        mount_plugins(app, [self._make_info("demo", str(plugin_static))],
+                      logger=lambda *a: None)
+        assert c.get("/api/plugin/demo/hello").status_code == 200, "API 被 catch-all 遮蔽"
+        assert c.get("/static/plugins/demo/vue-entry.js").status_code == 200, \
+            "插件静态被主 /static 挂载遮蔽"
+        # 主静态与 SPA 不受影响
+        assert c.get("/static/home.txt").status_code == 200
+        assert c.get("/some/spa/route").json() == {"spa": "some/spa/route"}

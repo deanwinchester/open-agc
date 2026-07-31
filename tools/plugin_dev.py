@@ -17,8 +17,9 @@ class DevelopPluginTool(BaseTool):
 
     name: str = "develop_plugin"
     description: str = (
-        "开发新插件：生成脚手架（plugin.json、__init__.py、Vue 视图入口 static/vue-entry.js）"
-        "或校验插件代码。前端契约：plugin.json 声明 \"vue_entry\": \"vue-entry.js\"，入口文件是插件"
+        "开发新插件：生成脚手架（plugin.json、__init__.py、Vue 视图入口 static/vue-entry.js）、"
+        "校验插件代码或验收检查（verify：语法/契约/已知缺陷扫描，交付前必做）。"
+        "前端契约：plugin.json 声明 \"vue_entry\": \"vue-entry.js\"，入口文件是插件"
         " static/ 下的原生 ES module，default export 为 setup(ctx)，返回"
         " {views: [{path, title, icon?, component}]}；component 必须用 ctx.Vue.defineComponent"
         " 创建（模板字符串由主应用编译，el-* 组件可直接使用）；每个视图自动挂载到路由"
@@ -38,8 +39,8 @@ class DevelopPluginTool(BaseTool):
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["scaffold", "install"],
-                            "description": "scaffold=生成新插件脚手架；install=校验插件代码。",
+                            "enum": ["scaffold", "install", "verify"],
+                            "description": "scaffold=生成新插件脚手架；install=校验插件代码；verify=验收检查（语法/契约/已知缺陷，交付前必做）。",
                         },
                         "plugin_name": {
                             "type": "string",
@@ -162,6 +163,10 @@ class DevelopPluginTool(BaseTool):
             "下一步：编辑代码后调用 POST /api/plugins/scan（或设置页「扫描新插件」）"
             "即可热更新生效，无需重启服务。视图路由为 /plugins/%s/main。" % name
         )
+        summary_parts.append(
+            "验收（必做）：scan 生效后调用 develop_plugin(action=\"verify\", "
+            "plugin_name=\"%s\") 做静态验收（语法/契约/已知缺陷扫描），全部通过后再交付给用户。" % name
+        )
         return "\n".join(summary_parts)
 
     def _write_default_init(self, plugin_dir: str, name: str, mod_name: str, has_static: bool) -> None:
@@ -234,10 +239,15 @@ def init_plugin(context: PluginContext) -> PluginInstance:
 // ctx 可用能力：
 //   ctx.pluginName                  插件名
 //   ctx.Vue                         Vue 命名空间（defineComponent/ref/computed/onMounted/...）
-//   ctx.apiFetch                    主应用 API client：request(url, options)，自动 JSON 解析与错误规范化
+//   ctx.apiFetch                    主应用 API client，**本身就是函数**：apiFetch(url, options?) → Promise<JSON>
+//                                   ⚠️ 不是 apiFetch.request(...)——它没有 .request 方法，那样写必报错
 //   ctx.ElMessage / ctx.ElMessageBox  Element Plus 反馈组件
 //   ctx.wsOn(type, fn)              订阅主应用 WebSocket 事件（返回退订函数）
 //   ctx.navigate(path)              router.push 封装（插件内跳转）
+//
+// 主题规约：默认贴近主应用风格（浅色背景、el-* 组件 + 共享 CSS 变量
+// var(--el-*)，不要自定义页面底色/暗色主题/全局字体）；仅当用户明确
+// 要求自定义主题时例外。
 // ============================================================
 
 // 注入本插件的局部样式（class 统一加 __NAME__- 前缀，避免污染全局）
@@ -347,6 +357,133 @@ export default function setup(ctx) {
         except Exception as e:
             return f"插件 {name} 加载失败: {e}"
 
+    def _esbuild(self):
+        """定位 esbuild 二进制（仓库 node_modules/.bin）；找不到返回 None。"""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for cand in ("esbuild.cmd", "esbuild"):
+            p = os.path.join(root, "node_modules", ".bin", cand)
+            if os.path.isfile(p):
+                return p
+        return None
+
+    def _check_js_syntax(self, entry_path: str):
+        """esbuild 语法检查；返回 (ok, detail)。esbuild 缺失时跳过（ok=None）。"""
+        esbuild = self._esbuild()
+        if not esbuild:
+            return None, "esbuild 不可用，跳过语法检查"
+        import subprocess
+        try:
+            proc = subprocess.run(
+                [esbuild, entry_path, "--log-level=error"],
+                capture_output=True, text=True, timeout=30)
+        except Exception as e:
+            return None, f"语法检查执行失败: {e}"
+        if proc.returncode == 0:
+            return True, ""
+        return False, (proc.stderr or proc.stdout or "语法错误").strip()[:300]
+
+    _BAD_PATTERNS = [
+        (r"apiFetch\s*\.\s*request\s*\(",
+         "apiFetch 本身就是函数，应直接 apiFetch(url, ...) —— 写 apiFetch.request 必报 "
+         "'apiFetch.request is not a function'（生产实证）"),
+        (r"ctx\s*\.\s*request\s*\(", "ctx 上没有 request 方法，请用 ctx.apiFetch"),
+    ]
+    _DARK_THEME_RE = r"background(?:-color)?\s*:\s*#(?:0[0-9a-fA-F]{2,5}|1[0-9a-fA-F]{2,5})\b"
+
+    def _verify(self, name: str) -> str:
+        """验收检查（用户要求：开发完成后必须有测试环节，避免带病交付）。
+
+        检查项：plugin.json 有效且声明 vue_entry、vue-entry.js 存在且语法
+        通过（esbuild）、已知错误用法扫描（apiFetch.request 等）、暗色自定义
+        主题告警（默认应贴近主应用浅色风格，用户明确要求除外）、__init__.py
+        含 init_plugin、插件当前已加载。返回逐项 ✅/⚠️/❌ 报告。"""
+        import re
+        plugin_dir = os.path.join(self._plugins_base(), name)
+        if not os.path.isdir(plugin_dir):
+            return f"插件目录 {plugin_dir} 不存在"
+        lines = []
+        errors = 0
+        warnings = 0
+
+        def check(label, ok, detail=""):
+            nonlocal errors
+            if ok is False:
+                errors += 1
+            mark = "✅" if ok else ("➖" if ok is None else "❌")
+            lines.append(f"{mark} {label}{(' — ' + detail) if detail else ''}")
+
+        def warn(label, detail=""):
+            nonlocal warnings
+            warnings += 1
+            lines.append(f"⚠️ {label}{(' — ' + detail) if detail else ''}")
+
+        # 1) plugin.json
+        manifest = None
+        manifest_path = os.path.join(plugin_dir, "plugin.json")
+        if os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+            except Exception:
+                manifest = None
+        check("plugin.json 有效", manifest is not None)
+
+        # 2) vue_entry 前端契约
+        vue_entry = (manifest or {}).get("vue_entry", "")
+        if not vue_entry:
+            check("vue_entry 声明", None, "未声明（纯后端插件可忽略）")
+        else:
+            entry_path = os.path.join(plugin_dir, "static", vue_entry)
+            check("vue-entry 文件存在", os.path.isfile(entry_path), vue_entry)
+            if os.path.isfile(entry_path):
+                ok, detail = self._check_js_syntax(entry_path)
+                check("vue-entry 语法检查（esbuild）", ok, detail)
+                try:
+                    src = open(entry_path, encoding="utf-8").read()
+                except Exception:
+                    src = ""
+                check("default export 存在",
+                      bool(re.search(r"export\s+default", src)))
+                code_lines = [l for l in src.splitlines()
+                              if not l.strip().startswith(("//", "*", "/*"))]
+                code = "\n".join(code_lines)
+                for pat, msg in self._BAD_PATTERNS:
+                    if re.search(pat, code):
+                        check("已知错误用法扫描", False, msg)
+                        break
+                else:
+                    check("已知错误用法扫描", True)
+                if re.search(self._DARK_THEME_RE, code):
+                    warn("主题风格", "检测到暗色自定义底色——默认应贴近主应用浅色风格"
+                         "（el-* + 共享 CSS 变量），仅当用户明确要求自定义主题时保留")
+
+        # 3) __init__.py init_plugin
+        init_path = os.path.join(plugin_dir, "__init__.py")
+        has_init = False
+        if os.path.isfile(init_path):
+            try:
+                has_init = "init_plugin" in open(init_path, encoding="utf-8").read()
+            except Exception:
+                has_init = False
+        check("__init__.py 含 init_plugin", has_init)
+
+        # 4) 加载状态（scan 后应已加载）
+        try:
+            from core.plugin_manager import get_plugin
+            info = get_plugin(name)
+            check("插件当前已加载", bool(info and info.instance),
+                  "未加载——需先调用 POST /api/plugins/scan")
+        except Exception as e:
+            check("插件当前已加载", None, f"状态查询失败: {e}")
+
+        verdict = "通过" if errors == 0 else f"未通过（{errors} 项错误）"
+        if warnings:
+            verdict += f"，{warnings} 项警告"
+        lines.insert(0, f"插件 {name} 验收{verdict}")
+        if errors:
+            lines.append("请逐项修复后重新 verify，全部通过再交付用户。")
+        return "\n".join(lines)
+
     def execute(self, action: str, **kwargs) -> str:
         try:
             name = kwargs.get("plugin_name", "").strip()
@@ -354,6 +491,10 @@ export default function setup(ctx) {
                 return self._scaffold(**kwargs)
             elif action == "install":
                 return self._install(name)
+            elif action == "verify":
+                if not name:
+                    return "插件名称不能为空"
+                return self._verify(name)
             else:
                 return f"未知操作: {action}"
         except Exception as e:

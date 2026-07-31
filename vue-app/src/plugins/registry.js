@@ -36,6 +36,15 @@ import { buildPluginEntryUrl, createRegistrationTracker, removeNavByName } from 
 // 侧边栏插件导航（响应式，App.vue 直接渲染）。
 // 元素形状：{ name, label, icon, views: [{ path, title, icon? }] }
 export const pluginNav = Vue.reactive([]);
+// 插件前端加载错误（响应式）：name -> 错误信息。插件管理页据此展示缺陷，
+// 不再静默 console.error（生产实证：插件 vue-entry 报错时菜单无任何提示）。
+export const pluginErrors = Vue.reactive({});
+
+function setPluginError(name, err) {
+  const msg = (err && (err.message || String(err))) || '未知错误';
+  pluginErrors[name] = msg;
+  console.error(`[plugins] 加载插件视图失败: ${name}`, err);
+}
 
 function makeCtx(router, plugin) {
   return {
@@ -76,20 +85,22 @@ function removePluginRegistration(router, name) {
 async function loadPluginViews(router, plugin) {
   // 同一插件重新注册（热更新）前，先移除其旧路由与旧导航项
   removePluginRegistration(router, plugin.name);
-  // import URL 加时间戳破浏览器缓存，保证拿到最新 vue-entry.js
-  const url = buildPluginEntryUrl(plugin.name, plugin.vue_entry, Date.now());
-  const mod = await import(/* @vite-ignore */ url);
-  const setup = mod.default;
-  if (typeof setup !== 'function') {
-    console.warn(`[plugins] ${plugin.name}: vue_entry default export 不是函数，跳过`);
-    return [];
-  }
-  const result = await setup(makeCtx(router, plugin));
-  const views = (result && result.views) || [];
-  const navViews = [];
-  const routeNames = [];
-  for (const v of views) {
-    if (!v || !v.path || !v.component) continue;
+  delete pluginErrors[plugin.name];
+  try {
+    // import URL 加时间戳破浏览器缓存，保证拿到最新 vue-entry.js
+    const url = buildPluginEntryUrl(plugin.name, plugin.vue_entry, Date.now());
+    const mod = await import(/* @vite-ignore */ url);
+    const setup = mod.default;
+    if (typeof setup !== 'function') {
+      setPluginError(plugin.name, 'vue_entry default export 不是函数');
+      return [];
+    }
+    const result = await setup(makeCtx(router, plugin));
+    const views = (result && result.views) || [];
+    const navViews = [];
+    const routeNames = [];
+    for (const v of views) {
+      if (!v || !v.path || !v.component) continue;
     const fullPath = `/plugins/${plugin.name}/${v.path}`;
     const routeName = `plugin-${plugin.name}-${v.path}`;
     router.addRoute({
@@ -101,15 +112,19 @@ async function loadPluginViews(router, plugin) {
     routeNames.push(routeName);
     navViews.push({ path: fullPath, title: v.title || v.path, icon: v.icon || '' });
   }
-  if (navViews.length) {
-    pluginNav.push({
-      name: plugin.name,
-      label: (plugin.menu && plugin.menu.label) || plugin.name,
-      icon: (plugin.menu && plugin.menu.icon) || '🧩',
-      views: navViews,
-    });
+    if (navViews.length) {
+      pluginNav.push({
+        name: plugin.name,
+        label: (plugin.menu && plugin.menu.label) || plugin.name,
+        icon: (plugin.menu && plugin.menu.icon) || '🧩',
+        views: navViews,
+      });
+    }
+    return routeNames;
+  } catch (err) {
+    setPluginError(plugin.name, err);
+    return [];
   }
-  return routeNames;
 }
 
 // 应用启动时调用一次（main.js，mount 之后，保证 pinia 已激活）。

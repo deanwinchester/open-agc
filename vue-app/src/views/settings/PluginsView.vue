@@ -12,7 +12,7 @@ import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Refresh, Search } from '@element-plus/icons-vue';
 import { cachedFetch, invalidateCache, request } from '../../api/client';
-import { refreshPluginViews } from '../../plugins/registry';
+import { refreshPluginViews, pluginErrors } from '../../plugins/registry';
 import zh from '../../i18n/zh';
 
 const t = zh.settings.plugins;
@@ -228,8 +228,14 @@ async function installFromMarket(p) {
             <strong>📦 {{ p.name }}</strong>
             <span class="plugin-version">v{{ p.version }}</span>
             <el-tag size="small" :type="statusOf(p).type" disable-transitions>{{ statusOf(p).label }}</el-tag>
+            <el-tag v-if="pluginErrors[p.name]" size="small" type="danger" disable-transitions>
+              {{ t.viewError }}
+            </el-tag>
           </div>
           <div class="plugin-meta">{{ p.description }}<template v-if="p.author"> · {{ p.author }}</template></div>
+          <div v-if="pluginErrors[p.name]" class="plugin-error">
+            {{ t.viewErrorPrefix }}: {{ pluginErrors[p.name] }}
+          </div>
         </div>
         <div class="plugin-actions">
           <el-button
@@ -397,6 +403,13 @@ async function installFromMarket(p) {
   margin-top: 2px;
   font-size: 13px;
   color: var(--el-text-color-regular);
+}
+
+.plugin-error {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--el-color-danger);
+  word-break: break-all;
 }
 
 .plugin-actions {
