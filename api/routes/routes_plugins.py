@@ -62,11 +62,9 @@ os.makedirs(_user_plugins_dir, exist_ok=True)
 
 
 def _all_plugin_dirs():
-    """Return both built-in and user-installed plugin directories."""
-    dirs = [_builtin_plugins_dir]
-    if _user_plugins_dir != _builtin_plugins_dir:
-        dirs.append(_user_plugins_dir)
-    return dirs
+    """Return plugin directories to scan — user-installed dir only.
+    Built-in plugins are copied to data/plugins on first run by server.py."""
+    return [_user_plugins_dir]
 
 
 def _find_plugin_dir(name: str) -> str:
