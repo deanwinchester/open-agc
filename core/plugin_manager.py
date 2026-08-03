@@ -166,6 +166,39 @@ def discover_plugins(plugins_dir: str = "plugins",
     return loaded
 
 
+def _install_plugin_deps(manifest: dict, plugin_dir: str, logger) -> None:
+    """Install Python dependencies declared in plugin.json's pip_dependencies field.
+
+    Runs pip install for any dependency that isn't already importable.
+    """
+    deps = manifest.get("pip_dependencies", [])
+    if not deps:
+        return
+    import importlib.util as _ilu
+    import subprocess as _sp
+
+    missing = []
+    for dep in deps:
+        # dep can be "package" or "package>=1.0" — extract the import name
+        import_name = dep.split(">=")[0].split("==")[0].split("<")[0].strip()
+        import_name = import_name.replace("-", "_")
+        if _ilu.find_spec(import_name) is None:
+            missing.append(dep)
+
+    if not missing:
+        return
+
+    logger(f"[PluginManager] Installing plugin dependencies: {missing}")
+    try:
+        _sp.run(
+            [sys.executable, "-m", "pip", "install", "--no-cache-dir"] + missing,
+            capture_output=True, text=True, timeout=180,
+        )
+        logger(f"[PluginManager] Dependencies installed: {missing}")
+    except Exception as e:
+        logger(f"[PluginManager] Dependency install failed: {e}")
+
+
 def load_plugin(name: str, plugins_dir: str = "plugins",
                 broadcast_fn: Callable = None,
                 server_config: dict = None,
@@ -189,6 +222,9 @@ def load_plugin(name: str, plugins_dir: str = "plugins",
     if not os.path.exists(init_path):
         logger(f"[PluginManager] No __init__.py in {plugin_dir}")
         return None
+
+    # Install any declared Python dependencies before importing the plugin
+    _install_plugin_deps(manifest, plugin_dir, logger)
 
     # Ensure plugins_dir parent is importable
     plugins_parent = os.path.dirname(os.path.abspath(plugins_dir))
