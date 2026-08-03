@@ -225,8 +225,9 @@ def load_plugin(name: str, plugins_dir: str = "plugins",
         logger(f"[PluginManager] {name}: no init_plugin() function")
         return None
 
-    # Build context
-    data_dir = os.path.join(os.path.dirname(os.path.abspath(plugins_dir)), "data")
+    # Build context — use core.paths for the canonical data dir
+    from core.paths import get_data_dir
+    data_dir = get_data_dir()
     db_dir = os.path.join(data_dir, "plugins", name)
     os.makedirs(db_dir, exist_ok=True)
 
