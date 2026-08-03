@@ -283,6 +283,13 @@ def _run_migrations(cursor):
     except Exception:
         pass  # Already exists
 
+    # Add attachments to messages — 粘贴图片等附件的相对路径 JSON 数组
+    # （如 ["uploads/paste_x.png"]），供历史展示与后续轮次视觉上下文重建
+    try:
+        cursor.execute("ALTER TABLE messages ADD COLUMN attachments TEXT")
+    except Exception:
+        pass  # Already exists
+
 
 def create_indexes():
     """Create indexes for query performance."""
