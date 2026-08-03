@@ -1238,11 +1238,15 @@ def _guardian_resume_task(task_id: int) -> None:
         # run) so resumed steps don't collide with old task_steps rows.
         _hb_step_offset = _get_step_offset(task_id)
 
+        _hb_thinking = {"content": None}
+
         def _hb_cb(e):
             if "step" in e:
                 e["step"] = e.get("step", 0) + _hb_step_offset
+            if e.get("event") == "thinking" and e.get("content"):
+                _hb_thinking["content"] = e["content"]
             if e.get("event") == "tool_start":
-                add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", ""), session_id=_hb_session, sub_task=e.get("sub_task"))
+                add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", ""), session_id=_hb_session, sub_task=e.get("sub_task"), thinking_content=_hb_thinking["content"])
             # Persist sandbox approvals so they survive agent recreation
             if e.get("event") == "sandbox_approved":
                 _path = e.get("path", "")

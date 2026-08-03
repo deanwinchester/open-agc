@@ -37,6 +37,7 @@ MANIFEST
 data/secrets.json
 bin/
 /eval/results/
+/models/
 
 # macOS
 .DS_Store

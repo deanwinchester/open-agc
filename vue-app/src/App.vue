@@ -12,6 +12,20 @@ const logoUrl = '/static/icon_rounded.png';
 // 移动端抽屉：≤768px 侧栏默认隐藏，汉堡按钮滑出；遮罩/菜单项点击关闭。
 // 视口变回桌面时强制收起，避免抽屉状态残留。
 const sidebarOpen = ref(false);
+
+// 插件子菜单收起状态（按插件名持久化到 localStorage，用户反馈：插件
+// 菜单应当能收起子菜单）
+const _COLLAPSE_KEY = 'pluginNavCollapsed';
+const collapsedPlugins = ref(new Set(
+  JSON.parse(localStorage.getItem(_COLLAPSE_KEY) || '[]')));
+
+function togglePluginNav(name) {
+  const s = new Set(collapsedPlugins.value);
+  if (s.has(name)) s.delete(name);
+  else s.add(name);
+  collapsedPlugins.value = s;
+  localStorage.setItem(_COLLAPSE_KEY, JSON.stringify([...s]));
+}
 const mobileMq = window.matchMedia('(max-width: 768px)');
 function onViewportChange(e) {
   if (!e.matches) sidebarOpen.value = false;
@@ -107,17 +121,27 @@ async function doUpgrade() {
         </router-link>
         <!-- 插件视图导航：由 src/plugins/registry.js 按 manifest vue_entry 动态注册 -->
         <div v-for="plugin in pluginNav" :key="plugin.name" class="plugin-section">
-          <div class="plugin-label">{{ plugin.icon }} {{ plugin.label }}</div>
-          <router-link
-            v-for="view in plugin.views"
-            :key="view.path"
-            :to="view.path"
-            class="menu-item"
-            active-class="active"
-            @click="closeSidebar"
+          <div
+            class="plugin-label collapsible"
+            role="button"
+            :title="collapsedPlugins.has(plugin.name) ? '展开' : '收起'"
+            @click="togglePluginNav(plugin.name)"
           >
-            {{ view.title }}
-          </router-link>
+            <span class="plugin-chevron">{{ collapsedPlugins.has(plugin.name) ? '▸' : '▾' }}</span>
+            {{ plugin.icon }} {{ plugin.label }}
+          </div>
+          <template v-if="!collapsedPlugins.has(plugin.name)">
+            <router-link
+              v-for="view in plugin.views"
+              :key="view.path"
+              :to="view.path"
+              class="menu-item"
+              active-class="active"
+              @click="closeSidebar"
+            >
+              {{ view.title }}
+            </router-link>
+          </template>
         </div>
       </nav>
       <!-- 版本号与升级入口（侧栏底部） -->
@@ -280,9 +304,26 @@ async function doUpgrade() {
 /* 分组小标题：字距加大 */
 .plugin-label {
   padding: 4px 14px 8px;
-  font-size: 11px;
-  letter-spacing: 0.12em;
+  font-size: 11px;  letter-spacing: 0.12em;
   color: var(--panda-sidebar-text-dim);
+}
+
+.plugin-label.collapsible {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+}
+
+.plugin-label.collapsible:hover {
+  color: var(--panda-sidebar-text, var(--el-text-color-primary));
+}
+
+.plugin-chevron {
+  display: inline-block;
+  width: 14px;
+  margin-left: -4px;
+  font-size: 10px;
 }
 
 .content {

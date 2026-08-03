@@ -1,6 +1,7 @@
 """Memories and history API endpoints."""
+import json
 import sqlite3
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from api.db import DB_PATH
 
 router = APIRouter()
@@ -42,10 +43,21 @@ async def get_history(session_id: int = None, before_id: int = 0, limit: int = 1
     if before_id > 0:
         where.append("id < ?")
         params.append(before_id)
-    sql = "SELECT id, role, content FROM messages WHERE {} ORDER BY id DESC LIMIT ?".format(" AND ".join(where))
+    sql = "SELECT id, role, content, timestamp, attachments FROM messages WHERE {} ORDER BY id DESC LIMIT ?".format(" AND ".join(where))
     cursor.execute(sql, params + [limit])
     rows = cursor.fetchall()
-    history = [{"id": r["id"], "role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    history = []
+    for r in reversed(rows):
+        atts = []
+        if r["attachments"]:
+            try:
+                parsed = json.loads(r["attachments"])
+                if isinstance(parsed, list):
+                    atts = [a for a in parsed if isinstance(a, str)]
+            except Exception:
+                atts = []
+        history.append({"id": r["id"], "role": r["role"], "content": r["content"],
+                        "timestamp": r["timestamp"], "attachments": atts})
     oldest_id = history[0]["id"] if history else 0
     has_more = False
     if oldest_id:
@@ -61,3 +73,19 @@ async def get_history(session_id: int = None, before_id: int = 0, limit: int = 1
             ).fetchone()[0])
     conn.close()
     return {"history": history, "oldest_id": oldest_id, "has_more": has_more}
+
+
+@router.delete("/api/history/{message_id}")
+async def delete_history_message(message_id: int):
+    """删除会话中的单条消息记录（用户手动清理用）。
+
+    只影响聊天展示层（messages 表）；关联的 task_steps/任务记录不动。
+    不存在返回 404。"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("DELETE FROM messages WHERE id=?", (message_id,))
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="消息不存在")
+    return {"status": "success", "deleted": message_id}

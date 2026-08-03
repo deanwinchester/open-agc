@@ -129,7 +129,8 @@ class TestHistoryMapping:
         conn = sqlite3.connect(db)
         conn.execute(
             "CREATE TABLE messages ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, content TEXT, session_id INTEGER)")
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, content TEXT, session_id INTEGER, "
+            "attachments TEXT)")
         conn.executemany(
             "INSERT INTO messages (role, content, session_id) VALUES (?, ?, 1)",
             [

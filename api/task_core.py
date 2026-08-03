@@ -523,19 +523,25 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
     return 'completed'
 
 
-def save_message(role: str, content: str, session_id: int = 1, task_id: int = None):
-    """Save a chat message. If task_id is provided, links the message to its task."""
+def save_message(role: str, content: str, session_id: int = 1, task_id: int = None,
+                 attachments: list = None):
+    """Save a chat message. If task_id is provided, links the message to its task.
+
+    attachments: 附件相对路径列表（如 ["uploads/paste_x.png"]，沙箱相对），
+    以 JSON 存入 messages.attachments——历史展示缩略图与后续轮次视觉上下文
+    重建都靠它（此前粘贴截图只以 base64 过路，落库后彻底丢失）。"""
     try:
+        att_json = json.dumps(attachments, ensure_ascii=False) if attachments else None
         conn = db_connect()
         if task_id:
             conn.execute(
-                "INSERT INTO messages (role, content, session_id, task_id) VALUES (?, ?, ?, ?)",
-                (role, content, session_id, task_id)
+                "INSERT INTO messages (role, content, session_id, task_id, attachments) VALUES (?, ?, ?, ?, ?)",
+                (role, content, session_id, task_id, att_json)
             )
         else:
             conn.execute(
-                "INSERT INTO messages (role, content, session_id) VALUES (?, ?, ?)",
-                (role, content, session_id)
+                "INSERT INTO messages (role, content, session_id, attachments) VALUES (?, ?, ?, ?)",
+                (role, content, session_id, att_json)
             )
         conn.execute("UPDATE sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
         conn.commit()

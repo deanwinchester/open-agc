@@ -412,8 +412,8 @@ class FetchURLTool(BaseTool):
             description=(
                 "抓取指定 URL 的网页正文，返回纯文本。已知目标 URL 时直接用本工具，不必先搜索；"
                 "raw=true 返回原始 HTML。内网/本机地址会被 SSRF 防护拒绝。"
-                "不知道 URL 时用 search_web 搜索；页面需 JS 渲染或登录交互时用 browser_automation；"
-                "已有大段 HTML 要转 Markdown 用 parse_html。"
+                "不知道 URL 时用 search_web 搜索；页面需 JS 渲染或登录交互时用 browser_automation。"
+                "已有大段 HTML 时直接读入分析（read_file）或先截取关键片段。"
             ),
         )
 

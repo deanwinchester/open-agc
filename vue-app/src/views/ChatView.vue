@@ -19,7 +19,7 @@
 // - REST /api/tasks/{id}/steps 返回倒序步骤，渲染前反转（旧版历史卡片步骤顺序反了）
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { useWsStore } from '../stores/ws';
 import { request, cachedFetch } from '../api/client';
 import zh from '../i18n/zh';
@@ -163,6 +163,11 @@ function onListScroll() {
 
 // ── 消息追加：运行中插入的用户消息排在实时进度卡片之前（对齐旧 appendMessage） ──
 function appendItem(item) {
+  // 实时消息无 DB id/时间戳：补本地时间用于显示（删除按钮仅对有 DB id 的
+  // 历史消息开放，刷新后即可删除）
+  if (item.kind === 'msg' && !item.timestamp) {
+    item.timestamp = new Date().toISOString();
+  }
   if (item.role === 'user' && liveCard.value) {
     const idx = items.value.findIndex((i) => i.kind === 'progress' && i.key === liveCard.value.key);
     if (idx >= 0) {
@@ -235,10 +240,10 @@ function renderHistorySteps(data) {
     live: isLive, history: !isLive,
     resumable: RESUMABLE_STATUSES.includes(data.task_status),
     collapsed: !isLive,
-    entries: steps.map((s) => {
+    entries: steps.flatMap((s) => {
       const ok = s.success === 1 || s.success === true;
       const failed = s.success === 0 || s.success === false;
-      return {
+      const toolEntry = {
         kind: 'tool', step: s.step_number, tool: s.tool_name,
         toolLabel: s.tool_label || s.tool_name,
         argsPreview: s.args_preview || '',
@@ -249,6 +254,12 @@ function renderHistorySteps(data) {
         success: ok ? true : failed ? false : null,
         status: ok ? 'done' : failed ? 'failed' : 'running',
       };
+      // 该步骤前缓存的思考内容（reasoning_content 落库于 task_steps.thinking_content）
+      // 作为 thinking 条目插在工具步骤之前——刷新后思考过程仍可见（用户反馈）
+      const thinkingEntry = s.thinking_content
+        ? { kind: 'thinking', ekey: `h-th-${s.step_number}`, content: s.thinking_content }
+        : null;
+      return thinkingEntry ? [thinkingEntry, toolEntry] : [toolEntry];
     }),
     shellLines: [], tokenUsage: '',
   });
@@ -613,6 +624,27 @@ function onSandboxRespond(payload) {
   sandboxState.visible = false;
 }
 
+// ── 删除单条消息（有 DB id 的历史消息） ──
+async function onDeleteMessage(item) {
+  if (!item.id) return;
+  try {
+    await ElMessageBox.confirm(
+      t.deleteConfirmText,
+      t.deleteConfirmTitle,
+      { confirmButtonText: t.deleteMessage, cancelButtonText: zh.goals.cancel, type: 'warning' }
+    );
+  } catch {
+    return; // 用户取消
+  }
+  try {
+    await request(`/api/history/${item.id}`, { method: 'DELETE' });
+    items.value = items.value.filter((i) => i !== item);
+    ElMessage.success(t.deleteSuccess);
+  } catch (e) {
+    ElMessage.error(`${t.deleteFailed}: ${e.message}`);
+  }
+}
+
 // ── 历史加载（含分页与过期守卫） ──
 async function loadHistory(sid, { beforeId = 0 } = {}) {
   if (historyPaging.loading) return;
@@ -625,9 +657,11 @@ async function loadHistory(sid, { beforeId = 0 } = {}) {
     historyPaging.hasMore = !!data.has_more;
     const msgs = (data.history || []).map((m) => ({
       kind: 'msg', key: nextKey(), role: m.role, content: m.content,
-      // /api/history 只 SELECT id/role/content（api/routes/routes_memories.py:45-48），
-      // 历史消息不含附件数据；此处透传仅为后端未来补充字段时可直接渲染
-      images: m.images || null,
+      id: m.id, timestamp: m.timestamp || null,
+      // 附件（粘贴图片落盘路径 uploads/xxx）→ 缩略图 URL，经 /api/upload 提供
+      images: (Array.isArray(m.attachments) && m.attachments.length)
+        ? m.attachments.map((a) => '/api/upload/' + encodeURIComponent(String(a).split('/').pop()))
+        : (m.images || null),
       files: m.files || null,
     }));
     if (beforeId) {
@@ -860,7 +894,7 @@ onUnmounted(() => {
           </div>
 
           <template v-for="item in displayItems" :key="item.key">
-            <MessageItem v-if="item.kind === 'msg'" :item="item" />
+            <MessageItem v-if="item.kind === 'msg'" :item="item" @delete="onDeleteMessage" />
             <ProgressCard
               v-else-if="item.kind === 'progress'"
               :card="item"
