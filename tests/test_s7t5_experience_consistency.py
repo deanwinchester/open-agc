@@ -222,7 +222,7 @@ def test_resume_synthetic_prompt_not_saved():
     合成提示（"【系统提示】任务已恢复…"）不落聊天库。"""
     ws_src = (_SRC / "api" / "ws.py").read_text(encoding="utf-8")
     assert re.search(
-        r'if not resume_task_id:\s*\n\s*try:\s*\n\s*save_message\("user", query, ws_session_id\)',
+        r'if not resume_task_id:\s*\n\s*try:\s*\n(?:\s*#[^\n]*\n)*\s*save_message\("user", query, ws_session_id',
         ws_src), "resume 时 save_message('user', query) 应被 if not resume_task_id 跳过"
 
 

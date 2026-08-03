@@ -102,13 +102,15 @@ def _load_session_history(session_id: int, limit: int = 20) -> list:
     role='system' rows (download/task notices) are included and mapped to the
     user role via _map_history_message, so the agent still sees them after a
     reload or session switch.
+    用户消息带 attachments（粘贴图片落盘路径）时重建多模态内容块——后续
+    轮次/会话重载后模型仍能"看到"当时的截图（此前落库即丢失）。
     """
     try:
         conn = db_connect()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT role, content FROM (SELECT * FROM messages WHERE session_id=? "
+            "SELECT role, content, attachments FROM (SELECT * FROM messages WHERE session_id=? "
             "AND role IN ('user','agent','system') ORDER BY id DESC LIMIT ?) ORDER BY id ASC",
             (session_id, limit))
         rows = cursor.fetchall()
@@ -116,12 +118,40 @@ def _load_session_history(session_id: int, limit: int = 20) -> list:
         history = []
         for row in rows:
             msg = _map_history_message(row["role"], row["content"])
-            if msg is not None:
-                history.append(msg)
+            if msg is None:
+                continue
+            if row["role"] == "user" and row["attachments"]:
+                msg = _with_history_images(msg, row["attachments"])
+            history.append(msg)
         return history
     except Exception as e:
         print(f"Failed to load chat history: {e}")
         return []
+
+
+def _with_history_images(msg: dict, attachments_json: str) -> dict:
+    """把用户消息的 attachments（沙箱相对路径 JSON）重建为多模态内容块。
+    文件缺失/损坏时保留原文本消息（视觉上下文丢失但不影响文本）。"""
+    try:
+        rels = json.loads(attachments_json)
+        if not isinstance(rels, list) or not rels:
+            return msg
+        from api.config import load_config as _lc
+        cfg = _lc() or {}
+        sandbox = cfg.get("sandbox_dir") or os.path.join(os.getcwd(), "workspace")
+        paths = []
+        for rel in rels:
+            if not isinstance(rel, str) or ".." in rel.split("/"):
+                continue
+            p = os.path.join(sandbox, rel)
+            if os.path.isfile(p):
+                paths.append(p)
+        if not paths:
+            return msg
+        from core.llm_client import build_user_message
+        return build_user_message(msg.get("content", ""), paths)
+    except Exception:
+        return msg
 
 
 def _user_facing(response: str):
@@ -331,6 +361,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
             # Accumulate shell output per step for tool_step message persistence
             _step_outputs: dict = {}
+            # 思考内容缓冲：reasoning_content 事件先缓存，下一个 tool_start
+            # 落库时随步骤写入 thinking_content（此前只流转到前端不落库，
+            # 刷新页面思考内容即丢失——用户反馈）
+            _pending_thinking: dict = {"content": None}
             def progress_callback(event: dict):
                 nonlocal has_taken_action, ws_task_id, _bg_pid
                 """Thread-safe: push progress events from thread pool into queue."""
@@ -345,6 +379,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
                         print(f"[Sandbox] Persisted approval: {_path} for session {_sid}")
                     return  # Don't queue this event to frontend
+
+                if event.get("event") == "thinking" and event.get("content"):
+                    _pending_thinking["content"] = event["content"]
 
                 # Record task steps (offset on resume to continue numbering)
                 adjusted_step = event.get("step", 0) + step_offset
@@ -373,7 +410,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             session_id=ws_session_id,
                             tool_call_id=event.get("tool_call_id"),
                             full_args=event.get("tool_args"),
-                            sub_task=event.get("sub_task")
+                            sub_task=event.get("sub_task"),
+                            thinking_content=_pending_thinking["content"]
                         )
                     except Exception as e:
                         print(f"[Task] Failed to add step: {e}")
@@ -563,7 +601,10 @@ async def websocket_endpoint(websocket: WebSocket):
             # 不落库——聊天里不应出现内部合成文本。
             if not resume_task_id:
                 try:
-                    save_message("user", query, ws_session_id)
+                    # 粘贴图片的落盘路径随消息存 attachments——历史展示与
+                    # 后续轮次视觉上下文重建都依赖它（此前落库即丢失）
+                    save_message("user", query, ws_session_id,
+                                 attachments=_pasted or None)
                 except Exception as _msg_e:
                     print(f"[WS] Save user message failed: {_msg_e}")
 
@@ -1160,6 +1201,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         retry_model = None
                         agent_profile_name = None
                         ws_images = None
+                        _pasted = None
                     else:
                         continue
                 elif msg_type == "retry":
@@ -1167,6 +1209,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     retry_model = user_msg.get("model", None)
                     agent_profile_name = user_msg.get("agent_name", None)
                     ws_images = user_msg.get("images", None)
+                    _pasted = None
                     if not query.strip():
                         continue
                 else:
@@ -1190,7 +1233,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         _existing_session_agent = next(iter(_existing_session_agents.values()))
                         if not getattr(_existing_session_agent, 'is_interrupted', False):
                             _existing_session_agent.queue_message(query)
-                            save_message("user", query, ws_session_id)
+                            save_message("user", query, ws_session_id,
+                                         attachments=_pasted or None)
                             print(f"[WS] Existing agent active for session {ws_session_id} — queued message (not starting new loop)")
                             continue
 

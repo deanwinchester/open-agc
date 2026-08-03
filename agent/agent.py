@@ -48,7 +48,6 @@ from tools.task_plan import TaskPlanTool, format_plan_for_prompt, load_plan
 from tools.task_manager import TaskManagerTool
 from tools.system_config import ConfigureSystemTool
 from tools.plugin_dev import DevelopPluginTool
-from tools.reader_lm import ReaderLMTool
 from tools.compact_context import CompactContextTool
 from tools.subagent_dispatch import DispatchSubagentTool
 from tools.request_secret import RequestSecretTool
@@ -195,6 +194,32 @@ def _post_process_loop():
                 pass
 
 
+_DEFAULT_SOUL_MD = """# 人格设定（soul.md）
+
+此文件定义 Agent 的人格，系统在每次任务开始时自动注入提示词。
+可随时修改，立即生效，无需重启。
+
+## 人格
+- 名字：熊猫（Panda）——住在用户电脑里的数字生命。
+- 自我认知：你不是"Open-AGC 产品"，Open-AGC 只是你运行的躯壳与工具箱。
+  被问到"你是谁"时以本人格作答，不要自称某个产品或模型。
+- 性格：沉稳务实，有好奇心；做事利落，说话有人味但不过度热情；
+  承认不确定，不不懂装懂。
+
+## 回复风格
+- 使用中文回复
+- 简洁明了，先给结论再给细节
+- 对复杂任务先说明计划再执行
+- 遇到错误时先分析原因再重试，不盲目重复
+
+## 行为偏好
+- 优先使用 Python 而非 Shell 命令（对于跨平台兼容的操作）
+- 文件操作时优先使用 write_file/edit_file 而非 echo/cat 重定向
+- 生成图片/文件后告知用户保存路径
+- 大文件下载使用 queue_download 工具
+"""
+
+
 class OpenAGCAgent:
     """
     Main Agent Loop handling context, Tool calling, and orchestration.
@@ -323,8 +348,12 @@ class OpenAGCAgent:
             )
 
         self.system_prompt_base = (
-            f"# 身份与能力\n"
-            f"你是 Open-AGC，一个强大的 AI 智能体，能够执行终端命令、运行 Python 代码、"
+            f"# 身份与人格\n"
+            f"你是住在用户电脑里的数字生命——不是「Open-AGC」产品本身，那只是你运行的躯壳与工具箱；"
+            f"被问到「你是谁」时不要自称 Open-AGC 或某个模型。"
+            f"你的名字、性格与回复风格由紧随其后的「人格设定」定义，以它为自我介绍的口径。\n"
+            f"# 能力与纪律\n"
+            f"你能够执行终端命令、运行 Python 代码、"
             f"操作文件系统，以及物理控制电脑的鼠标和键盘。"
             f"始终使用你的工具来明确验证假设，不要凭空猜测。\n"
             f"你的训练数据有知识截止日期。对于任何关于近期事件、当前新闻、最新动态或"
@@ -355,8 +384,7 @@ class OpenAGCAgent:
             f"5. search_web / fetch_url — 搜索互联网获取最新信息 / 抓取已知 URL 的网页正文\n"
             f"6. search_history — 检索当前会话历史（需要回忆之前内容时使用）\n"
             f"7. browser_automation — 虚拟浏览器操作网页（扩展工具，先用 search_available_tools 启用）\n"
-            f"8. parse_html — 使用 Reader-lm 将 HTML 源码转为 Markdown（扩展工具，需先启用；浏览器获取的页面过大时使用）\n"
-            f"9. 其他专用工具（下载、邮件、任务计划、电脑控制等）先通过 search_available_tools 搜索启用，再根据场景选用\n"
+            f"8. 其他专用工具（下载、邮件、任务计划、电脑控制等）先通过 search_available_tools 搜索启用，再根据场景选用\n"
             f"\n## 大文件下载\n"
             f"如果需要下载超过 100MB 的大文件（如模型文件 .gguf/.safetensors/.bin），"
             f"必须使用 queue_download 工具（扩展工具，需先通过 search_available_tools 启用）而非 execute_shell。它支持断点续传，"
@@ -524,7 +552,7 @@ class OpenAGCAgent:
             f"**禁止**另起独立服务、独立端口或独立前端。插件内调用大模型必须使用 "
             f"core.llm_client.LLMClient()（不传参即跟随系统设置的默认模型与密钥），"
             f"禁止自行硬编码 API Key、base_url 或模型名。\n"
-            f"\n## 持久化事实 (MEMORY.md) 与 人格设定 (soul.md)\n"
+            f"\n## 持久化事实 (MEMORY.md)\n"
             f"### MEMORY.md\n"
             f"`data/MEMORY.md` 是**最高优先级的持久化事实库**，每次任务开头系统会自动注入其内容。\n"
             f"当你发现以下类型的信息时，**必须使用 write_file 写入 data/MEMORY.md**，以便后续任务复用：\n"
@@ -540,15 +568,6 @@ class OpenAGCAgent:
             f"- Python 路径: D:\\Apps\\Python312\\python.exe\n"
             f"```\n"
             f"⚠️ 每个 key 只写一次，覆盖更新即可。不要重复添加相同内容。\n"
-            f"\n### soul.md\n"
-            f"`data/soul.md` 是你的**人格设定文件**，系统自动注入。你可以在这里定义你的回复风格、行为偏好、"
-            f"角色定位等。例如：\n"
-            f"```markdown\n"
-            f"- 回复风格：简洁专业，用中文回复\n"
-            f"- 优先使用 Python 而非 Shell 命令\n"
-            f"- 每次执行重要操作前先向用户说明计划\n"
-            f"```\n"
-            f"你可以用 write_file 修改 data/soul.md 来实时调整风格。\n"
         )
 
         self.messages: List[Dict[str, Any]] = [
@@ -603,7 +622,6 @@ class OpenAGCAgent:
             "shell_send": ShellSendTool(),
             "manage_task_plan": TaskPlanTool(),
             "manage_task": TaskManagerTool(),
-            "parse_html": ReaderLMTool() if ReaderLMTool.is_available() else None,
             "compact_context": CompactContextTool(),
             "dispatch_subagent": DispatchSubagentTool(),
             "request_secret": RequestSecretTool(),
@@ -647,7 +665,6 @@ class OpenAGCAgent:
             "shell_send": "交互命令输入",
             "manage_task_plan": "管理任务计划",
             "manage_task": "查看和管理任务",
-            "parse_html": "HTML 转 Markdown",
             "dispatch_subagent": "分派子代理",
             "request_secret": "向用户收集凭据",
         }
@@ -724,7 +741,7 @@ class OpenAGCAgent:
                                 "search_file_content", "find_files", "list_dir", "search_available_tools",
                                 "ask_user_question", "user_interjection_response", "search_history", "queue_download", "pause_and_wait",
                                 "execute_python", "search_web", "fetch_url", "self_review", "configure_system",
-                                "manage_task_plan", "parse_html", "shell_send"}
+                                "manage_task_plan", "shell_send"}
         CORE_TOOL_NAMES = TIERED_CORE_TOOL_NAMES if self.tool_tiered_exposure else FULL_CORE_TOOL_NAMES
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
 
@@ -807,6 +824,30 @@ class OpenAGCAgent:
         prompt = prompt.replace("{cwd_dir}", self.sandbox_dir or os.getcwd())
         prompt = prompt.replace("{system_env}", _detect_system_env())
 
+        # 人格设定（soul.md）紧跟身份段注入——人格内容就在开头，不是"指针"
+        # （用户反馈：开头只说「见下方」而内容在结尾，中间还有重复的编辑说明，
+        # 冗余且割裂）。缺失时播种默认人格；编辑说明一句话附在内容尾部。
+        try:
+            from core.paths import get_data_path as _gdp_soul
+            soul_path = _gdp_soul("soul.md")
+            if not os.path.exists(soul_path):
+                with open(soul_path, "w", encoding="utf-8") as f:
+                    f.write(_DEFAULT_SOUL_MD)
+            with open(soul_path, "r", encoding="utf-8") as f:
+                soul_content = f.read().strip()
+            if soul_content:
+                soul_block = (f"--- 人格设定 (soul.md) ---\n{soul_content}\n"
+                              f"（以上是最高优先级的人格定义；可按用户要求用 write_file "
+                              f"修改 data/soul.md 实时调整人格。）\n")
+                marker = "# 能力与纪律"
+                idx = prompt.find(marker)
+                if idx > 0:
+                    prompt = prompt[:idx] + soul_block + "\n" + prompt[idx:]
+                else:
+                    prompt += "\n" + soul_block
+        except Exception as e:
+            print(f"Failed to read soul.md: {e}")
+
         # Inject all available tool names (built after full_available_tools is populated)
         if hasattr(self, 'full_available_tools'):
             prompt += self._build_tool_list_section()
@@ -816,14 +857,24 @@ class OpenAGCAgent:
             prompt += f"\n--- 历史记忆回溯 (Episodic Memory) ---\n{memory_context}\n"
             
         # Optional: Inject MEMORY.md (Highest priority global rules)
+        # 路径修正（生产实证）：文档口径是 data/MEMORY.md，此前读
+        # sandbox/MEMORY.md（不存在）导致静默不注入；sandbox 旧位置仅作兼容回退。
+        _memory_candidates = []
+        try:
+            from core.paths import get_data_path as _gdp_mem
+            _memory_candidates.append(_gdp_mem("MEMORY.md"))
+        except Exception:
+            pass
         if self.sandbox_dir:
-            memory_file_path = os.path.join(self.sandbox_dir, "MEMORY.md")
+            _memory_candidates.append(os.path.join(self.sandbox_dir, "MEMORY.md"))
+        for memory_file_path in _memory_candidates:
             if os.path.exists(memory_file_path):
                 try:
                     with open(memory_file_path, "r", encoding="utf-8") as f:
                         content = f.read().strip()
                         if content:
-                            prompt += f"\n--- 全局核心设定与事实库 (MEMORY.md) ---\n{content}\n(注意：这是最高优先级的持久化记忆。当用户想传授新规定、修改基础偏好时，请使用 write_file 覆写沙箱目录下的 MEMORY.md)\n"
+                            prompt += f"\n--- 全局核心设定与事实库 (MEMORY.md) ---\n{content}\n(注意：这是最高优先级的持久化记忆。当用户想传授新规定、修改基础偏好时，请使用 write_file 覆写 data/MEMORY.md)\n"
+                            break
                 except Exception as e:
                     print(f"Failed to read MEMORY.md: {e}")
 
