@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 import json
 import re
@@ -152,15 +153,25 @@ def _plugin_broadcast(data):
     if f:
         f(data)
 
-# ── Plugin Discovery (built-in + user-installed) ──
-_plugins_dir = os.path.abspath(os.path.join(os.path.dirname(DB_PATH), "..", "plugins"))
+# ── Plugin Discovery (only from data/plugins — built-in plugins are copied there on first run) ──
 _user_plugins_dir = os.path.join(os.path.dirname(DB_PATH), "plugins")
 os.makedirs(_user_plugins_dir, exist_ok=True)
-_plugins = []
-for _pd in [_plugins_dir, _user_plugins_dir]:
-    if os.path.isdir(_pd) or _pd == _user_plugins_dir:
-        _plugins.extend(discover_plugins(plugins_dir=_pd, broadcast_fn=_plugin_broadcast,
-                          server_config=load_config() if "load_config" in dir() else {}))
+
+# Copy built-in plugins from the source tree to data/plugins (first run only)
+_builtin_plugins_dir = os.path.abspath(os.path.join(os.path.dirname(DB_PATH), "..", "plugins"))
+if os.path.isdir(_builtin_plugins_dir):
+    for _entry in os.listdir(_builtin_plugins_dir):
+        _src = os.path.join(_builtin_plugins_dir, _entry)
+        _dst = os.path.join(_user_plugins_dir, _entry)
+        if os.path.isdir(_src) and not os.path.exists(_dst):
+            try:
+                shutil.copytree(_src, _dst)
+                print(f"[Server] Copied built-in plugin {_entry} -> data/plugins")
+            except Exception as e:
+                print(f"[Server] Failed to copy plugin {_entry}: {e}")
+
+_plugins = discover_plugins(plugins_dir=_user_plugins_dir, broadcast_fn=_plugin_broadcast,
+                  server_config=load_config() if "load_config" in dir() else {})
 
 # _mount_plugins 的实现移到 api/plugin_mount.py（import-light，幽灵路由剪除可单测）；
 # 此处保留原名以兼容 routes_plugins.py 的 _srv._mount_plugins 调用。
