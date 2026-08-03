@@ -37,6 +37,9 @@ const version = ref('');
 const updateAvailable = ref(false);
 const latestVersion = ref('');
 const upgrading = ref(false);
+// 部署通道（desktop/docker/source）与平台，决定升级弹窗文案
+const channel = ref('source');
+const platform = ref('');
 
 onMounted(async () => {
   try {
@@ -44,24 +47,34 @@ onMounted(async () => {
     version.value = 'v' + (data.current || '0.0.0');
     latestVersion.value = data.latest || '';
     updateAvailable.value = !!data.update_available;
+    channel.value = data.channel || 'source';
+    platform.value = data.platform || '';
   } catch { /* 版本检查失败静默，不影响主界面 */ }
 });
+
+function upgradeHint() {
+  if (channel.value === 'desktop') {
+    return platform.value === 'darwin' ? zh.upgrade.macHint : zh.upgrade.desktopHint;
+  }
+  return zh.upgrade.sourceHint;
+}
 
 async function doUpgrade() {
   try {
     await ElMessageBox.confirm(
-      `发现新版本 v${latestVersion.value}，升级将下载并覆盖程序文件，完成后需重启服务。继续？`,
-      '自动升级',
-      { confirmButtonText: '升级', cancelButtonText: '取消', type: 'warning' },
+      `${zh.upgrade.foundNew} v${latestVersion.value}，${upgradeHint()}${zh.upgrade.confirmSuffix}`,
+      zh.upgrade.title,
+      { confirmButtonText: zh.upgrade.confirmButton, cancelButtonText: zh.upgrade.cancelButton, type: 'warning' },
     );
   } catch { return; }
   upgrading.value = true;
   try {
-    await request('/api/upgrade', { method: 'POST' });
-    ElMessage.success('升级完成，请重启服务以生效');
-    updateAvailable.value = false;
+    const res = await request('/api/upgrade', { method: 'POST' });
+    // desktop Windows 成功后会自动退出重启；macOS 返回手动安装指引
+    ElMessage.success((res && res.message) || zh.upgrade.success);
+    if (!(res && res.restart)) updateAvailable.value = false;
   } catch (err) {
-    ElMessage.error('升级失败：' + (err.message || ''));
+    ElMessage.error(zh.upgrade.failed + (err.message || ''));
   } finally {
     upgrading.value = false;
   }
