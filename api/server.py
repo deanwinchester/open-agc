@@ -154,8 +154,8 @@ def _plugin_broadcast(data):
         f(data)
 
 # ── Plugin Discovery (only from data/plugins — built-in plugins are copied there on first run) ──
-_user_plugins_dir = os.path.join(os.path.dirname(DB_PATH), "plugins")
-os.makedirs(_user_plugins_dir, exist_ok=True)
+from core.paths import get_user_plugins_dir
+_user_plugins_dir = get_user_plugins_dir()
 
 # Copy built-in plugins from the source tree to data/plugins (first run only)
 _builtin_plugins_dir = os.path.abspath(os.path.join(os.path.dirname(DB_PATH), "..", "plugins"))
