@@ -53,8 +53,8 @@ REM ---- 2. Build with PyInstaller ----
 echo [2/4] Building with PyInstaller...
 echo   Using spec file: open_agc.spec
 
-:: The spec file handles all data files. build_data/config.json.template
-:: is bundled as data/config.json (API-key-free template only).
+:: The spec file handles all data files. build_data/config.json (API-key-free
+:: default) is bundled as data/config.json.
 :: Real config.json with user API keys is NEVER bundled.
 pyinstaller open_agc.spec --clean --noconfirm
 

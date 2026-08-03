@@ -37,11 +37,11 @@ datas = [
     ('api', 'api'),
 ]
 
-# Bundle API-key-free config template as data/config.json.
+# Bundle the API-key-free default config as data/config.json so first launch
+# has something to seed from (seeded to ~/.open-agc/data/config.json).
 # Real data/config.json with user API keys is NEVER bundled.
-_config_tmpl = 'data/config.json.template'
-if os.path.exists(_config_tmpl):
-    datas.append((_config_tmpl, 'data'))
+if os.path.exists('build_data/config.json'):
+    datas.append(('build_data/config.json', 'data'))
 
 # Do NOT bundle data/ directory as it may contain sensitive user data (API keys).
 

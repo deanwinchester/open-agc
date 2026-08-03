@@ -38,34 +38,14 @@ def setup_environment():
         # Use user's home directory for writable data
         app_data = os.path.join(os.path.expanduser("~"), ".open-agc")
         os.makedirs(app_data, exist_ok=True)
-        
-        # Copy default data files if not present
-        bundled_data = os.path.join(base_dir, "data")
-        if os.path.exists(bundled_data):
-            import shutil
-            for item in os.listdir(bundled_data):
-                src = os.path.join(bundled_data, item)
-                dst = os.path.join(app_data, item)
-                if not os.path.exists(dst):
-                    if os.path.isfile(src):
-                        shutil.copy2(src, dst)
-                    elif os.path.isdir(src):
-                        shutil.copytree(src, dst)
-        
+
         # Point the app to the writable data directory
         os.environ["OPEN_AGC_DATA_DIR"] = app_data
-        
-        # Also ensure skills directory
-        skills_dir = os.path.join(app_data, "skills")
-        os.makedirs(skills_dir, exist_ok=True)
-        bundled_skills = os.path.join(base_dir, "skills")
-        if os.path.exists(bundled_skills):
-            import shutil
-            for item in os.listdir(bundled_skills):
-                src = os.path.join(bundled_skills, item)
-                dst = os.path.join(skills_dir, item)
-                if not os.path.exists(dst):
-                    shutil.copy2(src, dst)
+
+        # 播种逻辑与打包真实入口 gui_app.py 共用 core.paths.seed_frozen_data
+        # （bundle data/* → <data>/，skills/* → <data>/skills/，不覆盖已有文件）
+        from core.paths import seed_frozen_data
+        seed_frozen_data(base_dir)
     
     # Change to base directory so relative paths work
     os.chdir(base_dir)
