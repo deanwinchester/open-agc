@@ -29,6 +29,23 @@ export default {
     migrating: '该视图正在迁移到 Vue3，敬请期待。',
   },
 
+  // 侧栏自动升级弹窗（按部署通道 channel 显示不同文案）
+  upgrade: {
+    title: '自动升级',
+    confirmButton: '升级',
+    cancelButton: '取消',
+    foundNew: '发现新版本',
+    // desktop（Windows 打包客户端）：下载新版本并自动替换程序文件，随后自动重启
+    desktopHint: '升级将下载新版本并自动替换程序文件，随后自动重启。',
+    // desktop（macOS）：仅下载 dmg，需用户手动拖装
+    macHint: '升级将下载 macOS 安装包（dmg）到下载目录，完成后请手动拖入「应用程序」替换安装。',
+    // docker / 源码部署：在线升级源码，需手动重启
+    sourceHint: '升级将在线下载并覆盖源码文件，完成后需重启服务。',
+    confirmSuffix: '继续？',
+    success: '升级完成，请重启服务以生效',
+    failed: '升级失败：',
+  },
+
   // 设置视图
   settings: {
     title: '系统配置',

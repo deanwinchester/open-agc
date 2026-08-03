@@ -180,20 +180,10 @@ def main():
         app_data = os.path.join(os.path.expanduser("~"), ".open-agc")
         os.environ["OPEN_AGC_DATA_DIR"] = app_data
 
-        # Now get_data_path() etc. will use the writable path
-        from core.paths import get_data_dir
-        data_dir = get_data_dir()
-
         # Copy initial data/skills from bundle to writable dir if not exist
-        import shutil
-        for item in ["data", "skills"]:
-            src = os.path.join(base_dir, item)
-            dst = os.path.join(data_dir, item)
-            if os.path.exists(src) and not os.path.exists(dst):
-                if os.path.isdir(src):
-                    shutil.copytree(src, dst)
-                else:
-                    shutil.copy2(src, dst)
+        # （播种目标与 get_data_dir() 对齐：data/* → <data>/，skills/* → <data>/skills/）
+        from core.paths import seed_frozen_data
+        seed_frozen_data(base_dir)
 
     def safe_print(msg):
         try:
