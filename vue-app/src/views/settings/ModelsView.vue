@@ -45,6 +45,13 @@ const form = reactive({
   janitorIntervalHours: 1,
   janitorSoftGb: 20,
   janitorHardGb: 50,
+  // 邮件监听与助手（重构时丢失的区块，恢复）
+  emailListenerEnabled: false,
+  ownerEmail: '',
+  emailAccount: '',
+  emailPassword: '',      // 仅保存用户新输入；GET 返回 *** 不回填
+  emailImap: '',
+  emailSmtp: '',
 });
 
 // 初始值快照（来自 GET 响应），保存时逐字段对比得出 dirty 集合
@@ -108,6 +115,12 @@ function applySettings(data) {
       soft_gb: data.sandbox_janitor?.soft_gb ?? 20,
       hard_gb: data.sandbox_janitor?.hard_gb ?? 50,
     },
+    email_listener_enabled: data.email_listener_enabled ?? false,
+    owner_email: data.owner_email || '',
+    email_account: data.email_account || '',
+    email_imap_server: data.email_imap_server || '',
+    email_smtp_server: data.email_smtp_server || '',
+    email_password_set: data.email_password === '***',
   };
   initial.value = init;
 
@@ -129,6 +142,12 @@ function applySettings(data) {
   form.janitorIntervalHours = init.sandbox_janitor.interval_hours;
   form.janitorSoftGb = init.sandbox_janitor.soft_gb;
   form.janitorHardGb = init.sandbox_janitor.hard_gb;
+  form.emailListenerEnabled = init.email_listener_enabled;
+  form.ownerEmail = init.owner_email;
+  form.emailAccount = init.email_account;
+  form.emailImap = init.email_imap_server;
+  form.emailSmtp = init.email_smtp_server;
+  form.emailPassword = '';   // 已设置显示占位，不回填真实值
 
   form.provider = providerFromModel(init.default_model);
   form.model = init.default_model;
@@ -237,6 +256,14 @@ function buildPayload() {
     if (v != null && v !== jInit[k]) jDiff[k] = v;
   }
   if (Object.keys(jDiff).length > 0) payload.sandbox_janitor = jDiff;
+
+  // 邮件监听与助手：密码仅用户新输入时才发送（*** 掩码不回传）
+  if (form.emailListenerEnabled !== init.email_listener_enabled) payload.email_listener_enabled = form.emailListenerEnabled;
+  if (form.ownerEmail.trim() !== init.owner_email) payload.owner_email = form.ownerEmail.trim();
+  if (form.emailAccount.trim() !== init.email_account) payload.email_account = form.emailAccount.trim();
+  if (form.emailImap.trim() !== init.email_imap_server) payload.email_imap_server = form.emailImap.trim();
+  if (form.emailSmtp.trim() !== init.email_smtp_server) payload.email_smtp_server = form.emailSmtp.trim();
+  if (form.emailPassword.trim()) payload.email_password = form.emailPassword.trim();
 
   return payload;
 }
@@ -444,6 +471,42 @@ onMounted(loadSettings);
             <div class="field-hint">{{ t.sandbox.janitorHardHint }}</div>
           </el-form-item>
         </template>
+      </el-form>
+    </el-card>
+
+    <!-- 邮件监听与助手 -->
+    <el-card class="settings-card" shadow="never">
+      <template #header>
+        <div class="card-header">
+          <span class="card-title">{{ t.email.title }}</span>
+          <p class="card-desc">{{ t.email.desc }}</p>
+        </div>
+      </template>
+      <el-form label-position="top">
+        <el-form-item :label="t.email.listenerEnabled">
+          <el-switch v-model="form.emailListenerEnabled" />
+          <div class="field-hint">{{ t.email.listenerHint }}</div>
+        </el-form-item>
+        <el-form-item :label="t.email.ownerEmail">
+          <el-input v-model="form.ownerEmail" :placeholder="t.email.ownerEmailPlaceholder" />
+        </el-form-item>
+        <el-form-item :label="t.email.account">
+          <el-input v-model="form.emailAccount" :placeholder="t.email.accountPlaceholder" />
+        </el-form-item>
+        <el-form-item :label="t.email.password">
+          <el-input
+            v-model="form.emailPassword"
+            type="password"
+            show-password
+            :placeholder="initial?.email_password_set ? t.email.passwordSetPlaceholder : t.email.passwordPlaceholder"
+          />
+        </el-form-item>
+        <el-form-item :label="t.email.imap">
+          <el-input v-model="form.emailImap" :placeholder="t.email.imapPlaceholder" />
+        </el-form-item>
+        <el-form-item :label="t.email.smtp">
+          <el-input v-model="form.emailSmtp" :placeholder="t.email.smtpPlaceholder" />
+        </el-form-item>
       </el-form>
     </el-card>
 

@@ -3300,6 +3300,15 @@ class OpenAGCAgent:
                 "question": question,
                 "options": options
             })
+        # 持久化待回答问题：用户不在聊天页/卡片重建后仍可在任务页看到并回答
+        # （此前问题只活在实时进度卡片里，超时后静默转后台——生产实证用户
+        # 全程没看到问题）。回答送达或任务收官时清除；超时转后台保留可答。
+        try:
+            from api.task_core import set_pending_question
+            if getattr(self, "task_id", None):
+                set_pending_question(self.task_id, question, options)
+        except Exception:
+            pass
 
         # Clear queue of any stale responses
         while not self.user_input_queue.empty():
@@ -3313,7 +3322,15 @@ class OpenAGCAgent:
             if getattr(self, "is_interrupted", False):
                 return "[用户已中断任务]"
             try:
-                return self.user_input_queue.get(timeout=1.0)
+                answer = self.user_input_queue.get(timeout=1.0)
+                # 回答送达：清除持久化的待回答问题
+                try:
+                    from api.task_core import clear_pending_question
+                    if getattr(self, "task_id", None):
+                        clear_pending_question(self.task_id)
+                except Exception:
+                    pass
+                return answer
             except queue.Empty:
                 if _time.time() >= deadline:
                     # Total timeout — pause to background (same flow as the

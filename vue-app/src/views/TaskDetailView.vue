@@ -97,6 +97,40 @@ async function loadTask({ silent = false } = {}) {
   }
 }
 
+// ── 待回答问题（ask_user 持久化）：任务详情页直接回答，提交即恢复任务 ──
+const pendingQuestion = computed(() => {
+  const raw = task.value?.pending_question;
+  if (!raw) return null;
+  try {
+    const pq = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return pq && pq.question ? pq : null;
+  } catch {
+    return null;
+  }
+});
+const pqAnswer = ref('');
+const pqSending = ref(false);
+
+async function answerQuestion(ans) {
+  const answer = String(ans || '').trim();
+  if (!answer || pqSending.value) return;
+  pqSending.value = true;
+  try {
+    await request(`/api/tasks/${taskId}/reply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer }),
+    });
+    ElMessage.success(t.pendingAnswerSent);
+    pqAnswer.value = '';
+    await loadTask({ silent: true });
+  } catch (err) {
+    ElMessage.error(`${t.pendingAnswerFailed}: ${err.message}`);
+  } finally {
+    pqSending.value = false;
+  }
+}
+
 // ── 步骤（分页，DESC；展示序号换算为正序） ──
 
 const steps = ref([]);
@@ -574,6 +608,38 @@ onUnmounted(() => {
           <div class="section-block">{{ task.user_query }}</div>
         </div>
 
+        <!-- 待回答问题（ask_user 持久化）：显示问题与回答框，回答即恢复任务 -->
+        <div v-if="pendingQuestion" class="section pending-q">
+          <div class="section-title">❓ {{ t.pendingQuestion }}</div>
+          <div class="section-block">
+            <div class="pq-text">{{ pendingQuestion.question }}</div>
+            <div v-if="pendingQuestion.options && pendingQuestion.options.length" class="pq-options">
+              <el-button
+                v-for="opt in pendingQuestion.options"
+                :key="opt"
+                size="small"
+                plain
+                @click="answerQuestion(opt)"
+              >{{ opt }}</el-button>
+            </div>
+            <div class="pq-input-row">
+              <el-input
+                v-model="pqAnswer"
+                size="small"
+                :placeholder="t.pendingAnswerPlaceholder"
+                @keyup.enter="answerQuestion(pqAnswer)"
+              />
+              <el-button
+                size="small"
+                type="primary"
+                :loading="pqSending"
+                :disabled="!pqAnswer.trim()"
+                @click="answerQuestion(pqAnswer)"
+              >{{ t.pendingAnswerSend }}</el-button>
+            </div>
+          </div>
+        </div>
+
         <div v-if="task.task_type === 'scheduled'" class="section">
           <div class="section-title">{{ t.scheduleConfig }}</div>
           <div class="section-block">
@@ -882,6 +948,28 @@ onUnmounted(() => {
   padding: 10px 12px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.pending-q .section-block {
+  background: var(--el-color-warning-light-9);
+  border-color: var(--el-color-warning-light-5);
+}
+
+.pq-text {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.pq-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.pq-input-row {
+  display: flex;
+  gap: 8px;
 }
 
 .section-block code {

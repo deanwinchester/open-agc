@@ -209,9 +209,12 @@ def claim_task_for_resume(task_id: int, allowed_statuses: tuple) -> bool:
 
     Flips status to 'running' and increments ``resume_count`` only when the
     task's current status is in ``allowed_statuses``. 认领同时把
-    ``interruption_reason`` 清 NULL——历史中断原因属于上一次中断，任务已
-    恢复执行，继续保留会误导前端「中断原因」区块。SQLite serializes
-    writers, so under concurrent resume paths exactly one caller gets True.
+    ``interruption_reason`` 与 ``result_summary`` 清 NULL——历史中断原因
+    和「Task paused: 等待用户回答超时…」之类的旧摘要都属于上一次中断，
+    任务已恢复执行，继续保留会让前端把运行中的任务误显为挂起（生产实证：
+    用户回答后任务已恢复，详情页仍显示旧的挂起文案，误以为卡住）。SQLite
+    serializes writers, so under concurrent resume paths exactly one caller
+    gets True.
     Every resume path must call this BEFORE spawning its worker thread;
     losers must skip the resume. 统一语义「认领即 running，不再降级」：
     认领成功后任何路径都不得再把状态写回 interrupted；resume_count 收敛到
@@ -222,7 +225,7 @@ def claim_task_for_resume(task_id: int, allowed_statuses: tuple) -> bool:
         placeholders = ",".join("?" for _ in allowed_statuses)
         cursor = conn.execute(
             f"UPDATE tasks SET status='running', resume_count=resume_count+1, "
-            f"interruption_reason=NULL, updated_at=CURRENT_TIMESTAMP "
+            f"interruption_reason=NULL, result_summary=NULL, updated_at=CURRENT_TIMESTAMP "
             f"WHERE id=? AND status IN ({placeholders})",
             (task_id, *allowed_statuses))
         claimed = cursor.rowcount == 1
@@ -509,6 +512,7 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
     except Exception as _reg_err:
         print(f"[Task] Deliverables registry error: {_reg_err}")
     update_task_status(task_id, "completed", summary)
+    clear_pending_question(task_id)  # 任务收官：清除待回答问题（若曾提问）
     # 成功完成即清零恢复计数：Scheduler 点火/各恢复路径的 CAS 每次 +1，
     # 不清零会单调累积——长寿命 cron 任务一次普通中断就会被 Guardian
     # 判超限置 background_failed（且高计数触发长退避）
@@ -979,3 +983,46 @@ def _check_goal_completeness(task_id: int) -> int:
     except Exception as e:
         print(f"[Goal] Completeness check error: {e}")
         return -1
+
+
+def set_pending_question(task_id: int, question: str, options: list = None):
+    """记录任务的待回答问题（ask_user 触发时调用）——让问题在任务页/
+    会话重载后仍可见可答，不再只存在于实时进度卡片的瞬间。"""
+    try:
+        payload = json.dumps(
+            {"question": question, "options": options or [],
+             "asked_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")},
+            ensure_ascii=False)
+        conn = db_connect()
+        conn.execute("UPDATE tasks SET pending_question=? WHERE id=?",
+                     (payload, task_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[TaskCore] set_pending_question error: {e}")
+
+
+def clear_pending_question(task_id: int):
+    """回答送达/任务收官时清除待回答问题。"""
+    try:
+        conn = db_connect()
+        conn.execute("UPDATE tasks SET pending_question=NULL WHERE id=?",
+                     (task_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[TaskCore] clear_pending_question error: {e}")
+
+
+def get_pending_question(task_id: int):
+    """读取任务待回答问题（dict 或 None）。"""
+    try:
+        conn = db_connect()
+        row = conn.execute(
+            "SELECT pending_question FROM tasks WHERE id=?", (task_id,)).fetchone()
+        conn.close()
+        if row and row[0]:
+            return json.loads(row[0])
+    except Exception:
+        pass
+    return None

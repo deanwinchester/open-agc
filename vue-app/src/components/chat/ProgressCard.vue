@@ -5,8 +5,19 @@
 import { computed, ref } from 'vue';
 import zh from '../../i18n/zh';
 import AskUserForm from './AskUserForm.vue';
+import MarkdownView from '../MarkdownView.vue';
 
 const t = zh.chat;
+
+// LLM 中间回复的折叠预览：去 markdown 标记取前 60 字（全文在展开区
+// 用 MarkdownView 渲染——此前纯文本平铺，长回复完全无法读，用户反馈）
+function respPreview(content) {
+  const plain = String(content || '')
+    .replace(/[#*`>\-\[\]()!]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return plain.length > 60 ? plain.slice(0, 60) + '…' : plain;
+}
 
 const props = defineProps({
   card: { type: Object, required: true },
@@ -104,11 +115,16 @@ function onSubmitAsk(entry, answer) {
           </div>
         </div>
 
-        <div v-else-if="entry.kind === 'response'" class="pc-step">
+        <div v-else-if="entry.kind === 'response'" class="pc-step response">
           <span class="step-icon">💬</span>
           <div class="step-body">
-            <span class="step-label">{{ t.llmResponse }}</span>
-            <span class="step-detail">{{ entry.content }}</span>
+            <details>
+              <summary class="step-label">
+                {{ t.llmResponse }}
+                <span class="resp-preview">{{ respPreview(entry.content) }}</span>
+              </summary>
+              <MarkdownView :content="entry.content" class="resp-md" />
+            </details>
           </div>
         </div>
 
@@ -361,6 +377,21 @@ function onSubmitAsk(entry, answer) {
 .thinking-content {
   max-height: 200px;
   overflow-y: auto;
+}
+
+.resp-preview {
+  margin-left: 8px;
+  font-weight: normal;
+  color: var(--el-text-color-placeholder);
+  font-size: 12px;
+}
+
+.resp-md {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--el-fill-color-light);
+  border-radius: 8px;
+  font-size: 13px;
 }
 
 .pc-steps :deep(.ask-user) {

@@ -105,6 +105,20 @@ class ReadFileTool(BaseTool):
         except Exception as e:
             return f"Error reading file {path}: {str(e)}"
 
+def _resolve_relative(path: str, config: dict) -> str:
+    """相对路径按沙箱目录解析（写方向工具统一口径）。
+
+    生产实证：write_file 对相对路径沿用进程 CWD（服务器以仓库根为 CWD），
+    agent 按「outputs/<主题>/」约定写产出时落到了仓库根 outputs/ 而非
+    workspace/outputs/。绝对路径原样返回；sandbox_mode 关闭时维持 CWD 语义
+    （此处只在 sandbox_mode 开启的分支被调用）。"""
+    if os.path.isabs(path):
+        return path
+    sandbox_dir = (config or {}).get(
+        "sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+    return os.path.normpath(os.path.join(sandbox_dir, path))
+
+
 class WriteFileTool(BaseTool):
     name: str = "write_file"
     description: str = "写入文件内容（存在覆盖、不存在创建）。局部小改用 edit_file。受沙箱限制。"
@@ -120,7 +134,7 @@ class WriteFileTool(BaseTool):
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "文件路径（绝对或相对）。"
+                            "description": "文件路径（绝对路径，或相对沙箱目录的路径）。"
                         },
                         "content": {
                             "type": "string",
@@ -135,20 +149,23 @@ class WriteFileTool(BaseTool):
     def execute(self, **kwargs) -> str:
         import json
         from core.paths import get_data_path
-        
+
         path = kwargs.get("path")
         content = kwargs.get("content", "")
         if not path:
             return "Error: No file path provided."
-            
+
         # Sandbox Mode Enforcement
         config_path = get_data_path("config.json")
         if os.path.exists(config_path):
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
-                
+
                 if config.get("sandbox_mode", True):
+                    # 相对路径按沙箱目录解析（生产实证：此前按进程 CWD 解析，
+                    # agent 写 outputs/x.md 落到了仓库根目录而不是 workspace/outputs/）
+                    path = _resolve_relative(path, config)
                     whitelist = kwargs.get("_session_whitelist", None)
                     self.check_sandbox(path, config=config, session_whitelist=whitelist)
             except SandboxBlocked:
@@ -293,6 +310,8 @@ class EditFileTool(BaseTool):
                     config = json.load(f)
 
                 if config.get("sandbox_mode", True):
+                    # 同 write_file：相对路径按沙箱目录解析（见 _resolve_relative）
+                    path = _resolve_relative(path, config)
                     whitelist = kwargs.get("_session_whitelist", None)
                     self.check_sandbox(path, config=config, session_whitelist=whitelist)
             except SandboxBlocked:
