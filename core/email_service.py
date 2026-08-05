@@ -33,8 +33,14 @@ def fetch_emails(imap_server, username, password, criteria='ALL', limit=10, mark
     try:
         mail = imaplib.IMAP4_SSL(imap_server)
         mail.login(username, password)
-        mail.select("inbox")
-        
+        # SELECT 结果必须检查：网易 163 风控会返回 NO「Unsafe Login」——
+        # 不检查直接 search 只会得到误导性的 "illegal in state AUTH"，
+        # 把真实原因（需网页端确认/联系 kefu@188.com）淹没掉。
+        sel_status, sel_data = mail.select("inbox")
+        if sel_status != "OK":
+            detail = sel_data[0].decode("utf-8", "ignore") if sel_data else "unknown"
+            raise RuntimeError(f"IMAP SELECT 被拒绝: {detail}")
+
         status, messages = mail.search(None, criteria)
         if status != "OK":
             mail.logout()

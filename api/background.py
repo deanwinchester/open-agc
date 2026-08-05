@@ -49,6 +49,45 @@ def _email_reply_lines(task_id: int, status: str, summary: str) -> tuple:
     return status or "running", body
 
 
+def _email_listener_sources(config: dict, session_rows: list) -> list:
+    """构建邮件监听凭据来源列表。
+
+    全局 config.json 为主（设置页「邮件监听与助手」写的就是全局配置）；
+    sessions 表的 per-session 行作为补充（多邮箱场景），但与全局同账号的
+    行跳过——历史遗留的错误凭据（生产实证：sessions 行存着旧密码 admin888，
+    全局 config 已是新授权码，监听器却用旧行导致 LOGIN 失败刷屏）。
+    返回 [{sess_id, account, password, imap, smtp, owner}]。"""
+    sources = []
+    covered_accounts = set()
+    if (config.get("email_listener_enabled") and config.get("email_account")
+            and config.get("email_password") and config.get("email_imap_server")):
+        sources.append({
+            "id": 1,
+            "sess_id": 1,  # 单用户部署：全局配置默认作用于主会话
+            "email_account": config["email_account"],
+            "email_password": config["email_password"],
+            "email_imap_server": config["email_imap_server"],
+            "email_smtp_server": config.get("email_smtp_server", ""),
+            "owner_email": config.get("owner_email", ""),
+        })
+        covered_accounts.add(config["email_account"])
+    for row in session_rows:
+        acc = row["email_account"]
+        if acc in covered_accounts:
+            continue  # 全局同账号已覆盖，跳过（防旧凭据遮蔽新配置）
+        sources.append({
+            "id": row["id"],
+            "sess_id": row["id"],
+            "email_account": acc,
+            "email_password": row["email_password"],
+            "email_imap_server": row["email_imap_server"],
+            "email_smtp_server": row["email_smtp_server"],
+            "owner_email": row["owner_email"] or "",
+        })
+        covered_accounts.add(acc)
+    return sources
+
+
 def start_email_listener():
     def email_listener_loop():
         from core.email_service import fetch_emails, send_email
@@ -68,7 +107,7 @@ def start_email_listener():
                 except Exception:
                     rows = []
 
-                for row in rows:
+                for row in _email_listener_sources(config, rows):
                     sess_id = row["id"]
                     smtp_server = row["email_smtp_server"]
                     email_account = row["email_account"]
