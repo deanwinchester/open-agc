@@ -290,6 +290,13 @@ def _run_migrations(cursor):
     except Exception:
         pass  # Already exists
 
+    # Add pending_question to tasks — ask_user 提问的持久可见（此前只在
+    # 实时进度卡片里，用户不在聊天页/卡片重建后就永远看不到——生产实证）
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN pending_question TEXT")
+    except Exception:
+        pass  # Already exists
+
 
 def create_indexes():
     """Create indexes for query performance."""
