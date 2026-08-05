@@ -703,6 +703,30 @@ async function loadRecentTaskCard(sid) {
   }
 }
 
+// ── 待回答问题（ask_user 持久化）：会话加载时挂出未回答的问题表单，
+// 此前问题只活在实时进度卡片里，用户不在聊天页就永远看不到（生产实证）。
+async function loadPendingQuestions(sid) {
+  try {
+    const data = await request(`/api/tasks?session_id=${sid}&page=1&page_size=50`);
+    if (sid !== currentSessionId.value) return;
+    for (const task of (data.tasks || [])) {
+      if (!task.pending_question) continue;
+      // 已在列表里的不重复挂（WS 实时 ask 事件可能已挂过）
+      if (items.value.some((i) => i.kind === 'ask' && i.taskId === task.id && !i.answered)) continue;
+      let pq = null;
+      try { pq = JSON.parse(task.pending_question); } catch { continue; }
+      if (!pq || !pq.question) continue;
+      appendItem({
+        kind: 'ask', key: nextKey(), question: pq.question,
+        options: pq.options || null, taskId: task.id,
+        background: true, answered: false, answer: '', error: '',
+      });
+    }
+  } catch {
+    /* 待回答问题为可选增强，失败静默 */
+  }
+}
+
 // ── 会话管理 ──
 async function loadSessions() {
   try {
@@ -736,6 +760,7 @@ async function enterSession(sid) {
   //（api/ws.py:38-77），若先连 WS 再加载历史，推送的消息会被历史覆盖丢失。
   await loadHistory(sid);
   await loadRecentTaskCard(sid);
+  await loadPendingQuestions(sid);
   if (sid !== currentSessionId.value) return; // 加载期间又切换了会话，放弃旧连接
   ws.switchSession(sid); // store 内部关旧连新
 }

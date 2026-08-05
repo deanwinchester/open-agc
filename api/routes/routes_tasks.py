@@ -45,7 +45,7 @@ async def get_tasks(status: str = None, q: str = None, session_id: int = None,
     columns = ("t.id, t.title, t.user_query, t.status, t.task_type, "
                "t.created_at, t.updated_at, t.result_summary, "
                "t.session_id, t.schedule_cron, t.schedule_enabled, "
-               "t.next_run_at, t.resume_count, "
+               "t.next_run_at, t.resume_count, t.pending_question, "
                "t.total_tokens, t.total_cost, "
                "t.prompt_tokens, t.completion_tokens, t.cached_tokens")
     conditions = []
@@ -86,6 +86,7 @@ async def get_tasks(status: str = None, q: str = None, session_id: int = None,
             "schedule_enabled": bool(row["schedule_enabled"]) if "schedule_enabled" in row.keys() else False,
             "next_run_at": row["next_run_at"] if "next_run_at" in row.keys() else None,
             "resume_count": row["resume_count"] if "resume_count" in row.keys() else 0,
+            "pending_question": row["pending_question"] if "pending_question" in row.keys() else None,
             "total_tokens": row["total_tokens"] if "total_tokens" in row.keys() else 0,
             "total_cost": row["total_cost"] if "total_cost" in row.keys() else 0.0,
             "prompt_tokens": row["prompt_tokens"] if "prompt_tokens" in row.keys() else 0,
@@ -752,10 +753,28 @@ async def list_processes():
     return await asyncio.get_running_loop().run_in_executor(None, _build_processes_payload)
 
 
+def _backgrounded_task_ids() -> set:
+    """当前 backgrounded 状态任务的 id 集合（字符串）。
+
+    僵尸回收的排除名单——backgrounded 任务的死进程条目是 BgMonitor 判定
+    「进程结束→恢复任务」的唯一信号，被惰性回收先清掉任务就永远唤不醒
+    （生产实证：任务 #350 进程已结束，条目被 /api/processes 轮询回收，
+    BgMonitor 只看到 no pinfo 空等）。"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        ids = {str(r[0]) for r in conn.execute(
+            "SELECT id FROM tasks WHERE status='backgrounded'").fetchall()}
+        conn.close()
+        return ids
+    except Exception:
+        return set()
+
+
 def _build_processes_payload() -> dict:
     from tools.shell_interact import _is_pid_alive
     from tools.shell import reap_dead_background_processes
-    reaped = reap_dead_background_processes()
+    reaped = reap_dead_background_processes(
+        exclude_task_ids=_backgrounded_task_ids())
     procs = {}
     tracked_pids = set()
     for tid, task_procs in get_background_processes().items():
@@ -948,7 +967,8 @@ async def get_task_process(task_id: int):
     from tools.shell import reap_dead_background_processes
     # Try to adopt any orphans that might belong to this task
     adopt_orphan_processes(task_id)
-    reaped = [e for e in reap_dead_background_processes()
+    reaped = [e for e in reap_dead_background_processes(
+                  exclude_task_ids=_backgrounded_task_ids())
               if e.get("task_id") == str(task_id)]
     procs = get_background_processes_for_task(task_id)
     orphan = get_orphan_processes().get(str(task_id))
@@ -1124,10 +1144,12 @@ async def reply_to_background_task(task_id: int, body: dict):
     if not answer:
         raise HTTPException(status_code=400, detail="answer is required")
     from api.state import _background_agents
+    from api.task_core import clear_pending_question
     agent = _background_agents.get(task_id)
     if agent and not getattr(agent, "is_interrupted", False):
         try:
             agent.user_input_queue.put_nowait(answer)
+            clear_pending_question(task_id)
             return {"status": "success", "message": f"Answer delivered to task #{task_id}"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to deliver answer: {e}")
@@ -1135,6 +1157,7 @@ async def reply_to_background_task(task_id: int, body: dict):
     from api.background import resume_task_with_late_answer
     result = resume_task_with_late_answer(task_id, answer)
     if result.get("ok"):
+        clear_pending_question(task_id)
         return {"status": "success", "message": result["message"], "resumed": True}
     if result.get("error") == "not_found":
         raise HTTPException(status_code=404, detail=result["message"])
