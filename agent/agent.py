@@ -356,6 +356,15 @@ class OpenAGCAgent:
             f"你能够执行终端命令、运行 Python 代码、"
             f"操作文件系统，以及物理控制电脑的鼠标和键盘。"
             f"始终使用你的工具来明确验证假设，不要凭空猜测。\n"
+            f"## 事实红线\n"
+            f"用户的个人信息（邮箱、账号、电话、地址等）只以对话原文、MEMORY.md 与"
+            f"系统设置为准，**严禁臆造或把臆测说成「用户提供」**。代注册账号、代收验证码"
+            f"一律使用设置中配置的智能体邮箱；没有可用邮箱或关键信息不确定时，必须用 "
+            f"ask_user_question 向用户确认，不得自行编造。\n"
+            f"## 执行指令必须执行\n"
+            f"「试试吧」「继续」「开始吧」「做吧」这类回复是**执行指令**：必须立即调用"
+            f"工具开始执行，严禁只用文字描述计划就结束回合。说「我现在去点击/下载/注册」"
+            f"的当轮就必须真的发起对应工具调用。\n"
             f"你的训练数据有知识截止日期。对于任何关于近期事件、当前新闻、最新动态或"
             f"时效性信息的问题，你必须使用 search_web 工具获取最新信息。"
             f"绝对不要仅依赖训练数据回答时事问题。\n"
@@ -2502,9 +2511,11 @@ class OpenAGCAgent:
         self._final_answer_requested = False
         self._self_review_history = []
 
-        # Tool loop detection state
+        # Tool loop detection state（「调用+结果双同」判循环，见工具执行块注释）
         self._recent_tool_calls: list = []
-        MAX_REPEATED_TOOL_CALLS = 3
+        self._loop_last_sig: str = ""
+        self._loop_last_result_hash: str = ""
+        self._loop_streak: int = 0
         effective_max = max_iterations  # self-review has separate budget via _correction_attempts
 
         while (current_iter < max_iterations or
@@ -2783,26 +2794,23 @@ class OpenAGCAgent:
                     tool_instance = self.available_tools.get(function_name)
                     
                     # Tool Loop Detection Check
+                    # 判定「调用+结果双同」才算循环（生产实证：browser_automation
+                    # 读页面是天然无参重复调用，页面内容每次不同却在推进，
+                    # 旧逻辑只看参数一致 ×3 误杀正常浏览器操作）。
+                    # 规则：连续两次同签名调用且结果也相同 → 第三次同签名调用拦截；
+                    # 结果不同说明环境在变化，计数重置。
                     import re as _re
                     normalized_args = _re.sub(r'\s+', ' ', str(function_args)).strip()
                     call_signature = f"{function_name}:{normalized_args}"
-                    call_hash = hashlib.md5(call_signature.encode('utf-8')).hexdigest()
-                    self._recent_tool_calls.append(call_hash)
-
-                    # Keep only the last 10 calls in the memory window
-                    if len(self._recent_tool_calls) > 10:
-                        self._recent_tool_calls.pop(0)
-
-                    # Check if the exact same tool with the exact same args was called too many times recently
-                    # This often happens when the agent gets stuck in an error loop
-                    loop_count = self._recent_tool_calls.count(call_hash)
-                    
-                    if loop_count >= MAX_REPEATED_TOOL_CALLS:
+                    if (self._loop_last_sig == call_signature
+                            and self._loop_streak >= 2):
                         result = (f"System Guard: Blocked due to critical loop. "
-                                  f"You have called `{function_name}` with these exact arguments {loop_count} times recently. "
-                                  f"You are likely stuck in a loop. YOU MUST change your approach or use different parameters.")
+                                  f"You have called `{function_name}` with these exact arguments "
+                                  f"and got identical results {self._loop_streak} times in a row. "
+                                  f"You are likely stuck in a loop. YOU MUST change your approach "
+                                  f"or use different parameters.")
                         if verbose:
-                            print(f"[Tool Loop Detected] Blocked {function_name}")
+                            print(f"[Tool Loop Detected] Blocked {function_name} (identical results ×{self._loop_streak})")
                     else:
                         if tool_instance:
                             from tools.base import SandboxBlocked
@@ -2964,6 +2972,16 @@ class OpenAGCAgent:
                             pass
 
                     result_str = str(result)
+
+                    # 循环追踪：同签名且结果也相同 → streak+1；否则重置。
+                    # 浏览器读页等「同参不同效」操作因结果不同自然豁免。
+                    _res_hash = hashlib.md5(result_str[:4000].encode('utf-8', 'ignore')).hexdigest()
+                    if call_signature == self._loop_last_sig and _res_hash == self._loop_last_result_hash:
+                        self._loop_streak += 1  # 同签名同结果：循环迹象累积
+                    else:
+                        self._loop_streak = 1   # 结果不同或换了调用：环境在变化，重置
+                    self._loop_last_sig = call_signature
+                    self._loop_last_result_hash = _res_hash
 
                     # Vision data: extract base64 image payloads from the full
                     # (untruncated) result FIRST, then swap the marker for a
