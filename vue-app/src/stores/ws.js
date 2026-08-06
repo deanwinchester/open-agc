@@ -12,10 +12,18 @@
 //   training_progress / training_complete / training_error / training_step_paused / eval_progress
 
 import { defineStore } from 'pinia';
+// 显式 .js 后缀：smoke.mjs 用 Node 原生 ESM 直接加载本文件，Node 不做扩展名补全
+import { notifyUnauthorized } from '../api/client.js';
 
 // 退避间隔（毫秒）：第 attempt 次重连前的等待，1s * 2^attempt，上限 30s。纯函数，可测。
 export function reconnectDelay(attempt) {
   return Math.min(1000 * Math.pow(2, attempt), 30000);
+}
+
+// 访问控制中间件（core/access_control.py）拒绝 WS 握手时的关闭码：
+// 4401=未认证（局域网无凭据），4403=拒绝（公网/未配置密码）。纯函数，可测。
+export function isAuthCloseCode(code) {
+  return code === 4401 || code === 4403;
 }
 
 // 纯 pub/sub 注册表：按事件 type 订阅/退订/分发。与浏览器无关，可测。
@@ -107,7 +115,7 @@ export const useWsStore = defineStore('ws', {
         this._dispatcher.dispatch(data);
       };
 
-      ws.onclose = () => {
+      ws.onclose = (evt) => {
         if (this._intentionalClose) {
           this._intentionalClose = false;
           return; // 主动关闭（切换会话等）不重连
@@ -115,6 +123,12 @@ export const useWsStore = defineStore('ws', {
         if (this._ws !== ws) return; // 旧连接的迟到 onclose，不影响新连接
         this.connected = false;
         this._ws = null;
+        // 访问控制拒绝（局域网未认证/被禁）：不重连，拉起密码遮罩；
+        // 登录成功后 App.vue 会整体刷新页面，连接随之重建。
+        if (isAuthCloseCode(evt && evt.code)) {
+          notifyUnauthorized({ status: 401, url: '/ws' });
+          return;
+        }
         const delay = reconnectDelay(this.reconnectAttempt);
         this.reconnectAttempt += 1;
         clearTimeout(this._reconnectTimer);

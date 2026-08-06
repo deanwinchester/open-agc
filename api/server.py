@@ -61,6 +61,7 @@ from api.routes.routes_tasks import router as tasks_router
 from api.routes.routes_settings import router as settings_router
 from api.routes.routes_secrets import router as secrets_router
 from api.routes.routes_sandbox import router as sandbox_router
+from api.routes.routes_auth import router as auth_router
 
 # Load environment variables
 env_file = get_data_path(".env")
@@ -101,6 +102,13 @@ for var in ["no_proxy", "NO_PROXY"]:
         os.environ[var] = f"{current.rstrip(',')},{local_hosts}"
 
 app = FastAPI(title="Open-AGC UI Server")
+
+# ── 访问控制中间件：本机免密 / 局域网凭密码 / 公网 403（含 IPv6）──
+# 纯 ASGI 实现，覆盖全部 HTTP 路由、静态挂载与 /ws WebSocket；只认 TCP
+# 对端 IP（request.client.host），不信任 X-Forwarded-For。密码改动即时生效。
+from core.access_control import AccessControlMiddleware
+app.add_middleware(AccessControlMiddleware)
+
 app.include_router(benchmark_router)
 app.include_router(downloads_router)
 app.include_router(uploads_router)
@@ -116,6 +124,7 @@ app.include_router(tasks_router)
 app.include_router(settings_router)
 app.include_router(secrets_router)
 app.include_router(sandbox_router)
+app.include_router(auth_router)
 
 # Initialize benchmark and download route modules with dependencies
 init_benchmark_routes(
