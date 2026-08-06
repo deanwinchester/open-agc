@@ -53,7 +53,9 @@ def start_server(port):
         from api.server import app
         # 默认仅监听回环地址；局域网访问需显式设置 OPEN_AGC_HOST=0.0.0.0
         host = os.environ.get("OPEN_AGC_HOST", "127.0.0.1")
-        uvicorn.run(app, host=host, port=port, log_level="warning")
+        # proxy_headers=False：同 launcher.py——禁用 uvicorn 默认的 XFF 信任，
+        # 防止伪造 X-Forwarded-For: 127.0.0.1 绕过访问控制。
+        uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=False)
     except Exception as e:
         with open("server_crash.log", "a") as f:
             f.write(f"Server crash: {e}\n")

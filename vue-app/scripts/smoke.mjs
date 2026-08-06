@@ -4,8 +4,8 @@
 // 运行：node vue-app/scripts/smoke.mjs
 
 import assert from 'node:assert/strict';
-import { createApiClient, lookupTtl, ApiError } from '../src/api/client.js';
-import { reconnectDelay, createDispatcher } from '../src/stores/ws.js';
+import { createApiClient, lookupTtl, ApiError, setUnauthorizedHandler, notifyUnauthorized } from '../src/api/client.js';
+import { reconnectDelay, createDispatcher, isAuthCloseCode } from '../src/stores/ws.js';
 
 let passed = 0;
 function ok(name) {
@@ -177,6 +177,36 @@ ok('lookupTtl 前缀匹配');
   ok('invalidate 缓存失效');
 }
 
+// 401 全局钩子：request 遇 401 触发 notifyUnauthorized；注册/清理/非法值安全
+{
+  let hits = 0;
+  setUnauthorizedHandler(() => { hits += 1; });
+
+  const fetchImpl = countingFetch(async () =>
+    jsonResponse({ detail: '需要访问密码' }, { ok: false, status: 401 })
+  );
+  const client = createApiClient({ fetchImpl });
+  await assert.rejects(client.request('/api/tasks'), (err) => {
+    assert.ok(err instanceof ApiError);
+    assert.equal(err.status, 401);
+    return true;
+  });
+  assert.equal(hits, 1, '401 应触发已注册的全局钩子');
+
+  notifyUnauthorized({ status: 401, url: '/ws' });
+  assert.equal(hits, 2, 'WS 关闭码路径也可主动触发');
+
+  setUnauthorizedHandler(null);
+  notifyUnauthorized({ status: 401 });
+  assert.equal(hits, 2, '清除后不再触发');
+
+  setUnauthorizedHandler('not-a-function');
+  notifyUnauthorized({ status: 401 });
+  assert.equal(hits, 2, '非函数处理器安全忽略');
+  setUnauthorizedHandler(null);
+  ok('401 全局钩子（setUnauthorizedHandler/notifyUnauthorized）');
+}
+
 // ---- stores/ws.js（纯逻辑部分） ----
 console.log('stores/ws.js');
 
@@ -189,6 +219,14 @@ assert.equal(reconnectDelay(4), 16000);
 assert.equal(reconnectDelay(5), 30000, '第 5 次起封顶 30s');
 assert.equal(reconnectDelay(10), 30000, '高次重连仍封顶');
 ok('reconnectDelay 指数退避 1s→30s 封顶');
+
+// 访问控制关闭码：4401/4403 停止重连并走密码遮罩，其余码正常退避重连
+assert.ok(isAuthCloseCode(4401), '4401 = 未认证');
+assert.ok(isAuthCloseCode(4403), '4403 = 拒绝');
+assert.ok(!isAuthCloseCode(1000), '正常关闭应继续重连');
+assert.ok(!isAuthCloseCode(1006), '异常断开应继续重连');
+assert.ok(!isAuthCloseCode(undefined), '缺码安全默认为非认证关闭');
+ok('isAuthCloseCode 关闭码判定');
 
 // 事件按 type 分发 / 退订
 {

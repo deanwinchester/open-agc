@@ -23,6 +23,20 @@ export class ApiError extends Error {
   }
 }
 
+// 401 全局钩子：App.vue 注册后，任何请求 401（局域网未认证）都会触发密码遮罩。
+// 模块级单例、仅作通知；注入式客户端（smoke 测试）不注册即为 no-op，不影响纯函数测试。
+let unauthorizedHandler = null;
+export function setUnauthorizedHandler(fn) {
+  unauthorizedHandler = typeof fn === 'function' ? fn : null;
+}
+
+// 主动触发未认证通知：HTTP 401 之外，WebSocket 被访问控制关闭（4401/4403）也走这里。
+export function notifyUnauthorized(info) {
+  if (unauthorizedHandler) {
+    try { unauthorizedHandler(info); } catch { /* 钩子异常不影响调用方 */ }
+  }
+}
+
 // 按 URL 前缀查 TTL，取最长匹配前缀；无匹配返回 0（不缓存）。
 export function lookupTtl(url, ttlTable = TTL_TABLE) {
   const path = String(url).split('?')[0];
@@ -59,7 +73,10 @@ export function createApiClient({ fetchImpl, ttlTable = TTL_TABLE, now = () => D
       const detail = data && typeof data === 'object' && (data.detail || data.error || data.message);
       // FastAPI 422 的 detail 是对象数组，直接作 message 会变 [object Object]
       const msg = typeof detail === 'string' ? detail : detail ? JSON.stringify(detail) : null;
-      throw new ApiError(msg || `HTTP ${res.status}`, { status: res.status, url, data });
+      const err = new ApiError(msg || `HTTP ${res.status}`, { status: res.status, url, data });
+      // 401（局域网未认证）通知全局钩子弹密码页；原 ApiError 照常抛出
+      if (err.status === 401) notifyUnauthorized(err);
+      throw err;
     }
     return data;
   }
