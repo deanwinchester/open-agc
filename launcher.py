@@ -80,7 +80,12 @@ def main():
         "api.server:app",
         host=host,
         port=port,
-        log_level="info"
+        log_level="info",
+        # 访问控制按 scope["client"] 分类，必须关掉 uvicorn 默认的
+        # proxy_headers（默认信任 127.0.0.1 的 XFF 并改写 client，
+        # 同机透传式反代下可伪造 127.0.0.1 免密绕过）。本应用面向直连，
+        # 无受信代理场景。
+        proxy_headers=False,
     )
 
 if __name__ == "__main__":

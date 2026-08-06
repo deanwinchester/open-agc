@@ -409,6 +409,8 @@ class ConfigUpdate(BaseModel):
     max_total_tokens: Optional[int] = None
     tool_tiered_exposure: Optional[bool] = None
     sandbox_janitor: Optional[Dict[str, Any]] = None
+    # 访问控制：局域网访问密码。空字符串 = 清除密码 = 恢复仅本机访问
+    access_password: Optional[str] = None
 
 
 
@@ -535,6 +537,9 @@ async def get_settings(session_id: int = None):
         "mcp_servers": config.get("mcp_servers", {}),
 
         "sandbox_janitor": _load_janitor_section(),
+
+        # 访问控制：只暴露「是否已设置」，绝不回传密码本身
+        "access_password_set": bool((config.get("access_password") or "").strip()),
 
     }
 
@@ -752,6 +757,20 @@ async def update_settings(config_update: ConfigUpdate):
             _budget["max_total_tokens"] = config_update.max_total_tokens
 
             config["context_budget"] = _budget
+
+        # 访问控制密码：非空写入；空字符串 = 清除（恢复仅本机访问）。
+        # 密码变更后已签发的签名令牌自然失效（HMAC 密钥含密码）。
+        if config_update.access_password is not None:
+
+            _pw = config_update.access_password.strip()
+
+            if _pw:
+
+                config["access_password"] = _pw
+
+            else:
+
+                config.pop("access_password", None)
 
 
 

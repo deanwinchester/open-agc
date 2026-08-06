@@ -87,7 +87,9 @@ if command -v Xvfb >/dev/null 2>&1; then
 fi
 
 # Start uvicorn in background and wait for it
-python -m uvicorn api.server:app --host 0.0.0.0 --port "$PORT" --log-level info &
+# --no-proxy-headers：与 launcher.py/gui_app.py 一致，禁止 XFF 改写
+# 客户端 IP（访问控制层依赖真实对端地址；Docker 内全部是网关地址，无受信代理）
+python -m uvicorn api.server:app --host 0.0.0.0 --port "$PORT" --log-level info --no-proxy-headers &
 UVICORN_PID=$!
 echo "[Entrypoint] uvicorn PID: $UVICORN_PID"
 

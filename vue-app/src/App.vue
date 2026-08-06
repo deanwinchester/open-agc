@@ -3,11 +3,62 @@ import { onMounted, onUnmounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import zh from './i18n/zh';
 import { pluginNav } from './plugins/registry';
-import { request } from './api/client';
+import { request, setUnauthorizedHandler } from './api/client';
 
 // Logo is served by the backend's existing /static mount (static/icon_rounded.png);
 // bound dynamically so Vite doesn't try to resolve it as a build-time asset.
 const logoUrl = '/static/icon_rounded.png';
+
+// ── 访问控制：局域网未认证时的全屏密码遮罩 ──
+// 本机访问中间件直接放行，/api/auth/check 返回 authenticated=true，遮罩不出现；
+// 任何请求 401（Cookie 过期等）也会通过全局钩子重新拉起遮罩。
+const authRequired = ref(false);
+const authLocked = ref(false);        // 未配置密码/被 403 拒绝：只展示说明，不提供输入框
+const authLockedMessage = ref('');
+const authPassword = ref('');
+const authError = ref('');
+const authSubmitting = ref(false);
+
+// 立即注册（而非 onMounted），保证最早一批请求的 401 也能被拦截
+setUnauthorizedHandler(() => {
+  authRequired.value = true;
+});
+
+onMounted(async () => {
+  try {
+    const res = await request('/api/auth/check');
+    authRequired.value = !(res && res.authenticated);
+  } catch (err) {
+    if (err && err.status === 401) {
+      authRequired.value = true;
+    } else if (err && err.status === 403) {
+      // 非本机且未配置密码（或公网）：锁定，无解，只展示后端说明
+      authRequired.value = true;
+      authLocked.value = true;
+      authLockedMessage.value = err.message || '';
+    }
+    // 其他错误（网络失败等）不拦截，避免本机故障时锁死界面
+  }
+});
+
+async function submitAuth() {
+  if (!authPassword.value || authSubmitting.value) return;
+  authSubmitting.value = true;
+  authError.value = '';
+  try {
+    await request('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: authPassword.value }),
+    });
+    // Cookie 已种下；整体刷新让所有缓存请求与 WebSocket 以新凭据重建
+    window.location.reload();
+  } catch (err) {
+    authError.value = err.message || zh.auth.failed;
+  } finally {
+    authSubmitting.value = false;
+  }
+}
 
 // 移动端抽屉：≤768px 侧栏默认隐藏，汉堡按钮滑出；遮罩/菜单项点击关闭。
 // 视口变回桌面时强制收起，避免抽屉状态残留。
@@ -164,6 +215,31 @@ async function doUpgrade() {
         </Transition>
       </router-view>
     </main>
+    <!-- 全局访问密码遮罩：局域网未认证时拦截整个界面 -->
+    <div v-if="authRequired" class="auth-overlay">
+      <div class="auth-card">
+        <img class="auth-logo" :src="logoUrl" alt="Open-AGC" />
+        <h1 class="auth-title">{{ zh.auth.title }}</h1>
+        <p class="auth-desc">{{ authLocked ? authLockedMessage : zh.auth.desc }}</p>
+        <template v-if="!authLocked">
+          <input
+            v-model="authPassword"
+            class="auth-input"
+            type="password"
+            :placeholder="zh.auth.passwordPlaceholder"
+            autofocus
+            @keyup.enter="submitAuth"
+          />
+          <p v-if="authError" class="auth-error">{{ authError }}</p>
+          <button
+            class="auth-submit"
+            type="button"
+            :disabled="authSubmitting || !authPassword"
+            @click="submitAuth"
+          >{{ authSubmitting ? zh.auth.loggingIn : zh.auth.submit }}</button>
+        </template>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -330,6 +406,85 @@ async function doUpgrade() {
   flex: 1;
   overflow: auto;
   background: var(--el-bg-color-page);
+}
+
+/* 访问密码遮罩：全屏拦截层，压过侧栏抽屉（z-index 1002）与汉堡按钮 */
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--el-bg-color-page);
+}
+
+.auth-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: min(360px, 88vw);
+  padding: 36px 32px;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 14px;
+  background: var(--el-bg-color);
+  box-shadow: var(--panda-shadow-card);
+}
+
+.auth-logo {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+}
+
+.auth-title {
+  margin: 14px 0 6px;
+  font-size: 17px;
+}
+
+.auth-desc {
+  margin: 0 0 18px;
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
+  color: var(--el-text-color-secondary);
+}
+
+.auth-input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 8px;
+  font-size: 14px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.auth-input:focus {
+  border-color: var(--el-color-primary);
+}
+
+.auth-error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--el-color-danger);
+}
+
+.auth-submit {
+  width: 100%;
+  margin-top: 14px;
+  padding: 9px 0;
+  border: none;
+  border-radius: 8px;
+  background: var(--el-color-primary);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.auth-submit:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 /* 汉堡按钮 / 遮罩：仅窄屏出现（默认隐藏，避免桌面端残留状态影响） */

@@ -45,6 +45,9 @@ const form = reactive({
   janitorIntervalHours: 1,
   janitorSoftGb: 20,
   janitorHardGb: 50,
+  // 访问控制：局域网访问密码（空 = 不修改；勾选清除 = 恢复仅本机）
+  accessPassword: '',
+  accessPasswordClear: false,
   // 邮件监听与助手（重构时丢失的区块，恢复）
   emailListenerEnabled: false,
   ownerEmail: '',
@@ -115,6 +118,7 @@ function applySettings(data) {
       soft_gb: data.sandbox_janitor?.soft_gb ?? 20,
       hard_gb: data.sandbox_janitor?.hard_gb ?? 50,
     },
+    access_password_set: data.access_password_set ?? false,
     email_listener_enabled: data.email_listener_enabled ?? false,
     owner_email: data.owner_email || '',
     email_account: data.email_account || '',
@@ -142,6 +146,8 @@ function applySettings(data) {
   form.janitorIntervalHours = init.sandbox_janitor.interval_hours;
   form.janitorSoftGb = init.sandbox_janitor.soft_gb;
   form.janitorHardGb = init.sandbox_janitor.hard_gb;
+  form.accessPassword = '';          // 已设置显示占位，不回填真实值
+  form.accessPasswordClear = false;
   form.emailListenerEnabled = init.email_listener_enabled;
   form.ownerEmail = init.owner_email;
   form.emailAccount = init.email_account;
@@ -256,6 +262,11 @@ function buildPayload() {
     if (v != null && v !== jInit[k]) jDiff[k] = v;
   }
   if (Object.keys(jDiff).length > 0) payload.sandbox_janitor = jDiff;
+
+  // 访问控制密码：输入新值 = 设置/覆盖；未输入且勾选清除 = 恢复仅本机
+  const ap = form.accessPassword.trim();
+  if (ap) payload.access_password = ap;
+  else if (form.accessPasswordClear && init.access_password_set) payload.access_password = '';
 
   // 邮件监听与助手：密码仅用户新输入时才发送（*** 掩码不回传）
   if (form.emailListenerEnabled !== init.email_listener_enabled) payload.email_listener_enabled = form.emailListenerEnabled;
@@ -471,6 +482,33 @@ onMounted(loadSettings);
             <div class="field-hint">{{ t.sandbox.janitorHardHint }}</div>
           </el-form-item>
         </template>
+      </el-form>
+    </el-card>
+
+    <!-- 访问控制 -->
+    <el-card class="settings-card" shadow="never">
+      <template #header>
+        <div class="card-header">
+          <span class="card-title">{{ t.access.title }}</span>
+          <p class="card-desc">{{ t.access.desc }}</p>
+        </div>
+      </template>
+      <el-form label-position="top">
+        <el-form-item :label="t.access.password">
+          <el-input
+            v-model="form.accessPassword"
+            type="password"
+            show-password
+            :placeholder="initial?.access_password_set ? t.access.passwordSetPlaceholder : t.access.passwordPlaceholder"
+          />
+          <div class="field-hint">{{ t.access.passwordHint }}</div>
+        </el-form-item>
+        <el-form-item v-if="initial?.access_password_set">
+          <el-checkbox v-model="form.accessPasswordClear" :disabled="!!form.accessPassword.trim()">
+            {{ t.access.clear }}
+          </el-checkbox>
+        </el-form-item>
+        <div class="field-hint">{{ t.access.policyHint }}</div>
       </el-form>
     </el-card>
 

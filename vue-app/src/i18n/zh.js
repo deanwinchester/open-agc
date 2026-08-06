@@ -24,6 +24,16 @@ export default {
     reconnecting: '重连中',
   },
 
+  // 全局访问密码遮罩（局域网未认证时的全屏拦截层）
+  auth: {
+    title: '需要访问密码',
+    desc: '当前设备来自局域网，请输入管理员设置的访问密码。本实例不面向公网开放。',
+    passwordPlaceholder: '请输入访问密码',
+    submit: '进入',
+    loggingIn: '验证中…',
+    failed: '验证失败',
+  },
+
   // 占位视图
   placeholder: {
     migrating: '该视图正在迁移到 Vue3，敬请期待。',
@@ -148,6 +158,16 @@ export default {
         janitorSoftHint: '沙箱总占用超过该值时，沙箱页面显示黄色提示。',
         janitorHard: '硬水位阈值（GB）',
         janitorHardHint: '沙箱总占用超过该值时，无视保留期清空 tmp/（📌 保留标记除外）。0 = 禁用硬水位。',
+      },
+      access: {
+        title: '🔒 访问控制',
+        desc: '按客户端 IP 控制哪些设备可以访问本实例的 Web 界面与 API。',
+        password: '局域网访问密码',
+        passwordPlaceholder: '设置密码以允许局域网设备访问',
+        passwordSetPlaceholder: '已设置（输入新值覆盖，留空不修改）',
+        passwordHint: '留空（未设置）= 仅允许本机访问，最安全的默认。设置后局域网设备打开界面需输入该密码，修改密码会使已登录设备失效。',
+        clear: '清除密码（恢复仅本机访问）',
+        policyHint: '策略：本机（127.0.0.1 / ::1）免密码直接访问；局域网（10/8、172.16/12、192.168/16、fc00::/7、fe80::/10）凭密码访问；公网（含公网 IPv6）一律禁止。',
       },
       email: {
         title: '📧 邮件监听与助手',
