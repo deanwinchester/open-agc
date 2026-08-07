@@ -14,6 +14,7 @@ Usage:
 import os
 import sys
 import json
+import threading
 import importlib
 import traceback
 from typing import Optional, Callable, Dict, List, Any
@@ -31,6 +32,37 @@ class PluginContext:
         self.broadcast_fn = broadcast_fn
         self.server_config = server_config or {}
         self.logger = logger or print
+        self._store = None
+
+    # ── 标准化能力（实测插件开发暴露的缺口：每个插件都在重造轮子）──
+
+    def llm_client(self):
+        """系统默认大模型客户端（跟随「设置」页配置，禁止自行硬编码 key/模型）。"""
+        from core.llm_client import LLMClient
+        return LLMClient()
+
+    def llm_text(self, messages, default: str = "") -> str:
+        """最常用形态：messages → 回复文本。失败返回 default 不抛异常。"""
+        try:
+            resp, _model = self.llm_client().chat(messages=messages)
+            choices = getattr(resp, "choices", None) or []
+            if choices:
+                return choices[0].message.content or default
+            return default
+        except Exception as e:
+            self.logger(f"[Plugin:{self.name}] llm_text error: {e}")
+            return default
+
+    @property
+    def store(self):
+        """插件私有 JSON KV 存储（落在 db_dir/_store.json，带锁、原子写）。
+
+        用法：context.store.get(key, default) / .set(key, value) /
+        .delete(key) / .keys() / .all()。适合项目列表、设置、小数据。"""
+        if self._store is None:
+            os.makedirs(self.db_dir, exist_ok=True)
+            self._store = _PluginStore(os.path.join(self.db_dir, "_store.json"))
+        return self._store
 
 
 class PluginInstance:
@@ -63,8 +95,54 @@ class PluginInfo:
         self.plugin_dir = plugin_dir
 
 
-_loaded_plugins: Dict[str, PluginInfo] = {}
+class _PluginStore:
+    """插件私有 JSON KV 存储（PluginContext.store 的实现）：带锁、原子写。"""
 
+    def __init__(self, path: str):
+        self._path = path
+        self._lock = threading.Lock()
+
+    def _read(self) -> dict:
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _write(self, data: dict):
+        tmp = self._path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self._path)
+
+    def get(self, key, default=None):
+        with self._lock:
+            return self._read().get(key, default)
+
+    def set(self, key, value):
+        with self._lock:
+            data = self._read()
+            data[key] = value
+            self._write(data)
+
+    def delete(self, key):
+        with self._lock:
+            data = self._read()
+            if key in data:
+                del data[key]
+                self._write(data)
+
+    def keys(self):
+        with self._lock:
+            return list(self._read().keys())
+
+    def all(self) -> dict:
+        with self._lock:
+            return self._read()
+
+
+_loaded_plugins: Dict[str, PluginInfo] = {}
 # 目录内容签名（max mtime）：扫描时只重载代码变过的插件——此前每次 scan 都
 # 全量卸载重导（含 open-agc-train 的重依赖导入），事件循环阻塞数秒导致 WS
 # 断连、进度停更、页面重载时插件菜单拉取失败变空（生产实证）。

@@ -22,15 +22,20 @@
 6. 人工验证：检查 `/api/plugins` 列表含新插件、左侧菜单出现入口、视图路由 `/plugins/<名>/<path>` 可访问、插件 API 返回正常。
 7. 出错时可用 `develop_plugin(action="install", plugin_name=..., init_code=...)` 校验代码；删除插件用 `DELETE /api/plugins/<名>`（同样随即调 scan 清理残留路由）。
 
-## LLM 调用示例（插件后端内）
+## LLM 调用与存储（插件后端，PluginContext 标准化能力）
 
 ```python
-from core.llm_client import LLMClient
+# 大模型：跟随系统设置，禁止硬编码 key/模型
+text = context.llm_text([{"role": "user", "content": "..."}])   # 纯文本（失败返回 ""）
+resp, model = context.llm_client().chat(messages=[...])          # 需要完整响应时
 
-llm = LLMClient()  # 跟随系统设置的默认模型与密钥
-resp, model_used = llm.chat(messages=[{"role": "user", "content": "你好"}])
-text = resp.choices[0].message.content
+# 插件私有 KV 存储（自动落盘 db_dir/_store.json，带锁原子写）：
+context.store.set("projects", [...])
+projects = context.store.get("projects", [])
+context.store.delete("projects") / context.store.keys() / context.store.all()
 ```
+
+不要再手写 `from core.llm_client import LLMClient` 散落各处，也不要自己造 JSON 文件存储——用上面的标准能力。
 
 ## 涉及工具
 
