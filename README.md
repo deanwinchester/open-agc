@@ -91,6 +91,29 @@ docker build -t open-agc .
 docker run -d -p 8000:8000 -v ./data:/app/data -v ./workspace:/app/workspace open-agc
 ```
 
+### 🔒 访问控制（本机免密 / 局域网密码 / 公网禁止）
+
+内置 IP 分层访问控制：**本机访问免密直连**；**局域网设备需输入访问密码**；**公网（含公网 IPv6）一律拒绝**。
+
+配置访问密码（二选一）：
+
+```bash
+# 方式一：环境变量播种（Docker 推荐）——config.json 未配置时把环境
+# 变量写入 config.json（一次性），之后以 config.json 为准；已配置则忽略
+docker run -d -p 8000:8000 \
+  -e OPEN_AGC_ACCESS_PASSWORD=你的访问密码 \
+  -v ./data:/app/data -v ./workspace:/app/workspace open-agc
+
+# 方式二：docker-compose.yml 的 environment 节（compose 已带注释示例）
+#   - OPEN_AGC_ACCESS_PASSWORD=你的访问密码
+
+# 方式三：启动后在「设置 → 访问控制」页面配置/修改（保存到 data/config.json）
+```
+
+不设置密码时仅允许本机访问（最安全默认）。判断口径始终以 config.json 为唯一事实源。
+
+**Docker 网络注意**：bridge 端口映射经 NAT，容器看到的源地址都是 docker 网关——宿主机访问同样需密码，且公网/局域网无法在应用层区分。**公网禁止须靠端口映射面保证**：compose 默认绑 `127.0.0.1:8000:8000`（仅宿主机）；局域网开放请绑定到具体 LAN 网卡（如 `192.168.x.x:8000:8000`），不要裸写 `8000:8000`（会暴露公网）。Linux 上也可用 `network_mode: host` 获得与裸机完全一致的语义。
+
 ---
 
 ## 🔌 插件系统 (Plugin System)

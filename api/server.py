@@ -571,6 +571,14 @@ try:
 except Exception as _sj_e:
     print(f"[Server] Sandbox janitor start error: {_sj_e}")
 
+# 访问密码环境变量播种（一次性）：config.json 未配置且
+# OPEN_AGC_ACCESS_PASSWORD 有值时写入 config.json，之后判定只看 config
+try:
+    from core.access_control import seed_access_password_from_env as _seed_pw
+    _seed_pw()
+except Exception as _seed_e:
+    print(f"[Server] Access password seed error: {_seed_e}")
+
 # Restore persisted background process registry BEFORE reconcile: tasks whose
 # pre-restart processes are still alive stay backgrounded and BgMonitor takes
 # over (reconcile skips them), instead of being flipped to interrupted.
