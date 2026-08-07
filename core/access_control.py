@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import os
 import time
 from typing import Callable, Optional
 
@@ -122,10 +123,39 @@ def _default_config_loader() -> dict:
 
 
 def get_access_password(config: Optional[dict] = None) -> str:
-    """从配置取访问密码；未配置/空串返回 ""（= 仅本机）。"""
+    """从配置取访问密码；未配置/空串返回 ""（= 仅本机）。
+
+    唯一事实源是 config.json：环境变量 OPEN_AGC_ACCESS_PASSWORD 仅作
+    首次播种（见 seed_access_password_from_env），不参与每次判定——
+    保证判断口径一致（用户拍板）。"""
     if config is None:
         config = _default_config_loader()
     return str((config or {}).get("access_password") or "").strip()
+
+
+def seed_access_password_from_env(config_path: str = None,
+                                  save_fn=None, load_fn=None) -> bool:
+    """config.json 未配置 access_password 且环境变量
+    OPEN_AGC_ACCESS_PASSWORD 有值时，把环境变量写入 config.json（一次性
+    播种，Docker  provisioning 用）。config.json 已有值则不动（config 优先）。
+    返回是否播种。注入 save/load/path 便于测试。"""
+    value = os.environ.get("OPEN_AGC_ACCESS_PASSWORD", "").strip()
+    if not value:
+        return False
+    try:
+        if load_fn is None:
+            from api.config import load_config, save_config
+            load_fn, save_fn = load_config, save_config
+        cfg = load_fn() or {}
+        if str(cfg.get("access_password") or "").strip():
+            return False  # 已配置，config.json 优先
+        cfg["access_password"] = value
+        save_fn(cfg)
+        print("[AccessControl] Seeded access password from OPEN_AGC_ACCESS_PASSWORD")
+        return True
+    except Exception as e:
+        print(f"[AccessControl] Seed from env failed: {e}")
+        return False
 
 
 def _header_value(scope: dict, name: bytes) -> Optional[str]:

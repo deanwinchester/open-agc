@@ -54,6 +54,24 @@ build_win.bat
 - **macOS**: `~/Library/Application Support/Open-AGC`
 - **Windows**: `%APPDATA%\Open-AGC`
 
+## 5. 访问控制 (Access Control)
+
+内置 IP 分层访问控制：**本机免密直连**；**局域网设备需输入访问密码**；**公网（含公网 IPv6）一律拒绝**。
+
+配置访问密码（环境变量为一次性播种，config.json 为唯一事实源）：
+
+```bash
+# Docker / 环境变量方式：config.json 未配置时把该值播种进
+# data/config.json，之后判定只以 config.json 为准；已配置则忽略
+docker run -d -e OPEN_AGC_ACCESS_PASSWORD=你的访问密码 ...
+# 或 docker-compose.yml 的 environment 节：
+#   - OPEN_AGC_ACCESS_PASSWORD=你的访问密码
+```
+
+也可以在启动后通过「设置 → 访问控制」页面配置/修改（保存到 `data/config.json`）。**不设置密码时仅允许本机访问**。
+
+> Docker bridge 部署注意：端口映射经 NAT 后源地址均为 docker 网关，宿主机访问同样需密码，公网/局域网无法在应用层区分。公网禁止请靠映射面保证——compose 默认 `127.0.0.1:8000:8000`；局域网开放绑到具体 LAN 网卡（如 `192.168.x.x:8000:8000`），不要裸写 `8000:8000`。Linux 可用 `network_mode: host` 获得裸机语义。
+
 ---
 
 # 🐼 Open-AGC Usage Guide (English)

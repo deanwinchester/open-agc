@@ -26,5 +26,9 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - AUTO_UPGRADE=true
+      # 局域网访问密码（访问控制层）：config.json 未配置时把该环境变量
+      # 播种进 config.json（一次性），之后判定只以 config.json 为准；
+      # 已配置则忽略本变量。也可在设置页「访问控制」配置/修改。
+      # - OPEN_AGC_ACCESS_PASSWORD=你的访问密码
       # - OPENAI_API_KEY=your_key_here
       # - DEFAULT_MODEL=moonshot/kimi-latest
