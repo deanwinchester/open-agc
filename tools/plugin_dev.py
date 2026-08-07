@@ -192,11 +192,12 @@ def init_plugin(context: PluginContext) -> PluginInstance:
     plugin_dir = context.plugin_dir
 
     # 调用系统默认大模型（跟随「设置」页的默认模型与密钥，禁止自行硬编码
-    # API Key / base_url / 模型名）：
-    # from core.llm_client import LLMClient
-    # llm = LLMClient()
-    # resp, model_used = llm.chat(messages=[{"role": "user", "content": "你好"}])
-    # text = resp.choices[0].message.content
+    # API Key / base_url / 模型名）——用 PluginContext 标准化能力：
+    # text = context.llm_text([{"role": "user", "content": "你好"}])  # 纯文本
+    # resp, model = context.llm_client().chat(messages=[...])           # 完整响应
+    #
+    # 插件私有 KV 存储（自动落盘 db_dir/_store.json，带锁原子写）：
+    # context.store.set("projects", [...]) / context.store.get("projects", [])
 
     @router.get("/hello")
     async def hello():
@@ -375,7 +376,8 @@ export default function setup(ctx) {
         try:
             proc = subprocess.run(
                 [esbuild, entry_path, "--log-level=error"],
-                capture_output=True, text=True, timeout=30)
+                capture_output=True, timeout=30,
+                encoding="utf-8", errors="replace")  # 默认 GBK 会在 UTF-8 输出上炸（实测）
         except Exception as e:
             return None, f"语法检查执行失败: {e}"
         if proc.returncode == 0:
