@@ -49,5 +49,5 @@ class TestArchitectureRedLine:
     def test_scaffold_template_has_llm_example(self):
         src = open(os.path.join(PROJECT_ROOT, "tools", "plugin_dev.py"),
                    encoding="utf-8").read()
-        assert "from core.llm_client import LLMClient" in src
+        assert "context.llm_text(" in src  # PluginContext 标准化能力（新版契约）
         assert "禁止自行硬编码" in src
