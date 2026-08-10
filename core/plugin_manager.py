@@ -64,6 +64,30 @@ class PluginContext:
             self._store = _PluginStore(os.path.join(self.db_dir, "_store.json"))
         return self._store
 
+    def skill_text(self, name: str) -> str:
+        """按名取已安装技能的内容（SKILL.md 文本，截断 4000 字符），不存在返回 ""。
+
+        插件把它拼进自己的 LLM prompt，例如写作助手插件生成正文时调用
+        context.skill_text("human-writing")。"""
+        try:
+            from core.skill_store import SkillStore
+            content = SkillStore().get_skill_content(name) or ""
+            return content[:4000]
+        except Exception as e:
+            self.logger(f"[Plugin:{self.name}] skill_text({name}) error: {e}")
+            return ""
+
+    def skill_dir(self, name: str) -> str:
+        """返回目录式技能的目录绝对路径（references/scripts 供插件读取），不存在返回 ""。"""
+        try:
+            from core.paths import get_skills_dir
+            from core.security import resolve_under
+            path = resolve_under(get_skills_dir(), name)
+            return path if os.path.isdir(path) else ""
+        except Exception as e:
+            self.logger(f"[Plugin:{self.name}] skill_dir({name}) error: {e}")
+            return ""
+
 
 class PluginInstance:
     """Returned by init_plugin()."""

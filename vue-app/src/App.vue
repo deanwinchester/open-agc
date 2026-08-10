@@ -1,13 +1,15 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue';
+import { onMounted, onUnmounted, ref, computed } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import zh from './i18n/zh';
 import { pluginNav } from './plugins/registry';
 import { request, setUnauthorizedHandler } from './api/client';
+import { useWsStore } from './stores/ws';
 
-// Logo is served by the backend's existing /static mount (static/icon_rounded.png);
-// bound dynamically so Vite doesn't try to resolve it as a build-time asset.
-const logoUrl = '/static/icon_rounded.png';
+// Logo/主题走共享 stores/theme.js（customize_theme 工具改动后经
+// theme_updated 广播实时应用）；动态绑定避免 Vite 当作构建期资源解析。
+import { themeState, loadTheme } from './stores/theme';
+const logoUrl = computed(() => themeState.logoUrl);
 
 // ── 访问控制：局域网未认证时的全屏密码遮罩 ──
 // 本机访问中间件直接放行，/api/auth/check 返回 authenticated=true，遮罩不出现；
@@ -25,6 +27,13 @@ setUnauthorizedHandler(() => {
 });
 
 onMounted(async () => {
+  loadTheme();
+  // customize_theme 工具改动后实时应用（广播 theme_updated）
+  try {
+    const ws = useWsStore();
+    if (!ws.connected) ws.connect();
+    ws.on('theme_updated', () => loadTheme());
+  } catch { /* WS 未就绪则等下次刷新应用 */ }
   try {
     const res = await request('/api/auth/check');
     authRequired.value = !(res && res.authenticated);
@@ -157,7 +166,7 @@ async function doUpgrade() {
     <aside class="sidebar" :class="{ open: sidebarOpen }">
       <div class="logo">
         <img class="logo-img" :src="logoUrl" alt="Open-AGC" />
-        <span class="logo-text">Open-AGC</span>
+        <span class="logo-text">{{ themeState.appName || 'Open-AGC' }}</span>
       </div>
       <nav class="menu">
         <router-link
@@ -284,7 +293,8 @@ async function doUpgrade() {
   font-size: 16px;
   font-weight: 700;
   letter-spacing: 0.02em;
-  color: var(--panda-on-accent);
+  /* 跟随侧边栏文字色（主题派生），此前固定 --panda-on-accent 换主题不变色 */
+  color: var(--panda-sidebar-text, #f9fafb);
 }
 
 .menu {
@@ -547,5 +557,109 @@ async function doUpgrade() {
   .content {
     padding-top: 52px;
   }
+}
+</style>
+
+<!-- 主题扩展效果（customize_theme 开放给 agent 的装饰能力，全局类由
+     stores/theme.js applyTheme 切换）：毛玻璃/描边/动画/装饰图案 -->
+<style>
+/* ── 毛玻璃：不覆盖配色，只加模糊与轻透（颜色由变量/半透明派生） ── */
+.theme-glass .sidebar {
+  backdrop-filter: blur(18px) saturate(1.5);
+  -webkit-backdrop-filter: blur(18px) saturate(1.5);
+}
+
+.theme-glass .el-card,
+.theme-glass .msg-bubble.agent,
+.theme-glass .msg-system-inner,
+.theme-glass .pc-card {
+  /* color-mix 跟随当前模式的 overlay 色：浅色模式为白、暗色模式为深灰 */
+  background-color: color-mix(in srgb, var(--el-bg-color-overlay) 68%, transparent);
+  backdrop-filter: blur(12px) saturate(1.3);
+  -webkit-backdrop-filter: blur(12px) saturate(1.3);
+}
+
+/* ── 描边：气泡与卡片显性边框 ── */
+.theme-bordered .msg-bubble,
+.theme-bordered .el-card,
+.theme-bordered .msg-system-inner {
+  border: 1.5px solid var(--el-color-primary-light-5) !important;
+}
+
+.theme-bordered .msg-bubble.user {
+  border-color: var(--el-color-primary-light-3) !important;
+}
+
+/* ── 动画：消息入场与过渡 ── */
+.theme-anim .msg-row {
+  animation: theme-msg-in 0.28s ease-out;
+}
+
+.theme-anim .menu-item,
+.theme-anim .el-button {
+  transition: all 0.2s ease;
+}
+
+.theme-anim .menu-item:hover {
+  transform: translateX(3px);
+}
+
+@keyframes theme-msg-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── 装饰图案：纯 CSS 生成，无外部资源 ── */
+body::after {
+  content: none;
+}
+
+.decor-petals body,
+.decor-stars body,
+.decor-geometric body {
+  position: relative;
+}
+
+.decor-petals body::after,
+.decor-stars body::after,
+.decor-geometric body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.decor-petals body::after {
+  background-image: var(--decor-image);
+  background-size: var(--decor-size);
+  background-position: var(--decor-pos);
+  background-repeat: no-repeat;
+  animation: decor-petal-fall 14s linear infinite;
+}
+
+@keyframes decor-petal-fall {
+  0% { background-position: var(--decor-pos); }
+  100% { background-position: 12% 115vh, 55% 108vh, 78% 112vh, 30% 118vh, 90% 106vh; }
+}
+
+.decor-stars body::after {
+  background-image: var(--decor-image);
+  background-size: var(--decor-size);
+  background-position: var(--decor-pos);
+  background-repeat: no-repeat;
+  animation: decor-star-twinkle 3.5s ease-in-out infinite alternate;
+}
+
+@keyframes decor-star-twinkle {
+  from { opacity: 0.45; }
+  to { opacity: 1; }
+}
+
+.decor-geometric body::after {
+  background-image:
+    linear-gradient(45deg, rgba(64, 158, 255, 0.05) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(64, 158, 255, 0.05) 25%, transparent 25%);
+  background-size: 40px 40px;
 }
 </style>

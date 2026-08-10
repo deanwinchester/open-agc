@@ -33,6 +33,10 @@ resp, model = context.llm_client().chat(messages=[...])          # 需要完整�
 context.store.set("projects", [...])
 projects = context.store.get("projects", [])
 context.store.delete("projects") / context.store.keys() / context.store.all()
+
+# 已安装技能（目录式技能包，如 human-writing，可从 GitHub 安装）：
+skill_md = context.skill_text("human-writing")  # SKILL.md 文本（截断 4000 字符），拼进 prompt
+sdir = context.skill_dir("human-writing")       # 技能目录绝对路径，可读取 references/scripts；无则 ""
 ```
 
 不要再手写 `from core.llm_client import LLMClient` 散落各处，也不要自己造 JSON 文件存储——用上面的标准能力。

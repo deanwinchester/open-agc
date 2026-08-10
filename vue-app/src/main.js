@@ -2,6 +2,7 @@ import { createApp } from 'vue';
 import { createPinia } from 'pinia';
 import ElementPlus from 'element-plus';
 import 'element-plus/dist/index.css';
+import 'element-plus/theme-chalk/dark/css-vars.css';
 // 熊猫主题覆盖必须在 element-plus 样式之后引入
 import './theme/element-panda.css';
 import App from './App.vue';
