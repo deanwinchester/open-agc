@@ -48,9 +48,11 @@ from tools.task_plan import TaskPlanTool, format_plan_for_prompt, load_plan
 from tools.task_manager import TaskManagerTool
 from tools.system_config import ConfigureSystemTool
 from tools.plugin_dev import DevelopPluginTool
+from tools.install_skill import InstallSkillTool
 from tools.compact_context import CompactContextTool
 from tools.subagent_dispatch import DispatchSubagentTool
 from tools.request_secret import RequestSecretTool
+from tools.theme_tool import CustomizeThemeTool
 
 
 from agent.context_manager import (
@@ -538,6 +540,7 @@ class OpenAGCAgent:
             f"如果你成功完成了一项之前未完成过的复杂任务，并且得到了用户的正面反馈，"
             f"必须主动询问用户是否需要将过程保存为新技能。"
             f"如用户同意，请使用 save_learned_skill 工具（扩展工具，需先 search_available_tools 启用）。\n"
+            f"{self._installed_skills_line()}"
             f"\n## 自我审查机制\n"
             f"当任务接近最大迭代次数或你感觉陷入循环时，可以调用 self_review 工具进行自我审查。"
             f"系统会在达到迭代上限时自动提示你使用此工具。通过审查你可以获得额外的执行机会。"
@@ -553,6 +556,8 @@ class OpenAGCAgent:
             f"- 电脑键鼠控制——搜索「电脑」\n"
             f"- 系统配置管理（查看/修改配置、管理 API 密钥、MCP 服务器）——搜索「配置」「设置」「API」\n"
             f"- 插件开发（生成新插件脚手架、安装插件）——搜索「插件」\n"
+            f"- 安装技能（从 GitHub 安装标准技能包）——搜索「技能」\n"
+            f"- 界面风格定制（主题色、Logo）——搜索「主题」「界面」「风格」\n"
             f"- 以及其他未默认启用的专用工具\n"
             f"\n## 架构红线\n"
             f"用户要求为本系统增加功能、页面、菜单或面板时，**一律使用 develop_plugin 插件架构**"
@@ -628,12 +633,14 @@ class OpenAGCAgent:
             "self_review": SelfReviewTool(),
             "configure_system": ConfigureSystemTool(),
             "develop_plugin": DevelopPluginTool(),
+            "install_skill": InstallSkillTool(),
             "shell_send": ShellSendTool(),
             "manage_task_plan": TaskPlanTool(),
             "manage_task": TaskManagerTool(),
             "compact_context": CompactContextTool(),
             "dispatch_subagent": DispatchSubagentTool(),
             "request_secret": RequestSecretTool(),
+            "customize_theme": CustomizeThemeTool(),
         }
 
         # Add to core tool names so it's always available
@@ -671,11 +678,13 @@ class OpenAGCAgent:
             "self_review": "自我审查任务进度",
             "configure_system": "系统配置管理",
             "develop_plugin": "插件开发",
+            "install_skill": "安装技能",
             "shell_send": "交互命令输入",
             "manage_task_plan": "管理任务计划",
             "manage_task": "查看和管理任务",
             "dispatch_subagent": "分派子代理",
             "request_secret": "向用户收集凭据",
+            "customize_theme": "界面风格定制",
         }
 
         # Load auto-generated tools (persisted from previous sessions)
@@ -821,6 +830,28 @@ class OpenAGCAgent:
             lines.append("扩展工具（需通过 search_available_tools 唤醒）：")
             lines.extend(ext_items)
         return "\n".join(lines)
+
+    def _installed_skills_line(self) -> str:
+        """已安装技能清单（确定性可见，不靠关键词检索命中——生产实证：
+        任务文案无技能关键词时检索零命中，agent 不知道本地已装，转而从
+        GitHub 重新克隆同名仓库）。清单随 agent 每轮重建刷新。"""
+        try:
+            skills = self.skill_store.list_skills() if self.skill_store else []
+            if not skills:
+                return ""
+            names = []
+            for s in skills[:12]:
+                title = (s.get("title") or s["filename"]).strip()
+                names.append(f"{title}（{s['filename']}）")
+            return (
+                "\n### 已安装技能包（本地 data/skills/）\n"
+                + "、".join(names)
+                + "。需要其方法时请直接使用（read_file 读 data/skills/<名>/SKILL.md"
+                  "及其 references/，或搜索启用相关工具）；**已安装的禁止再从 "
+                  "GitHub/网络重复下载或克隆同名仓库**。\n"
+            )
+        except Exception:
+            return ""
 
     def _build_system_prompt(self, memory_context: str = "", skill_context: str = "",
                              experience_context: str = "", kg_context: str = "") -> str:
@@ -2283,7 +2314,8 @@ class OpenAGCAgent:
             self._active_skills = []
             try:
                 self.skill_store.refresh()
-                matched_skills = self.skill_store.retrieve(recent_context, top_k=3)
+                # 混合检索：字面 bigram 优先 + 语义兜底（≥floor 才注入，宁缺毋滥）
+                matched_skills = self.skill_store.retrieve_semantic(recent_context, top_k=3)
                 if matched_skills:
                     self._active_skills = [s["filename"] for s in matched_skills]
                     skill_context = self.skill_store.format_skills_for_prompt(matched_skills)

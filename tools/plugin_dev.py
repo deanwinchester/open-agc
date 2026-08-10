@@ -198,6 +198,10 @@ def init_plugin(context: PluginContext) -> PluginInstance:
     #
     # 插件私有 KV 存储（自动落盘 db_dir/_store.json，带锁原子写）：
     # context.store.set("projects", [...]) / context.store.get("projects", [])
+    #
+    # 使用已安装技能（目录式技能包，如 human-writing）：
+    # skill_md = context.skill_text("human-writing")  # SKILL.md 文本（≤4000 字符），拼进 LLM prompt
+    # sdir = context.skill_dir("human-writing")       # 技能目录绝对路径（references/scripts），无则 ""
 
     @router.get("/hello")
     async def hello():

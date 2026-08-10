@@ -393,7 +393,7 @@ onUnmounted(() => {
         class="stop-btn"
         :title="t.stop"
         @click="emit('stop')"
-      >⏹</el-button>
+      ><el-icon><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></el-icon></el-button>
       <el-button
         type="primary"
         circle

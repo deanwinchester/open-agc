@@ -39,7 +39,10 @@ function onDelete() {
 }
 
 // 后端 /static 挂载的图标；动态绑定避免 Vite 当作构建期资源解析（同 App.vue）。
-const avatarUrl = '/static/icon_rounded.png';
+// 头像跟随自定义 Logo（ui_theme.logo_file），未设置时回退默认熊猫图标。
+import { themeState } from '../../stores/theme';
+
+const avatarUrl = computed(() => themeState.logoUrl);
 
 // 附件大小格式化阈值与旧 app.js:1574-1578 一致
 function formatSize(size) {

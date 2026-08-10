@@ -12,7 +12,7 @@
 import { computed, h, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { ArrowLeft, Refresh } from '@element-plus/icons-vue';
+import { ArrowLeft, Refresh, VideoPlay, CircleCheck, Delete } from '@element-plus/icons-vue';
 import { request } from '../api/client';
 import zh from '../i18n/zh';
 
@@ -590,16 +590,16 @@ onUnmounted(() => {
 
         <div class="action-bar">
           <el-button v-if="canResume" size="small" type="primary" plain @click="resumeTask">
-            ▶ {{ t.actions.resume }}
+            <el-icon><VideoPlay /></el-icon> {{ t.actions.resume }}
           </el-button>
           <el-button v-if="canInterrupt" size="small" type="warning" plain @click="interruptTask">
-            ⏹ {{ t.actions.interrupt }}
+            <el-icon><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></el-icon> {{ t.actions.interrupt }}
           </el-button>
           <el-button v-if="canComplete" size="small" type="success" plain @click="completeTask">
-            ✅ {{ t.actions.complete }}
+            <el-icon><CircleCheck /></el-icon> {{ t.actions.complete }}
           </el-button>
           <el-button size="small" type="danger" plain @click="deleteTask">
-            🗑 {{ t.actions.delete }}
+            <el-icon><Delete /></el-icon> {{ t.actions.delete }}
           </el-button>
         </div>
 
@@ -751,7 +751,7 @@ onUnmounted(() => {
                 📄 {{ t.process.viewLog }}
               </el-button>
               <el-button v-if="p.alive" size="small" type="danger" plain @click="killProcess">
-                ⏹ {{ t.process.kill }}
+                <el-icon><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></el-icon> {{ t.process.kill }}
               </el-button>
             </div>
             <div v-if="p.output_file" class="process-output">
