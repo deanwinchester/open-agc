@@ -63,32 +63,45 @@ class SkillManager:
         os.makedirs(skills_dir, exist_ok=True)
     
     def list_skills(self) -> List[Dict]:
-        """List all available skills."""
+        """List all available skills (flat .md files + directories with SKILL.md)."""
         skills = []
         for filename in sorted(os.listdir(self.skills_dir)):
-            if filename.endswith(".md"):
-                filepath = os.path.join(self.skills_dir, filename)
+            filepath = os.path.join(self.skills_dir, filename)
+            is_dir_skill = os.path.isdir(filepath) and \
+                os.path.isfile(os.path.join(filepath, "SKILL.md"))
+            if filename.endswith(".md") or is_dir_skill:
                 try:
-                    with open(filepath, 'r', encoding='utf-8') as f:
+                    content_path = os.path.join(filepath, "SKILL.md") if is_dir_skill \
+                        else filepath
+                    with open(content_path, 'r', encoding='utf-8') as f:
                         content = f.read()
-                    
-                    # Extract title from first heading
-                    title_match = re.search(r'^#\s+(.+)', content, re.MULTILINE)
-                    title = title_match.group(1) if title_match else filename
-                    
-                    size = os.path.getsize(filepath)
+
+                    # Title: frontmatter name/description wins, else first heading
+                    from core.skill_store import _extract_title_and_desc
+                    title, _desc = _extract_title_and_desc(content)
+                    if not title:
+                        title = filename
+
+                    if is_dir_skill:
+                        size = sum(
+                            os.path.getsize(os.path.join(r, f))
+                            for r, _d, files in os.walk(filepath) for f in files
+                        )
+                    else:
+                        size = os.path.getsize(filepath)
                     modified = datetime.fromtimestamp(os.path.getmtime(filepath)).isoformat()
-                    
+
                     skills.append({
                         "filename": filename,
                         "title": title,
                         "size": size,
                         "modified": modified,
-                        "lines": content.count('\n') + 1
+                        "lines": content.count('\n') + 1,
+                        "is_dir": is_dir_skill,
                     })
                 except Exception as e:
                     skills.append({"filename": filename, "error": str(e)})
-        
+
         return skills
 
     def validate_skill(self, content: str) -> Dict:
@@ -183,6 +196,9 @@ class SkillManager:
             filepath = resolve_under(self.skills_dir, filename)
         except ValueError:
             return False
+        if os.path.isdir(filepath):
+            shutil.rmtree(filepath)
+            return True
         if os.path.exists(filepath):
             os.remove(filepath)
             return True

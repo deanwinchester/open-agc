@@ -67,23 +67,74 @@ def _extract_keywords(text: str) -> List[str]:
     return list(keywords)
 
 
-def _extract_title_and_desc(content: str) -> tuple:
-    """Extract title and description from skill markdown."""
-    title = ""
+_ENTRY_NAME_RE = re.compile(r"^[\w\-\.]+$")
+
+
+def _is_valid_entry_name(filename) -> bool:
+    """Whitelist check for skill entry names: ^[\w\-\.]+$ and no path
+    separators / parent traversal — blocks reads outside the skills dir."""
+    return isinstance(filename, str) and bool(filename) \
+        and bool(_ENTRY_NAME_RE.match(filename)) \
+        and ".." not in filename and "/" not in filename and "\\" not in filename
+
+
+def _parse_frontmatter(content: str) -> tuple:
+    """Parse YAML-style frontmatter (--- ... ---) for name/description.
+
+    Returns (name, description); both "" when no frontmatter is present.
+    Minimal line-based parser — no yaml dependency.
+    """
+    if not content.startswith("---"):
+        return "", ""
+    end = content.find("\n---", 3)
+    if end == -1:
+        return "", ""
+    name = ""
     desc = ""
+    for line in content[3:end].splitlines():
+        m = re.match(r'\s*(name|description)\s*:\s*(.+?)\s*$', line)
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2).strip().strip('\'"')
+        if key == "name" and not name:
+            name = value
+        elif key == "description" and not desc:
+            desc = value
+    return name, desc
+
+
+def _extract_title_and_desc(content: str) -> tuple:
+    """Extract title and description from skill markdown.
+
+    Directory-style skills (SKILL.md) may carry YAML frontmatter with
+    name/description — frontmatter wins; otherwise fall back to the first
+    # heading and first paragraph.
+    """
+    fm_name, fm_desc = _parse_frontmatter(content)
+
+    # Strip the frontmatter block before heading/paragraph fallback
+    body_text = content
+    if content.startswith("---"):
+        end = content.find("\n---", 3)
+        if end != -1:
+            body_text = content[end + 4:]
 
     # Title: first # heading
-    title_match = re.search(r'^#\s+(.+)', content, re.MULTILINE)
+    title = ""
+    title_match = re.search(r'^#\s+(.+)', body_text, re.MULTILINE)
     if title_match:
         title = title_match.group(1).strip()
 
     # Description: first paragraph (between title and next heading or blank line)
     # Remove the first heading line to get content after title
-    body = re.sub(r'^#\s+.+', '', content, count=1).strip()
+    desc = ""
+    body = re.sub(r'^#\s+.+', '', body_text, count=1).strip()
     para_match = re.search(r'^([^#\n][^\n]*(?:\n[^#\n][^\n]*)*)', body, re.MULTILINE)
     if para_match:
         desc = para_match.group(1).strip()[:200]
 
+    title = fm_name or title
+    desc = fm_desc or desc
     if not desc:
         desc = title
 
@@ -133,16 +184,31 @@ class SkillStore:
         self.build_index()
 
     def _list_skill_files(self) -> List[str]:
+        """List skill entries: flat .md/.py files plus directories containing
+        SKILL.md (Anthropic-style directory skills; entry filename = dir name)."""
         if not os.path.isdir(self.skills_dir):
             return []
-        return sorted(f for f in os.listdir(self.skills_dir)
-                      if f.endswith(".md") or f.endswith(".py"))
+        entries = []
+        for f in os.listdir(self.skills_dir):
+            path = os.path.join(self.skills_dir, f)
+            if os.path.isfile(path) and (f.endswith(".md") or f.endswith(".py")):
+                entries.append(f)
+            elif os.path.isdir(path) and os.path.isfile(os.path.join(path, "SKILL.md")):
+                entries.append(f)
+        return sorted(entries)
+
+    def _content_path(self, filename: str) -> str:
+        """Resolve an index entry to the file holding its prompt content."""
+        path = os.path.join(self.skills_dir, filename)
+        if os.path.isdir(path):
+            return os.path.join(path, "SKILL.md")
+        return path
 
     def build_index(self):
         """Scan skills directory and build/rebuild the full index."""
         index_skills = []
         for filename in self._list_skill_files():
-            filepath = os.path.join(self.skills_dir, filename)
+            filepath = self._content_path(filename)
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     content = f.read()
@@ -211,20 +277,94 @@ class SkillStore:
         scored.sort(key=lambda x: -x[0])
         return [dict(s[1]) for s in scored[:top_k]]
 
+    # ── 语义检索（精度提升）：bigram 零命中时用 LLM 做相关性兜底 ──
+    # 生产实证：任务文案「续写5章」与技能关键词（写作/小说/改稿）字面零交集，
+    # 字面检索零命中导致已安装技能不可见。向量方案依赖 sentence-transformers
+    #（本环境未装），改用现成的 LLM 一次性判定——只在字面零命中时花一次小调用。
+    def _llm_skill_judge(self, query: str) -> list:
+        """让 LLM 从技能清单中挑出与 query 相关的 filename（JSON 数组）。
+        失败/异常一律返回 []（退化为纯字面语义）。"""
+        try:
+            from core.llm_client import LLMClient
+            lines = []
+            for s in self.index.get("skills", []):
+                desc = (s.get("description") or "")[:100]
+                lines.append(f"- {s['filename']}: {s.get('title','')} — {desc}")
+            prompt = (
+                "判断以下哪些技能与用户需求【相关】（可用于完成该需求的方法/风格/流程）。"
+                "只返回 JSON 数组（元素为 filename 字符串），都不相关返回 []。不要解释。\n\n"
+                f"用户需求：{query[:500]}\n\n技能列表：\n" + "\n".join(lines)
+            )
+            resp, _ = LLMClient().chat(messages=[{"role": "user", "content": prompt}])
+            text = (resp.choices[0].message.content or "").strip()
+            import re as _re
+            m = _re.search(r"\[[^\]]*\]", text, _re.S)
+            names = json.loads(m.group(0)) if m else []
+            if not isinstance(names, list):
+                return []
+            known = {s["filename"] for s in self.index.get("skills", [])}
+            return [n for n in names if isinstance(n, str) and n in known]
+        except Exception as e:
+            print(f"[SkillStore] LLM skill judge error: {e}")
+            return []
+
+    def retrieve_semantic(self, query: str, top_k: int = 3) -> List[Dict]:
+        """混合检索：字面 bigram 优先；字面零命中时用一次 LLM 小调用做
+        相关性兜底（宁缺毋滥——不命中不注入，不增加无关预载）。
+
+        LLM 判定失败时静默退化为纯字面检索（返回可能为空）。"""
+        literal = self.retrieve(query, top_k=top_k)
+        if literal:
+            return literal
+        names = self._llm_skill_judge(query)
+        if not names:
+            return []
+        by_name = {s["filename"]: s for s in self.index.get("skills", [])}
+        return [by_name[n] for n in names[:top_k] if n in by_name]
+
     def get_skill_content(self, filename: str) -> Optional[str]:
-        """Read full skill content from file (with cache)."""
+        """Read full skill content (with cache).
+
+        Directory skills return SKILL.md plus an appendix listing bundled
+        resources (references/, scripts/) with the absolute directory path,
+        so the agent can use them via read_file / execute.
+        filename 做白名单校验（^[\w\-\.]+$ 且不含路径分隔符/..），
+        防止 "../secret.md" 之类读到技能目录外文件。"""
+        if not _is_valid_entry_name(filename):
+            return None
         if filename in self._loaded_content:
             return self._loaded_content[filename]
-        filepath = os.path.join(self.skills_dir, filename)
-        if os.path.exists(filepath):
+        filepath = self._content_path(filename)
+        if os.path.isfile(filepath):
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     content = f.read()
+                dirpath = os.path.join(self.skills_dir, filename)
+                if os.path.isdir(dirpath):
+                    content += self._resource_appendix(dirpath)
                 self._loaded_content[filename] = content
                 return content
             except Exception:
                 pass
         return None
+
+    @staticmethod
+    def _resource_appendix(dirpath: str) -> str:
+        """Resource listing appended to directory-skill content."""
+        lines = ["", "", "---", f"## 技能资源（目录: {os.path.abspath(dirpath)}）"]
+        listed = False
+        for sub in ("references", "scripts"):
+            subdir = os.path.join(dirpath, sub)
+            if os.path.isdir(subdir):
+                files = sorted(f for f in os.listdir(subdir)
+                               if os.path.isfile(os.path.join(subdir, f)))
+                if files:
+                    listed = True
+                    lines.append(f"- {sub}/: " + ", ".join(files))
+        if not listed:
+            return ""
+        lines.append("可用 read_file 读取上述文件；scripts/ 下的脚本可用 execute_shell / execute_python 运行。")
+        return "\n".join(lines)
 
     def format_skills_for_prompt(self, skills: List[Dict]) -> str:
         """Format retrieved skills into injectable prompt text."""
@@ -265,7 +405,7 @@ class SkillStore:
         """Append a review note to a failing skill file."""
         from pathlib import Path
         filepath = Path(self.skills_dir) / filename
-        if not filepath.exists():
+        if not filepath.is_file():  # directory skills are not annotated in place
             return
         entry = self._find_entry(filename)
         rate = entry["success_rate"] if entry else 0.0

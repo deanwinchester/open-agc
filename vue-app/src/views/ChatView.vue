@@ -20,6 +20,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import { Collection, RefreshRight, VideoPlay } from '@element-plus/icons-vue';
 import { useWsStore } from '../stores/ws';
 import { request, cachedFetch } from '../api/client';
 import zh from '../i18n/zh';
@@ -116,6 +117,22 @@ async function loadHeaderMeta() {
 }
 
 const listEl = ref(null);
+
+// 会话区背景图（ui_theme.chat_bg_image）：加浅色遮罩保证消息可读
+import { themeState } from '../stores/theme';
+const msgListBgStyle = computed(() => {
+  const url = themeState.chatBgUrl;
+  if (!url) return {};
+  // 遮罩跟随明暗模式（暗色模式下用深色遮罩保证可读）
+  const overlay = themeState.dark
+    ? 'color-mix(in srgb, var(--el-bg-color-page) 86%, transparent)'
+    : 'rgba(245,247,250,0.88)';
+  return {
+    backgroundImage: `linear-gradient(${overlay}, ${overlay}), url("${url}")`,
+    backgroundSize: 'cover',
+    backgroundPosition: 'center',
+  };
+});
 const chatViewEl = ref(null);
 // 移动端输入法遮挡：visualViewport 收缩（键盘弹出）时把聊天区高度钉在可视区，
 // 键盘收起后还原；仅窄屏生效，桌面端 visualViewport 变化不影响布局。
@@ -890,7 +907,7 @@ onUnmounted(() => {
           type="button"
           :title="t.sessionsTitle"
           @click="railOpen = !railOpen"
-        >🗂️</button>
+        ><el-icon><Collection /></el-icon></button>
         <span class="session-title" :title="currentSessionName">{{ currentSessionName }}</span>
         <div class="header-right">
           <el-select v-model="selectedAgent" size="small" class="agent-select" :title="t.agentSelectTitle">
@@ -907,7 +924,7 @@ onUnmounted(() => {
         <span class="dl-pct">{{ downloadBanner.pct }}%</span>
       </div>
 
-      <div ref="listEl" class="msg-list" @scroll="onListScroll">
+      <div ref="listEl" class="msg-list" :style="msgListBgStyle" @scroll="onListScroll">
         <div class="msg-list-inner">
           <div v-if="historyPaging.hasMore" class="load-more">
             <el-button
@@ -946,8 +963,8 @@ onUnmounted(() => {
           </div>
 
           <div v-if="retryBar.visible" class="retry-bar">
-            <el-button size="small" @click="onRetry">↻ {{ t.retry }}</el-button>
-            <el-button size="small" @click="onRetryContinue">▶ {{ t.continueRest }}</el-button>
+            <el-button size="small" @click="onRetry"><el-icon><RefreshRight /></el-icon> {{ t.retry }}</el-button>
+            <el-button size="small" @click="onRetryContinue"><el-icon><VideoPlay /></el-icon> {{ t.continueRest }}</el-button>
           </div>
         </div>
       </div>

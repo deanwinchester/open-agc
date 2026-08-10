@@ -21,6 +21,23 @@ async def get_skills():
     return {"skills": skills}
 
 
+@router.post("/api/skills/install")
+async def install_skill(data: dict):
+    """Install a directory-style skill package from a GitHub URL / zip link."""
+    url = data.get("url") or ""
+    if not isinstance(url, str) or not url.strip():
+        raise HTTPException(status_code=400, detail="url is required")
+    import asyncio
+    from core.skill_installer import install_skill_from_url, SkillInstallError
+    try:
+        # 下载/解压/copytree 是阻塞操作（最长 60s），移执行器线程，
+        # 不在事件循环上跑（参照 routes_tasks.list_processes 的做法）。
+        return await asyncio.get_running_loop().run_in_executor(
+            None, install_skill_from_url, url.strip())
+    except SkillInstallError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/api/skills/import")
 async def import_skill(data: dict):
     """Import a skill file with security validation."""
@@ -76,12 +93,14 @@ async def get_skill_stats():
 
 @router.get("/api/skills/{filename}")
 async def get_skill_content(filename: str):
-    """Get the content of a specific skill."""
+    """Get the content of a specific skill (SKILL.md for directory skills)."""
     try:
         filepath = resolve_under(get_skills_dir(), filename)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid filename: {filename}")
-    if not os.path.exists(filepath):
+    if os.path.isdir(filepath):
+        filepath = os.path.join(filepath, "SKILL.md")
+    if not os.path.isfile(filepath):
         raise HTTPException(status_code=404, detail="Skill not found")
     with open(filepath, 'r', encoding='utf-8') as f:
         return {"filename": filename, "content": f.read()}

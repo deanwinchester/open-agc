@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "themes": [
+    {
+      "name": "猫娘粉",
+      "desc": "柔和粉 + 玫瑰紫侧边栏，飘落花瓣",
+      "author": "Open-AGC",
+      "theme": {
+        "primary_color": "#E88FB0",
+        "sidebar_color": "#8E5B78",
+        "decor": "petals",
+        "dark": false
+      }
+    },
+    {
+      "name": "暗夜黑",
+      "desc": "全站深色 + 靛蓝主题色，星空点缀",
+      "author": "Open-AGC",
+      "theme": {
+        "primary_color": "#6366f1",
+        "sidebar_color": "#111827",
+        "dark": true,
+        "decor": "stars"
+      }
+    },
+    {
+      "name": "薄荷绿",
+      "desc": "清新绿 + 浅色侧边栏，几何纹理",
+      "author": "Open-AGC",
+      "theme": {
+        "primary_color": "#10b981",
+        "sidebar_color": "#d1f2e5",
+        "decor": "geometric",
+        "dark": false
+      }
+    },
+    {
+      "name": "暖阳橙",
+      "desc": "温暖橙 + 琥珀侧边栏，轻快明亮",
+      "author": "Open-AGC",
+      "theme": {
+        "primary_color": "#f59e0b",
+        "sidebar_color": "#7c2d12",
+        "decor": "none",
+        "dark": false
+      }
+    },
+    {
+      "name": "紫藤梦境",
+      "desc": "紫罗兰 + 毛玻璃质感，梦幻花瓣",
+      "author": "Open-AGC",
+      "theme": {
+        "primary_color": "#8b5cf6",
+        "sidebar_color": "#4c1d95",
+        "glass": true,
+        "decor": "petals",
+        "dark": false
+      }
+    }
+  ]
+}

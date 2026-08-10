@@ -9,7 +9,7 @@
 // - 删除：DELETE /api/skills/{filename}（后端 resolve_under 校验路径穿越）
 import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Plus, Refresh } from '@element-plus/icons-vue';
+import { Plus, Refresh, Link } from '@element-plus/icons-vue';
 import { cachedFetch, invalidateCache, request } from '../../api/client';
 import zh from '../../i18n/zh';
 
@@ -182,6 +182,40 @@ async function saveImport() {
   }
 }
 
+// ── 从 GitHub 安装（目录式技能包，POST /api/skills/install）──
+
+const installVisible = ref(false);
+const installUrl = ref('');
+const installLoading = ref(false);
+
+function openInstall() {
+  installUrl.value = '';
+  installVisible.value = true;
+}
+
+async function saveInstall() {
+  const url = installUrl.value.trim();
+  if (!url) {
+    ElMessage.error(t.installUrlRequired);
+    return;
+  }
+  installLoading.value = true;
+  try {
+    const res = await request('/api/skills/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    ElMessage.success(`${t.installSuccess}: ${res?.title || res?.name || ''}`);
+    installVisible.value = false;
+    refresh();
+  } catch (err) {
+    ElMessage.error(`${t.installFailed}: ${err.message}`);
+  } finally {
+    installLoading.value = false;
+  }
+}
+
 // ── 删除 ──
 
 async function removeSkill(skill) {
@@ -230,6 +264,7 @@ onMounted(loadSkills);
         <span class="skills-count">{{ filteredSkills.length }}</span>
         <div class="toolbar-actions">
           <el-button :icon="Refresh" :title="t.refresh" @click="refresh" />
+          <el-button :icon="Link" @click="openInstall">{{ t.installFromGithub }}</el-button>
           <el-button type="primary" :icon="Plus" @click="openImport">{{ t.import }}</el-button>
         </div>
       </div>
@@ -279,6 +314,19 @@ onMounted(loadSkills);
         <el-button type="primary" :loading="editSaving" :disabled="editLoading" @click="saveEdit">
           {{ t.save }}
         </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 从 GitHub 安装技能 -->
+    <el-dialog v-model="installVisible" :title="t.installTitle" width="560px">
+      <el-form label-position="top">
+        <el-form-item :label="t.installUrlLabel">
+          <el-input v-model="installUrl" :placeholder="t.installUrlPlaceholder" spellcheck="false" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="installVisible = false">{{ t.cancel }}</el-button>
+        <el-button type="primary" :loading="installLoading" @click="saveInstall">{{ t.installConfirm }}</el-button>
       </template>
     </el-dialog>
 
