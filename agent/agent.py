@@ -277,7 +277,7 @@ class OpenAGCAgent:
 
         # Inject current date/time so the LLM knows "today"
         from datetime import datetime
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
         current_date = datetime.now().strftime("%Y年%m月%d日")
 
         # Store config for later use
@@ -367,6 +367,10 @@ class OpenAGCAgent:
             f"「试试吧」「继续」「开始吧」「做吧」这类回复是**执行指令**：必须立即调用"
             f"工具开始执行，严禁只用文字描述计划就结束回合。说「我现在去点击/下载/注册」"
             f"的当轮就必须真的发起对应工具调用。\n"
+            f"\n## 当前时间\n"
+            f"当前本地时间：{current_time}（含时区偏移）；今天：{current_date}。"
+            f"安排定时任务、计算截止时间、解释「明天上午9点」这类相对时间时，一律以该时区为准。"
+            f"注意：任务/数据库时间戳统一为 UTC，与本地时间换算时必须先做时区换算再比较。\n"
             f"你的训练数据有知识截止日期。对于任何关于近期事件、当前新闻、最新动态或"
             f"时效性信息的问题，你必须使用 search_web 工具获取最新信息。"
             f"绝对不要仅依赖训练数据回答时事问题。\n"
@@ -857,7 +861,7 @@ class OpenAGCAgent:
                              experience_context: str = "", kg_context: str = "") -> str:
         # Inject current date/time so the LLM knows "today"
         from datetime import datetime
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
         current_date = datetime.now().strftime("%Y年%m月%d日")
         
         prompt = self.system_prompt_base.replace("{current_time}", current_time).replace("{current_date}", current_date)

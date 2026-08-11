@@ -17,6 +17,7 @@ import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Plus, Refresh, Search, Delete } from '@element-plus/icons-vue';
 import { request } from '../api/client';
+import { formatDbTime } from '../utils/time';
 import zh from '../i18n/zh';
 
 const t = zh.tasks;
@@ -577,7 +578,7 @@ onUnmounted(() => {
             </div>
           </div>
           <div class="row-card-meta">
-            <span>{{ task.created_at }}</span>
+            <span>{{ formatDbTime(task.created_at) }}</span>
             <span>{{ task.step_count || 0 }}{{ t.stepsSuffix }}</span>
             <span v-if="task.session_id">
               {{ t.sessionPrefix }}{{ task.session_id }}<template v-if="task.session_name"> · {{ task.session_name }}</template>
