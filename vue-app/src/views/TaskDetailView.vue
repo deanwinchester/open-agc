@@ -14,6 +14,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { ArrowLeft, Refresh, VideoPlay, CircleCheck, Delete } from '@element-plus/icons-vue';
 import { request } from '../api/client';
+import { formatDbTime } from '../utils/time';
 import zh from '../i18n/zh';
 
 const t = zh.taskDetail;
@@ -572,7 +573,7 @@ onUnmounted(() => {
             <span class="pill-dot"></span>{{ statusPill(task.status).label }}
           </span>
           <el-tag type="info" disable-transitions>{{ typeLabel }}</el-tag>
-          <span class="meta-chip">🕐 {{ task.created_at }}</span>
+          <span class="meta-chip">🕐 {{ formatDbTime(task.created_at) }}</span>
           <span class="meta-chip">📊 {{ stepsTotal }}{{ zh.tasks.stepsSuffix }}</span>
           <span v-if="task.session_id" class="meta-chip">
             💬 {{ zh.tasks.sessionPrefix }}{{ task.session_id }}<template v-if="task.session_name"> · {{ task.session_name }}</template>
