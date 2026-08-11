@@ -320,6 +320,71 @@ class SubAgent:
 
             # Text response — sub-task complete
             summary = message.content or ""
+
+            # ── 工具调用营救（生产实证：模型把工具调用写成 JSON 文本时，
+            # 旧逻辑直接当最终答复返回 success，子代理零执行"假完成"）──
+            _rescued = None
+            try:
+                _txt = summary.strip()
+                _m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', _txt, re.DOTALL)
+                _cand = _m.group(1) if _m else _txt
+                _obj = json.loads(_cand)
+                if isinstance(_obj, dict) and isinstance(_obj.get("name"), str):
+                    _rescued = _obj
+            except Exception:
+                _rescued = None
+            if _rescued and _rescued.get("name") in self.available_tools:
+                _fn = _rescued["name"]
+                _fa = _rescued.get("arguments") or _rescued.get("parameters") or {}
+                if isinstance(_fa, str):
+                    try:
+                        _fa = json.loads(_fa)
+                    except Exception:
+                        _fa = {}
+                # 追加 assistant 文本后按正常工具调用继续循环
+                self.messages.append({"role": "assistant", "content": summary})
+                _tool = self.available_tools[_fn]
+                try:
+                    _res = _tool.execute(
+                        interrupt_check=lambda: self.is_interrupted,
+                        _agent_context=self._agent_context,
+                        _session_whitelist=self._session_whitelist,
+                        _network_whitelist=self._network_whitelist,
+                        _permission_whitelist=self._permission_whitelist,
+                        _session_id=self._session_id,
+                        **_fa,
+                    )
+                    _ok = True
+                except Exception as _e:
+                    _res = f"Error executing {_fn}: {_e}"
+                    _ok = False
+                tool_call_count += 1
+                self.messages.append({
+                    "role": "user",
+                    "content": f"[工具 {_fn} 执行结果]\n{str(_res)[:15000]}",
+                })
+                steps.append({"tool": _fn, "args": json.dumps(_fa)[:200],
+                              "result_preview": str(_res)[:300], "success": _ok})
+                if self.progress_callback:
+                    self.progress_callback({
+                        "event": "tool_done", "tool": _fn,
+                        "step": tool_call_count, "success": _ok,
+                        "result_preview": str(_res)[:200],
+                        "sub_task": self.task[:50],
+                    })
+                continue
+
+            # ── 空谈守卫：零工具调用就返回文字计划 ≠ 完成（生产实证：
+            # 子代理回一段计划即"成功"，主 agent 只能兜底重做）──
+            if tool_call_count == 0:
+                self._empty_nudges = getattr(self, "_empty_nudges", 0) + 1
+                if self._empty_nudges <= 2:
+                    self.messages.append({"role": "assistant", "content": summary})
+                    self.messages.append({"role": "user", "content": (
+                        "你还没有执行任何工具调用。请不要只描述计划——"
+                        "现在就用可用工具实际执行子任务，完成后再汇报结果。")})
+                    continue
+
             # Collect output file references from messages
             output_files = re.findall(
                 r'(?:saved|wrote|created|written to)\s*:?\s*([^\s)]+\.[a-zA-Z]+)',
