@@ -15,11 +15,18 @@
 3. ``dispatch_to_worker`` —— 单执行者派发闭环：验收失败带失败信息重派一次，
    双失败返回结构化失败信息，由主 agent 在其主循环中亲自接管（无需额外兜底分支）。
 
-M1 边界：输入分类（M2）、eval 接入（M3）、并发 UI（M4）均不在此模块。
+M2（输入分类）：``dispatch_async`` 把上述闭环放进后台线程，主 agent 派完即回、
+不再阻塞——它由此能在 worker 执行期间履行分类职责：闲聊直答、追加指令经
+``message_worker`` 注入 worker 专属队列、新任务再派（并发）。worker 的插话
+通道只收主 agent 分类后转发的消息，与原始 pending_messages 物理隔离。
+worker 完成（含验收）后注入【执行者返回】并唤醒主 agent 做呈现。
+
+M3 eval 接入、M4 并发 UI 不在此模块。
 """
 import json
 import os
 import re
+import threading
 from typing import Any, Dict, List, Optional
 
 # 执行者（worker）初始常驻工具：基础工具集 + 发现入口。其余工具由 worker
@@ -32,6 +39,42 @@ _WORKER_CORE_TOOLS = [
 
 # worker 单轮最大迭代：完整任务比原子子任务长，给旧子代理默认 10 的两倍。
 _WORKER_MAX_ITERATIONS = 20
+
+# ── M2：worker 专属插话队列（只装主 agent 分类后转发的追加指令）──
+# key: (session_id, task_id)；value: list[str]。worker 的 pending provider 只读
+# 这里——原始 pending_messages（含闲聊）不再转发（用户指正：分类是主 agent
+# 职责，无关内容压根不该到 worker）。
+_worker_inboxes: Dict[Any, List[str]] = {}
+_inbox_lock = threading.Lock()
+
+# 运行中的 dispatch 批次：key (session_id, task_id) → {"thread", "done", "result"}
+_running_dispatches: Dict[Any, Dict[str, Any]] = {}
+_running_lock = threading.Lock()
+
+
+def push_worker_inbox(session_id, task_id, message: str) -> bool:
+    """message_worker 工具写入：追加指令注入运行中 worker 的专属队列。"""
+    key = (session_id, task_id)
+    with _inbox_lock:
+        _worker_inboxes.setdefault(key, []).append(message.strip()[:500])
+    return True
+
+
+def _pop_worker_inbox(session_id, task_id) -> List[str]:
+    key = (session_id, task_id)
+    with _inbox_lock:
+        msgs = _worker_inboxes.get(key) or []
+        _worker_inboxes[key] = []
+    return [m for m in msgs if m]
+
+
+def get_running_dispatch(session_id, task_id) -> Optional[Dict[str, Any]]:
+    """查询当前任务是否有运行中的 dispatch（message_worker 的前置检查）。"""
+    with _running_lock:
+        d = _running_dispatches.get((session_id, task_id))
+    if d and not d.get("done"):
+        return d
+    return None
 
 # 验收文件引用提取（I-3 修复）：
 # - 支持 Windows 盘符绝对路径（D:/...、D:\...），盘符不再被 ":" 吃掉
@@ -357,30 +400,22 @@ def _label_progress(progress_callback):
 
 
 def _make_pending_provider(agent):
-    """I-2 修复：worker 执行期间的插话转发钩子（peek 不消费）。
+    """M2：worker 插话只读**专属队列**（message_worker 注入的已分类追加指令）。
 
-    只读主 agent 的 pending_messages、不 pop——accept/reject 判断是主循环
-    既有协议（user_interjection_response），worker 只负责"看到"，turn 结束
-    前由 run_turn 调度成功分支排空注入主循环做正式判断。已转发的消息按
-    下标去重，不会重复注入。
+    不再 peek 主 agent 的 pending_messages——原始插话（含闲聊）由主 agent
+    自行分类处理，无关内容不到 worker（用户指正）。
     """
-    state = {"seen": 0}
+    sid = getattr(agent, "session_id", None)
+    tid = getattr(agent, "task_id", None)
 
     def _provider() -> str:
-        pend = getattr(agent, "pending_messages", None) or []
-        if state["seen"] > len(pend):
-            state["seen"] = 0  # 队列被外部排空过，重新计
-        new = [m for m in pend[state["seen"]:]
-               if isinstance(m, str) and m.strip()]
-        state["seen"] = len(pend)
+        new = _pop_worker_inbox(sid, tid)
         if not new:
             return ""
         body = "\n".join(f"- {m.strip()[:300]}" for m in new[:3])
         return (
-            "【调度转发：用户在你执行期间发来的消息】\n" + body +
-            "\n判定与处理：仅当消息是对**当前任务**的追加要求/纠正时才采纳执行；"
-            "若是闲聊、无关提问或其他话题——严禁回应、严禁改变当前计划，"
-            "直接继续手头工作（该消息会由调度者另行处理，不是你职责）。"
+            "【调度者转发的用户追加指令】\n" + body +
+            "\n以上是对**当前任务**的补充要求，请采纳执行。"
         )
 
     return _provider
@@ -521,3 +556,102 @@ def dispatch_to_worker(agent, brief: str, acceptance=None,
         "result": final["result"],
         "packet": packet,
     }
+
+
+# ────────────────────────── M2：异步派发与完成唤醒 ──────────────────────────
+
+def dispatch_async(agent, brief: str, acceptance=None,
+                   max_iterations: Optional[int] = None,
+                   progress_callback=None) -> Dict[str, Any]:
+    """M2：后台线程跑 dispatch_to_worker 闭环，立即返回（主 agent 不再阻塞）。
+
+    完成后经 _notify_completion：主 agent 循环在跑 → pending 注入（下轮收编）；
+    turn 已结束 → resume_task_manual 唤起新 turn 做验收呈现。
+    """
+    sid = getattr(agent, "session_id", None)
+    tid = getattr(agent, "task_id", None)
+    key = (sid, tid)
+
+    def _run():
+        try:
+            result = dispatch_to_worker(
+                agent, brief, acceptance=acceptance,
+                max_iterations=max_iterations,
+                progress_callback=progress_callback)
+        except Exception as e:
+            result = {"success": False, "summary": f"调度线程异常: {e}",
+                      "verdict": {"passed": False, "failures": [str(e)]},
+                      "result": {}}
+        with _running_lock:
+            _running_dispatches[key].update({"done": True, "result": result})
+        try:
+            _notify_completion(agent, result)
+        except Exception as e:
+            print(f"[Dispatcher] completion notify error: {e}")
+
+    t = threading.Thread(target=_run, daemon=True, name=f"dispatch-{tid}")
+    with _running_lock:
+        _running_dispatches[key] = {"done": False, "result": None, "thread": t}
+    t.start()
+    return {"dispatched": True}
+
+
+def _notify_completion(agent, result: Dict[str, Any]):
+    """worker 完成：组装【执行者返回】，在跑 → pending 注入；已结束 → resume 唤起。"""
+    ok = bool(result.get("success"))
+    summary = str(result.get("summary", ""))[:800]
+    verdict = result.get("verdict") or {}
+    files = (result.get("result") or {}).get("output_files") or []
+    lines = [
+        f"【执行者返回】验收{'通过 ✅' if ok else '未通过 ❌'}",
+        f"摘要：{summary or '（空）'}",
+    ]
+    if files:
+        lines.append("产出文件：" + ", ".join(str(f) for f in files[:8]))
+    if not ok:
+        fails = verdict.get("failures") or []
+        if fails:
+            lines.append("失败点：" + "; ".join(str(f)[:120] for f in fails[:3]))
+        lines.append("请按调度者职责：针对性补充信息重派一次，或亲自接管执行，并如实告知用户。")
+    else:
+        lines.append("请验收证据（产出文件/关键步骤）并呈现交付给用户。")
+    note = "\n".join(lines)
+
+    tid = getattr(agent, "task_id", None)
+    sid = getattr(agent, "session_id", None)
+
+    # 找当前会话的活跃 agent 实例注入【执行者返回】——注意可能是**另一个
+    # 实例**（dispatch 后用户插话起了新 turn），注入 dispatch 时的旧实例
+    # 会随实例死亡丢失通知（生产实证推演）。
+    target = None
+    try:
+        from api.state import _active_agents, _background_agents
+        _aa = _active_agents.get(sid, {}) or {}
+        for _inst in _aa.values():
+            if not getattr(_inst, "is_interrupted", False):
+                target = _inst
+                break
+        if target is None:
+            _bg = _background_agents.get(tid)
+            if _bg is not None and not getattr(_bg, "is_interrupted", False):
+                target = _bg
+    except Exception:
+        target = None
+
+    if target is not None:
+        try:
+            target.pending_messages.append(note)
+            print(f"[Dispatcher] worker done → injected into live agent (task {tid})")
+            return
+        except Exception:
+            pass
+
+    # 无活跃实例（turn 已结束）→ resume 唤起新 turn 呈现
+    if tid:
+        try:
+            from api.background import resume_task_manual
+            r = resume_task_manual(tid, extra_instruction=note)
+            print(f"[Dispatcher] worker done → resume task {tid}: "
+                  f"{r.get('status') or r.get('error')}")
+        except Exception as e:
+            print(f"[Dispatcher] resume on completion failed: {e}")
