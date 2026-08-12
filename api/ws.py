@@ -1245,8 +1245,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     ) if session_history else ""
                     # Calls llm.chat (sync network I/O) — run in a worker
                     # thread so the event loop keeps serving WS/HTTP.
+                    # dispatcher_mode 下跳过 LLM 目标判定（主 agent 在意图理解中
+                    # 自行关联目标）——每条消息省 10-30s 静默。
+                    try:
+                        _dm_fast_only = bool(load_config().get("dispatcher_mode", False))
+                    except Exception:
+                        _dm_fast_only = False
                     _resolved_goal = await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: _resolve_goal_for_query(query, recent_context=_recent_ctx, session_id=ws_session_id))
+                        None, lambda: _resolve_goal_for_query(query, recent_context=_recent_ctx, session_id=ws_session_id, fast_only=_dm_fast_only))
                     if _resolved_goal > 0:
                         try:
                             from tools.task_plan import load_goals as _ct_load
