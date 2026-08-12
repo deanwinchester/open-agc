@@ -2357,6 +2357,8 @@ class OpenAGCAgent:
         # 生产实证：主 agent 零工具调用虚构「编译完成/验收通过」报告）
         self._tool_msg_baseline = sum(1 for m in self.messages if m.get("role") == "tool")
         self._fabrication_retries = 0
+        # 工具调用 JSON 格式漂移纠错重试计数（上限 2 次/轮次）
+        self._format_drift_retries = 0
         # 调用日志归属本会话/本任务（SubAgent 共享 self.llm，日志随主任务）
         try:
             self.llm.set_log_context(self.session_id, task_id)
@@ -2719,6 +2721,21 @@ class OpenAGCAgent:
                     raise ValueError("LLM returned an empty choices list")
                 message = choices[0].message
             except Exception as e:
+                # 工具调用格式漂移（模型返回非法 JSON arguments，API 层解析
+                # 即失败）：注入纠错消息后重试本轮（上限 2 次）——生产实证：
+                # k3 偶发未闭合 JSON，LLMClient 三次盲重试同一 prompt 仍漂移，
+                # 不带纠错反馈的重试等于让模型在同一位置再摔三次。
+                _es = str(e)
+                if ("Failed to parse tool call" in _es or "Unterminated string" in _es
+                        or "Expecting value" in _es) and self._format_drift_retries < 2:
+                    self._format_drift_retries += 1
+                    print(f"[Agent] 工具调用 JSON 格式漂移，注入纠错重试（{self._format_drift_retries}/2）")
+                    self.messages.append({"role": "system", "content": (
+                        "⚠️ 你刚才的工具调用参数不是合法 JSON（字符串未闭合/未转义或"
+                        "直接输出了裸文本），已被 API 解析层拒绝，该次调用未执行。"
+                        "请重新发起调用：arguments 必须是严格合法的 JSON 字符串"
+                        "（换行写 \\n、双引号转义、对象完整闭合）。")})
+                    continue
                 # LLM call failed (network error, empty choices, malformed
                 # response). Must not escape run_turn — run the same cleanup
                 # as the max-iterations path so stats/KG/post-process still run.

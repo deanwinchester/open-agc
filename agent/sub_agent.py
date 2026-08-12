@@ -271,6 +271,7 @@ class SubAgent:
                             "tool": func_name,
                             "step": tool_call_count,
                             "args_preview": tc.function.arguments[:200],
+                            "tool_call_id": tc.id,
                             "sub_task": self.task[:50]
                         })
 
@@ -295,6 +296,7 @@ class SubAgent:
                                 "step": tool_call_count,
                                 "success": False,
                                 "result_preview": str(result)[:200],
+                                "tool_call_id": tc.id,
                                 "sub_task": self.task[:50],
                             })
                         steps.append({
@@ -380,6 +382,7 @@ class SubAgent:
                             "step": tool_call_count,
                             "success": success,
                             "result_preview": str(result)[:200],
+                            "tool_call_id": tc.id,
                             "sub_task": self.task[:50],
                         })
                     steps.append({
