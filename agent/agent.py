@@ -2752,12 +2752,28 @@ class OpenAGCAgent:
                 # LLM call failed (network error, empty choices, malformed
                 # response). Must not escape run_turn — run the same cleanup
                 # as the max-iterations path so stats/KG/post-process still run.
-                error_text = (f"[LLM_ERROR] Agent stopped: LLM call failed at iteration "
-                              f"{current_iter}: {e}")
+                # 用户态文案净化：litellm 异常全文带着整个请求 dump（Received
+                # Messages，几千字代码/路径/历史），原样展示就是聊天界面里的
+                # 一大串技术垃圾（生产实证）——人话上屏，全文进日志。
+                _full_err = str(e)
+                print(f"[Agent] LLM_ERROR detail at iteration {current_iter}: {_full_err[:2000]}")
+                if ("parse tool call" in _full_err or "Unterminated" in _full_err
+                        or "Expecting value" in _full_err):
+                    _ehint = "模型连续返回了非法格式的工具调用（已自动重试仍失败）"
+                elif "timeout" in _full_err.lower():
+                    _ehint = "模型服务响应超时"
+                elif "rate" in _full_err.lower() and "limit" in _full_err.lower():
+                    _ehint = "模型服务限流"
+                else:
+                    _ehint = "模型服务调用失败"
+                error_text = (f"[LLM_ERROR] {_ehint}"
+                              f"（{type(e).__name__}，第 {current_iter} 轮）。"
+                              f"点「继续」可重试；反复失败请检查模型配置或更换模型。")
                 if verbose:
                     print(f"[Agent] {error_text}")
+                # messages 里同样只留净化版：完整 dump 会浪费恢复后的上下文
                 self.messages.append({"role": "assistant",
-                                      "content": f"Error: LLM call failed: {e}"})
+                                      "content": f"Error: LLM call failed: {type(e).__name__}: {_full_err[:300]}"})
                 self._finalize_failed_turn(user_input, current_iter,
                                            _time.time() - _task_start)
                 return error_text
