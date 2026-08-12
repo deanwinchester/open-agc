@@ -26,7 +26,8 @@ from tools.dispatch_worker import DispatchWorkerTool, _parse_acceptance  # noqa:
 
 # ────────────────────────── 测试替身 ──────────────────────────
 
-def _resp(text=None, tool_calls=None):
+def _resp(text=None, tool_calls=None):
+
     msg = SimpleNamespace(role="assistant", content=text or "", tool_calls=tool_calls)
     return SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=None), "mock-model"
 
@@ -545,19 +546,20 @@ class TestInterruptSemantics:
 
 
 class TestPendingInjection:
-    """I-2：插话转发——provider peek 不消费；worker 上下文能看到。
-    重构轮后调用发生在主循环内，主循环两个轮询点天然覆盖 worker 返回后的判断。"""
+    """M2：worker 插话只读专属队列（message_worker 注入的已分类追加指令），
+    主 agent 的原始 pending_messages（含闲聊）不再转发——分类是主 agent 职责。"""
 
-    def test_provider_peek_no_consume(self):
-        agent = SimpleNamespace(pending_messages=["别忘了改端口"])
+    def test_provider_reads_only_worker_inbox(self):
+        agent = SimpleNamespace(pending_messages=["今天天气怎么样（闲聊）"],
+                                session_id=7, task_id=77)
         provider = dispatcher._make_pending_provider(agent)
+        assert provider() == ""  # 闲聊不进 worker
+        dispatcher.push_worker_inbox(7, 77, "别忘了改端口")
         text = provider()
         assert "别忘了改端口" in text
-        assert agent.pending_messages == ["别忘了改端口"]  # 不消费，判断权在主循环
-        assert provider() == ""  # 同一条不重复转发
-        agent.pending_messages.append("再补一句")
-        text2 = provider()
-        assert "再补一句" in text2 and "别忘了改端口" not in text2
+        assert "调度者转发" in text
+        assert provider() == ""  # 同一条不重复
+        assert agent.pending_messages == ["今天天气怎么样（闲聊）"]  # 主队列不受影响
 
     def test_worker_receives_forwarded_message(self):
         shell = _FakeTool("execute_shell", "run shell")
@@ -645,18 +647,16 @@ class TestDispatchWorkerTool:
         assert _parse_acceptance("单条文本") == ["单条文本"]
 
     def test_brief_passed_and_result_serialized(self, monkeypatch):
-        """工具的 brief/验收原样进 dispatch_to_worker；结构化结果含验收结论。"""
+        """M2 异步化：brief/验收原样进 dispatch_async；工具立即返回已开工指引。"""
         seen = {}
 
-        def _stub_dispatch(agent, brief, acceptance=None, max_iterations=None,
-                           progress_callback=None):
+        def _stub_async(agent, brief, acceptance=None, max_iterations=None,
+                        progress_callback=None):
             seen.update(brief=brief, acceptance=acceptance,
-                        max_iterations=max_iterations)
-            return {"success": True, "summary": "完成", "attempts": 1,
-                    "verdict": {"passed": True, "failures": [], "checked_files": []},
-                    "result": {"output_files": ["out.txt"]}, "packet": {}}
+                        max_iterations=max_iterations, progress_callback=progress_callback)
+            return {"dispatched": True}
 
-        monkeypatch.setattr(dispatcher, "dispatch_to_worker", _stub_dispatch)
+        monkeypatch.setattr(dispatcher, "dispatch_async", _stub_async)
         out = DispatchWorkerTool().execute(
             task_brief="目标：写报表；产出 report.html",
             acceptance=["产出 report.html 存在且非空"],
@@ -665,28 +665,21 @@ class TestDispatchWorkerTool:
             _progress_cb="CB",
         )
         result = json.loads(out)
-        assert result["success"] is True
-        assert result["summary"] == "完成"
-        assert result["verification"]["passed"] is True
-        assert result["output_files"] == ["out.txt"]
+        assert result["dispatched"] is True
+        assert "不要空等" in result["note"]
         assert seen["brief"] == "目标：写报表；产出 report.html"
         assert seen["acceptance"] == ["产出 report.html 存在且非空"]
         assert seen["max_iterations"] == 7
+        assert seen["progress_callback"] == "CB"
 
-    def test_failure_result_carries_takeover_note(self, monkeypatch):
-        monkeypatch.setattr(
-            dispatcher, "dispatch_to_worker",
-            lambda *a, **kw: {"success": False, "summary": "err", "attempts": 2,
-                              "verdict": {"passed": False,
-                                          "failures": ["零工具调用（疑似空谈/假完成）"],
-                                          "checked_files": []},
-                              "result": {}, "packet": {}})
-        out = DispatchWorkerTool().execute(
-            task_brief="简报", _agent_context=SimpleNamespace(llm=object()))
-        result = json.loads(out)
-        assert result["success"] is False
-        assert "零工具调用" in result["verification"]["failures"][0]
-        assert "接管" in result["note"]
+    def test_async_note_guides_interjection_classification(self):
+        """工具返回指引包含插话分类职责（M2 三态）。"""
+        from unittest.mock import patch
+        with patch.object(dispatcher, "dispatch_async", return_value={"dispatched": True}):
+            out = DispatchWorkerTool().execute(
+                task_brief="简报", _agent_context=SimpleNamespace(llm=object()))
+        note = json.loads(out)["note"]
+        assert "message_worker" in note and "闲聊" in note
 
 
 class TestRolePrompts:
@@ -776,3 +769,139 @@ class TestFabricationGuard:
         assert len(agent.llm.seen_messages) == 2
         assert not any(m.get("role") == "system" and "虚构交付" in str(m.get("content", ""))
                        for m in agent.messages)
+
+
+# ────────────────────────── M2：异步派发与插话分类 ──────────────────────────
+
+class TestDispatchAsync:
+    """dispatch_async：立即返回；后台闭环完成后注入【执行者返回】并唤醒。"""
+
+    def _agent(self, **kw):
+        base = dict(session_id=7, task_id=77, pending_messages=[],
+                    llm=object(), sandbox_dir=None, is_interrupted=False)
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_async_returns_immediately_and_notifies_live_agent(self, monkeypatch):
+        monkeypatch.setattr(dispatcher, "dispatch_to_worker",
+                            lambda *a, **kw: {
+                                "success": True, "summary": "完成了编译",
+                                "verdict": {"passed": True, "failures": []},
+                                "result": {"output_files": ["out.exe"]}})
+        agent = self._agent()
+        # live 判定：把 agent 塞进 _active_agents
+        import api.state as state
+        state._active_agents.setdefault(7, {})[77] = agent
+        try:
+            out = dispatcher.dispatch_async(agent, "简报")
+            assert out["dispatched"] is True
+            with dispatcher._running_lock:
+                d = dispatcher._running_dispatches.get((7, 77))
+            assert d is not None and d["thread"] is not None
+            d["thread"].join(timeout=10)
+            assert agent.pending_messages, "完成后应注入【执行者返回】"
+            note = agent.pending_messages[0]
+            assert "执行者返回" in note and "验收通过" in note and "out.exe" in note
+            # 完成后不再视为运行中
+            assert dispatcher.get_running_dispatch(7, 77) is None
+        finally:
+            state._active_agents.get(7, {}).pop(77, None)
+
+    def test_async_resume_when_turn_ended(self, monkeypatch):
+        monkeypatch.setattr(dispatcher, "dispatch_to_worker",
+                            lambda *a, **kw: {
+                                "success": False, "summary": "失败摘要",
+                                "verdict": {"passed": False,
+                                            "failures": ["产出文件不存在: x"]},
+                                "result": {}})
+        agent = self._agent()  # 不在 _active_agents → turn 已结束
+        calls = {}
+
+        def _stub_resume(task_id, extra_instruction=""):
+            calls.update(task_id=task_id, extra=extra_instruction)
+            return {"ok": True, "status": "resumed"}
+
+        monkeypatch.setattr("api.background.resume_task_manual", _stub_resume)
+        out = dispatcher.dispatch_async(agent, "简报")
+        key = (7, 77)
+        import time as _t
+        for _ in range(50):  # 最多等 5s
+            with dispatcher._running_lock:
+                if dispatcher._running_dispatches.get(key, {}).get("done"):
+                    break
+            _t.sleep(0.1)
+        for _ in range(50):
+            if calls:
+                break
+            _t.sleep(0.1)
+        assert calls.get("task_id") == 77
+        assert "执行者返回" in calls["extra"]
+        assert "验收未通过" in calls["extra"]
+        assert "产出文件不存在" in calls["extra"]
+
+
+class TestWorkerInbox:
+    def test_inbox_isolated_per_task(self):
+        dispatcher.push_worker_inbox(1, 10, "任务A的追加")
+        dispatcher.push_worker_inbox(1, 20, "任务B的追加")
+        a = dispatcher._pop_worker_inbox(1, 10)
+        b = dispatcher._pop_worker_inbox(1, 20)
+        assert a == ["任务A的追加"] and b == ["任务B的追加"]
+        assert dispatcher._pop_worker_inbox(1, 10) == []
+
+
+class TestMessageWorkerTool:
+    def _tool(self):
+        from tools.message_worker import MessageWorkerTool
+        return MessageWorkerTool()
+
+    def test_no_running_dispatch_rejected(self):
+        out = self._tool().execute(
+            message="补一句", _agent_context=SimpleNamespace(session_id=9, task_id=99))
+        r = json.loads(out)
+        assert r["delivered"] is False
+        assert "没有运行中" in r["note"]
+
+    def test_delivers_to_running_dispatch(self):
+        key = (9, 99)
+        with dispatcher._running_lock:
+            dispatcher._running_dispatches[key] = {"done": False, "result": None}
+        try:
+            out = self._tool().execute(
+                message="端口改成 8080",
+                _agent_context=SimpleNamespace(session_id=9, task_id=99))
+            r = json.loads(out)
+            assert r["delivered"] is True
+            assert dispatcher._pop_worker_inbox(9, 99) == ["端口改成 8080"]
+        finally:
+            with dispatcher._running_lock:
+                dispatcher._running_dispatches.pop(key, None)
+
+    def test_empty_message_rejected(self):
+        out = self._tool().execute(
+            message="  ", _agent_context=SimpleNamespace(session_id=9, task_id=99))
+        assert "Error" in out
+
+    def test_requires_agent_context(self):
+        assert "Error" in self._tool().execute(message="x")
+
+
+class TestDispatcherPromptM2:
+    def test_prompt_has_interjection_classification(self):
+        src = open(os.path.join(PROJECT_ROOT, "agent", "agent.py"),
+                   encoding="utf-8").read()
+        for needle in ("插话分类", "message_worker", "异步", "不要空等",
+                       "另派一个执行者"):
+            assert needle in src, f"M2 提示词缺少: {needle}"
+
+    def test_message_worker_registered_in_dispatcher_mode(self, monkeypatch, tmp_path):
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"dispatcher_mode": True}), encoding="utf-8")
+        monkeypatch.setattr("agent.agent.get_data_path", lambda name: str(tmp_path / name))
+        agent = OpenAGCAgent(memory_db_path=str(tmp_path / "memory.db"))
+        assert "message_worker" in agent.full_available_tools
+        assert "message_worker" in agent.available_tools
+        # 关闭模式零痕迹
+        cfg.write_text(json.dumps({"dispatcher_mode": False}), encoding="utf-8")
+        agent2 = OpenAGCAgent(memory_db_path=str(tmp_path / "memory2.db"))
+        assert "message_worker" not in agent2.full_available_tools
