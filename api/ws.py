@@ -413,6 +413,10 @@ async def websocket_endpoint(websocket: WebSocket):
                             sub_task=event.get("sub_task"),
                             thinking_content=_pending_thinking["content"]
                         )
+                        # 思考只归属其后的首个工具步骤；缓冲随写随清，
+                        # 否则后续每步都带上同一段思考（生产实证：界面
+                        # 上同一思考过程重复显示 N 次）
+                        _pending_thinking["content"] = None
                     except Exception as e:
                         print(f"[Task] Failed to add step: {e}")
 
@@ -953,20 +957,10 @@ async def websocket_endpoint(websocket: WebSocket):
             raise
         finally:
             agent_is_running = False
-            # If ws_alive is False (WS disconnected mid-execution), broadcast the
-            # response to any reconnected client via the pending response mechanism.
-            # The main loop handles sending for the normal (alive) case.
-            try:
-                _resp = _user_facing(locals().get('response'))
-                if not ws_alive and _resp:
-                    _broadcast_to_websockets({
-                        "type": "message", "role": "agent",
-                        "content": _resp, "session_id": ws_session_id,
-                        "task_id": locals().get('ws_task_id'),
-                    })
-                    print(f"[WS] Broadcast final response after disconnect (session {ws_session_id})")
-            except Exception as _resp_e:
-                print(f"[WS] Broadcast final response error: {_resp_e}")
+            # 最终回复的唯一发送点是主循环（run 返回后 broadcast + pop pending）；
+            # 此处不再补广播——断开期间未送达的场景由 _pending_final_responses
+            # 在重连时投递（生产实证：旧连接判定死亡时的 finally 广播与主循环
+            # 广播会同时命中共存的新连接，前端渲染两条相同回复）。
             # Clean up finished agent from _active_agents so new messages
             # can start a fresh agent loop (instead of being queued to a dead agent)
             try:
@@ -1225,6 +1219,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     if _pasted:
                         query += f"\n\n[用户粘贴的图片已保存: {', '.join(_pasted)}]"
 
+                    # 即时回执：任务解析（可能含 LLM 目标匹配）+ 首轮非流式调用
+                    # 之前是 30-60s 静默期，先让前端亮起「思考中」（生产实证：
+                    # 用户发指令后 1 分钟看不到任何动静）
+                    await _safe_send({"type": "status", "session_id": ws_session_id})
+
                     # If an agent is already running for this session (from another WS
                     # connection or previous turn), queue the message instead of starting
                     # a new agent loop.
@@ -1247,7 +1246,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Calls llm.chat (sync network I/O) — run in a worker
                     # thread so the event loop keeps serving WS/HTTP.
                     _resolved_goal = await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: _resolve_goal_for_query(query, recent_context=_recent_ctx))
+                        None, lambda: _resolve_goal_for_query(query, recent_context=_recent_ctx, session_id=ws_session_id))
                     if _resolved_goal > 0:
                         try:
                             from tools.task_plan import load_goals as _ct_load

@@ -356,6 +356,10 @@ class LLMClient:
         config = load_config()
         self.default_model = default_model or config.get("default_model", "gpt-4o")
         self.fallback_models = config.get("fallback_models", [])
+        # 调用日志归属（model_call_logs.session_id/task_id）：由调用方经
+        # set_log_context 注入；此前恒为 NULL，调试页按会话过滤查不到任何记录
+        self._log_session_id = None
+        self._log_task_id = None
 
         # Bootstrap: inject API keys from config.json into environment
         # so litellm can find them automatically
@@ -717,6 +721,15 @@ class LLMClient:
 
         return kwargs
 
+    def set_log_context(self, session_id: Optional[int] = None, task_id: Optional[int] = None):
+        """设置调用日志的归属上下文（会话/任务）。
+
+        任务切换时由调用方重新设置（如 run_turn 开头）；SubAgent 共享主
+        agent 的 client，日志归属主任务（sub_task 列另行区分）。
+        """
+        self._log_session_id = session_id
+        self._log_task_id = task_id
+
     def chat(self, messages: List[Dict[str, Any]], model: Optional[str] = None,
              tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[Any, str]:
         """
@@ -790,6 +803,7 @@ class LLMClient:
                             request_data=req_text, response_data=resp_text,
                             cache_hit=_detect_cache_hit(response), cached_tokens=_detect_cached_tokens(response),
                             latency_ms=int((t1 - t0) * 1000),
+                            session_id=self._log_session_id, task_id=self._log_task_id,
                         )
                     except Exception as log_e:
                         print(f"[LLMClient] Logging failed: {log_e}")
@@ -900,6 +914,7 @@ class LLMClient:
                         cache_hit="hit" if _cached > 0 else "miss",
                         cached_tokens=_cached,
                         latency_ms=int((time.time() - _stream_start) * 1000),
+                        session_id=self._log_session_id, task_id=self._log_task_id,
                     )
                 except Exception as log_e:
                     print(f"[LLMClient] Stream log failed: {log_e}")
