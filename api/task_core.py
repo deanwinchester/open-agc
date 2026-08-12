@@ -297,6 +297,7 @@ def _resolve_task_goal_via_llm(session_id: int, query: str) -> str:
         from core.llm_client import LLMClient
         cfg = load_config()
         llm = LLMClient(default_model=cfg.get("default_model", "moonshot/kimi-latest"))
+        llm.set_log_context(session_id=session_id)
         conn2 = db_connect()
         conn2.row_factory = sqlite3.Row
         recent_msgs = conn2.execute(
@@ -385,13 +386,32 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
     except Exception as e:
         print(f"[Task] Error resolving task: {e}")
 
-    task_title = query if len(query.strip()) > 15 else _resolve_task_goal_via_llm(session_id, query)
+    # 标题先行（非阻塞）：短 query 的 LLM 精修筑到后台线程——此前同步调用
+    # 会让任务创建前静默 10-30s（生产实证：发指令后 1 分钟看不到动静，
+    # 静默期 = LLM 标题 + LLM 目标解析 + 首轮非流式调用）
+    task_title = query if len(query.strip()) > 15 else ""
     if not task_title:
         task_title = _extract_task_title(query) or query[:120]
     if len(task_title) > 120:
         task_title = task_title[:117] + '...'
     tid = create_task(task_title, query, session_id=session_id)
     print(f"[Task] Created task {tid} for session {session_id}")
+
+    if len(query.strip()) <= 15:
+        import threading as _th
+        def _refine_title(_tid=tid, _q=query, _sid=session_id):
+            try:
+                better = _resolve_task_goal_via_llm(_sid, _q)
+                if better:
+                    if len(better) > 120:
+                        better = better[:117] + '...'
+                    _c = db_connect()
+                    _c.execute("UPDATE tasks SET title=? WHERE id=?", (better, _tid))
+                    _c.commit()
+                    _c.close()
+            except Exception as _e:
+                print(f"[Task] Title refine error: {_e}")
+        _th.Thread(target=_refine_title, daemon=True).start()
 
     try:
         from tools.shell import adopt_orphan_processes
@@ -756,7 +776,7 @@ def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: st
         print(f"[Task] Add step error: {e}")
 
 
-def _resolve_goal_for_query(query: str, recent_context: str = "") -> int:
+def _resolve_goal_for_query(query: str, recent_context: str = "", session_id: int = None) -> int:
     """Determine which goal (if any) this query is continuing.
     recent_context: last 2-3 conversation turns to distinguish follow-up from goal.
     Returns goal_id, or 0 for new task.
@@ -804,6 +824,7 @@ def _resolve_goal_for_query(query: str, recent_context: str = "") -> int:
             + f"不确定 \u2192 回复 0"
         )
         llm = LLMClient(default_model=model)
+        llm.set_log_context(session_id=session_id)
         resp, _ = llm.chat([{"role": "user", "content": prompt}])
         text = resp.choices[0].message.content.strip()
         nums = re.findall(r'\d+', text)
