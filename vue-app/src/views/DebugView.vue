@@ -126,6 +126,16 @@ onMounted(loadLogs);
 .debug-tabs {
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* tabs 内容区撑满剩余高度并可滚动：el-tabs 根默认 block 布局，50 行日志
+   表格会溢出视口且无滚动条（用户反馈：调用日志无法上下滑动） */
+.debug-tabs :deep(.el-tabs__content) {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .log-card {
