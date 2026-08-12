@@ -487,17 +487,32 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception as link_err:
                         print(f"[Task] tool_done link error: {link_err}")
                     try:
-                        # Update the step with result and tool_call_id
+                        # Update the step with result and tool_call_id.
+                        # 匹配键优先 tool_call_id：同轮并行工具共享 step_number，
+                        # 按 step 更新会把同 step 所有行刷成同一结果（生产实证：
+                        # 四个不同路径的 read_file 全部显示 player_screen.dart）。
                         conn = db_connect()
                         cursor = conn.cursor()
-                        cursor.execute(
-                            "UPDATE task_steps SET result_preview=?, full_result=?, success=?, tool_call_id=COALESCE(?, tool_call_id) WHERE task_id=? AND step_number=?",
-                            (event.get("result_preview", ""),
-                             event.get("full_result", event.get("result_preview", "")),
-                             1 if event.get("success") else 0,
-                             event.get("tool_call_id"),
-                             ws_task_id, adjusted_step)
-                        )
+                        _tcid = event.get("tool_call_id")
+                        if _tcid:
+                            cursor.execute(
+                                "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND tool_call_id=?",
+                                (event.get("result_preview", ""),
+                                 event.get("full_result", event.get("result_preview", "")),
+                                 1 if event.get("success") else 0,
+                                 ws_task_id, _tcid)
+                            )
+                        if not _tcid or cursor.rowcount == 0:
+                            # 无 id 或 id 未命中（旧行缺 id）：只更新同 step 中
+                            # 尚未写入结果的行，已写的不再覆盖
+                            cursor.execute(
+                                "UPDATE task_steps SET result_preview=?, full_result=?, success=?, tool_call_id=COALESCE(?, tool_call_id) WHERE task_id=? AND step_number=? AND (result_preview IS NULL OR result_preview='')",
+                                (event.get("result_preview", ""),
+                                 event.get("full_result", event.get("result_preview", "")),
+                                 1 if event.get("success") else 0,
+                                 _tcid,
+                                 ws_task_id, adjusted_step)
+                            )
                         conn.commit()
                         conn.close()
                     except Exception as e:
@@ -508,11 +523,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     try:
                         _rpreview = event.get("result_preview", "")
                         _success = 1 if event.get("success") else 0
+                        _tcid2 = event.get("tool_call_id")
                         _conn_step = db_connect()
-                        _conn_step.execute(
-                            "UPDATE task_steps SET result_preview=?, success=? WHERE task_id=? AND step_number=?",
-                            (_rpreview, _success, ws_task_id, adjusted_step)
-                        )
+                        if _tcid2:
+                            _conn_step.execute(
+                                "UPDATE task_steps SET result_preview=?, success=? WHERE task_id=? AND tool_call_id=?",
+                                (_rpreview, _success, ws_task_id, _tcid2)
+                            )
+                        else:
+                            # 无 id 时只更新同 step 未写结果的行（防并行工具结果串台）
+                            _conn_step.execute(
+                                "UPDATE task_steps SET result_preview=?, success=? WHERE task_id=? AND step_number=? AND (result_preview IS NULL OR result_preview='')",
+                                (_rpreview, _success, ws_task_id, adjusted_step)
+                            )
                         _conn_step.commit()
                         _conn_step.close()
                     except Exception as _step_e:

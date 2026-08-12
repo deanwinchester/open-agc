@@ -278,11 +278,20 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
             try:
                 conn = db_connect()
                 cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=?",
-                    (event.get("result_preview", ""), event.get("full_result", event.get("result_preview", "")),
-                     1 if event.get("success") else 0, task_id, done_step)
-                )
+                _tcid = event.get("tool_call_id")
+                if _tcid:
+                    # 并行工具同 step 编号：按 call_id 精确匹配，防结果串台
+                    cursor.execute(
+                        "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND tool_call_id=?",
+                        (event.get("result_preview", ""), event.get("full_result", event.get("result_preview", "")),
+                         1 if event.get("success") else 0, task_id, _tcid)
+                    )
+                if not _tcid or cursor.rowcount == 0:
+                    cursor.execute(
+                        "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=? AND (result_preview IS NULL OR result_preview='')",
+                        (event.get("result_preview", ""), event.get("full_result", event.get("result_preview", "")),
+                         1 if event.get("success") else 0, task_id, done_step)
+                    )
                 conn.commit()
                 conn.close()
             except Exception:

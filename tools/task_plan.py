@@ -566,30 +566,20 @@ class TaskPlanTool(BaseTool):
                                 return p
                         except Exception:
                             continue
-            # Fallback: check DB for plan_id (current task + same session)
+            # Fallback: check DB for plan_id (current task only)。
+            # 生产实证：此前还会兜底读「同 session 最近任务的计划」，无计划任务
+            # 会拿到别的任务的计划（#398 读到 #354 Tripo 计划），主 agent 被
+            # 强误导去搜无关上下文——计划必须按任务精确归属。
             try:
                 import sqlite3 as _sq3
                 from core.paths import get_data_path as _gdp
                 _c = _sq3.connect(_gdp("chat_history.db"))
-                # Check current task first
                 _r = _c.execute("SELECT plan_id FROM tasks WHERE id=?", (task_id,)).fetchone()
                 if _r and _r[0]:
                     p = load_plan(plan_id=_r[0])
                     if p:
                         _c.close()
                         return p
-                # Fallback: check other tasks in same session
-                _session = _c.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()
-                if _session and _session[0]:
-                    for _r2 in _c.execute(
-                        "SELECT plan_id FROM tasks WHERE session_id=? AND plan_id != '' AND plan_id IS NOT NULL ORDER BY updated_at DESC LIMIT 5",
-                        (_session[0],)
-                    ).fetchall():
-                        if _r2[0]:
-                            p = load_plan(plan_id=_r2[0])
-                            if p:
-                                _c.close()
-                                return p
                 _c.close()
             except Exception:
                 pass
