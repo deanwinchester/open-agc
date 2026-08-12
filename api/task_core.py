@@ -776,9 +776,12 @@ def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: st
         print(f"[Task] Add step error: {e}")
 
 
-def _resolve_goal_for_query(query: str, recent_context: str = "", session_id: int = None) -> int:
+def _resolve_goal_for_query(query: str, recent_context: str = "", session_id: int = None,
+                            fast_only: bool = False) -> int:
     """Determine which goal (if any) this query is continuing.
     recent_context: last 2-3 conversation turns to distinguish follow-up from goal.
+    fast_only: 只走续接词快速路径，跳过 LLM 判定（dispatcher_mode 下目标关联
+    由主 agent 在意图理解中完成，前置 LLM 是 10-30s 的重复劳动）。
     Returns goal_id, or 0 for new task.
     """
     q = query.strip().lower()
@@ -806,6 +809,11 @@ def _resolve_goal_for_query(query: str, recent_context: str = "", session_id: in
         active = []
 
     if not active:
+        return 0
+
+    if fast_only:
+        # dispatcher_mode：目标关联交给主 agent 的全量上下文意图理解，
+        # 此处不再消耗一次 LLM 调用
         return 0
 
     try:
