@@ -159,6 +159,9 @@ class TestLLMCallProtection:
 class TestDelegation:
     def _make_agent(self, monkeypatch, plans, sub_success):
         agent = _bare_agent()
+        # 本组测试针对旧委派路径（dispatcher_mode 关闭语义）——强制模式关闭，
+        # 隔离运行环境真实 config.json 可能开启 dispatcher_mode 的影响。
+        agent._dispatcher_mode_enabled = lambda: False
         agent._should_delegate = lambda text: True
         agent._decompose_task = lambda text: [dict(p) for p in plans]
         seen_tasks = []

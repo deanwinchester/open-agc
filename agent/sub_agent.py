@@ -81,7 +81,10 @@ class SubAgent:
                  network_whitelist=None,
                  permission_whitelist=None,
                  session_id=None,
-                 context_brief: str = ""):
+                 context_brief: str = "",
+                 full_tools_map: Optional[Dict] = None,
+                 external_interrupt_check: Optional[Callable] = None,
+                 pending_message_provider: Optional[Callable[[], str]] = None):
         self.task = task
         self.max_iterations = max_iterations
         self.progress_callback = progress_callback
@@ -93,28 +96,52 @@ class SubAgent:
         self._permission_whitelist = permission_whitelist or set()
         self._session_id = session_id
         self.context_brief = context_brief or ""
+        # 全量工具发现（调度者模式 M1）：传入时 worker 可通过
+        # search_available_tools 从该 map 解锁更多工具；不传维持现状。
+        self._full_tools_map = full_tools_map
+        # 调度者模式 M1 联动钩子（均可选，不传维持现状）：
+        # - external_interrupt_check：主 agent 中断标志透传（评审 I-1）
+        # - pending_message_provider：每迭代拉取用户插话注入 worker 上下文（评审 I-2）
+        self._external_interrupt_check = external_interrupt_check
+        self._pending_message_provider = pending_message_provider
 
-        # Build system prompt
+        # Build system prompt — 执行者角色提示（调度者模式重构轮重写）：
+        # 简报为权威依据；真实执行纪律；结构化交付汇报。
         now = _time.strftime("%Y-%m-%d %H:%M:%S")
         tool_list = "\n".join(f"  - {t}" for t in tools)
+        discovery_rule = (
+            "3. 需要未列出的能力时，先调用 search_available_tools 检索启用，再使用该工具\n"
+            if self._full_tools_map is not None else ""
+        )
         # Sub-agents run isolated from the main conversation; the brief
         # carries the goal / recent user messages / session paths so the
         # sub-agent never has to "find the repository" by blind scanning.
         brief_section = (
-            f"\n\n## 会话上下文\n{self.context_brief}"
+            f"\n\n## 会话上下文（参考）\n{self.context_brief}"
             if self.context_brief else ""
         )
         self.messages = [
             {
                 "role": "system",
                 "content": (
-                    f"你是 Open-AGC 的子代理，当前时间：{now}\n"
-                    f"你的子任务是：{task}\n\n"
-                    f"可用工具：\n{tool_list}\n\n"
-                    f"规则：\n"
-                    f"1. 专注于完成子任务，完成后返回结果摘要\n"
-                    f"2. 不要使用未列出的工具\n"
-                    f"3. 不要执行超出子任务范围的操作"
+                    f"你是执行者（work agent），由调度者指派任务。当前时间：{now}\n\n"
+                    f"## 任务简报（调度者撰写，是权威依据）\n{task}\n\n"
+                    f"## 可用工具\n{tool_list}\n\n"
+                    f"## 工作纪律\n"
+                    f"1. 用工具真实执行——禁止只描述计划不行动；每个意图都落到工具调用上。\n"
+                    f"2. 严格按简报的目标与产出要求执行，不做超出范围的操作。\n"
+                    f"{discovery_rule}"
+                    f"4. 产出文件写到简报指定位置；未指定则放沙箱 outputs/ 下，"
+                    f"并在汇报中给出完整路径。\n"
+                    f"5. 遇到困难先说明原因再换方案；同一方法失败两次就换思路，"
+                    f"不要重复尝试同样的操作。\n"
+                    f"6. 需求不清或客观不可行时：明确报告「无法完成」及原因、"
+                    f"已排除的路径——严禁假装完成。\n\n"
+                    f"## 交付汇报（最后一轮必须包含）\n"
+                    f"- 完成内容（实际做了什么）\n"
+                    f"- 产出清单（文件的完整路径）\n"
+                    f"- 验收标准逐条自评（简报里有的话）\n"
+                    f"- 遗留问题/风险（没有就写「无」）"
                     f"{brief_section}"
                 )
             }
@@ -126,8 +153,37 @@ class SubAgent:
             if name in parent_tools:
                 self.available_tools[name] = parent_tools[name]
 
+        # 全量工具发现（M1）：发现工具必须绑定本子代理自己的解锁回调——
+        # 复用主 agent 的 ToolDiscoveryTool 实例会把工具启用到主 agent 上。
+        if self._full_tools_map is not None:
+            from tools.discovery import ToolDiscoveryTool
+
+            def _enable_more(tool_names):
+                added = False
+                for _n in tool_names or []:
+                    if _n in self._full_tools_map and _n not in self.available_tools:
+                        self.available_tools[_n] = self._full_tools_map[_n]
+                        added = True
+                if added:
+                    self.tool_schemas = [t.get_openai_schema()
+                                         for t in self.available_tools.values()
+                                         if t is not None]
+
+            self.available_tools["search_available_tools"] = ToolDiscoveryTool(
+                full_tools=self._full_tools_map, enable_callback=_enable_more)
+
         self.tool_schemas = [t.get_openai_schema()
                              for t in self.available_tools.values()]
+
+    def _interrupted(self) -> bool:
+        """自身中断标志 + 外部（主 agent）中断标志联动（评审 I-1）。"""
+        if self.is_interrupted:
+            return True
+        try:
+            return bool(self._external_interrupt_check
+                        and self._external_interrupt_check())
+        except Exception:
+            return False
 
     def run(self) -> Dict[str, Any]:
         """Execute the sub-task. Returns structured result."""
@@ -148,9 +204,19 @@ class SubAgent:
         MAX_REPEATED_TOOL_CALLS = 3
 
         while current_iter < self.max_iterations:
-            if self.is_interrupted:
+            if self._interrupted():
                 return {"success": False, "summary": "Interrupted",
                         "duration": _time.time() - start_time, "output_files": []}
+
+            # 用户插话转发（I-2）：调度执行期间主循环轮询点到不了，
+            # 由 provider 拉取主 agent 队列里的新消息注入 worker 上下文。
+            if self._pending_message_provider:
+                try:
+                    _pending = self._pending_message_provider()
+                except Exception:
+                    _pending = ""
+                if _pending:
+                    self.messages.append({"role": "user", "content": _pending})
 
             current_iter += 1
 
@@ -242,7 +308,14 @@ class SubAgent:
                     tool = self.available_tools.get(func_name)
                     success = False
                     if not tool:
-                        result = f"Error: Tool '{func_name}' not available in this sub-agent"
+                        if self._full_tools_map and func_name in self._full_tools_map:
+                            # 已知但未解锁（全量工具发现）：引导走发现路径，
+                            # 与主 agent 的 tiered exposure 行为一致。
+                            result = (f"Error: Tool '{func_name}' is not enabled in this sub-agent. "
+                                      f"Call search_available_tools with a related query to enable it, "
+                                      f"then retry your call.")
+                        else:
+                            result = f"Error: Tool '{func_name}' not available in this sub-agent"
                     else:
                         try:
                             extra_kwargs = {
@@ -258,7 +331,7 @@ class SubAgent:
                                 self._tool_locks[func_name].acquire()
                                 try:
                                     result = tool.execute(
-                                        interrupt_check=lambda: self.is_interrupted,
+                                        interrupt_check=lambda: self._interrupted(),
                                         _agent_context=self._agent_context,
                                         **extra_kwargs,
                                         **func_args,
@@ -267,7 +340,7 @@ class SubAgent:
                                     self._tool_locks[func_name].release()
                             else:
                                 result = tool.execute(
-                                    interrupt_check=lambda: self.is_interrupted,
+                                    interrupt_check=lambda: self._interrupted(),
                                     _agent_context=self._agent_context,
                                     **extra_kwargs,
                                     **func_args,
@@ -346,7 +419,7 @@ class SubAgent:
                 _tool = self.available_tools[_fn]
                 try:
                     _res = _tool.execute(
-                        interrupt_check=lambda: self.is_interrupted,
+                        interrupt_check=lambda: self._interrupted(),
                         _agent_context=self._agent_context,
                         _session_whitelist=self._session_whitelist,
                         _network_whitelist=self._network_whitelist,
