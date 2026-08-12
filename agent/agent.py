@@ -52,6 +52,7 @@ from tools.install_skill import InstallSkillTool
 from tools.compact_context import CompactContextTool
 from tools.subagent_dispatch import DispatchSubagentTool
 from tools.dispatch_worker import DispatchWorkerTool
+from tools.message_worker import MessageWorkerTool
 from tools.request_secret import RequestSecretTool
 from tools.theme_tool import CustomizeThemeTool
 
@@ -609,6 +610,7 @@ class OpenAGCAgent:
                     f"\n## 分流（每条用户输入先判定）\n"
                     f"你只有两种身份，没有第三种：\n"
                     f"- **对话者**：闲聊、问答、讨论、澄清需求、汇报结果——直接回复，不动用工具。\n"
+                    f"  对话直接给出答案，不要反问用户（ask_user_question 只用于真正缺关键信息时）。\n"
                     f"- **调度者**：凡是需要「做事」的请求——产出内容、读写文件、操作系统、"
                     f"查资料整理、创作、重写/续写/改稿/润色——**一律派发执行者，没有例外**。\n"
                     f"⚠️ 你没有「小任务直接做」的选项：再小的事也派发。\n"
@@ -616,7 +618,7 @@ class OpenAGCAgent:
                     f"⚠️ 在回复里直接输出本应由执行者产出的内容（章节/稿件/代码/报告正文）"
                     f"= 未完成交付。\n"
                     f"⚠️ 行动前先显式声明：「对话：…」或「派发：…」＋一句理由。\n"
-                    f"\n## 派发（dispatch_worker）\n"
+                    f"\n## 派发（dispatch_worker，异步）\n"
                     f"基于全部会话上下文理解用户**真正**想要什么（不要只看字面一句话；"
                     f"必要时回顾历史任务的执行情况与结果），然后**亲自撰写**任务简报，"
                     f"以 task_brief 参数调用 dispatch_worker。简报必须自包含"
@@ -628,8 +630,16 @@ class OpenAGCAgent:
                     f"5. 验收标准 acceptance：1-3 条可客观检验的条件\n"
                     f"系统会自动为简报补充相关历史任务、记忆与文件路径——检索是增强，"
                     f"不能替代你的理解。\n"
+                    f"派发是**异步**的：调用立即返回，执行者在后台干活——**不要空等**，"
+                    f"立即回复用户已开工（一句话说清任务要点）；执行者完成（含证据验收）"
+                    f"后系统会以【执行者返回】通知你，届时你再验收呈现。\n"
+                    f"\n## 执行中的插话分类（你的职责，不要推给执行者）\n"
+                    f"worker 执行期间用户又发来消息时，先判定三类再行动：\n"
+                    f"- 闲聊/无关提问/讨论 → 直接回答，**不要打扰 worker**。\n"
+                    f"- 与当前任务相关的追加要求/纠正 → 用 message_worker 转发给 worker。\n"
+                    f"- 明显是新任务 → dispatch_worker 另派一个执行者（可并行）。\n"
                     f"\n## 验收与接管\n"
-                    f"执行者返回后看验收结论与证据（产出文件/关键步骤），不信「成功」字样。"
+                    f"收到【执行者返回】后看验收结论与证据（产出文件/关键步骤），不信「成功」字样。"
                     f"验收未通过：先针对性补充信息重派一次；再次失败则亲自接管执行"
                     f"（此时适用下方执行规范），并如实告知用户。\n"
                     f"接管是唯一的亲手执行场景——仅限执行者两次失败之后。\n"
@@ -748,12 +758,14 @@ class OpenAGCAgent:
             "customize_theme": "界面风格定制",
         }
 
-        # 调度者模式 M1（实验开关 dispatcher_mode）：仅在开启时注册并预启用
-        # dispatch_worker（免 search_available_tools）；关闭时完全不注册，
-        # 工具列表/提示词均无痕迹（零影响）。调度者角色提示见 system_prompt_base 组装段。
+        # 调度者模式 M1+M2（实验开关 dispatcher_mode）：仅在开启时注册并预启用
+        # dispatch_worker / message_worker（免 search_available_tools）；关闭时
+        # 完全不注册，工具列表/提示词均无痕迹（零影响）。
         if self._dispatcher_mode_enabled():
             self.full_available_tools["dispatch_worker"] = DispatchWorkerTool()
             self.tool_display_names["dispatch_worker"] = "派发执行者"
+            self.full_available_tools["message_worker"] = MessageWorkerTool()
+            self.tool_display_names["message_worker"] = "转发追加指令"
             # 隐藏旧的 dispatch_subagent 入口，避免模型 search 工具时发现两个
             # 派发入口而绕开 dispatch_worker 的证据验收链路。
             self.full_available_tools.pop("dispatch_subagent", None)
@@ -833,9 +845,10 @@ class OpenAGCAgent:
                                 "manage_task_plan", "shell_send"}
         CORE_TOOL_NAMES = TIERED_CORE_TOOL_NAMES if self.tool_tiered_exposure else FULL_CORE_TOOL_NAMES
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
-        # 调度者模式：dispatch_worker 常驻（上面已在开启时注册进 full_available_tools）
+        # 调度者模式：dispatch/message_worker 常驻（上面已在开启时注册进 full_available_tools）
         if self._dispatcher_mode_enabled():
             self.active_tool_names.add("dispatch_worker")
+            self.active_tool_names.add("message_worker")
 
         # Adaptive resident: auto-load frequently used non-core tools
         try:

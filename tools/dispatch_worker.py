@@ -47,11 +47,12 @@ class DispatchWorkerTool(BaseTool):
 
     name: str = "dispatch_worker"
     description: str = (
-        "派发一个执行者（worker）在独立上下文中完成实质任务，并对产出做证据验收。"
+        "派发一个执行者（worker）在独立上下文中完成实质任务，后台异步执行并对产出做"
+        "证据验收——调用立即返回，你**不要空等**：先回复用户已开工；worker 完成（含验收）"
+        "后系统会以【执行者返回】通知你，届时你验收证据并呈现交付。"
         "调用前你必须基于全部会话上下文亲自理解用户意图，把完整任务简报（目标、背景、"
         "产出要求）写入 task_brief——worker 看不到本对话，简报必须自包含。"
         "系统会自动补充相关历史任务、记忆与文件路径作为参考。"
-        "验收未通过时返回失败原因，由你亲自接管完成。"
         "闲聊、简单问答、单步小操作（读个文件、跑条命令）不要使用本工具。"
     )
 
@@ -102,7 +103,7 @@ class DispatchWorkerTool(BaseTool):
             return ("Error: task_brief 不能为空——请基于全部会话上下文"
                     "亲自写出完整任务简报（目标、背景、产出要求）。")
 
-        result = dispatcher.dispatch_to_worker(
+        result = dispatcher.dispatch_async(
             agent,
             task_brief.strip(),
             acceptance=_parse_acceptance(acceptance),
@@ -111,12 +112,10 @@ class DispatchWorkerTool(BaseTool):
         )
 
         out = {
-            "success": bool(result.get("success")),
-            "summary": result.get("summary", ""),
-            "attempts": result.get("attempts"),
-            "verification": result.get("verdict"),
-            "output_files": (result.get("result") or {}).get("output_files", []),
+            "dispatched": bool(result.get("dispatched")),
+            "note": ("执行者已在后台开工。现在请立即回复用户「已开工 + 任务要点」，不要空等；"
+                     "执行者完成（含证据验收）后系统会以【执行者返回】通知你，"
+                     "届时你再验收并呈现交付。worker 执行期间用户发来的追加指令，"
+                     "判断与当前任务相关时用 message_worker 转发，闲聊/无关提问直接回答。"),
         }
-        if not out["success"]:
-            out["note"] = "验收未通过或执行失败：请根据 verification.failures 亲自接管执行。"
         return json.dumps(out, ensure_ascii=False)
