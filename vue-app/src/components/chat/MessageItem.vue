@@ -4,18 +4,45 @@
 // 用户气泡可携带图片缩略图（dataURL 数组，flex 排列）与附件 chips
 //（文件名+大小、下载链接 /api/upload/{name}）——对齐旧 static/app.js appendMessage。
 // 气泡下方显示消息时间（DB UTC 时间戳或本地 ISO）；有 DB id 的消息悬停出现删除按钮。
-import { computed } from 'vue';
+// agent 消息（有 DB id）附 👍/👎 反馈按钮（M3 好评率采集，/api/feedback）。
+import { computed, ref, watch } from 'vue';
 import MarkdownView from '../MarkdownView.vue';
+import { request } from '../../api/client';
 import zh from '../../i18n/zh';
 
 const t = zh.chat;
 
 const props = defineProps({
-  // { role: 'user'|'agent'|'system', content, taskId?, id?, timestamp?, images?: string[]|null, files?: {name,path,size}[]|null }
+  // { role: 'user'|'agent'|'system', content, taskId?, id?, timestamp?, feedback?: 0|1|-1, images?: string[]|null, files?: {name,path,size}[]|null }
   item: { type: Object, required: true },
 });
 
 const emit = defineEmits(['delete']);
+
+// 反馈状态（-1/0/1）；历史消息由 /api/history 带入，实时消息默认 0
+const feedback = ref(props.item.feedback || 0);
+watch(() => props.item.feedback, (v) => { feedback.value = v || 0; });
+const feedbackBusy = ref(false);
+
+const canFeedback = computed(() => props.item.role === 'agent' && !!props.item.id);
+
+async function onFeedback(score) {
+  if (feedbackBusy.value) return;
+  const next = feedback.value === score ? 0 : score; // 再点一次撤销
+  feedbackBusy.value = true;
+  try {
+    await request('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message_id: props.item.id, score: next }),
+    });
+    feedback.value = next;
+  } catch {
+    // 失败静默：保持原状态（非关键路径）
+  } finally {
+    feedbackBusy.value = false;
+  }
+}
 
 // DB timestamp 是 UTC 'YYYY-MM-DD HH:MM:SS'（sqlite CURRENT_TIMESTAMP）；
 // 实时消息是本地 ISO 串。统一转本地显示：今天 HH:mm，其余 MM-DD HH:mm。
@@ -94,7 +121,25 @@ function dlHref(name) {
         <MarkdownView :content="item.content" />
         <router-link v-if="item.taskId" class="task-link" :to="`/tasks/${item.taskId}`">#{{ item.taskId }}</router-link>
       </div>
-      <div v-if="timeText" class="msg-time">{{ timeText }}</div>
+      <div class="msg-foot">
+        <div v-if="timeText" class="msg-time">{{ timeText }}</div>
+        <div v-if="canFeedback" class="msg-feedback">
+          <button
+            class="fb-btn" :class="{ active: feedback === 1 }"
+            :title="t.feedbackGood" :disabled="feedbackBusy"
+            @click="onFeedback(1)"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></svg>
+          </button>
+          <button
+            class="fb-btn" :class="{ active: feedback === -1 }"
+            :title="t.feedbackBad" :disabled="feedbackBusy"
+            @click="onFeedback(-1)"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform: rotate(180deg)"><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></svg>
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -120,6 +165,59 @@ function dlHref(name) {
 
 .msg-time.user {
   text-align: right;
+}
+
+.msg-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+
+.msg-foot .msg-time {
+  margin-top: 0;
+}
+
+.msg-feedback {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.msg-row:hover .msg-feedback,
+.msg-feedback:has(.fb-btn.active) {
+  opacity: 1;
+}
+
+.fb-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--el-bg-color);
+  color: var(--el-text-color-placeholder);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.fb-btn:hover {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-5);
+}
+
+.fb-btn.active {
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  border-color: var(--el-color-primary-light-5);
+}
+
+.fb-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .msg-bubble {

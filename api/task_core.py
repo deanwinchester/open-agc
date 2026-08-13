@@ -558,20 +558,23 @@ def save_message(role: str, content: str, session_id: int = 1, task_id: int = No
         att_json = json.dumps(attachments, ensure_ascii=False) if attachments else None
         conn = db_connect()
         if task_id:
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO messages (role, content, session_id, task_id, attachments) VALUES (?, ?, ?, ?, ?)",
                 (role, content, session_id, task_id, att_json)
             )
         else:
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO messages (role, content, session_id, attachments) VALUES (?, ?, ?, ?)",
                 (role, content, session_id, att_json)
             )
+        msg_id = cur.lastrowid
         conn.execute("UPDATE sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
         conn.commit()
         conn.close()
+        return msg_id
     except Exception as _e:
         print(f"[TaskCore] save_message error: {_e}")
+        return None
 
 
 def save_task_context(task_id: int, messages: list):
