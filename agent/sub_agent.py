@@ -221,15 +221,35 @@ class SubAgent:
             current_iter += 1
 
             try:
-                response, _ = self.llm.chat(
-                    messages=self.messages,
+                # 漂移纠错重试（与主 agent 同款，公共 helper）：此前裸调用，
+                # 一次 JSON 漂移整个 worker 即死——worker 故障率远高于主 agent
+                # 的主因（生产实证 whisper 编译任务两轮漂移直接炸死）。
+                from core.llm_client import chat_with_drift_retry
+                response, _ = chat_with_drift_retry(
+                    self.llm, self.messages,
                     tools=self.tool_schemas if self.tool_schemas else None,
+                    retries=2,
+                    on_retry=lambda n: print(f"[SubAgent] 工具调用 JSON 漂移，纠错重试（{n}/2）"),
                 )
             except Exception as e:
-                return {"success": False, "summary": f"LLM error: {e}",
+                return {"success": False, "summary": f"LLM error: {type(e).__name__}: {str(e)[:300]}",
                         "duration": _time.time() - start_time, "output_files": []}
 
             message = response.choices[0].message
+
+            # thinking 可视化：worker 的思考过程同样转发进度（此前只有
+            # 主 agent 的 thinking 上屏，worker 是黑盒——用户反馈）
+            _reasoning = getattr(message, "reasoning_content", None)
+            if _reasoning and self.progress_callback:
+                try:
+                    self.progress_callback({
+                        "event": "thinking",
+                        "iteration": current_iter,
+                        "content": _reasoning,
+                        "sub_task": self.task[:50],
+                    })
+                except Exception:
+                    pass
 
             # Tool calls
             if message.tool_calls:

@@ -922,3 +922,49 @@ class LLMClient:
         except Exception as e:
             print(f"Error calling LLM stream ({target_model}): {str(e)}")
             raise
+
+
+# ────────────────────────── 工具调用 JSON 漂移容错（公共） ──────────────────────────
+# 生产实证：k3 经 Anthropic 协议返回 tool_call arguments 时偶发未闭合 JSON /
+# 裸文本（长 shell 命令、含换行的 Python 代码最易发）。盲重试同一 prompt
+# 漂移复发率高；把「格式非法」反馈给模型再试，大部分能救回。
+
+_DRIFT_ERROR_KEYS = ("Failed to parse tool call", "Unterminated string", "Expecting value")
+
+DRIFT_RETRY_HINT = (
+    "⚠️ 你刚才的工具调用参数不是合法 JSON（字符串未闭合/未转义或"
+    "直接输出了裸文本），已被 API 解析层拒绝，该次调用未执行。"
+    "请重新发起调用：arguments 必须是严格合法的 JSON 字符串"
+    "（换行写 \\n、双引号转义、对象完整闭合）。"
+)
+
+
+def is_tool_call_drift_error(err: BaseException) -> bool:
+    """判断异常是否为工具调用 JSON 漂移（可纠错重试）。"""
+    es = str(err)
+    return any(k in es for k in _DRIFT_ERROR_KEYS)
+
+
+def chat_with_drift_retry(llm, messages: List[Dict[str, Any]],
+                          tools: Optional[List[Dict[str, Any]]] = None,
+                          retries: int = 2, on_retry=None) -> Tuple[Any, str]:
+    """llm.chat + 漂移纠错重试：漂移时追加纠错 system 消息（反馈式重试）。
+
+    供 SubAgent/worker 等没有 run_turn 纠错层的调用方使用；主 agent 的
+    run_turn 内联同款逻辑（含 progress/continue 语义）不重复实现。
+    """
+    attempt = 0
+    while True:
+        try:
+            return llm.chat(messages=messages, tools=tools)
+        except Exception as e:
+            if is_tool_call_drift_error(e) and attempt < retries:
+                attempt += 1
+                messages.append({"role": "system", "content": DRIFT_RETRY_HINT})
+                if on_retry:
+                    try:
+                        on_retry(attempt)
+                    except Exception:
+                        pass
+                continue
+            raise
