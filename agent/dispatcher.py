@@ -421,6 +421,24 @@ def _make_pending_provider(agent):
     return _provider
 
 
+def _load_worker_skill_context(agent, brief: str) -> str:
+    """worker 技能注入（与主 agent 同机制，生产实证缺失）：按简报语义检索
+    技能并格式化为提示段落——写作类任务此前因 worker 无 human-writing
+    技能而质量弱于主 agent 直执时代。"""
+    try:
+        store = getattr(agent, "skill_store", None)
+        if store is None:
+            return ""
+        store.refresh()
+        matched = store.retrieve_semantic(brief or "", top_k=3)
+        if not matched:
+            return ""
+        return store.format_skills_for_prompt(matched)
+    except Exception as e:
+        print(f"[Dispatcher] worker skill load error: {e}")
+        return ""
+
+
 def _run_worker(agent, task_text: str, progress_callback,
                 max_iterations: Optional[int] = None) -> Dict[str, Any]:
     """构造并运行单执行者 SubAgent（全量工具发现 + 复用现有 context_brief）。
@@ -429,6 +447,14 @@ def _run_worker(agent, task_text: str, progress_callback,
     交给验收/重派回路处理。
     """
     from agent.sub_agent import SubAgent  # 延迟导入避免循环
+
+    # worker 技能注入：按简报检索（human-writing 等），与主 agent 同机制
+    try:
+        _skill_ctx = _load_worker_skill_context(agent, task_text[:600])
+        if _skill_ctx:
+            task_text += "\n\n" + _skill_ctx
+    except Exception:
+        pass
 
     try:
         _brief_fn = getattr(agent, "_build_context_brief", None)

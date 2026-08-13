@@ -2738,16 +2738,11 @@ class OpenAGCAgent:
                 # 即失败）：注入纠错消息后重试本轮（上限 2 次）——生产实证：
                 # k3 偶发未闭合 JSON，LLMClient 三次盲重试同一 prompt 仍漂移，
                 # 不带纠错反馈的重试等于让模型在同一位置再摔三次。
-                _es = str(e)
-                if ("Failed to parse tool call" in _es or "Unterminated string" in _es
-                        or "Expecting value" in _es) and self._format_drift_retries < 2:
+                from core.llm_client import is_tool_call_drift_error, DRIFT_RETRY_HINT
+                if is_tool_call_drift_error(e) and self._format_drift_retries < 2:
                     self._format_drift_retries += 1
                     print(f"[Agent] 工具调用 JSON 格式漂移，注入纠错重试（{self._format_drift_retries}/2）")
-                    self.messages.append({"role": "system", "content": (
-                        "⚠️ 你刚才的工具调用参数不是合法 JSON（字符串未闭合/未转义或"
-                        "直接输出了裸文本），已被 API 解析层拒绝，该次调用未执行。"
-                        "请重新发起调用：arguments 必须是严格合法的 JSON 字符串"
-                        "（换行写 \\n、双引号转义、对象完整闭合）。")})
+                    self.messages.append({"role": "system", "content": DRIFT_RETRY_HINT})
                     continue
                 # LLM call failed (network error, empty choices, malformed
                 # response). Must not escape run_turn — run the same cleanup
