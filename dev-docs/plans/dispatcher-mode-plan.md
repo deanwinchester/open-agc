@@ -100,8 +100,23 @@
 
 ## 4. 里程碑
 
-- M1：交接包装配 + 单执行者派发 + 证据验收（最小闭环，直执兜底）
-- M2：输入分类（chat/append/new_task）+ 追加指令注入
+- M1：交接包装配 + 单执行者派发 + 证据验收（最小闭环，直执兜底）✅ 已落地
+- M2：输入分类（chat/append/new_task）+ 追加指令注入 ✅ 已落地
+  - dispatch 异步化（worker 后台线程，主 agent 派完即回不阻塞）——分类的物理前提
+  - 完成唤醒：【执行者返回】注入活跃实例或 resume_task_manual 唤起呈现
+  - message_worker：worker 插话专属队列，与原始 pending_messages 物理隔离
+  - 提示词三态：闲聊直答 / 追加转发 / 新任务再派（并发）
+- M2.5（worker 能力对齐，生产实证追加）：
+  - ✅ 漂移容错公共化（chat_with_drift_retry，SubAgent 同款纠错重试）
+  - ✅ 技能注入（按简报语义检索 skill_store，human-writing 等）
+  - ✅ thinking 可视化（worker reasoning 转发 progress）
+  - ⬜ **worker 上下文压缩**：长任务（100+ 步）必撑爆——复用主 agent
+    fold/compact 机制，注意与 drift_retry 的 messages 追加兼容
+  - ⬜ **worker 恢复机制**：dispatch 状态持久化（brief/packet/进度），
+    服务重启或线程死亡后 guardian 唤起主 agent 决定重派；现状 dispatcher
+    线程重启即死，恢复的只是主 agent turn，worker 进度全丢
+  - ⬜ **任务状态语义**：异步后主 agent turn 结束即 completed，worker 仍在
+    后台跑——任务界面状态与真实执行状态不符，M4 一并理顺
 - M3：eval 接入（--mode、报告、3 次取均值）+ 用户反馈按钮
 - M4：并发任务 UI（泳道雏形）
 - M5：A/B 跑分 + 评审 + 合并决策
@@ -111,3 +126,5 @@
 - **装配质量即上限**：交接包在界面对用户可见，可纠偏。
 - **成本膨胀**：token 增幅 >30% 即触发回退评审；闲聊/小任务必须走直执。
 - **模型方差**：每场景 3 次取成功率；判定标准用 pp（百分点）而非相对值。
+- **JSON 漂移（k3 长上下文+多工具 schema 已知倾向）**：主 agent/worker 均有
+  纠错重试（2 次）；顽固漂移仍炸，观察中，若频次不降考虑切换协议或供应商。
