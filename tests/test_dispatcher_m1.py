@@ -905,3 +905,118 @@ class TestDispatcherPromptM2:
         cfg.write_text(json.dumps({"dispatcher_mode": False}), encoding="utf-8")
         agent2 = OpenAGCAgent(memory_db_path=str(tmp_path / "memory2.db"))
         assert "message_worker" not in agent2.full_available_tools
+
+
+# ────────────────────────── worker 能力对齐（漂移容错/技能/思考可视化） ──────────────────────────
+
+class TestWorkerDriftRetry:
+    """worker 漂移容错（生产实证：whisper 任务两轮 JSON 漂移直接炸死 worker，
+    主 agent 有纠错重试、worker 裸调用一次即死）。"""
+
+    def test_drift_retries_with_correction_and_recovers(self):
+        from core.llm_client import DRIFT_RETRY_HINT
+        shell = _FakeTool("execute_shell", "run shell")
+        llm = _ScriptLLM([
+            RuntimeError("AnthropicException - Failed to parse tool call arguments "
+                         "for tool 'execute_shell'. Error: Unterminated string"),
+            (None, [_tc("execute_shell", call_id="c1")]),
+            ("完成", None),
+        ])
+        sub = SubAgent(task="t", tools=["execute_shell"],
+                       parent_tools={"execute_shell": shell},
+                       max_iterations=5, llm_client=llm)
+        result = sub.run()
+        assert result["success"] is True
+        # 第二次调用时 messages 里应含纠错 system 消息
+        second = llm.seen_messages[1]
+        assert any(m.get("role") == "system" and "合法 JSON" in str(m.get("content", ""))
+                   for m in second)
+
+    def test_drift_exhausted_returns_failure_not_raise(self):
+        llm = _ScriptLLM([
+            RuntimeError("Failed to parse tool call arguments. Unterminated string"),
+            RuntimeError("Failed to parse tool call arguments. Unterminated string"),
+            RuntimeError("Failed to parse tool call arguments. Unterminated string"),
+        ])
+        sub = SubAgent(task="t", tools=[], parent_tools={},
+                       max_iterations=5, llm_client=llm)
+        result = sub.run()
+        assert result["success"] is False
+        assert "LLM error" in result["summary"]
+
+    def test_non_drift_error_not_retried(self):
+        llm = _ScriptLLM([ConnectionError("network down")])
+        sub = SubAgent(task="t", tools=[], parent_tools={},
+                       max_iterations=5, llm_client=llm)
+        result = sub.run()
+        assert result["success"] is False
+        assert len(llm.seen_messages) == 1  # 非漂移不重试
+
+
+class TestWorkerThinkingVisibility:
+    def test_reasoning_forwarded_to_progress(self):
+        shell = _FakeTool("execute_shell", "run shell")
+        events = []
+
+        # 构造带 reasoning_content 的响应
+        def _resp_with_reasoning(text=None, tool_calls=None, reasoning=None):
+            msg = SimpleNamespace(role="assistant", content=text or "",
+                                  tool_calls=tool_calls, reasoning_content=reasoning)
+            return SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=None), "mock-model"
+
+        class _ReasonLLM:
+            def __init__(self):
+                self.calls = 0
+            def chat(self, messages=None, tools=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return _resp_with_reasoning(tool_calls=[_tc("execute_shell")],
+                                                reasoning="先分析目录结构")
+                return _resp_with_reasoning(text="完成")
+
+        sub = SubAgent(task="t", tools=["execute_shell"],
+                       parent_tools={"execute_shell": shell},
+                       max_iterations=5, llm_client=_ReasonLLM(),
+                       progress_callback=lambda e: events.append(e))
+        result = sub.run()
+        assert result["success"] is True
+        think = [e for e in events if e.get("event") == "thinking"
+                 and "分析目录结构" in str(e.get("content", ""))]
+        assert think, "worker 思考过程应转发到 progress"
+
+
+class TestWorkerSkillInjection:
+    def test_skills_loaded_into_worker_task(self, monkeypatch):
+        store = SimpleNamespace(
+            refresh=lambda: None,
+            retrieve_semantic=lambda q, top_k=3: [{"filename": "human-writing.md"}],
+            format_skills_for_prompt=lambda m: "## 可用技能\n- human-writing",
+        )
+        agent = SimpleNamespace(skill_store=store)
+        ctx = dispatcher._load_worker_skill_context(agent, "写第15章")
+        assert "human-writing" in ctx
+
+    def test_no_store_returns_empty(self):
+        assert dispatcher._load_worker_skill_context(SimpleNamespace(), "简报") == ""
+
+    def test_run_worker_appends_skill_context(self, monkeypatch):
+        seen = {}
+
+        class _ProbeSub:
+            def __init__(self, task=None, **kw):
+                seen["task"] = task
+            def run(self):
+                return {"success": True, "summary": "done",
+                        "tool_calls": 1, "output_files": []}
+
+        monkeypatch.setattr("agent.sub_agent.SubAgent", _ProbeSub)
+        monkeypatch.setattr(dispatcher, "_load_worker_skill_context",
+                            lambda a, b: "## 可用技能\n- human-writing")
+        agent = SimpleNamespace(
+            llm=object(), full_available_tools={}, available_tools={},
+            session_id=1, task_id=1, sandbox_dir=None, is_interrupted=False,
+            _session_sandbox_whitelist=set(), _session_network_whitelist=set(),
+            _session_permission_whitelist=set())
+        dispatcher._run_worker(agent, "原始简报", None)
+        assert "human-writing" in seen["task"]
+        assert "原始简报" in seen["task"]
