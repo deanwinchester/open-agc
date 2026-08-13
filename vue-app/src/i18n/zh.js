@@ -775,6 +775,8 @@ export default {
     createFailed: '创建会话失败',
     historyLoadFailed: '加载聊天记录失败',
     deleteMessage: '删除此消息',
+    feedbackGood: '这个回复不错',
+    feedbackBad: '这个回复有问题',
     deleteConfirmTitle: '删除消息',
     deleteConfirmText: '确定删除这条消息记录吗？删除后不可恢复。',
     deleteSuccess: '已删除',

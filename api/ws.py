@@ -241,6 +241,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 "content": _pending["content"],
                 "session_id": ws_session_id,
                 "task_id": _pending.get("task_id"),
+                "message_id": _pending.get("message_id"),
             })
             # Clear after successful delivery
             _pending_final_responses.pop(ws_session_id, None)
@@ -882,7 +883,13 @@ async def websocket_endpoint(websocket: WebSocket):
                             _uf_save = _user_facing(_tb_response)
                             if _uf_save:
                                 try:
-                                    save_message("agent", _uf_save, _tb_session_id)
+                                    _saved_mid = save_message("agent", _uf_save, _tb_session_id)
+                                    # 回写 message_id：pending 推送/broadcast 带上，
+                                    # 前端实时消息即可即时反馈（M3 好评率）
+                                    if _saved_mid:
+                                        _pend = _pending_final_responses.get(_tb_session_id)
+                                        if _pend is not None:
+                                            _pend["message_id"] = _saved_mid
                                 except Exception:
                                     pass
 
@@ -1326,10 +1333,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 # 事件单独提示；max_iterations 剥前缀 + 可继续提示。
                 _uf_final = _user_facing(response)
                 if _uf_final:
+                    _pend_mid = (_pending_final_responses.get(ws_session_id) or {}).get("message_id")
                     _broadcast_to_websockets({
                         "type": "message", "role": "agent",
                         "content": _uf_final, "session_id": ws_session_id,
                         "task_id": ws_task_id,
+                        "message_id": _pend_mid,
                     })
                 # Clear pending response — successfully dispatched to all sockets
                 _pending_final_responses.pop(ws_session_id, None)
