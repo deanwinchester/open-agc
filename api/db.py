@@ -145,6 +145,18 @@ def init_db():
             cost_estimate REAL DEFAULT 0.0
         )
     ''')
+    # 用户反馈（M3 测评指标）：每条 agent 回复的好评/差评，一消息一条
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS message_feedback (
+            message_id INTEGER PRIMARY KEY,
+            score INTEGER NOT NULL DEFAULT 0,
+            comment TEXT DEFAULT '',
+            session_id INTEGER,
+            task_id INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     # 交付物登记制：目录 ↔ 任务多对多（归属不再靠 outputs/task_<id>/ 目录名隐含）
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS deliverables (
