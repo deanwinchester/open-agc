@@ -241,9 +241,7 @@ def run_scenario(scenario, dispatcher_mode=None):
 
     # ── Run ──
     try:
-        # 显式 model=None：__init__ 默认参数硬编码 "gpt-4o"，无参构造会
-        # 绕开 config 的 default_model（生产实证：eval 全场景打到假 OpenAI key）
-        agent = OpenAGCAgent(model=None)
+        agent = _make_eval_agent(scenario, dispatcher_mode)
         if dispatcher_mode:
             _clear_stale_dispatch(agent)  # 场景间共享 (None,None) key，清残留
         response = agent.run_turn(prompt, verbose=False)
@@ -493,6 +491,192 @@ def _ab_save_ckpt(sig, base_results, disp_results):
     os.replace(tmp, AB_CKPT)
 
 
+# ── Sequence runner（M3+：长会话上下文污染量化）──
+# 单轮孤立场景 ≠ 真实使用（长会话连续作战）。sequence 场景在同一 agent 实例
+# 上连续跑一串任务（长任务穿插固定探针问答），测量：
+#   - 主上下文膨胀曲线（每步后 messages 字符量）
+#   - 探针步正确率（基准校验，随污染退化即污染实锤）
+#   - 每步 billable token（baseline 随历史线性涨，dispatcher 应平稳）
+
+def _context_chars(agent):
+    return sum(len(str(m.get("content", ""))) for m in getattr(agent, "messages", []))
+
+
+def _preload_session_messages(agent, session_id, limit=40):
+    """预载真实会话历史（只读 DB，不写）——模拟「长会话进行中」的线上
+    上下文起点（用户要求：测评要含真实使用场景）。"""
+    from api.db import db_connect
+    conn = db_connect()
+    rows = conn.execute(
+        "SELECT role, content FROM messages WHERE session_id=? "
+        "AND role IN ('user','agent') ORDER BY id DESC LIMIT ?",
+        (session_id, limit)).fetchall()
+    conn.close()
+    msgs = [{"role": ("assistant" if r[0] == "agent" else "user"), "content": r[1]}
+            for r in reversed(rows) if r[1]]
+    agent.messages = [agent.messages[0]] + msgs
+    return len(msgs)
+
+
+def _isolate_eval_side_effects(agent, results_subdir="."):
+    """eval 副作用隔离：记忆库指向临时文件；KG 提取与反思后处理 no-op——
+    评测产生的「苹果123」之类不应污染真实记忆/知识图谱/反思库。"""
+    import types as _t
+    try:
+        from core.memory_store import MemoryStore
+        from core.paths import get_data_path as _gdp
+        _mdir = os.path.join(RESULTS_DIR, "sandbox")
+        os.makedirs(_mdir, exist_ok=True)
+        agent.memory_store = MemoryStore(db_path=os.path.join(_mdir, "eval_memory.db"))
+    except Exception:
+        pass
+    agent.knowledge_graph = _t.SimpleNamespace(
+        extract_from_messages=lambda msgs: None,
+        retrieve_context=lambda *a, **k: None)
+    agent._enqueue_post_process = lambda *a, **k: None
+
+
+def _make_eval_agent(scenario=None, dispatcher_mode=None):
+    """eval 专用 agent 构造：model=None（跟随 config）+ 副作用隔离 +
+    可选真实会话历史预载（preload_session 场景字段）。"""
+    from agent.agent import OpenAGCAgent
+    if dispatcher_mode is not None:
+        _set_dispatcher_mode(dispatcher_mode)
+    agent = OpenAGCAgent(model=None)
+    _isolate_eval_side_effects(agent)
+    if scenario:
+        preload = scenario.get("preload_session")
+        if preload:
+            n = _preload_session_messages(agent, int(preload))
+            print(f"  📚 预载会话 #{preload} 历史 {n} 条（真实上下文起点）")
+    return agent
+
+
+def run_sequence(scenario, dispatcher_mode=None):
+    """同一 agent 实例连续执行 steps。返回聚合结果 dict。"""
+    from agent.agent import OpenAGCAgent
+    from datetime import timezone
+
+    name = scenario["name"]
+    steps = scenario.get("steps", [])
+    if dispatcher_mode is not None:
+        _set_dispatcher_mode(dispatcher_mode)
+
+    print(f"\n  {'='*55}")
+    print(f"  [ SEQUENCE] {name} ({'dispatcher' if dispatcher_mode else 'baseline'})")
+    print(f"  {scenario.get('description','')} — {len(steps)} 步连续执行")
+    print(f"  {'─'*55}")
+
+    setup = scenario.get("setup", "")
+    if setup:
+        try:
+            exec(setup)
+        except Exception as e:
+            print(f"  ⚠️  Setup error: {e}")
+
+    agent = _make_eval_agent(scenario, dispatcher_mode)
+    if dispatcher_mode:
+        _clear_stale_dispatch(agent)
+
+    step_results = []
+    context_curve = []
+    total_billable = 0
+    t0 = time.time()
+    for i, st in enumerate(steps, 1):
+        from datetime import timezone as _tz
+        step_start = datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+        prompt = st.get("prompt", "")
+        expected = st.get("expected", {})
+        is_probe = bool(st.get("probe"))
+        try:
+            response = agent.run_turn(prompt, verbose=False) or ""
+            worker_info = None
+            if dispatcher_mode:
+                wres = _wait_dispatches(agent)
+                if wres:
+                    # 与线上通道一致（用户要求）：worker 完成 = 【执行者返回】注入
+                    # messages + 主 agent 跑呈现 turn（线上走 resume_task_manual
+                    # 唤起，同语义）。此前只在 run_turn 外拼字符串，主 agent 的
+                    # messages 永远不含 worker 结果——下一步它只会对着「已开工」
+                    # 的承诺空转（R3/R4 终检连环错位根因）。
+                    try:
+                        agent.pending_messages = [
+                            m for m in (agent.pending_messages or [])
+                            if "执行者返回" not in str(m)]
+                    except Exception:
+                        pass
+                    ok = bool(wres.get("success"))
+                    wsum = str(wres.get("summary", "") or "")[:1500]
+                    verdict = wres.get("verdict") or {}
+                    note = (f"【执行者返回】验收{'通过 ✅' if ok else '未通过 ❌'}\n"
+                            f"摘要：{wsum or '（空）'}")
+                    if not ok and verdict.get("failures"):
+                        note += ("\n失败点：" + "; ".join(str(f)[:120]
+                                 for f in verdict["failures"][:3])
+                                 + "\n请按调度者职责：补充信息重派或亲自接管，并如实告知用户。")
+                    else:
+                        note += "\n请验收证据并呈现交付给用户。"
+                    agent.messages.append({"role": "user", "content": note})
+                    present = agent.run_turn(None, verbose=False, skip_rag=True) or ""
+                    response = (response + "\n" + str(present)).strip()
+                    wr = wres.get("result") if isinstance(wres.get("result"), dict) else {}
+                    worker_info = {"success": ok,
+                                   "tool_calls": wr.get("tool_calls", 0)}
+            tcs = []
+            for msg in agent.messages:
+                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    for tc in msg["tool_calls"]:
+                        tcs.append({"name": tc.get("function", {}).get("name", "")})
+            rt = _real_token_usage(step_start) or {}
+            billable = rt.get("billable_tokens", 0)
+            passed, details = check_response(response, tcs, {"total_tokens": billable}, expected)
+        except Exception as e:
+            response = f"[ERROR] {e}"
+            passed, details, billable, worker_info = False, {"exception": str(e)[:200]}, 0, None
+        ctx = _context_chars(agent)
+        context_curve.append(ctx)
+        total_billable += billable
+        step_results.append({
+            "step": i, "probe": is_probe, "passed": passed,
+            "billable_tokens": billable, "context_chars": ctx,
+            "check_details": details,
+            "response_snippet": str(response)[:200],
+        })
+        print(f"  {'🧪' if is_probe else '  '} 步骤{i}/{len(steps)}: "
+              f"{'✅' if passed else '❌'} | billable {billable} | 上下文 {ctx} 字符")
+
+    teardown = scenario.get("teardown", "")
+    if teardown:
+        try:
+            exec(teardown)
+        except Exception as e:
+            print(f"  ⚠️  Teardown error: {e}")
+
+    probe_steps = [s for s in step_results if s["probe"]]
+    probe_passed = sum(1 for s in probe_steps if s["passed"])
+    return {
+        "name": name, "type": "sequence", "category": scenario.get("category", ["sequence"]),
+        "level": scenario.get("level", "advanced"),
+        "passed": all(s["passed"] for s in step_results),
+        "metrics": {"total_tokens": total_billable, "billable_tokens": total_billable,
+                    "tool_errors": 0, "elapsed_s": round(time.time() - t0, 2)},
+        "tool_call_count": 0,
+        "tool_error_count": 0,
+        "check_details": {},
+        "response_snippet": "",
+        "errors": [],
+        "timestamp": datetime.now().isoformat(),
+        "sequence": {
+            "steps": step_results,
+            "context_curve": context_curve,
+            "context_final": context_curve[-1] if context_curve else 0,
+            "probe_total": len(probe_steps),
+            "probe_passed": probe_passed,
+            "probe_pass_rate": round(probe_passed / len(probe_steps) * 100, 1) if probe_steps else None,
+        },
+    }
+
+
 # ── Reporting ──
 
 def generate_report(all_results, git_commit=None):
@@ -698,7 +882,10 @@ def main():
                                                 (True, disp_results, "d")):
                     if (scenario["name"], mtag, rnd) in done_keys:
                         continue
-                    r = run_scenario(scenario, dispatcher_mode=mode_flag)
+                    if scenario.get("type") == "sequence":
+                        r = run_sequence(scenario, dispatcher_mode=mode_flag)
+                    else:
+                        r = run_scenario(scenario, dispatcher_mode=mode_flag)
                     r["_round"] = rnd
                     bucket.append(r)
                     _ab_save_ckpt(sig, base_results, disp_results)  # 每项落盘
@@ -728,7 +915,10 @@ def main():
         if args.repeat > 1:
             print(f"\n  ── 第 {rnd+1}/{args.repeat} 轮 ──")
         for scenario in scenarios:
-            results.append(run_scenario(scenario, dispatcher_mode=dm_flag))
+            if scenario.get("type") == "sequence":
+                results.append(run_sequence(scenario, dispatcher_mode=dm_flag))
+            else:
+                results.append(run_scenario(scenario, dispatcher_mode=dm_flag))
 
     report = generate_report(results, git_commit=git_commit)
     run_file = save_report(report)

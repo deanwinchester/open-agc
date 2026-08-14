@@ -217,8 +217,12 @@ class TestDelegation:
 # ── Fix 3: interjection index ──
 
 class TestInterjectionIndex:
-    def test_accept_marks_user_interjection_not_assistant_message(self):
+    def test_accept_marks_user_interjection_not_assistant_message(self, monkeypatch):
         agent = _bare_agent()
+        # 动态段后置后，非空 goals 会以独立 system 消息插入——本测试断言
+        # 消息绝对索引，stub 空 goals 使动态段不插入（与本测试主题无关）
+        monkeypatch.setattr("tools.task_plan.load_goals", lambda: {"items": []})
+        monkeypatch.setattr("tools.task_plan.format_goal_list_for_prompt", lambda g: "")
         agent.pending_messages = ["请把结果也发到群里"]
         agent.llm = StubLLM([
             _tool_response("user_interjection_response",
@@ -239,8 +243,11 @@ class TestInterjectionIndex:
         assert agent.messages[3]["tool_calls"]
         assert agent.pending_messages == []
 
-    def test_reject_captures_user_interjection_content(self):
+    def test_reject_captures_user_interjection_content(self, monkeypatch):
         agent = _bare_agent()
+        # 同上：stub 空 goals，动态段不插入，消息结构保持 system/user/assistant
+        monkeypatch.setattr("tools.task_plan.load_goals", lambda: {"items": []})
+        monkeypatch.setattr("tools.task_plan.format_goal_list_for_prompt", lambda g: "")
         agent.pending_messages = ["帮我订一张机票"]
         agent.llm = StubLLM([
             _tool_response("user_interjection_response",

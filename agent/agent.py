@@ -635,6 +635,9 @@ class OpenAGCAgent:
                     f"派发是**异步**的：调用立即返回，执行者在后台干活——**不要空等**，"
                     f"立即回复用户已开工（一句话说清任务要点）；执行者完成（含证据验收）"
                     f"后系统会以【执行者返回】通知你，届时你再验收呈现。\n"
+                    f"多个互不依赖的任务可以**并行派发多个化身**（连续调用 dispatch_worker）；"
+                    f"化身陆续返回时逐一验收，全部完成后汇总呈现——一气化三清，"
+                    f"化身与你共享记忆与前缀，不必重复交代背景。\n"
                     f"\n## 执行中的插话分类（你的职责，不要推给执行者）\n"
                     f"worker 执行期间用户又发来消息时，先判定三类再行动：\n"
                     f"- 闲聊/无关提问/讨论 → 直接回答，**不要打扰 worker**。\n"
@@ -2456,58 +2459,64 @@ class OpenAGCAgent:
             except Exception as e:
                 if verbose: print(f"Knowledge graph retrieval error: {e}")
 
-        # Ensure System Prompt is always fresh and has the latest MEMORY.md and episodic context
+        # Ensure System Prompt is always fresh (仅静态部分：人格/角色/规范/机制/
+        # soul.md/MEMORY.md/工具列表)。动态内容一律不进 messages[0]——记忆/技能/
+        # 经验检索结果每轮不同，拼进 messages[0] 会让前缀缓存从头失效（fork 的
+        # 缓存共享也因此落空，生产实证 R6 fork billable 反涨 ×3.3）。
         if self.messages and self.messages[0]["role"] == "system":
-            system_content = self._build_system_prompt(
-                memory_context=memory_context,
-                skill_context=skill_context,
-                experience_context=experience_context,
-                kg_context=kg_context,
-            )
-            
-            if hasattr(self, 'failed_attempts') and self.failed_attempts:
-                attempts_str = "\n".join([f"- {attempt}" for attempt in self.failed_attempts])
-                system_content += f"\n\n## 历史失败尝试记录 (避坑指南)\n你过去曾尝试过以下操作但失败了，**请仔细分析原因，绝对不要原样重复**：\n{attempts_str}\n"
-
-            # Inject goal list
-            try:
-                from tools.task_plan import load_goals as _load_goals, format_goal_list_for_prompt as _fmt_goals
-                _goals = _load_goals()
-                _goal_text = _fmt_goals(_goals)
-                if _goal_text:
-                    system_content += "\n\n" + _goal_text
-            except Exception:
-                pass
-            # Inject task title as goal reminder so agent stays focused
-            if self.task_id:
-                try:
-                    import sqlite3 as _sq3
-                    from core.paths import get_data_path as _gdp
-                    _conn = _sq3.connect(_gdp("chat_history.db"))
-                    _row = _conn.execute("SELECT title FROM tasks WHERE id=?", (self.task_id,)).fetchone()
-                    _conn.close()
-                    if _row and _row[0]:
-                        _goal = _row[0].strip()
-                        # Only inject when title is a meaningful goal (> 5 chars)
-                        if len(_goal) > 5 and _goal not in system_content:
-                            system_content += f"\n\n## 当前任务目标\n始终聚焦于此目标，不要偏离：\n\n{_goal[:200]}\n"
-                    # 告知数字任务 ID 与检查点文件路径（「大任务检查点」约定的
-                    # 落盘位置）——任务 ID 只在运行期经 run_turn 传入，静态提示
-                    # 里无法写死；恢复时服务端读取同一文件把断点注入上下文。
-                    _ckpt_path = os.path.join(self.sandbox_dir or os.getcwd(),
-                                              ".checkpoints", f"task_{self.task_id}.json")
-                    system_content += (
-                        f"\n\n## 当前任务检查点\n当前任务 ID: {self.task_id}。"
-                        f"执行大批量/长耗时任务时，必须把进度检查点维护到 `{_ckpt_path}`"
-                        f"（字段与规则见「大任务检查点」约定），每处理完一批就更新。\n")
-                except Exception:
-                    pass
+            system_content = self._build_system_prompt()
             self.messages[0]["content"] = system_content
 
-        # 任务计划注入（唯一注入点，带标题段 + 去重守卫；skip_rag=True 的
-        # resume 场景也覆盖）。原先 system prompt 重建段里的第一段无标题注入
-        # 已删除——两段并存会导致计划文本在系统提示里出现两次。
-        if self.messages and self.messages[0]["role"] == "system" and self.task_id:
+        # ── 动态上下文后置：组装为一条 system 消息插到最新用户输入之前 ──
+        _dyn_parts = []
+        if memory_context:
+            _dyn_parts.append(f"--- 历史记忆回溯 (Episodic Memory) ---\n{memory_context}")
+        if skill_context:
+            _dyn_parts.append(skill_context)
+        if experience_context:
+            _dyn_parts.append(experience_context)
+        if kg_context:
+            _dyn_parts.append(kg_context)
+
+        if hasattr(self, 'failed_attempts') and self.failed_attempts:
+            attempts_str = "\n".join([f"- {attempt}" for attempt in self.failed_attempts])
+            _dyn_parts.append(f"## 历史失败尝试记录 (避坑指南)\n你过去曾尝试过以下操作但失败了，**请仔细分析原因，绝对不要原样重复**：\n{attempts_str}")
+
+        # Inject goal list（动态：目标列表随任务变化）
+        try:
+            from tools.task_plan import load_goals as _load_goals, format_goal_list_for_prompt as _fmt_goals
+            _goal_text = _fmt_goals(_load_goals())
+            if _goal_text:
+                _dyn_parts.append(_goal_text)
+        except Exception:
+            pass
+        # Inject task title as goal reminder so agent stays focused
+        if self.task_id:
+            try:
+                import sqlite3 as _sq3
+                from core.paths import get_data_path as _gdp
+                _conn = _sq3.connect(_gdp("chat_history.db"))
+                _row = _conn.execute("SELECT title FROM tasks WHERE id=?", (self.task_id,)).fetchone()
+                _conn.close()
+                if _row and _row[0]:
+                    _goal = _row[0].strip()
+                    if len(_goal) > 5:
+                        _dyn_parts.append(f"## 当前任务目标\n始终聚焦于此目标，不要偏离：\n\n{_goal[:200]}")
+                # 告知数字任务 ID 与检查点文件路径（「大任务检查点」约定的
+                # 落盘位置）——任务 ID 只在运行期经 run_turn 传入，静态提示
+                # 里无法写死；恢复时服务端读取同一文件把断点注入上下文。
+                _ckpt_path = os.path.join(self.sandbox_dir or os.getcwd(),
+                                          ".checkpoints", f"task_{self.task_id}.json")
+                _dyn_parts.append(
+                    f"## 当前任务检查点\n当前任务 ID: {self.task_id}。"
+                    f"执行大批量/长耗时任务时，必须把进度检查点维护到 `{_ckpt_path}`"
+                    f"（字段与规则见「大任务检查点」约定），每处理完一批就更新。")
+            except Exception:
+                pass
+
+        # 任务计划注入（动态段内；唯一注入点）——原先拼进 messages[0] 的做法
+        # 会让计划文本随任务切换改变前缀、缓存全灭。
+        if self.task_id:
             try:
                 from tools.task_plan import load_plan as _load_plan, format_plan_for_prompt as _fmt_plan
                 _plan = None
@@ -2524,11 +2533,25 @@ class OpenAGCAgent:
                 if not _plan:
                     _plan = _load_plan(plan_id=None, task_id=self.task_id)
                 if _plan:
-                    _plan_text = "\n\n## 当前计划进度\n" + _fmt_plan(_plan)
-                    if _plan_text not in self.messages[0]["content"]:
-                        self.messages[0]["content"] += _plan_text
+                    _dyn_parts.append("## 当前计划进度\n" + _fmt_plan(_plan))
             except Exception:
                 pass
+
+        if _dyn_parts:
+            _dyn_msg = {"role": "system", "content": (
+                "（以下是本轮为你检索到的相关上下文，供参考）\n\n"
+                + "\n\n".join(_dyn_parts))}
+            # 移除上一次 run_turn 插入的动态段（identity 过滤）——否则连续
+            # 对话会在消息流里累积多份过期检索快照，既胀上下文又误导模型
+            _prev_dyn = getattr(self, "_last_dyn_msg", None)
+            if _prev_dyn is not None:
+                self.messages = [m for m in self.messages if m is not _prev_dyn]
+            # 永远放最末尾（生产实证 R7）：插到中间会让前缀在该位置分叉——
+            # 前缀缓存要求消息序列从头部逐字节相同；末尾追加则主干历史纯增长、
+            # 跨轮/fork 共享全部命中。动态段在最新用户输入之后，语义是
+            # 「本轮检索补充」，模型照读。
+            self.messages.append(_dyn_msg)
+            self._last_dyn_msg = _dyn_msg
 
         # Sub-agent delegation for complex tasks
         # dispatcher_mode 下禁用旧的自动委派路径（关键词启发式 _should_delegate +
