@@ -1020,3 +1020,59 @@ class TestWorkerSkillInjection:
         dispatcher._run_worker(agent, "原始简报", None)
         assert "human-writing" in seen["task"]
         assert "原始简报" in seen["task"]
+
+
+# ────────────────────────── fork-context（M3+ 架构） ──────────────────────────
+
+class TestForkContext:
+    """worker 上下文从主干 fork：缓存前缀共享 + 信息天然回流。"""
+
+    def _trunk_agent(self):
+        return SimpleNamespace(messages=[
+            {"role": "system", "content": "你是 Open-AGC 主 agent（调度者）……"},
+            {"role": "user", "content": "帮我写小说"},
+            {"role": "assistant", "content": "好的，先确立设定……"},
+        ])
+
+    def test_fork_shares_prefix_and_appends_assignment(self):
+        trunk = self._trunk_agent()
+        sub = SubAgent(task="写第15章", tools=[], parent_tools={},
+                       llm_client=None, fork_from=trunk)
+        # 前缀逐字节相同（缓存共享的物理基础）
+        assert sub.messages[0]["content"] == trunk.messages[0]["content"]
+        assert sub.messages[1]["content"] == "帮我写小说"
+        assert len(sub.messages) == len(trunk.messages) + 1
+        assign = sub.messages[-1]
+        assert assign["role"] == "user"
+        assert "执行指派" in assign["content"] and "写第15章" in assign["content"]
+        assert "不派发" in assign["content"]
+        # 主干不被污染（deepcopy）
+        assert len(trunk.messages) == 3
+
+    def test_fork_fallback_when_trunk_empty(self):
+        sub = SubAgent(task="任务", tools=[], parent_tools={},
+                       llm_client=None, fork_from=SimpleNamespace(messages=[]))
+        assert sub.messages[0]["role"] == "system"  # 回退独立执行者提示词
+        assert "你是执行者" in sub.messages[0]["content"]
+
+    def test_fork_none_keeps_standalone(self):
+        sub = SubAgent(task="任务", tools=[], parent_tools={}, llm_client=None)
+        assert "你是执行者" in sub.messages[0]["content"]
+
+    def test_fork_worker_executes_with_tools(self):
+        """fork 模式继承主干工具栈（一气化三清完全体：tools 也一致，缓存命中）。"""
+        shell = _FakeTool("execute_shell", "run shell")
+        trunk = self._trunk_agent()
+        trunk.available_tools = {"execute_shell": shell}
+        trunk.tool_schemas = [shell.get_openai_schema()]
+        llm = _ScriptLLM([
+            (None, [_tc("execute_shell", call_id="c1")]),
+            ("完成", None),
+        ])
+        sub = SubAgent(task="列目录", tools=["execute_shell"],
+                       parent_tools={"execute_shell": shell},
+                       max_iterations=5, llm_client=llm, fork_from=trunk)
+        assert sub.available_tools.get("execute_shell") is shell
+        result = sub.run()
+        assert result["success"] is True
+        assert shell.calls, "fork 模式工具应正常执行"

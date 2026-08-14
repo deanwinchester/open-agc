@@ -475,10 +475,12 @@ class TestPlanSingleInjection:
         agent.llm = StubLLM([_text_response("完成")])
         agent.run_turn("你好", verbose=False, task_id=123, skip_rag=True)
 
-        system = agent.messages[0]["content"]
-        assert system.count("## 当前计划进度") == 1
-        assert system.count("TEST-PLAN-GOAL-XYZ") == 1
-        assert system.count("📋 任务计划") == 1
+        # 动态段后置后，计划段在独立 system 消息里（不再拼进 messages[0]）——
+        # 断言改为全消息流中恰好出现一次（测试意图是防重复注入）
+        all_text = "\n".join(str(m.get("content", "")) for m in agent.messages)
+        assert all_text.count("## 当前计划进度") == 1
+        assert all_text.count("TEST-PLAN-GOAL-XYZ") == 1
+        assert all_text.count("📋 任务计划") == 1
 
 
 # ── Item 6: reasoning_content 剥离 ──

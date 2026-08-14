@@ -84,7 +84,8 @@ class SubAgent:
                  context_brief: str = "",
                  full_tools_map: Optional[Dict] = None,
                  external_interrupt_check: Optional[Callable] = None,
-                 pending_message_provider: Optional[Callable[[], str]] = None):
+                 pending_message_provider: Optional[Callable[[], str]] = None,
+                 fork_from=None):
         self.task = task
         self.max_iterations = max_iterations
         self.progress_callback = progress_callback
@@ -104,7 +105,99 @@ class SubAgent:
         # - pending_message_provider：每迭代拉取用户插话注入 worker 上下文（评审 I-2）
         self._external_interrupt_check = external_interrupt_check
         self._pending_message_provider = pending_message_provider
+        self._fork_from = fork_from
 
+        # fork-context（调度者模式 M3+ 架构升级，实测驱动）：worker 上下文从
+        # 主 agent 主干 fork——系统提示词/历史前缀与主干逐字节相同（k3 缓存
+        # 前缀共享，billable 大头消失），信息天然回流（无需 enrich 重建），
+        # 执行者角色切换压成一条指派消息而非重写系统提示词。
+        if fork_from is not None and getattr(fork_from, "messages", None):
+            import copy as _copy
+            self.messages = _copy.deepcopy(fork_from.messages)
+            self.messages.append({
+                "role": "user",
+                "content": (
+                    "【执行指派】注意：你现在是从主干 fork 出的**执行者分支实例**——"
+                    "上面的调度者身份与对话历史属于主干，仅供你理解背景。"
+                    "你的唯一职责是直接执行下面的任务简报：**不派发、不分流、"
+                    "不等待，亲自动手用工具完成**。\n\n"
+                    "## 任务简报（权威依据）\n" + task + "\n\n"
+                    "## 执行纪律\n"
+                    "1. 用工具真实执行，每个意图都落到工具调用；禁止只描述计划。\n"
+                    "2. 高效执行：最少必要步骤，禁止重复确认/验证性重跑/额外探查。\n"
+                    "3. 产出文件写到简报指定位置（未指定则沙箱 outputs/），汇报给全路径。\n"
+                    "4. 同一方法失败两次换思路；客观不可行就明确报告「无法完成」+原因，"
+                    "严禁假装完成。\n"
+                    "5. 交付汇报必须含：完成内容 / 产出清单（全路径）/ 验收自评 / "
+                    "遗留风险；获取或生成的**关键内容本身**必须写进汇报（内容才会回流，"
+                    "「已读取/已生成」不是交付）。"
+                ),
+            })
+        else:
+            self._build_standalone_prompt(task, tools)
+        # 工具绑定在两分支汇合后统一执行
+        self._bind_tools(tools, parent_tools)
+
+    def _bind_tools(self, tools, parent_tools):
+        """按 tools 名单从 parent_tools 过滤绑定 + 全量工具发现的解锁回调。
+
+        fork 模式（一气化三清完全体）：化身直接继承主干的 available_tools 与
+        tool_schemas——请求的 system+tools+messages 前缀与主干逐字节一致，
+        缓存全命中（生产实证 R8：化身精简工具集导致缓存 key 不同、全价重算）。
+        """
+        if self._fork_from is not None:
+            self.available_tools = dict(getattr(self._fork_from, "available_tools", None)
+                                        or getattr(self._fork_from, "full_available_tools", {}))
+            self.tool_schemas = list(getattr(self._fork_from, "tool_schemas", None) or [])
+            # 化身继承主干工具后 search_available_tools 仍指主干解锁回调——
+            # 替换为本化身自己的（发现启用只影响化身，不回流主干）
+            if self._full_tools_map is not None:
+                from tools.discovery import ToolDiscoveryTool
+
+                def _enable_more(tool_names):
+                    added = False
+                    for _n in tool_names or []:
+                        if _n in self._full_tools_map and _n not in self.available_tools:
+                            self.available_tools[_n] = self._full_tools_map[_n]
+                            added = True
+                    if added:
+                        self.tool_schemas = [t.get_openai_schema()
+                                             for t in self.available_tools.values()
+                                             if t is not None]
+                self.available_tools["search_available_tools"] = ToolDiscoveryTool(
+                    full_tools=self._full_tools_map, enable_callback=_enable_more)
+            return
+
+        # Filter parent tools to only what this sub-agent needs
+        self.available_tools = {}
+        for name in tools:
+            if name in parent_tools:
+                self.available_tools[name] = parent_tools[name]
+
+        # 全量工具发现（M1）：发现工具必须绑定本子代理自己的解锁回调——
+        # 复用主 agent 的 ToolDiscoveryTool 实例会把工具启用到主 agent 上。
+        if self._full_tools_map is not None:
+            from tools.discovery import ToolDiscoveryTool
+
+            def _enable_more(tool_names):
+                added = False
+                for _n in tool_names or []:
+                    if _n in self._full_tools_map and _n not in self.available_tools:
+                        self.available_tools[_n] = self._full_tools_map[_n]
+                        added = True
+                if added:
+                    self.tool_schemas = [t.get_openai_schema()
+                                         for t in self.available_tools.values()
+                                         if t is not None]
+
+            self.available_tools["search_available_tools"] = ToolDiscoveryTool(
+                full_tools=self._full_tools_map, enable_callback=_enable_more)
+
+        self.tool_schemas = [t.get_openai_schema()
+                             for t in self.available_tools.values()]
+
+    def _build_standalone_prompt(self, task, tools):
+        """非 fork 模式（旧路径 dispatch_subagent 等）：独立执行者系统提示词。"""
         # Build system prompt — 执行者角色提示（调度者模式重构轮重写）：
         # 简报为权威依据；真实执行纪律；结构化交付汇报。
         now = _time.strftime("%Y-%m-%d %H:%M:%S")
@@ -144,39 +237,15 @@ class SubAgent:
                     f"- 完成内容（实际做了什么）\n"
                     f"- 产出清单（文件的完整路径）\n"
                     f"- 验收标准逐条自评（简报里有的话）\n"
-                    f"- 遗留问题/风险（没有就写「无」）"
+                    f"- 遗留问题/风险（没有就写「无」）\n"
+                    f"- 信息回传：若任务涉及获取/生成内容（读文件/查资料/写文稿），"
+                    f"必须把**关键内容本身**写进汇报——调度者与用户都看不到你的上下文，"
+                    f"只有汇报会回流；「已读取/已生成」不是交付，内容才是"
+                    f"（长内容给要点摘要 + 完整文件路径）"
                     f"{brief_section}"
                 )
             }
         ]
-
-        # Filter parent tools to only what this sub-agent needs
-        self.available_tools = {}
-        for name in tools:
-            if name in parent_tools:
-                self.available_tools[name] = parent_tools[name]
-
-        # 全量工具发现（M1）：发现工具必须绑定本子代理自己的解锁回调——
-        # 复用主 agent 的 ToolDiscoveryTool 实例会把工具启用到主 agent 上。
-        if self._full_tools_map is not None:
-            from tools.discovery import ToolDiscoveryTool
-
-            def _enable_more(tool_names):
-                added = False
-                for _n in tool_names or []:
-                    if _n in self._full_tools_map and _n not in self.available_tools:
-                        self.available_tools[_n] = self._full_tools_map[_n]
-                        added = True
-                if added:
-                    self.tool_schemas = [t.get_openai_schema()
-                                         for t in self.available_tools.values()
-                                         if t is not None]
-
-            self.available_tools["search_available_tools"] = ToolDiscoveryTool(
-                full_tools=self._full_tools_map, enable_callback=_enable_more)
-
-        self.tool_schemas = [t.get_openai_schema()
-                             for t in self.available_tools.values()]
 
     def _interrupted(self) -> bool:
         """自身中断标志 + 外部（主 agent）中断标志联动（评审 I-1）。"""
