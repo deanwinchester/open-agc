@@ -29,12 +29,13 @@ import re
 import threading
 from typing import Any, Dict, List, Optional
 
-# 执行者（worker）初始常驻工具：基础工具集 + 发现入口。其余工具由 worker
-# 执行中通过 search_available_tools 从 full_tools_map 按需解锁（M1 全量工具发现）。
+# 执行者（worker）初始常驻工具：最小高频集 + 发现入口（M3 token 优化：
+# 原 11 个全量 schema ~2.4k tok/轮，edit/search_file/search_web/fetch 等
+# 由 worker 执行中通过 search_available_tools 从 full_tools_map 按需解锁）。
 _WORKER_CORE_TOOLS = [
-    "execute_shell", "read_file", "write_file", "edit_file",
-    "execute_python", "search_file_content", "find_files", "list_dir",
-    "search_web", "fetch_url", "search_available_tools",
+    "execute_shell", "read_file", "write_file",
+    "execute_python", "find_files", "list_dir",
+    "search_available_tools",
 ]
 
 # worker 单轮最大迭代：完整任务比原子子任务长，给旧子代理默认 10 的两倍。
@@ -94,6 +95,9 @@ _NON_FILE_TOKENS = {
     "node.js", "react.js", "vue.js", "jquery.js", "angular.js",
     "express.js", "next.js", "nuxt.js", "chart.js", "three.js",
 }
+# 纯 basename 的可执行文件（无目录前缀）不当产出文件——worker 摘要里的
+# 「用 where.exe 查找」会被误提取并验收失败（生产实证 shell_find_python）。
+_NON_FILE_BASENAME_EXTS = {"exe", "dll", "sys", "com", "msi"}
 
 
 # ────────────────────────── 交接包增强 ──────────────────────────
@@ -323,6 +327,9 @@ def _extract_file_refs(text: str) -> List[str]:
             continue
         ext = tok.rsplit(".", 1)[-1].lower()
         if "/" not in tok and "\\" not in tok and ext in _DOMAIN_EXTS:
+            continue
+        # 纯 basename 的可执行文件（where.exe 等命令名）不是产出文件
+        if "/" not in tok and "\\" not in tok and ext in _NON_FILE_BASENAME_EXTS:
             continue
         if tok not in refs:
             refs.append(tok)
