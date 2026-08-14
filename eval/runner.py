@@ -145,7 +145,8 @@ def _set_dispatcher_mode(enabled):
 def _wait_dispatches(agent, timeout_s=300):
     """dispatcher 模式：run_turn 返回「已开工」后等待后台 worker 完成，
     把 worker 结果并入测评（M2 异步化后 worker 产出不在 run_turn 返回里）。
-    返回 (dispatch_result or None)。"""
+    读取后 pop 清残留（生产实证：eval 场景共享 (None,None) key，上一个
+    场景的完成结果被下一个场景误收）。返回 (dispatch_result or None)。"""
     import time as _t
     from agent import dispatcher
     key = (getattr(agent, "session_id", None), getattr(agent, "task_id", None))
@@ -154,12 +155,23 @@ def _wait_dispatches(agent, timeout_s=300):
         with dispatcher._running_lock:
             d = dispatcher._running_dispatches.get(key)
         if d and d.get("done"):
+            with dispatcher._running_lock:
+                dispatcher._running_dispatches.pop(key, None)
             return d.get("result")
         # 从未发起 dispatch（直执/闲聊）→ 立即返回
         if d is None:
             return None
         _t.sleep(1)
     return None
+
+
+def _clear_stale_dispatch(agent):
+    """场景开局清理残留 dispatch 状态（上一场景遗留的 done 结果/线程句柄）。"""
+    from agent import dispatcher
+    key = (getattr(agent, "session_id", None), getattr(agent, "task_id", None))
+    with dispatcher._running_lock:
+        dispatcher._running_dispatches.pop(key, None)
+    dispatcher._pop_worker_inbox(key[0], key[1])
 
 
 def _real_token_usage(since_ts):
@@ -177,6 +189,9 @@ def _real_token_usage(since_ts):
         if row and row[3] > 0:
             return {"prompt_tokens": row[0], "completion_tokens": row[1],
                     "cached_tokens": row[2], "total_tokens": row[0] + row[1],
+                    # 计费口径：缓存命中部分成本极低（生产实证 k3 缓存率 ~70%，
+                    # 名义 ×1.6 的实际成本增幅远小）——判定用 billable
+                    "billable_tokens": row[0] - row[2] + row[1],
                     "calls": row[3]}
     except Exception:
         pass
@@ -206,6 +221,7 @@ def run_scenario(scenario, dispatcher_mode=None):
     t0 = time.time()
     step_timing = []
     total_prompt_tokens = 0
+    total_billable_tokens = 0
     total_completion_tokens = 0
     worker_info = None
 
@@ -228,6 +244,8 @@ def run_scenario(scenario, dispatcher_mode=None):
         # 显式 model=None：__init__ 默认参数硬编码 "gpt-4o"，无参构造会
         # 绕开 config 的 default_model（生产实证：eval 全场景打到假 OpenAI key）
         agent = OpenAGCAgent(model=None)
+        if dispatcher_mode:
+            _clear_stale_dispatch(agent)  # 场景间共享 (None,None) key，清残留
         response = agent.run_turn(prompt, verbose=False)
 
         # M2 异步：dispatcher 模式下等待后台 worker 完成并合并结果
@@ -236,12 +254,21 @@ def run_scenario(scenario, dispatcher_mode=None):
             if wres:
                 wsum = str(wres.get("summary", "") or "")
                 response = (response + "\n" + wsum).strip()
+                wresult = wres.get("result") if isinstance(wres.get("result"), dict) else {}
                 worker_info = {
                     "success": bool(wres.get("success")),
-                    "tool_calls": wres.get("result", {}).get("tool_calls", 0)
-                        if isinstance(wres.get("result"), dict) else wres.get("tool_calls", 0),
+                    "tool_calls": wresult.get("tool_calls", 0),
                     "verdict": wres.get("verdict"),
                 }
+                # worker 的工具调用并入判定口径：tool_used 是系统级能力判定，
+                # 不关心是主 agent 还是 worker 调的（生产实证：worker 干完活
+                # 但主 agent 只调 dispatch_worker，tool_missing 全 FAIL 假象）
+                for st in (wresult.get("steps") or []):
+                    if isinstance(st, dict) and st.get("tool"):
+                        tool_calls.append({"name": st["tool"],
+                                           "args": str(st.get("args", ""))[:200]})
+                        if not st.get("success", True):
+                            tool_errors += 1
 
         for msg in agent.messages:
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
@@ -263,8 +290,10 @@ def run_scenario(scenario, dispatcher_mode=None):
         _rt = _real_token_usage(run_start_utc)
         if _rt:
             total_prompt_tokens = _rt["total_tokens"]
+            total_billable_tokens = _rt["billable_tokens"]
         else:
             total_prompt_tokens = sum(len(str(m.get("content", ""))) // 2 for m in agent.messages)
+            total_billable_tokens = total_prompt_tokens
 
     except Exception as e:
         errors.append(str(e)[:300])
@@ -275,6 +304,7 @@ def run_scenario(scenario, dispatcher_mode=None):
 
     metrics = {
         "total_tokens": total_prompt_tokens,
+        "billable_tokens": total_billable_tokens,
         "tool_errors": tool_errors,
         "elapsed_s": round(elapsed, 2),
     }
@@ -339,18 +369,23 @@ def generate_ab_report(baseline_results, dispatcher_results, repeat=1, git_commi
         total = len(results)
         passed = sum(1 for r in results if r["passed"])
         tokens = sum(r["metrics"]["total_tokens"] for r in results)
+        billable = sum(r["metrics"].get("billable_tokens", r["metrics"]["total_tokens"]) for r in results)
         steps = sum(r["tool_call_count"] for r in results)
         return {
             "total": total, "passed": passed,
             "pass_rate": round(passed / total * 100, 1) if total else 0,
             "avg_tokens": round(tokens / total, 1) if total else 0,
+            "avg_billable": round(billable / total, 1) if total else 0,
             "avg_steps": round(steps / total, 2) if total else 0,
         }
 
     base = _summarize(baseline_results)
     disp = _summarize(dispatcher_results)
     diff_pp = round(disp["pass_rate"] - base["pass_rate"], 1)
-    token_ratio = round(disp["avg_tokens"] / base["avg_tokens"], 3) if base["avg_tokens"] else None
+    # token 判定用计费口径（扣缓存命中）：名义 token 把每轮重复发送但几乎
+    # 零成本的缓存部分也算了进去，放大派发链路的真实开销
+    token_ratio = round(disp["avg_billable"] / base["avg_billable"], 3) if base["avg_billable"] else None
+    nominal_ratio = round(disp["avg_tokens"] / base["avg_tokens"], 3) if base["avg_tokens"] else None
     step_ratio = round(disp["avg_steps"] / base["avg_steps"], 3) if base["avg_steps"] else None
 
     # 逐场景对比（按场景名聚合 repeat 次的成功率）
@@ -388,6 +423,7 @@ def generate_ab_report(baseline_results, dispatcher_results, repeat=1, git_commi
         "comparison": {
             "pass_rate_diff_pp": diff_pp,
             "token_ratio": token_ratio,
+            "token_ratio_nominal": nominal_ratio,
             "step_ratio": step_ratio,
             "verdict": verdict,
             "per_scenario": per_scenario,
@@ -406,7 +442,8 @@ def print_ab_report(report):
     print(f"  成功率:  baseline {b['pass_rate']}% ({b['passed']}/{b['total']})  "
           f"→  dispatcher {d['pass_rate']}% ({d['passed']}/{d['total']})  "
           f"[{c['pass_rate_diff_pp']:+}pp]")
-    print(f"  平均token: {b['avg_tokens']} → {d['avg_tokens']}  [×{c['token_ratio']}]")
+    print(f"  计费token: {b.get('avg_billable', b['avg_tokens'])} → {d.get('avg_billable', d['avg_tokens'])}  [×{c['token_ratio']}]"
+          f"  (名义 ×{c.get('token_ratio_nominal')})")
     print(f"  平均步骤:  {b['avg_steps']} → {d['avg_steps']}  [×{c['step_ratio']}]")
     print(f"\n  ── 逐场景 ──")
     for s in c["per_scenario"]:
@@ -416,6 +453,44 @@ def print_ab_report(report):
     print(f"  成功率不降:      {'✅' if v['成功率不降'] else '❌'}")
     print(f"  token增幅≤30%:   {'✅' if v['token增幅≤30%'] else '❌'}")
     print(f"  总判定:          {'✅ PASS' if v['pass'] else '❌ FAIL'}")
+
+
+# ── A/B 断点续跑（用户要求：中断后可续，不全部重跑）──
+# 每完成一项（场景×模式×轮次）立即落盘 checkpoint；同参数重启时加载并跳过
+# 已完成项。全部完成后生成正式报告并删除 checkpoint。
+
+AB_CKPT = os.path.join(RESULTS_DIR, "ab_inprogress.json")
+
+
+def _ab_signature(args):
+    return {
+        "mode": args.mode, "repeat": args.repeat,
+        "level": sorted(args.level or []),
+        "category": sorted(args.category or []),
+        "tag": sorted(args.tag or []),
+    }
+
+
+def _ab_load_ckpt(sig):
+    if not os.path.exists(AB_CKPT):
+        return None
+    try:
+        with open(AB_CKPT, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        if d.get("sig") == sig:
+            return d
+        print("  ⚠️ 存在参数不同的未完成 checkpoint，忽略并重新开始")
+    except Exception:
+        pass
+    return None
+
+
+def _ab_save_ckpt(sig, base_results, disp_results):
+    tmp = AB_CKPT + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"sig": sig, "baseline": base_results, "dispatcher": disp_results},
+                  f, ensure_ascii=False)
+    os.replace(tmp, AB_CKPT)
 
 
 # ── Reporting ──
@@ -599,21 +674,46 @@ def main():
     except Exception:
         pass
 
-    # ── M3: A/B 双模式对比 ──
+    # ── M3: A/B 双模式对比（断点续跑）──
     if args.mode == "ab":
+        sig = _ab_signature(args)
         base_results, disp_results = [], []
+        done_keys = set()
+        ckpt = _ab_load_ckpt(sig)
+        if ckpt:
+            base_results = ckpt.get("baseline", [])
+            disp_results = ckpt.get("dispatcher", [])
+            for r in base_results:
+                done_keys.add((r["name"], "b", r.get("_round")))
+            for r in disp_results:
+                done_keys.add((r["name"], "d", r.get("_round")))
+            if done_keys:
+                print(f"  ♻️ 断点恢复：已完成 {len(done_keys)} 项，直接跳过")
+        total_items = len(scenarios) * max(1, args.repeat) * 2
         for rnd in range(max(1, args.repeat)):
             if args.repeat > 1:
                 print(f"\n  ── 第 {rnd+1}/{args.repeat} 轮 ──")
             for scenario in scenarios:
-                base_results.append(run_scenario(scenario, dispatcher_mode=False))
-                disp_results.append(run_scenario(scenario, dispatcher_mode=True))
+                for mode_flag, bucket, mtag in ((False, base_results, "b"),
+                                                (True, disp_results, "d")):
+                    if (scenario["name"], mtag, rnd) in done_keys:
+                        continue
+                    r = run_scenario(scenario, dispatcher_mode=mode_flag)
+                    r["_round"] = rnd
+                    bucket.append(r)
+                    _ab_save_ckpt(sig, base_results, disp_results)  # 每项落盘
+                    done = len(base_results) + len(disp_results)
+                    print(f"  [进度 {done}/{total_items}]")
         report = generate_ab_report(base_results, disp_results,
                                     repeat=args.repeat, git_commit=git_commit)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         ab_file = os.path.join(RESULTS_DIR, f"ab_{ts}.json")
         with open(ab_file, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
+        try:
+            os.remove(AB_CKPT)  # 全部完成，清 checkpoint
+        except OSError:
+            pass
         if args.json:
             print(json.dumps(report["comparison"], ensure_ascii=False, indent=2))
         else:

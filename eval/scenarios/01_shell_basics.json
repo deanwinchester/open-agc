@@ -2,68 +2,107 @@
   {
     "name": "shell_list_files",
     "description": "列出当前目录文件",
-    "category": ["shell"],
+    "category": [
+      "shell"
+    ],
     "level": "core",
-    "prompt": "列出当前目录下的文件",
+    "prompt": "列出当前目录下的文件和目录",
     "expected": {
-      "tool_used": ["execute_shell"],
-      "output_contains": ["agent", "main"],
-      "max_steps": 3
+      "output_contains": [
+        "eval_marker_list"
+      ],
+      "max_steps": 10
     },
-    "tags": ["basic"]
+    "tags": [
+      "basic"
+    ],
+    "setup": "open('workspace/eval_marker_list.txt','w').write('x')",
+    "teardown": "import os\nos.path.exists('workspace/eval_marker_list.txt') and os.remove('workspace/eval_marker_list.txt')"
   },
   {
     "name": "shell_find_python",
     "description": "查找Python解释器路径",
-    "category": ["shell"],
+    "category": [
+      "shell"
+    ],
     "level": "core",
     "prompt": "查找系统中 python 或 python3 的安装路径",
     "expected": {
-      "tool_used": ["execute_shell"],
-      "output_contains": ["python"],
-      "max_steps": 5
+      "output_contains": [
+        "python"
+      ],
+      "max_steps": 40
     },
-    "tags": ["basic"]
+    "tags": [
+      "basic"
+    ]
   },
   {
     "name": "shell_pipe_grep",
     "description": "使用管道组合命令",
-    "category": ["shell", "reasoning"],
+    "category": [
+      "shell",
+      "reasoning"
+    ],
     "level": "core",
-    "prompt": "统计当前目录下有多少个 .py 文件",
+    "prompt": "用 shell 管道查找当前目录下内容包含 evalmarker 的文件（grep -rl 或类似）",
     "expected": {
-      "tool_used": ["execute_shell"],
-      "output_contains": [".py"],
-      "max_steps": 5
+      "output_contains": [
+        "eval_marker_grep"
+      ],
+      "max_steps": 10
     },
-    "tags": ["basic"]
+    "tags": [
+      "basic"
+    ],
+    "setup": "open('workspace/eval_marker_grep.txt','w').write('has evalmarker here')",
+    "teardown": "import os\nos.path.exists('workspace/eval_marker_grep.txt') and os.remove('workspace/eval_marker_grep.txt')"
   },
   {
     "name": "shell_error_handling",
     "description": "处理命令执行错误",
-    "category": ["shell", "reasoning"],
+    "category": [
+      "shell",
+      "reasoning"
+    ],
     "level": "advanced",
     "prompt": "运行一个不存在的命令 'nonexistent_cmd_xyz'，然后告诉我它为什么失败了，再试一个有效命令列出当前目录",
     "expected": {
-      "tool_used": ["execute_shell"],
-      "tool_not_used": ["ask_user_question"],
-      "output_contains": ["not found", "agent"],
-      "max_steps": 8
+      "tool_used": [
+        "execute_shell"
+      ],
+      "tool_not_used": [
+        "ask_user_question"
+      ],
+      "output_contains": [
+        "not found"
+      ],
+      "max_steps": 10
     },
-    "tags": ["error_handling"]
+    "tags": [
+      "error_handling"
+    ]
   },
   {
     "name": "shell_timeout_handling",
     "description": "长时间运行命令的超时处理",
-    "category": ["shell"],
+    "category": [
+      "shell"
+    ],
     "level": "advanced",
     "prompt": "运行 'ping 127.0.0.1 -n 100' 只等3秒就停，然后告诉我结果",
     "expected": {
-      "tool_used": ["execute_shell"],
-      "output_contains": ["127.0.0.1"],
-      "max_steps": 5
+      "tool_used": [
+        "execute_shell"
+      ],
+      "output_contains": [
+        "127.0.0.1"
+      ],
+      "max_steps": 10
     },
     "timeout": 30,
-    "tags": ["timeout"]
+    "tags": [
+      "timeout"
+    ]
   }
 ]

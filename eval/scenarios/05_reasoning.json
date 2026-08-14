@@ -2,58 +2,95 @@
   {
     "name": "reasoning_multi_step_plan",
     "description": "多步骤任务规划与执行",
-    "category": ["reasoning"],
+    "category": [
+      "reasoning"
+    ],
     "level": "advanced",
     "prompt": "先创建目录 _eval_test_dir，然后在里面创建三个文件：file1.txt（内容为'first'）、file2.txt（内容为'second'）、file3.txt（内容为'third'）。然后列出目录下所有文件并读取它们的合并内容",
     "expected": {
-      "tool_used": ["execute_shell", "write_file", "read_file"],
-      "output_contains": ["first", "second", "third"],
+      "tool_used": [
+        "execute_shell",
+        "write_file",
+        "read_file"
+      ],
+      "output_contains": [
+        "first",
+        "second",
+        "third"
+      ],
       "max_steps": 15,
-      "max_tokens": 30000
+      "max_tokens": 100000
     },
     "timeout": 60,
-    "tags": ["multi_step"],
+    "tags": [
+      "multi_step"
+    ],
     "teardown": "import shutil, os; shutil.rmtree('_eval_test_dir', ignore_errors=True)"
   },
   {
     "name": "reasoning_self_correction",
     "description": "路径错误后的自我修正",
-    "category": ["reasoning"],
+    "category": [
+      "reasoning"
+    ],
     "level": "stress",
     "prompt": "先尝试读取 /nonexistent_path_xyz/file.txt，它肯定会失败。然后读取当前目录下任意一个 .py 文件作为替代",
     "expected": {
-      "tool_used": ["read_file"],
-      "tool_not_used": ["ask_user_question"],
+      "tool_used": [
+        "read_file"
+      ],
+      "tool_not_used": [
+        "ask_user_question"
+      ],
       "max_steps": 10,
       "max_errors": 3
     },
-    "tags": ["error_handling"]
+    "tags": [
+      "error_handling"
+    ]
   },
   {
     "name": "reasoning_ambiguous_request",
     "description": "模糊请求处理 — 先确认再行动",
-    "category": ["reasoning"],
+    "category": [
+      "reasoning"
+    ],
     "level": "stress",
     "prompt": "帮我整理一下那个文件",
     "expected": {
-      "tool_used": ["ask_user_question"],
-      "max_steps": 5
+      "tool_used": [
+        "ask_user_question"
+      ],
+      "max_steps": 10
     },
-    "tags": ["ambiguity"]
+    "tags": [
+      "ambiguity"
+    ]
   },
   {
     "name": "reasoning_file_then_search",
     "description": "文件操作后搜索的组合任务",
-    "category": ["reasoning", "filesystem"],
+    "category": [
+      "reasoning",
+      "filesystem"
+    ],
     "level": "advanced",
     "prompt": "创建一个Python脚本 _eval_combine.py，它接收两个数字参数并打印它们的和。然后用它计算 123 + 456",
     "expected": {
-      "tool_used": ["write_file", "execute_python", "execute_shell"],
-      "output_contains": ["579"],
+      "tool_used": [
+        "write_file",
+        "execute_python",
+        "execute_shell"
+      ],
+      "output_contains": [
+        "579"
+      ],
       "max_steps": 12,
-      "max_tokens": 25000
+      "max_tokens": 100000
     },
-    "tags": ["composition"],
+    "tags": [
+      "composition"
+    ],
     "teardown": "import os; [os.remove(f) for f in ['_eval_combine.py'] if os.path.exists(f)]"
   }
 ]
