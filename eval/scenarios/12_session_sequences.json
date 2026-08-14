@@ -1,0 +1,37 @@
+[
+  {
+    "name": "session_pollution_mixed",
+    "type": "sequence",
+    "level": "advanced",
+    "category": ["sequence", "pollution"],
+    "preload_session": 15,
+    "description": "长会话连续作战：预载真实写作会话（session 15）历史作为上下文起点，2 个产出型任务（大量工具输出）穿插 3 个探针问答（答案固定在文件里，客观对错），终检凭回忆回答——baseline 主上下文被污染后探针应退化，dispatcher 应平稳",
+    "setup": "import os\nos.makedirs('workspace/eval_seq', exist_ok=True)\nopen('workspace/eval_seq/probe_a.txt','w',encoding='utf-8').write('这个文件记录的是：苹果123')\nopen('workspace/eval_seq/probe_b.txt','w',encoding='utf-8').write('这个文件记录的是：香蕉456')\nopen('workspace/eval_seq/filler.txt','w',encoding='utf-8').write('\\n'.join(f'第{i}行：数据记录内容 {i*7%100}' for i in range(1,201)))\nopen('workspace/eval_seq/marker_note.md','w',encoding='utf-8').write('# 备注\\n这里有一个 evalseqmarker 标记。')",
+    "teardown": "import shutil\nshutil.rmtree('workspace/eval_seq', ignore_errors=True)",
+    "steps": [
+      {
+        "prompt": "读取 workspace/eval_seq/filler.txt（200 行），统计它的行数和总字符数，把统计结果写入 workspace/eval_seq/out1.txt（格式：行数=X，字符数=Y），写完读回确认。",
+        "expected": {"output_contains": ["out1"], "max_errors": 0}
+      },
+      {
+        "prompt": "读 workspace/eval_seq/probe_a.txt，直接告诉我里面写了什么。",
+        "probe": true,
+        "expected": {"output_contains": ["苹果123"], "max_errors": 0}
+      },
+      {
+        "prompt": "在 workspace/eval_seq 目录里找出包含 evalseqmarker 的文件，读取该文件内容，然后写一份简要报告到 workspace/eval_seq/out2.md，报告要包含：找到的文件名、文件内容全文、你使用的查找方法。",
+        "expected": {"output_contains": ["marker_note"], "max_errors": 0}
+      },
+      {
+        "prompt": "读 workspace/eval_seq/probe_b.txt，直接告诉我里面写了什么。",
+        "probe": true,
+        "expected": {"output_contains": ["香蕉456"], "max_errors": 0}
+      },
+      {
+        "prompt": "不读文件，直接凭我们刚才的交互回答：probe_a.txt 和 probe_b.txt 里各写了什么？",
+        "probe": true,
+        "expected": {"output_contains": ["苹果123", "香蕉456"], "max_errors": 0}
+      }
+    ]
+  }
+]

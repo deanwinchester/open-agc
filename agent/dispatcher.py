@@ -493,6 +493,9 @@ def _run_worker(agent, task_text: str, progress_callback,
             external_interrupt_check=(
                 lambda: bool(getattr(agent, "is_interrupted", False))),
             pending_message_provider=_make_pending_provider(agent),
+            # fork-context（M3+ 架构升级）：主干有真实上下文时 fork 共享缓存
+            # 前缀；主干为空（eval 早期等）回退独立执行者提示词
+            fork_from=agent if getattr(agent, "messages", None) else None,
         )
         return sub.run()
     except Exception as e:
