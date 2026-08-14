@@ -2622,6 +2622,22 @@ class OpenAGCAgent:
                                     sb, plan, progress_callback)
                             except Exception as e:
                                 result = {"success": False, "summary": str(e)}
+                            # 证据验收（生产实证 eval R7/R8：旧委派子代理零工具
+                            # 调用幻觉编造文件内容仍报 success——假完成打回，
+                            # 主 agent 经继续指引接管）
+                            if result.get("success"):
+                                try:
+                                    from agent.dispatcher import verify_execution as _ve
+                                    _v = _ve({"acceptance": []}, result,
+                                             sandbox_dir=getattr(self, "sandbox_dir", None))
+                                    if not _v["passed"]:
+                                        result["success"] = False
+                                        result["summary"] = (
+                                            str(result.get("summary", ""))
+                                            + "\n[验收打回] "
+                                            + "; ".join(_v["failures"][:2]))[:500]
+                                except Exception:
+                                    pass
                             # 带上子任务目标，报告才能看出每个子代理在做什么
                             result["task"] = plan.get("task", "")
                             sub_results.append(result)

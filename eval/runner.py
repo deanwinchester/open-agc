@@ -589,6 +589,7 @@ def run_sequence(scenario, dispatcher_mode=None):
         expected = st.get("expected", {})
         is_probe = bool(st.get("probe"))
         try:
+            worker_steps = []
             response = agent.run_turn(prompt, verbose=False) or ""
             worker_info = None
             if dispatcher_mode:
@@ -622,11 +623,17 @@ def run_sequence(scenario, dispatcher_mode=None):
                     wr = wres.get("result") if isinstance(wres.get("result"), dict) else {}
                     worker_info = {"success": ok,
                                    "tool_calls": wr.get("tool_calls", 0)}
+                    # worker 步骤并入判定（与单任务 run_scenario 口径一致）
+                    for wst in (wr.get("steps") or []):
+                        if isinstance(wst, dict) and wst.get("tool"):
+                            worker_steps.append(wst["tool"])
             tcs = []
             for msg in agent.messages:
                 if msg.get("role") == "assistant" and msg.get("tool_calls"):
                     for tc in msg["tool_calls"]:
                         tcs.append({"name": tc.get("function", {}).get("name", "")})
+            for wtn in worker_steps:
+                tcs.append({"name": wtn})
             rt = _real_token_usage(step_start) or {}
             billable = rt.get("billable_tokens", 0)
             passed, details = check_response(response, tcs, {"total_tokens": billable}, expected)
