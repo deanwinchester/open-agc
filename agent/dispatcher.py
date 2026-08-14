@@ -553,7 +553,18 @@ def dispatch_to_worker(agent, brief: str, acceptance=None,
     内，主 agent 读到失败后自然亲自接管执行（这正是新设计的目的）。
     用户中断（is_interrupted）不重派，直接收尾，主循环下一迭代按中断语义返回。
     """
-    packet = enrich_handoff(agent, brief, acceptance)
+    # fork 模式下化身继承主干上下文（历史/记忆/路径天然可见）——enrich 检索
+    # 重建冗余且有害：检索出的无关历史内容混进化身简报，会干扰执行与呈现
+    # （生产实证 R10：主 agent 把历史任务内容当成当前探针答案呈现）。
+    # 主干为空（无 fork 条件）才走 enrich 重建；acceptance 两模式都保留（验收依据）。
+    if getattr(agent, "messages", None):
+        packet = {
+            "brief": (brief or "").strip(),
+            "relevant_history": [], "memories": [], "files": [],
+            "acceptance": [str(c).strip()[:200] for c in (acceptance or []) if str(c).strip()][:3],
+        }
+    else:
+        packet = enrich_handoff(agent, brief, acceptance)
     task_text = render_packet_task(packet)
 
     attempts: List[Dict[str, Any]] = []

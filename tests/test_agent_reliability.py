@@ -159,7 +159,7 @@ class TestLLMCallProtection:
 # ── Fix 2: delegation robustness ──
 
 class TestDelegation:
-    def _make_agent(self, monkeypatch, plans, sub_success):
+    def _make_agent(self, monkeypatch, plans, sub_success, sub_tool_calls=1):
         agent = _bare_agent()
         # 本组测试针对旧委派路径（dispatcher_mode 关闭语义）——强制模式关闭，
         # 隔离运行环境真实 config.json 可能开启 dispatcher_mode 的影响。
@@ -175,7 +175,7 @@ class TestDelegation:
 
             def run(self):
                 return {"success": sub_success, "summary": f"done: {self.task}",
-                        "duration": 0.1, "tool_calls": 1}
+                        "duration": 0.1, "tool_calls": sub_tool_calls}
 
         monkeypatch.setattr("agent.agent.SubAgent", FakeSubAgent)
         # Reflection call: content=None -> run_turn falls back to the synthesis report
@@ -212,6 +212,17 @@ class TestDelegation:
         report = "\n".join(str(m.get("content", "")) for m in agent.messages)
         assert "未执行" in report
         assert "依赖失败任务" in report
+
+    def test_hallucinated_subtask_rejected_by_verification(self, monkeypatch):
+        """子代理零工具调用假完成（幻觉编造内容仍报 success）→ 证据验收打回，
+        不计入完成（生产实证 eval R7/R8：子代理编造小说句子/文件名）。"""
+        plans = [{"id": 1, "task": "幻觉任务"}, {"id": 2, "task": "正常任务"}]
+        agent, seen = self._make_agent(monkeypatch, plans, sub_success=True,
+                                       sub_tool_calls=0)  # 零工具调用 = 空谈
+        result = agent.run_turn("复杂任务", verbose=False, skip_rag=True)
+        report = "\n".join(str(m.get("content", "")) for m in agent.messages)
+        # 两个子任务都被验收打回（tool_calls=0），报告里带打回标记
+        assert "验收打回" in report
 
 
 # ── Fix 3: interjection index ──
