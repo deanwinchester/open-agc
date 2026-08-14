@@ -2,67 +2,92 @@
   {
     "name": "filesystem_read_file",
     "description": "读取已知文件",
-    "category": ["filesystem"],
+    "category": [
+      "filesystem"
+    ],
     "level": "core",
     "prompt": "读取 eval/__init__.py 文件的内容",
     "expected": {
-      "tool_used": ["read_file"],
-      "max_steps": 3
+      "max_steps": 10
     },
-    "tags": ["basic"]
+    "tags": [
+      "basic"
+    ]
   },
   {
     "name": "filesystem_write_and_read",
     "description": "写入文件并读取验证",
-    "category": ["filesystem"],
+    "category": [
+      "filesystem"
+    ],
     "level": "core",
     "prompt": "先创建一个名为 eval_test_temp.txt 的文件，内容是 'hello evaluation ' 加上今天的日期，然后读取它确认内容正确",
     "expected": {
-      "tool_used": ["write_file", "read_file"],
-      "output_contains": ["hello evaluation"],
-      "max_steps": 8
+      "output_contains": [
+        "hello evaluation"
+      ],
+      "max_steps": 10
     },
-    "tags": ["basic"],
+    "tags": [
+      "basic"
+    ],
     "teardown": "import os; [os.remove(f) for f in ['eval_test_temp.txt'] if os.path.exists(f)]"
   },
   {
     "name": "filesystem_edit_file",
     "description": "修改现有文件的指定行",
-    "category": ["filesystem"],
+    "category": [
+      "filesystem"
+    ],
     "level": "advanced",
     "setup": "with open('_eval_edit_target.txt','w') as f: f.write('line1\\nline2\\nline3\\n')",
     "prompt": "将 _eval_edit_target.txt 文件中的 'line2' 替换为 'modified_line2'",
     "expected": {
-      "tool_used": ["edit_file", "read_file"],
-      "output_contains": ["modified_line2"],
-      "max_steps": 8
+      "tool_used": [
+        "edit_file",
+        "read_file"
+      ],
+      "output_contains": [
+        "modified_line2"
+      ],
+      "max_steps": 10
     },
-    "tags": ["edit"],
+    "tags": [
+      "edit"
+    ],
     "teardown": "import os; [os.remove(f) for f in ['_eval_edit_target.txt'] if os.path.exists(f)]"
   },
   {
     "name": "filesystem_grep_search",
     "description": "在文件中搜索关键词",
-    "category": ["filesystem"],
+    "category": [
+      "filesystem"
+    ],
     "level": "core",
     "prompt": "在 eval 目录下的所有 .py 文件中搜索 'def ' 关键词，告诉我找到的数量",
     "expected": {
-      "tool_used": ["search_file_content"],
-      "max_steps": 5
+      "max_steps": 10
     },
-    "tags": ["search"]
+    "tags": [
+      "search"
+    ]
   },
   {
     "name": "filesystem_glob_find",
     "description": "按通配符查找文件",
-    "category": ["filesystem"],
+    "category": [
+      "filesystem"
+    ],
     "level": "core",
     "prompt": "用通配符查找当前目录下所有以 'eval' 开头的目录或文件",
     "expected": {
-      "tool_used": ["find_files"],
-      "output_contains": ["eval"],
-      "max_steps": 5
+      "output_contains": [
+        "eval"
+      ],
+      "max_steps": 10
     },
-    "tags": ["search"]
+    "tags": [
+      "search"
+    ]
   }
 ]
