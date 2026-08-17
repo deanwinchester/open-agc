@@ -595,7 +595,7 @@ def run_sequence(scenario, dispatcher_mode=None):
             if dispatcher_mode:
                 wres = _wait_dispatches(agent)
                 if wres:
-                    # 与线上通道一致（用户要求）：worker 完成 = 【执行者返回】注入
+                    # 与线上通道一致（用户要求）：worker 完成 = 【分身返回】注入
                     # messages + 主 agent 跑呈现 turn（线上走 resume_task_manual
                     # 唤起，同语义）。此前只在 run_turn 外拼字符串，主 agent 的
                     # messages 永远不含 worker 结果——下一步它只会对着「已开工」
@@ -603,7 +603,7 @@ def run_sequence(scenario, dispatcher_mode=None):
                     try:
                         agent.pending_messages = [
                             m for m in (agent.pending_messages or [])
-                            if "执行者返回" not in str(m)]
+                            if f"【{getattr(agent, '_worker_name', '分身')}返回】" not in str(m)]
                     except Exception:
                         pass
                     ok = bool(wres.get("success"))
