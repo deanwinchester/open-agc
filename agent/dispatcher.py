@@ -19,7 +19,7 @@ M2（输入分类）：``dispatch_async`` 把上述闭环放进后台线程，�
 不再阻塞——它由此能在 worker 执行期间履行分类职责：闲聊直答、追加指令经
 ``message_worker`` 注入 worker 专属队列、新任务再派（并发）。worker 的插话
 通道只收主 agent 分类后转发的消息，与原始 pending_messages 物理隔离。
-worker 完成（含验收）后注入【执行者返回】并唤醒主 agent 做呈现。
+worker 完成（含验收）后注入【分身返回】并唤醒主 agent 做呈现。
 
 M3 eval 接入、M4 并发 UI 不在此模块。
 """
@@ -400,7 +400,7 @@ def _label_progress(progress_callback):
     def _cb(event):
         if isinstance(event, dict) and "sub_task" in event:
             event = dict(event)
-            event["sub_task"] = "调度执行"
+            event["sub_task"] = "分身执行"
         return progress_callback(event)
 
     return _cb
@@ -496,6 +496,7 @@ def _run_worker(agent, task_text: str, progress_callback,
             # fork-context（M3+ 架构升级）：主干有真实上下文时 fork 共享缓存
             # 前缀；主干为空（eval 早期等）回退独立执行者提示词
             fork_from=agent if getattr(agent, "messages", None) else None,
+            worker_name=getattr(agent, "_worker_name", "分身"),
         )
         return sub.run()
     except Exception as e:
@@ -607,6 +608,35 @@ def dispatch_to_worker(agent, brief: str, acceptance=None,
 
 # ────────────────────────── M2：异步派发与完成唤醒 ──────────────────────────
 
+def _wrap_async_progress(agent, progress_callback):
+    """异步 worker 的进度双通道：原 cb（步骤落库，ws 的 progress_callback
+    线程安全、run_turn 结束后仍可调）+ 直接广播上前端。
+
+    生产实证：dispatch 异步化后 run_turn 立即结束，ws 的 progress 泵随之
+    停止——worker 的进度事件滞留队列无人消费，用户看不到任何分身进度。
+    """
+    sid = getattr(agent, "session_id", None)
+    tid = getattr(agent, "task_id", None)
+
+    def _wrapped(event):
+        if progress_callback:
+            try:
+                progress_callback(event)  # 步骤落库等
+            except Exception:
+                pass
+        try:
+            from api.state import _broadcast_to_websockets
+            if isinstance(event, dict):
+                _broadcast_to_websockets({
+                    "type": "progress", **event,
+                    "session_id": sid, "task_id": tid, "background": True,
+                })
+        except Exception:
+            pass
+
+    return _wrapped
+
+
 def dispatch_async(agent, brief: str, acceptance=None,
                    max_iterations: Optional[int] = None,
                    progress_callback=None) -> Dict[str, Any]:
@@ -618,6 +648,7 @@ def dispatch_async(agent, brief: str, acceptance=None,
     sid = getattr(agent, "session_id", None)
     tid = getattr(agent, "task_id", None)
     key = (sid, tid)
+    progress_callback = _wrap_async_progress(agent, progress_callback)
 
     def _run():
         try:
@@ -644,13 +675,14 @@ def dispatch_async(agent, brief: str, acceptance=None,
 
 
 def _notify_completion(agent, result: Dict[str, Any]):
-    """worker 完成：组装【执行者返回】，在跑 → pending 注入；已结束 → resume 唤起。"""
+    """worker 完成：组装【分身返回】，在跑 → pending 注入；已结束 → resume 唤起。"""
+    wn = getattr(agent, "_worker_name", "分身") or "分身"
     ok = bool(result.get("success"))
     summary = str(result.get("summary", ""))[:800]
     verdict = result.get("verdict") or {}
     files = (result.get("result") or {}).get("output_files") or []
     lines = [
-        f"【执行者返回】验收{'通过 ✅' if ok else '未通过 ❌'}",
+        f"【{wn}返回】验收{'通过 ✅' if ok else '未通过 ❌'}",
         f"摘要：{summary or '（空）'}",
     ]
     if files:
@@ -667,7 +699,7 @@ def _notify_completion(agent, result: Dict[str, Any]):
     tid = getattr(agent, "task_id", None)
     sid = getattr(agent, "session_id", None)
 
-    # 找当前会话的活跃 agent 实例注入【执行者返回】——注意可能是**另一个
+    # 找当前会话的活跃 agent 实例注入【分身返回】——注意可能是**另一个
     # 实例**（dispatch 后用户插话起了新 turn），注入 dispatch 时的旧实例
     # 会随实例死亡丢失通知（生产实证推演）。
     target = None

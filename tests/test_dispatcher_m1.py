@@ -450,7 +450,7 @@ class TestDispatchLoop:
         events = []
         cb = dispatcher._label_progress(events.append)
         cb({"event": "tool_start", "tool": "execute_shell", "sub_task": "原任务名"})
-        assert events[0]["sub_task"] == "调度执行"
+        assert events[0]["sub_task"] == "分身执行"
         # 无 sub_task 字段的事件原样透传
         cb({"event": "thinking"})
         assert events[1] == {"event": "thinking"}
@@ -774,7 +774,7 @@ class TestFabricationGuard:
 # ────────────────────────── M2：异步派发与插话分类 ──────────────────────────
 
 class TestDispatchAsync:
-    """dispatch_async：立即返回；后台闭环完成后注入【执行者返回】并唤醒。"""
+    """dispatch_async：立即返回；后台闭环完成后注入【分身返回】并唤醒。"""
 
     def _agent(self, **kw):
         base = dict(session_id=7, task_id=77, pending_messages=[],
@@ -799,9 +799,9 @@ class TestDispatchAsync:
                 d = dispatcher._running_dispatches.get((7, 77))
             assert d is not None and d["thread"] is not None
             d["thread"].join(timeout=10)
-            assert agent.pending_messages, "完成后应注入【执行者返回】"
+            assert agent.pending_messages, "完成后应注入【分身返回】"
             note = agent.pending_messages[0]
-            assert "执行者返回" in note and "验收通过" in note and "out.exe" in note
+            assert "分身返回" in note and "验收通过" in note and "out.exe" in note
             # 完成后不再视为运行中
             assert dispatcher.get_running_dispatch(7, 77) is None
         finally:
@@ -835,7 +835,7 @@ class TestDispatchAsync:
                 break
             _t.sleep(0.1)
         assert calls.get("task_id") == 77
-        assert "执行者返回" in calls["extra"]
+        assert "分身返回" in calls["extra"]
         assert "验收未通过" in calls["extra"]
         assert "产出文件不存在" in calls["extra"]
 
@@ -891,7 +891,7 @@ class TestDispatcherPromptM2:
         src = open(os.path.join(PROJECT_ROOT, "agent", "agent.py"),
                    encoding="utf-8").read()
         for needle in ("插话分类", "message_worker", "异步", "不要空等",
-                       "另派一个执行者"):
+                       "另派一个"):
             assert needle in src, f"M2 提示词缺少: {needle}"
 
     def test_message_worker_registered_in_dispatcher_mode(self, monkeypatch, tmp_path):
