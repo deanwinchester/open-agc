@@ -277,9 +277,10 @@ class OpenAGCAgent:
         # Load skill index (progressive — full content is retrieved on demand)
         self.skill_store = SkillStore(skills_dir=get_skills_dir())
 
-        # Inject current date/time so the LLM knows "today"
+        # Inject current date/time so the LLM knows "today"（分钟精度——秒级
+        # 时间戳会破坏前缀缓存，见 _build_system_prompt 同注）
         from datetime import datetime
-        current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %z")
         current_date = datetime.now().strftime("%Y年%m月%d日")
 
         # Store config for later use
@@ -369,8 +370,8 @@ class OpenAGCAgent:
             f"「试试吧」「继续」「开始吧」「做吧」这类回复是**执行指令**：必须立即调用"
             f"工具开始执行，严禁只用文字描述计划就结束回合。说「我现在去点击/下载/注册」"
             f"的当轮就必须真的发起对应工具调用。\n"
-            f"\n## 当前时间\n"
-            f"当前本地时间：{current_time}（含时区偏移）；今天：{current_date}。"
+            f"\n## 时间与时效\n"
+            f"当前时间由每轮消息流末尾的「本轮检索补充」段提供（含时区偏移）。"
             f"安排定时任务、计算截止时间、解释「明天上午9点」这类相对时间时，一律以该时区为准。"
             f"注意：任务/数据库时间戳统一为 UTC，与本地时间换算时必须先做时区换算再比较。\n"
             f"你的训练数据有知识截止日期。对于任何关于近期事件、当前新闻、最新动态或"
@@ -611,6 +612,9 @@ class OpenAGCAgent:
                     f"你只有两种身份，没有第三种：\n"
                     f"- **对话者**：闲聊、问答、讨论、澄清需求、汇报结果——直接回复，不动用工具。\n"
                     f"  对话直接给出答案，不要反问用户（ask_user_question 只用于真正缺关键信息时）。\n"
+                    f"  ⚠️ 凡需要动用工具的请求（读文件/查文件/跑命令/搜索/读取后告知内容）"
+                    f"都不是对话——必须派发。「只是读一下」也是派发（生产实证：判成对话后"
+                    f"零工具编造文件内容）。\n"
                     f"- **调度者**：凡是需要「做事」的请求——产出内容、读写文件、操作系统、"
                     f"查资料整理、创作、重写/续写/改稿/润色——**一律派发执行者，没有例外**。\n"
                     f"⚠️ 你没有「小任务直接做」的选项：再小的事也派发。\n"
@@ -948,8 +952,11 @@ class OpenAGCAgent:
     def _build_system_prompt(self, memory_context: str = "", skill_context: str = "",
                              experience_context: str = "", kg_context: str = "") -> str:
         # Inject current date/time so the LLM knows "today"
+        # 时间精确到分钟（生产实证 R7-R9：秒级时间戳让 system prompt 每秒都变，
+        # 前缀缓存从 messages[0] 起全部失效——跨任务/化身/呈现轮全灭，
+        # 首轮命中率 50-70% 而不是 98%）。分钟精度对 agent 足够。
         from datetime import datetime
-        current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %z")
         current_date = datetime.now().strftime("%Y年%m月%d日")
         
         prompt = self.system_prompt_base.replace("{current_time}", current_time).replace("{current_date}", current_date)
@@ -2467,8 +2474,17 @@ class OpenAGCAgent:
             system_content = self._build_system_prompt()
             self.messages[0]["content"] = system_content
 
-        # ── 动态上下文后置：组装为一条 system 消息插到最新用户输入之前 ──
+        # ── 动态上下文后置：组装为一条 system 消息追加到消息流末尾 ──
         _dyn_parts = []
+        # 当前时间在动态段（用户指正：放 system 里即使分钟级也周期性失效；
+        # 末尾段不参与前缀——前缀完全静态，跨分钟/跨化身缓存全命中）
+        try:
+            from datetime import datetime as _dt
+            _dyn_parts.append(
+                f"## 当前时间\n{_dt.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')}"
+                f"（本地，含时区偏移）；今天：{_dt.now().strftime('%Y年%m月%d日')}。")
+        except Exception:
+            pass
         if memory_context:
             _dyn_parts.append(f"--- 历史记忆回溯 (Episodic Memory) ---\n{memory_context}")
         if skill_context:
@@ -3481,23 +3497,28 @@ class OpenAGCAgent:
                 # ── 虚构交付拦截（dispatcher_mode）：回复声明了交付/验收，
                 # 但本轮零工具执行 → 判定幻觉，注入纠错消息重跑一轮（一次为限）。
                 # 模式刻意保守（强交付信号组合），纯问答/讨论不触发。
+                # 扩展（生产实证 eval R12/R13）：零工具回复里带 ``` 代码块/文件
+                # 内容引用 = 疑似编造文件/命令输出内容——「读取后告知」类请求的
+                # 幻觉形态（没有交付声明词，但内容必须来自真实工具读取）。
                 if (self._dispatcher_mode_enabled()
                         and self._fabrication_retries < 1
                         and len(final_answer or "") > 150):
                     _tools_used = (sum(1 for m in self.messages if m.get("role") == "tool")
                                    - self._tool_msg_baseline)
-                    if _tools_used == 0 and re.search(
-                            r"(验收通过|已跑通|链路已跑通|编译完成|部署完成|识别验证|"
-                            r"性能实测|交付物|文件位置[:：]|已下载.{0,12}模型|"
-                            r"✅\s*(编译|验证|部署|识别|跑通))", final_answer):
+                    _declared_delivery = re.search(
+                        r"(验收通过|已跑通|链路已跑通|编译完成|部署完成|识别验证|"
+                        r"性能实测|交付物|文件位置[:：]|已下载.{0,12}模型|"
+                        r"✅\s*(编译|验证|部署|识别|跑通))", final_answer)
+                    _fabricated_content = ("```" in final_answer)  # 外层已 len>150
+                    if _tools_used == 0 and (_declared_delivery or _fabricated_content):
                         self._fabrication_retries += 1
-                        print("[Agent] ⚠️ 虚构交付拦截：零工具调用却声明交付，注入纠错重跑")
+                        print("[Agent] ⚠️ 虚构交付拦截：零工具调用却声明交付/内容，注入纠错重跑")
                         self.messages.append({"role": "system", "content": (
-                            "⚠️ 系统检测：你刚才的回复声明了任务交付/验收通过，"
-                            "但本轮没有任何工具执行记录——这属于虚构交付（幻觉），已被拦截。"
+                            "⚠️ 系统检测：你刚才的回复给出了任务交付/文件内容，"
+                            "但本轮没有任何工具执行记录——这属于虚构内容（幻觉），已被拦截。"
                             "正确做法：作为调度者，立即调用 dispatch_worker 派发执行者去"
-                            "真实完成该任务（在简报中写清目标、背景、产出与验收标准）；"
-                            "纯问答讨论不涉及交付声明。现在请重新行动。")})
+                            "真实执行（读取/生成/验证），汇报必须基于执行者真实产出；"
+                            "纯问答讨论（无文件/无命令输出内容）不涉及。现在请重新行动。")})
                         continue
 
                 if self.logger:
