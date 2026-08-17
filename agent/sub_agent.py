@@ -59,6 +59,24 @@ def match_tool_set(task: str, default: str = "filesystem") -> str:
     return best
 
 
+def _fork_trim_messages(trunk_messages, keep_recent_users: int = 3):
+    """fork 裁剪（成本实测驱动）：化身上下文 = system（前缀缓存共享）+
+    最近 K 个用户消息起的尾部 + 动态段（若在尾部随尾部带走）。
+
+    全量 fork 的化身首轮 prompt 30k×命中率 70% ≈ 9k billable；裁剪后首轮
+    ≈ system 命中 + 尾部 3-4k——化身首轮成本减半（R13 账单拆解实证：
+    化身首轮是全款大头）。简报自包含（M1 设计），裁剪不伤执行。
+    """
+    if not trunk_messages:
+        return trunk_messages
+    sys_msg = trunk_messages[0] if trunk_messages[0].get("role") == "system" else None
+    rest = list(trunk_messages[1:] if sys_msg else trunk_messages)
+    # 最近第 K 条 user 消息的位置（从该处起整段保留，轮内 tool 序列不断）
+    user_idx = [i for i, m in enumerate(rest) if m.get("role") == "user"]
+    cut = user_idx[-keep_recent_users] if len(user_idx) > keep_recent_users else 0
+    return ([sys_msg] if sys_msg else []) + rest[cut:]
+
+
 class SubAgent:
     """Lightweight child agent with its own context and tool set."""
 
@@ -113,6 +131,9 @@ class SubAgent:
         # 执行者角色切换压成一条指派消息而非重写系统提示词。
         if fork_from is not None and getattr(fork_from, "messages", None):
             import copy as _copy
+            # 全量 fork（实证 R14-R17：裁剪会斩断前缀共享——化身尾部与主干
+            # 中部不同，缓存命中从 70% 掉到 50%，billable 不降反升；
+            # 全量 fork 化身首轮命中主干全部前缀，9k < 裁剪的 13k）
             self.messages = _copy.deepcopy(fork_from.messages)
             self.messages.append({
                 "role": "user",
