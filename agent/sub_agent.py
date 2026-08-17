@@ -103,7 +103,8 @@ class SubAgent:
                  full_tools_map: Optional[Dict] = None,
                  external_interrupt_check: Optional[Callable] = None,
                  pending_message_provider: Optional[Callable[[], str]] = None,
-                 fork_from=None):
+                 fork_from=None,
+                 worker_name: str = "分身"):
         self.task = task
         self.max_iterations = max_iterations
         self.progress_callback = progress_callback
@@ -124,6 +125,7 @@ class SubAgent:
         self._external_interrupt_check = external_interrupt_check
         self._pending_message_provider = pending_message_provider
         self._fork_from = fork_from
+        self._worker_name = (worker_name or "分身").strip() or "分身"
 
         # fork-context（调度者模式 M3+ 架构升级，实测驱动）：worker 上下文从
         # 主 agent 主干 fork——系统提示词/历史前缀与主干逐字节相同（k3 缓存
@@ -134,11 +136,12 @@ class SubAgent:
             # 全量 fork（实证 R14-R17：裁剪会斩断前缀共享——化身尾部与主干
             # 中部不同，缓存命中从 70% 掉到 50%，billable 不降反升；
             # 全量 fork 化身首轮命中主干全部前缀，9k < 裁剪的 13k）
+            _wn = getattr(self, "_worker_name", "分身") or "分身"
             self.messages = _copy.deepcopy(fork_from.messages)
             self.messages.append({
                 "role": "user",
                 "content": (
-                    "【执行指派】注意：你现在是从主干 fork 出的**执行者分支实例**——"
+                    f"【执行指派】注意：你现在是从主干 fork 出的**{_wn}分支实例**——"
                     "上面的调度者身份与对话历史属于主干，仅供你理解背景。"
                     "你的唯一职责是直接执行下面的任务简报：**不派发、不分流、"
                     "不等待，亲自动手用工具完成**。\n\n"
