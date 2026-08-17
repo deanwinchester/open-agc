@@ -736,7 +736,7 @@ class TestFabricationGuard:
         assert "派发" in out
         assert len(agent.llm.seen_messages) == 2
         second_call_msgs = agent.llm.seen_messages[1]
-        assert any(m.get("role") == "system" and "虚构交付" in str(m.get("content", ""))
+        assert any(m.get("role") == "system" and "虚构" in str(m.get("content", ""))
                    for m in second_call_msgs)
 
     def test_guard_fires_at_most_once(self, monkeypatch, tmp_path):
@@ -767,7 +767,7 @@ class TestFabricationGuard:
         out = agent.run_turn("开工", verbose=False, skip_rag=True)
         assert "验收通过" in out
         assert len(agent.llm.seen_messages) == 2
-        assert not any(m.get("role") == "system" and "虚构交付" in str(m.get("content", ""))
+        assert not any(m.get("role") == "system" and "虚构" in str(m.get("content", ""))
                        for m in agent.messages)
 
 
@@ -1076,3 +1076,39 @@ class TestForkContext:
         result = sub.run()
         assert result["success"] is True
         assert shell.calls, "fork 模式工具应正常执行"
+
+
+class TestFabricationGuardContentVariant:
+    """拦截扩展（eval R12/R13 实证）：零工具 + 回复含 ``` 代码块 = 编造
+    文件/命令输出内容（「读取后告知」类幻觉），同样拦截重跑。"""
+
+    def _make_agent(self, monkeypatch, tmp_path, script):
+        from tests.test_agent_reliability import _bare_agent
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"dispatcher_mode": True}), encoding="utf-8")
+        monkeypatch.setattr("agent.agent.get_data_path",
+                            lambda name: str(tmp_path / name))
+        agent = _bare_agent()
+        agent.session_id = 1
+        agent.llm = _ScriptLLM(script)
+        return agent
+
+    _HALLUCINATED = ("文件内容是喵~\n```\nhello probe A line2\n```\n"
+                     "共两行文本，末尾带换行符。以上内容是我直接读取到的，"
+                     "完整无误，你可以直接使用这段内容喵。" + "补充说明。" * 20)
+
+    def test_zero_tool_code_block_content_blocked(self, monkeypatch, tmp_path):
+        agent = self._make_agent(monkeypatch, tmp_path, [
+            (self._HALLUCINATED, None),               # 零工具编造内容 → 拦
+            ("派发：已派执行者真实读取该文件。", None),     # 重跑后正常
+        ])
+        out = agent.run_turn("读 probe_a.txt 告诉我内容", verbose=False, skip_rag=True)
+        assert "派发" in out
+        assert len(agent.llm.seen_messages) == 2
+
+    def test_pure_conversation_with_short_reply_not_blocked(self, monkeypatch, tmp_path):
+        agent = self._make_agent(monkeypatch, tmp_path, [
+            ("好的喵，这个问题很简单：直接回答即可。", None),
+        ])
+        out = agent.run_turn("你好", verbose=False, skip_rag=True)
+        assert len(agent.llm.seen_messages) == 1  # 短回复不拦
