@@ -661,6 +661,10 @@ class OpenAGCAgent:
                     f"验收未通过：先针对性补充信息重派一次；再次失败则亲自接管执行"
                     f"（此时适用下方执行规范），并如实告知用户。\n"
                     f"接管是唯一的亲手执行场景——仅限{_wn}两次失败之后。\n"
+                    f"\n## 进展问询处理\n"
+                    f"用户问「有进展吗/好了吗/继续」时：先看「活跃分身」段——{_wn}还在跑就如实"
+                    f"说仍在执行；已结束/失联就**重新派发**继续任务，或如实告诉用户当前状态。"
+                    f"严禁只回「继续跟进/催办/在等」而没有任何实际动作（查证或重派）。\n"
                     f"\n## 呈现\n"
                     f"回答基于{_wn}的真实产出：交付了什么、在哪里。工具步骤不必逐条复述。\n"
                     f"涉及交付物的回复若零工具调用、纯文本直接交付，视为违规（应派发而未派发）。\n"
@@ -2559,6 +2563,27 @@ class OpenAGCAgent:
                     _plan = _load_plan(plan_id=None, task_id=self.task_id)
                 if _plan:
                     _dyn_parts.append("## 当前计划进度\n" + _fmt_plan(_plan))
+            except Exception:
+                pass
+
+        # 活跃分身状态注入（生产实证 #413：主 agent 对「分身是否还在跑」毫无
+        # 感知，用户问进展时只能凭想象空谈「继续跟进」——现在每轮如实可见）
+        if self._dispatcher_mode_enabled():
+            try:
+                from agent.dispatcher import get_running_dispatches_for_session as _grds
+                _rds = _grds(self.session_id)
+                if _rds:
+                    _tids = "、".join(f"#{d['task_id']}" for d in _rds[:3])
+                    _dyn_parts.append(
+                        f"## 活跃分身\n当前会话有 {len(_rds)} 个{self._worker_name}正在后台执行"
+                        f"（任务 {_tids}，尚未返回）。用户问进展时如实说明「仍在执行，"
+                        "等其返回」即可，不要重复派发同一任务。")
+                else:
+                    _dyn_parts.append(
+                        f"## 活跃分身\n当前会话**没有**运行中的{self._worker_name}。"
+                        "若用户问此前任务的进展/催促继续：说明该{self._worker_name}已结束"
+                        "（完成或失联），需要继续时应**重新派发**（dispatch_worker），"
+                        "严禁空谈「继续跟进/催办」而无实际行动。")
             except Exception:
                 pass
 
