@@ -1002,6 +1002,21 @@ def chat_stream_collect(self, messages: List[Dict[str, Any]],
     response = litellm.stream_chunk_builder(chunks)
     if response is None:
         raise ValueError("stream_chunk_builder returned None")
+    # 流式空响应回退（生产实证 #420：k3 在 ~58k 上下文时长流式被切断/秒拒，
+    # 连续 7 次空响应、pt=0——聚合出空 message 会让 run_turn 整轮炸掉；
+    # 同上下文非流式随即恢复，故回退非流式 chat（自带 3 次重试+fallback））
+    _msg = None
+    try:
+        _choices = getattr(response, "choices", None) or []
+        _msg = _choices[0].message if _choices else None
+    except Exception:
+        _msg = None
+    _empty = (_msg is None
+              or (not (getattr(_msg, "content", "") or "").strip()
+                  and not getattr(_msg, "tool_calls", None)))
+    if _empty:
+        print("[LLMClient] 流式空响应，回退非流式 chat 重试")
+        return self.chat(messages, model=target_model, tools=tools)
     return response, target_model
 
 
