@@ -385,12 +385,24 @@ def _extract_session_files(agent, limit: int = 10) -> List[str]:
     return files[:limit]
 
 
-def render_packet_task(packet: Dict[str, Any]) -> str:
+def render_packet_task(packet: Dict[str, Any], compact: bool = False) -> str:
     """把交接包渲染为 worker 的自包含任务文本（worker 看不到主对话）。
 
     简报是主 agent 基于全部会话上下文亲自写的；检索段（历史/记忆/文件）
     是程序化增强的参考材料，用分隔标记与简报区隔。
+
+    compact=True（fork 模式）：化身已继承主干上下文，空检索段与规则段
+    是冗余噪音，只渲染简报 + 验收标准（生产实证：交接包冗长）。
     """
+    if compact:
+        lines = ["【调度任务】", packet.get("brief") or ""]
+        acceptance = packet.get("acceptance") or []
+        if acceptance:
+            lines.append("")
+            lines.append("验收标准（完成后将逐条核验）：")
+            lines.extend([f"{i}. {c}" for i, c in enumerate(acceptance, 1)])
+        return "\n".join(lines)
+
     lines = [
         "【调度任务】",
         "任务简报（主 agent 基于全部会话上下文亲自撰写，按此执行）：",
@@ -611,6 +623,11 @@ def _run_worker(agent, task_text: str, progress_callback,
         context_brief = _brief_fn() if callable(_brief_fn) else ""
     except Exception:
         context_brief = ""
+    _use_fork = bool(getattr(agent, "messages", None))
+    if _use_fork:
+        # fork 模式下化身已继承主干完整上下文（含会话背景），context_brief
+        # 是重复携带——省略（交接包瘦身，生产实证：内容冗长）
+        context_brief = ""
     parent_tools = (getattr(agent, "full_available_tools", None)
                     or getattr(agent, "available_tools", None) or {})
     try:
@@ -709,7 +726,7 @@ def dispatch_to_worker(agent, brief: str, acceptance=None,
         }
     else:
         packet = enrich_handoff(agent, brief, acceptance)
-    task_text = render_packet_task(packet)
+    task_text = render_packet_task(packet, compact=bool(getattr(agent, "messages", None)))
 
     attempts: List[Dict[str, Any]] = []
     for attempt in (1, 2):
