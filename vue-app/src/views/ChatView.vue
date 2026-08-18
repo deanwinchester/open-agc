@@ -339,7 +339,8 @@ function onProgress(data) {
       if (data.content) {
         const ekey = `thought-${data.iteration || 0}`;
         const existing = card.entries.find((e) => e.kind === 'thinking' && e.ekey === ekey);
-        if (existing) existing.content = data.content;
+        // 流式增量追加（llm_stream_enabled）；非流式整换
+        if (existing) existing.content = data.stream ? (existing.content + data.content) : data.content;
         else card.entries.push({ kind: 'thinking', ekey, content: data.content });
       } else {
         thinking.text = t.thinking;
@@ -352,9 +353,18 @@ function onProgress(data) {
     case 'model_switched':
       card.entries.push({ kind: 'note', text: `${t.modelSwitched}: ${data.from} → ${data.to}` });
       break;
-    case 'response':
-      if (data.content) card.entries.push({ kind: 'response', content: data.content });
+    case 'response': {
+      if (!data.content) break;
+      if (data.stream) {
+        // 流式增量：追加到最新 response 条目（无则新建）——逐字可见
+        const last = [...card.entries].reverse().find((e) => e.kind === 'response');
+        if (last) last.content += data.content;
+        else card.entries.push({ kind: 'response', content: data.content });
+      } else {
+        card.entries.push({ kind: 'response', content: data.content });
+      }
       break;
+    }
     case 'usage': {
       // 服务端字段：total_tokens/prompt_tokens/completion_tokens/cached_tokens（无 cost，
       // 见 agent/agent.py usage 事件构造）；格式对齐旧 static/app.js:830-836
