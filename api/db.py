@@ -157,6 +157,21 @@ def init_db():
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # 分身持久化（dispatcher_mode M2.5）：服务重启后仍可查询分身状态——
+    # 此前只有内存 dict，重启全部失联且无痕（生产实证：用户问进展时
+    # 主 agent 不知道分身早死了）。lost = 重启时仍在 running 的判定失联。
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER,
+            task_id INTEGER,
+            brief TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'running',
+            result_summary TEXT DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     # 交付物登记制：目录 ↔ 任务多对多（归属不再靠 outputs/task_<id>/ 目录名隐含）
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS deliverables (

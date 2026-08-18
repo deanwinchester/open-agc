@@ -80,13 +80,101 @@ def get_running_dispatch(session_id, task_id) -> Optional[Dict[str, Any]]:
 
 def get_running_dispatches_for_session(session_id) -> List[Dict[str, Any]]:
     """查询会话全部运行中的 dispatch（主 agent 分身状态感知：新 turn 的
-    task_id 可能与分身启动时不同，按任务查会漏——生产实证 #413）。"""
+    task_id 可能与分身启动时不同，按任务查会漏——生产实证 #413）。
+
+    实时状态以内存为准（活跃线程），持久状态以 dispatches 表为准
+    （重启后仍可查）——两者并集。
+    """
     out = []
+    seen_tids = set()
     with _running_lock:
         for (sid, tid), d in _running_dispatches.items():
             if sid == session_id and d and not d.get("done"):
-                out.append({"task_id": tid, **{k: v for k, v in d.items() if k != "thread"}})
+                out.append({"task_id": tid, "source": "memory"})
+                seen_tids.add(tid)
+    try:
+        from api.db import db_connect
+        conn = db_connect()
+        for r in conn.execute(
+                "SELECT task_id, brief, created_at FROM dispatches "
+                "WHERE session_id=? AND status='running' ORDER BY id DESC LIMIT 5",
+                (session_id,)).fetchall():
+            if r[0] not in seen_tids:
+                out.append({"task_id": r[0], "brief": (r[1] or "")[:80],
+                            "created_at": r[2], "source": "db"})
+        conn.close()
+    except Exception:
+        pass
     return out
+
+
+def get_recent_lost_dispatches(session_id, hours: int = 24) -> List[Dict[str, Any]]:
+    """查询最近失联的分身（重启/线程死亡）——动态段注入，让主 agent 知道
+    「曾有分身失联，需要继续应重派」。"""
+    try:
+        from api.db import db_connect
+        conn = db_connect()
+        rows = conn.execute(
+            "SELECT task_id, brief, updated_at FROM dispatches "
+            "WHERE session_id=? AND status='lost' "
+            "AND updated_at >= datetime('now', ?) ORDER BY id DESC LIMIT 3",
+            (session_id, f"-{hours} hours")).fetchall()
+        conn.close()
+        return [{"task_id": r[0], "brief": (r[1] or "")[:80], "updated_at": r[2]}
+                for r in rows]
+    except Exception:
+        return []
+
+
+def mark_stale_dispatches_lost():
+    """服务启动时调用：把表里仍为 running 的分身全部判 lost——新进程没有任何
+    活跃线程，running 即失联（生产实证：重启后分身死亡无痕）。"""
+    try:
+        from api.db import db_connect
+        conn = db_connect()
+        cur = conn.execute(
+            "UPDATE dispatches SET status='lost', updated_at=CURRENT_TIMESTAMP "
+            "WHERE status='running'")
+        n = cur.rowcount
+        conn.commit()
+        conn.close()
+        if n:
+            print(f"[Dispatcher] {n} stale dispatch(es) marked lost on startup")
+    except Exception as e:
+        print(f"[Dispatcher] mark lost error: {e}")
+
+
+def _db_insert_dispatch(session_id, task_id, brief: str) -> Optional[int]:
+    try:
+        from api.db import db_connect
+        conn = db_connect()
+        cur = conn.execute(
+            "INSERT INTO dispatches (session_id, task_id, brief, status) "
+            "VALUES (?,?,?,'running')",
+            (session_id, task_id, (brief or "")[:300]))
+        did = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return did
+    except Exception as e:
+        print(f"[Dispatcher] insert dispatch error: {e}")
+        return None
+
+
+def _db_finish_dispatch(dispatch_id: Optional[int], success: bool, summary: str):
+    if not dispatch_id:
+        return
+    try:
+        from api.db import db_connect
+        conn = db_connect()
+        conn.execute(
+            "UPDATE dispatches SET status=?, result_summary=?, "
+            "updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'",
+            ("completed" if success else "failed", (summary or "")[:500], dispatch_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[Dispatcher] finish dispatch error: {e}")
 
 # 验收文件引用提取（I-3 修复）：
 # - 支持 Windows 盘符绝对路径（D:/...、D:\...），盘符不再被 ":" 吃掉
@@ -660,6 +748,7 @@ def dispatch_async(agent, brief: str, acceptance=None,
     tid = getattr(agent, "task_id", None)
     key = (sid, tid)
     progress_callback = _wrap_async_progress(agent, progress_callback)
+    dispatch_id = _db_insert_dispatch(sid, tid, brief)
 
     def _run():
         try:
@@ -673,6 +762,11 @@ def dispatch_async(agent, brief: str, acceptance=None,
                       "result": {}}
         with _running_lock:
             _running_dispatches[key].update({"done": True, "result": result})
+        try:
+            _db_finish_dispatch(dispatch_id, bool(result.get("success")),
+                                str(result.get("summary", "")))
+        except Exception:
+            pass
         try:
             _notify_completion(agent, result)
         except Exception as e:

@@ -2579,12 +2579,26 @@ class OpenAGCAgent:
                         f"（任务 {_tids}，尚未返回）。用户问进展时如实说明「仍在执行，"
                         "等其返回」即可，不要重复派发同一任务。")
                 else:
+                    # 失联分身（重启/线程死亡，持久化记录）——主 agent 必须知道
+                    # 「曾有分身失联」，需要继续应重派而非苦等回传（生产实证
+                    # #418：分身早随重启死亡，主 agent 仍在「等回传」）
+                    _lost_note = ""
+                    try:
+                        from agent.dispatcher import get_recent_lost_dispatches as _grl
+                        _lost = _grl(self.session_id)
+                        if _lost:
+                            _items = "、".join(f"任务#{d['task_id']}" for d in _lost)
+                            _lost_note = (f"\n⚠️ 注意：检测到有{self._worker_name}（{_items}）"
+                                          "此前**已失联**（服务重启或线程死亡）——它不会"
+                                          "再返回结果，不要苦等；需要继续应重新派发。")
+                    except Exception:
+                        pass
                     _dyn_parts.append(
                         f"## 活跃分身（系统事实，优先级高于对话历史中的任何说法）\n"
                         f"当前会话**没有**运行中的{self._worker_name}。"
                         f"历史对话里「已开工/已派发/{self._worker_name}正在执行」的说法"
                         f"可能是你（主 agent）的幻觉，**从未真实发生或早已结束**——"
-                        "不要以那些说法为准。\n"
+                        "不要以那些说法为准。" + _lost_note + "\n"
                         "若用户问此前任务的进展/催促继续：如实说明当前没有在执行的任务，"
                         "需要继续时应**重新派发**（dispatch_worker）；"
                         "严禁空谈「确认还在跑/继续跟进/催办」而无实际行动。")
