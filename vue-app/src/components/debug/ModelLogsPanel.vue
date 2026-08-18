@@ -238,7 +238,7 @@ onMounted(() => {
       />
     </div>
 
-    <el-dialog v-model="detailDialog" :title="t.detailTitle" width="720px" class="model-log-detail-dialog">
+    <el-dialog :append-to-body="true" v-model="detailDialog" :title="t.detailTitle" width="720px" class="model-log-detail-dialog">
       <div v-loading="detailLoading">
         <template v-if="detail">
           <div class="detail-grid">

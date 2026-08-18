@@ -156,7 +156,7 @@ onMounted(loadSecrets);
       </el-table>
     </el-card>
 
-    <el-dialog
+    <el-dialog :append-to-body="true"
       v-model="dialogOpen"
       :title="dialogMode === 'add' ? t.addTitle : t.editTitle"
       width="480px"
