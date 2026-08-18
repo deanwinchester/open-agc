@@ -880,7 +880,8 @@ class LLMClient:
                         continue
 
                     # Clean the content just in case any markers remain
-                    cleaned = clean_llm_text(content)
+                    cleaned = re.sub(r"</?(thought|think)[^>]*>", "", content)  # chunk 级只剥标记不 strip：
+                    # strip 会把 chunk 边界换行剥掉（流式换行丢失致 markdown 挤成一坨）
                     chunk.choices[0].delta.content = cleaned
                     if not cleaned:
                         continue
