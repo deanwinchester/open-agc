@@ -236,7 +236,7 @@ function eventText(ev) {
     </el-card>
 
     <!-- 事件弹窗 -->
-    <el-dialog
+    <el-dialog :append-to-body="true"
       v-model="eventsDialog"
       :title="`${t.eventsTitle} — ${eventsTarget?.label || eventsTarget?.filename || ''}`"
       width="640px"

@@ -679,7 +679,7 @@ onMounted(() => {
         </div>
       </div>
 
-      <el-dialog v-model="themeImportVisible" :title="t.theme.importTitle" width="480px">
+      <el-dialog :append-to-body="true" v-model="themeImportVisible" :title="t.theme.importTitle" width="480px">
         <el-input
           v-model="themeImportText"
           type="textarea"
