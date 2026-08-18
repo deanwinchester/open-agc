@@ -77,6 +77,17 @@ def get_running_dispatch(session_id, task_id) -> Optional[Dict[str, Any]]:
         return d
     return None
 
+
+def get_running_dispatches_for_session(session_id) -> List[Dict[str, Any]]:
+    """查询会话全部运行中的 dispatch（主 agent 分身状态感知：新 turn 的
+    task_id 可能与分身启动时不同，按任务查会漏——生产实证 #413）。"""
+    out = []
+    with _running_lock:
+        for (sid, tid), d in _running_dispatches.items():
+            if sid == session_id and d and not d.get("done"):
+                out.append({"task_id": tid, **{k: v for k, v in d.items() if k != "thread"}})
+    return out
+
 # 验收文件引用提取（I-3 修复）：
 # - 支持 Windows 盘符绝对路径（D:/...、D:\...），盘符不再被 ":" 吃掉
 # - 词干必须含字母/CJK（排除 "3.10" 之类版本号），扩展名仅限 1-5 个字母
