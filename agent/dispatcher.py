@@ -161,6 +161,50 @@ def _db_insert_dispatch(session_id, task_id, brief: str) -> Optional[int]:
         return None
 
 
+def _fetch_prior_progress(session_id, task_id, limit: int = 8) -> str:
+    """断点接力：查同任务前次 lost/failed 分身的已完成步骤与产出，
+    渲染为「上次中断进度」段注入重派简报——新分身跳过已完成部分，
+    不要重做（用户要求：分身中断后能在断点继续）。"""
+    try:
+        from api.db import db_connect
+        conn = db_connect()
+        conn.row_factory = __import__("sqlite3").Row
+        # 前次中断的分身（lost/failed），最近一次
+        prior = conn.execute(
+            "SELECT id, status, result_summary FROM dispatches "
+            "WHERE session_id=? AND task_id=? AND status IN ('lost','failed') "
+            "ORDER BY id DESC LIMIT 1",
+            (session_id, task_id)).fetchone()
+        if not prior:
+            conn.close()
+            return ""
+        # 该任务下分身执行的成功步骤（task_steps 落库，重启后仍在；
+        # 限 session 过滤主 agent 自身与其他会话的步骤）
+        steps = conn.execute(
+            "SELECT tool_name, args_preview, result_preview FROM task_steps "
+            "WHERE task_id=? AND session_id=? AND success=1 AND tool_name IS NOT NULL "
+            "ORDER BY id DESC LIMIT ?",
+            (task_id, session_id, limit * 2)).fetchall()
+        conn.close()
+        if not steps:
+            return ""
+        done = []
+        for s in reversed(steps[-limit:] if len(steps) > limit else steps):
+            tool = s["tool_name"]
+            args = (s["args_preview"] or "")[:80].replace("\n", " ")
+            done.append(f"- {tool}({args})")
+        return (
+            "\n\n【断点接力：上次分身执行中断】\n"
+            "同一任务此前的分身曾执行到一半中断（lost/failed）。"
+            "它**已经完成的步骤**（不要重做）：\n" + "\n".join(done)
+            + "\n请在此基础上**继续未完成的部分**，先验证已有产出是否在位，"
+              "再执行剩余工作。"
+        )
+    except Exception as e:
+        print(f"[Dispatcher] prior progress error: {e}")
+        return ""
+
+
 def _db_finish_dispatch(dispatch_id: Optional[int], success: bool, summary: str):
     if not dispatch_id:
         return
@@ -749,6 +793,14 @@ def dispatch_async(agent, brief: str, acceptance=None,
     key = (sid, tid)
     progress_callback = _wrap_async_progress(agent, progress_callback)
     dispatch_id = _db_insert_dispatch(sid, tid, brief)
+    # 断点接力：同任务有前次 lost/failed 分身时，把已完成步骤注入简报，
+    # 新分身跳过已完成部分继续（用户要求：中断后能在断点继续）
+    try:
+        _prior = _fetch_prior_progress(sid, tid)
+        if _prior:
+            brief = (brief or "") + _prior
+    except Exception:
+        pass
 
     def _run():
         try:
