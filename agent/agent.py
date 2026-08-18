@@ -2794,7 +2794,31 @@ class OpenAGCAgent:
                 progress_callback({"event": "thinking", "iteration": current_iter})
             
             try:
-                response, actual_model = self.llm.chat(messages=self.messages, tools=self.tool_schemas)
+                # 流式优先（感知延迟优化，用户反馈）：边生成边推 thinking/response
+                # 增量到前端，首 token 几秒可见（此前非流式首轮 30-60s 无动静）。
+                # config.llm_stream_enabled=false 或无 progress_callback（测试）时回退非流式。
+                _stream_on = False
+                if progress_callback is not None:
+                    try:
+                        with open(config_path, encoding="utf-8") as _scf:
+                            _stream_on = bool(json.load(_scf).get("llm_stream_enabled", True))
+                    except Exception:
+                        _stream_on = True
+                if _stream_on:
+                    def _on_delta(kind, text, _iter=current_iter, _pcb=progress_callback):
+                        try:
+                            if kind == "thinking":
+                                _pcb({"event": "thinking", "iteration": _iter,
+                                      "content": text, "stream": True})
+                            else:
+                                _pcb({"event": "response", "content": text, "stream": True})
+                        except Exception:
+                            pass
+                    response, actual_model = self.llm.chat_stream_collect(
+                        messages=self.messages, tools=self.tool_schemas,
+                        on_delta=_on_delta)
+                else:
+                    response, actual_model = self.llm.chat(messages=self.messages, tools=self.tool_schemas)
                 choices = getattr(response, "choices", None) or []
                 if not choices:
                     raise ValueError("LLM returned an empty choices list")
@@ -3521,7 +3545,12 @@ class OpenAGCAgent:
                         r"已开工|已重新开工|已派出|已派发|已安排执行者|"
                         r"✅\s*(编译|验证|部署|识别|跑通))", final_answer)
                     _fabricated_content = ("```" in final_answer)  # 外层已 len>150
-                    if _tools_used == 0 and (_declared_delivery or _fabricated_content):
+                    # 「派发：」声明但零工具 = 声明与行动不符（生产实证 #411：
+                    # 新形态空话——不说「我做了」说「我会催办/在做」，词表拦不住；
+                    # 但它自己按提示词写的分流声明是可靠信号）
+                    _declared_dispatch = final_answer.lstrip().startswith("派发：")
+                    if _tools_used == 0 and (_declared_delivery or _fabricated_content
+                                             or _declared_dispatch):
                         self._fabrication_retries += 1
                         print("[Agent] ⚠️ 虚构交付拦截：零工具调用却声明交付/内容，注入纠错重跑")
                         self.messages.append({"role": "system", "content": (

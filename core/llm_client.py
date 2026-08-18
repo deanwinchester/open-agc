@@ -968,3 +968,43 @@ def chat_with_drift_retry(llm, messages: List[Dict[str, Any]],
                         pass
                 continue
             raise
+
+
+# ────────────────────────── 流式调用（感知延迟优化） ──────────────────────────
+
+def chat_stream_collect(self, messages: List[Dict[str, Any]],
+                        model: Optional[str] = None,
+                        tools: Optional[List[Dict[str, Any]]] = None,
+                        on_delta=None) -> Tuple[Any, str]:
+    """流式调用 + 聚合完整响应（litellm.stream_chunk_builder）。
+
+    on_delta(kind, text)：增量回调，kind='content' 正文 / 'thinking' 思考——
+    run_turn 据此把生成过程实时推给前端（用户反馈：非流式首轮 30-60s
+    无任何动静）。返回 (response, actual_model)，结构与 chat() 兼容。
+    """
+    target_model = model or self.default_model
+    chunks = []
+    for chunk in self.chat_stream(messages, model=target_model, tools=tools):
+        chunks.append(chunk)
+        if on_delta:
+            try:
+                delta = chunk.choices[0].delta
+                rc = getattr(delta, "reasoning_content", None)
+                if rc:
+                    on_delta("thinking", rc)
+                c = getattr(delta, "content", None)
+                if c:
+                    on_delta("content", c)
+            except Exception:
+                pass
+    if not chunks:
+        raise ValueError("LLM stream returned no chunks")
+    response = litellm.stream_chunk_builder(chunks)
+    if response is None:
+        raise ValueError("stream_chunk_builder returned None")
+    return response, target_model
+
+
+# 挂到类上（保持文件结构：类内不便再加方法——本函数与 chat_with_drift_retry
+# 同为模块级公共件）
+LLMClient.chat_stream_collect = chat_stream_collect
