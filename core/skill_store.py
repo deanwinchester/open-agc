@@ -29,6 +29,24 @@ _STOPWORDS = {
     'it', 'its', 'about', 'just', 'also', 'any', 'into', 'over', 'then',
 }
 
+# 语义泛词（无语义区分度，技能匹配不计分）——生产实证：human-writing 的
+# keywords 海量且满是这类泛词（生成/内容/用户/创建…），播放器开发任务
+# 也命中写作技能被误加载。bigram 形式（与 _extract_keywords 产出对齐）。
+_GENERIC_WORDS = {
+    '生成', '内容', '需要', '用户', '数据', '文件', '创建', '检查', '验证',
+    '测试', '使用', '信息', '进行', '分析', '系统', '工具', '结果', '功能',
+    '项目', '任务', '工作', '处理', '完成', '实现', '问题', '方式', '说明',
+    '查看', '获取', '设置', '管理', '支持', '帮助', '提供', '通过', '根据',
+    '注意', '确保', '当前', '主要', '具体', '实际', '基本', '简单', '可能',
+    '应该', '可以', '已经', '对于', '关于', '针对', '学习', '理解', '了解',
+    '知道', '清楚', '明确', '确定', '必须', '禁止', '严禁', '不要', '避免',
+    '完全', '全面', '高效', '快速', '准确', '详细', '清晰', '规范', '标准',
+    '统一', '合理', '有效', '实用', '通用', '常用', '典型', '特殊', '特定',
+    '技能', '文本', '方法', '情况', '相关', '介绍', '掌握', '熟悉', '深入',
+    '充分', '彻底', '专业', '精确', '简明', '一致', '学习', '应用', '运用',
+    '利用', '采用', '考虑', '涉及', '面向', '适用', '常见', '推荐', '建议',
+}
+
 
 def _extract_keywords(text: str) -> List[str]:
     """Extract meaningful keywords from text.
@@ -255,16 +273,20 @@ class SkillStore:
         """
         Retrieve relevant skill metadata by keyword matching against
         the user's query and recent conversation context.
+
+        语义泛词（_GENERIC_WORDS）在 query 与技能两侧都不计分——否则
+        human-writing 这类 keywords 海量泛词的技能会被任何任务命中
+        （生产实证：播放器开发误载写作技能）。
         """
         if not query or not self.index.get("skills"):
             return []
-        query_keywords = set(_extract_keywords(query))
+        query_keywords = set(_extract_keywords(query)) - _GENERIC_WORDS
         if not query_keywords:
             return []
 
         scored = []
         for skill in self.index["skills"]:
-            skill_keywords = set(skill.get("keywords", []))
+            skill_keywords = set(skill.get("keywords", [])) - _GENERIC_WORDS
             matches = query_keywords & skill_keywords
             if matches:
                 # Score: proportion of query keywords matched
