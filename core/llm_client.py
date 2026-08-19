@@ -401,6 +401,22 @@ class LLMClient:
         self.kimi_code_api_key = config.get("api_keys", {}).get("kimi_code", "") or os.environ.get("KIMI_CODE_API_KEY", "")
         self.kimi_code_api_base = "https://api.kimi.com/coding/"
 
+        # 自定义厂商（OpenAI 兼容端点，用户要求：预置厂商之外可自由添加，
+        # 如小米/自部署网关）。config.custom_providers:
+        #   [{"name": "xiaomi", "base_url": "https://...", "api_key": "sk-...",
+        #     "models": ["m1", "m2"]}]；模型 id 约定 <name>/<model> 路由。
+        self._custom_providers = {}
+        for cp in (config.get("custom_providers") or []):
+            try:
+                name = str(cp.get("name", "")).strip()
+                base_url = str(cp.get("base_url", "")).strip()
+                api_key = str(cp.get("api_key", "")).strip()
+                models = [str(m).strip() for m in (cp.get("models") or []) if str(m).strip()]
+                if name and base_url:
+                    self._custom_providers[name] = {"base_url": base_url, "api_key": api_key, "models": models}
+            except Exception:
+                continue
+
         # Ensure local connections bypass proxy
         for var in ["no_proxy", "NO_PROXY"]:
             current = os.environ.get(var, "")
@@ -717,6 +733,13 @@ class LLMClient:
             if not stream:
                 kwargs["timeout"] = 600
         else:
+            # 自定义厂商路由（OpenAI 兼容端点）：<name>/<model> → openai/<model>
+            prefix = model.split('/', 1)[0] if '/' in model else ''
+            _cp = getattr(self, "_custom_providers", {}).get(prefix)
+            if _cp:
+                kwargs["model"] = f"openai/{model.split('/', 1)[1]}"
+                kwargs["api_base"] = _cp["base_url"]
+                kwargs["api_key"] = _cp.get("api_key") or "sk-no-key-required"
             kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
 
         return kwargs

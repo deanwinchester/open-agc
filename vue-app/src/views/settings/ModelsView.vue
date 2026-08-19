@@ -23,6 +23,47 @@ const maskedKeys = ref({});       // provider -> 掩码值（仅用于 placehold
 const apiKeyInputs = ref({});     // provider -> 用户新输入的 key（空 = 不修改）
 const modelOptions = ref([]);
 
+// ── 自定义厂商（custom_providers）──
+// GET /api/settings 读入 ref；POST 为整体替换语义：保存时按当前列表全量回传。
+// api_key 为掩码（含 "..."）时原样保留回传，后端按原样存储。
+const customProviders = ref([]);           // 编辑中的列表
+const initialCustomProviders = ref([]);    // 初始快照，用于 dirty 判断
+const newProvider = reactive({ name: '', base_url: '', api_key: '', models: '' });
+// 预置厂商名：自定义 name 不允许冲突（其模型 id 形如 <name>/<model>）
+const PRESET_PROVIDER_NAMES = ['kimi', 'deepseek', 'openai', 'anthropic', 'gemini', 'glm', 'minimax', 'llamacpp', 'kimi_code'];
+
+// 默认模型厂商下拉：静态 providers + 动态追加的自定义厂商（值 custom:<name>）
+const providerOptions = computed(() => [
+  ...providers.map((p) => ({ key: p.key, label: p.label })),
+  ...customProviders.value.map((p) => ({
+    key: `custom:${p.name}`,
+    label: `${t.customProviders.optionPrefix}: ${p.name}`,
+  })),
+]);
+
+function addCustomProvider() {
+  const name = newProvider.name.trim().toLowerCase();
+  const baseUrl = newProvider.base_url.trim();
+  if (!name || !baseUrl) { ElMessage.warning(t.customProviders.missingFields); return; }
+  if (!/^[a-z][a-z0-9_-]*$/.test(name)) { ElMessage.warning(t.customProviders.invalidName); return; }
+  if (PRESET_PROVIDER_NAMES.includes(name)) { ElMessage.warning(t.customProviders.nameConflict); return; }
+  if (customProviders.value.some((p) => p.name === name)) { ElMessage.warning(t.customProviders.duplicate); return; }
+  customProviders.value.push({
+    name,
+    base_url: baseUrl,
+    api_key: newProvider.api_key.trim(),
+    models: newProvider.models.split(',').map((s) => s.trim()).filter(Boolean),
+  });
+  newProvider.name = '';
+  newProvider.base_url = '';
+  newProvider.api_key = '';
+  newProvider.models = '';
+}
+
+function removeCustomProvider(idx) {
+  customProviders.value.splice(idx, 1);
+}
+
 const form = reactive({
   provider: '',
   model: '',
@@ -45,6 +86,9 @@ const form = reactive({
   janitorIntervalHours: 1,
   janitorSoftGb: 20,
   janitorHardGb: 50,
+  // 调度者（分身）模式
+  dispatcherMode: false,
+  agentWorkerName: '分身',
   // 访问控制：局域网访问密码（空 = 不修改；勾选清除 = 恢复仅本机）
   accessPassword: '',
   accessPasswordClear: false,
@@ -85,6 +129,12 @@ function providerFromModel(model) {
   if (ml.startsWith('minimax/')) return 'minimax';
   if (ml.startsWith('openai/')) return 'openai';
   if (ml.startsWith('anthropic/')) return 'anthropic';
+  // 自定义厂商：model 前缀（xxx/ 前段）命中已加载自定义厂商 name 时归为 custom:<name>
+  const slashIdx = ml.indexOf('/');
+  if (slashIdx > 0) {
+    const prefix = ml.slice(0, slashIdx);
+    if (customProviders.value.some((p) => p.name === prefix)) return `custom:${prefix}`;
+  }
   if (ml.includes('claude')) return 'anthropic';
   if (ml.includes('gpt')) return 'openai';
   return '';
@@ -95,6 +145,16 @@ function applySettings(data) {
   const inputs = {};
   for (const p of providers) inputs[p.key] = '';
   apiKeyInputs.value = inputs;
+
+  // 自定义厂商先读入：下方 providerFromModel 反推依赖该列表
+  const cps = Array.isArray(data.custom_providers) ? data.custom_providers : [];
+  customProviders.value = cps.map((p) => ({
+    name: p.name || '',
+    base_url: p.base_url || '',
+    api_key: p.api_key || '',
+    models: Array.isArray(p.models) ? [...p.models] : [],
+  }));
+  initialCustomProviders.value = JSON.parse(JSON.stringify(customProviders.value));
 
   const init = {
     default_model: data.default_model || '',
@@ -119,6 +179,8 @@ function applySettings(data) {
       hard_gb: data.sandbox_janitor?.hard_gb ?? 50,
     },
     access_password_set: data.access_password_set ?? false,
+    dispatcher_mode: data.dispatcher_mode ?? false,
+    agent_worker_name: data.agent_worker_name || '分身',
     email_listener_enabled: data.email_listener_enabled ?? false,
     owner_email: data.owner_email || '',
     email_account: data.email_account || '',
@@ -148,6 +210,8 @@ function applySettings(data) {
   form.janitorHardGb = init.sandbox_janitor.hard_gb;
   form.accessPassword = '';          // 已设置显示占位，不回填真实值
   form.accessPasswordClear = false;
+  form.dispatcherMode = init.dispatcher_mode;
+  form.agentWorkerName = init.agent_worker_name;
   form.emailListenerEnabled = init.email_listener_enabled;
   form.ownerEmail = init.owner_email;
   form.emailAccount = init.email_account;
@@ -218,6 +282,16 @@ function buildPayload() {
   // 清空默认模型选择视为「不修改」，不发送空 default_model
   if (form.model && form.model !== init.default_model) payload.default_model = form.model;
 
+  // 自定义厂商：整体替换语义，仅在与初始快照不同时全量回传（掩码 api_key 原样保留）
+  if (JSON.stringify(customProviders.value) !== JSON.stringify(initialCustomProviders.value)) {
+    payload.custom_providers = customProviders.value.map((p) => ({
+      name: p.name,
+      base_url: p.base_url,
+      api_key: p.api_key,
+      models: p.models,
+    }));
+  }
+
   const fallback = form.fallbackModels.split(',').map((s) => s.trim()).filter(Boolean);
   if (JSON.stringify(fallback) !== JSON.stringify(init.fallback_models)) {
     payload.fallback_models = fallback;
@@ -267,6 +341,11 @@ function buildPayload() {
   const ap = form.accessPassword.trim();
   if (ap) payload.access_password = ap;
   else if (form.accessPasswordClear && init.access_password_set) payload.access_password = '';
+
+  // 调度者（分身）模式：仅在与初始值不同时提交；叫法留空视为「不修改」
+  if (form.dispatcherMode !== init.dispatcher_mode) payload.dispatcher_mode = form.dispatcherMode;
+  const wn = form.agentWorkerName.trim();
+  if (wn && wn !== init.agent_worker_name) payload.agent_worker_name = wn;
 
   // 邮件监听与助手：密码仅用户新输入时才发送（*** 掩码不回传）
   if (form.emailListenerEnabled !== init.email_listener_enabled) payload.email_listener_enabled = form.emailListenerEnabled;
@@ -465,6 +544,54 @@ onMounted(() => {
       </div>
     </el-card>
 
+    <!-- 自定义厂商 -->
+    <el-card class="settings-card" shadow="never">
+      <template #header>
+        <div class="card-header">
+          <span class="card-title">{{ t.customProviders.title }}</span>
+          <p class="card-desc">{{ t.customProviders.desc }}</p>
+        </div>
+      </template>
+      <div v-if="customProviders.length" class="cp-list">
+        <div v-for="(p, idx) in customProviders" :key="p.name" class="cp-row">
+          <div class="cp-info">
+            <strong>{{ p.name }}</strong>
+            <span class="cp-detail">{{ p.base_url }}</span>
+            <span class="cp-detail">
+              {{ t.customProviders.apiKey }}: {{ p.api_key || '—' }}
+              <em v-if="String(p.api_key || '').includes('...')" class="cp-masked-hint">
+                （{{ t.customProviders.maskedKeyKept }}）
+              </em>
+            </span>
+            <span class="cp-detail">{{ t.customProviders.models }}: {{ (p.models || []).join(', ') || '—' }}</span>
+          </div>
+          <el-button size="small" type="danger" plain @click="removeCustomProvider(idx)">
+            {{ t.customProviders.remove }}
+          </el-button>
+        </div>
+      </div>
+      <div v-else class="empty-state"><p>{{ t.customProviders.listEmpty }}</p></div>
+      <el-divider content-position="left">{{ t.customProviders.add }}</el-divider>
+      <el-form label-position="top">
+        <div class="cp-form-grid">
+          <el-form-item :label="t.customProviders.name">
+            <el-input v-model="newProvider.name" :placeholder="t.customProviders.namePlaceholder" />
+          </el-form-item>
+          <el-form-item :label="t.customProviders.baseUrl">
+            <el-input v-model="newProvider.base_url" :placeholder="t.customProviders.baseUrlPlaceholder" />
+          </el-form-item>
+          <el-form-item :label="t.customProviders.apiKey">
+            <el-input v-model="newProvider.api_key" :placeholder="t.customProviders.apiKeyPlaceholder" />
+          </el-form-item>
+          <el-form-item :label="t.customProviders.models">
+            <el-input v-model="newProvider.models" :placeholder="t.customProviders.modelsPlaceholder" />
+          </el-form-item>
+        </div>
+        <el-button type="primary" plain @click="addCustomProvider">{{ t.customProviders.add }}</el-button>
+        <div class="field-hint">{{ t.customProviders.saveHint }}</div>
+      </el-form>
+    </el-card>
+
     <!-- 默认模型 -->
     <el-card class="settings-card" shadow="never">
       <template #header>
@@ -477,7 +604,7 @@ onMounted(() => {
         <div class="model-row">
           <el-form-item :label="t.defaultModel.provider" class="provider-item">
             <el-select v-model="form.provider" @change="onProviderChange">
-              <el-option v-for="p in providers" :key="p.key" :label="p.label" :value="p.key" />
+              <el-option v-for="p in providerOptions" :key="p.key" :label="p.label" :value="p.key" />
             </el-select>
           </el-form-item>
           <el-form-item :label="t.defaultModel.model" class="model-item">
@@ -555,6 +682,30 @@ onMounted(() => {
         <el-form-item :label="t.heartbeat.resume">
           <el-input-number v-model="form.maxResumeCount" :min="0" :max="100" />
           <div class="field-hint">{{ t.heartbeat.resumeHint }}</div>
+        </el-form-item>
+      </el-form>
+    </el-card>
+
+    <!-- 调度者（分身）模式 -->
+    <el-card class="settings-card" shadow="never">
+      <template #header>
+        <div class="card-header">
+          <span class="card-title">{{ t.dispatcher.title }}</span>
+          <p class="card-desc">{{ t.dispatcher.desc }}</p>
+        </div>
+      </template>
+      <el-form label-position="top">
+        <el-form-item :label="t.dispatcher.enable">
+          <el-switch v-model="form.dispatcherMode" />
+          <div class="field-hint">{{ t.dispatcher.enableHint }}</div>
+        </el-form-item>
+        <el-form-item :label="t.dispatcher.workerName">
+          <el-input
+            v-model="form.agentWorkerName"
+            class="worker-name-input"
+            :placeholder="t.dispatcher.workerNamePlaceholder"
+          />
+          <div class="field-hint">{{ t.dispatcher.workerNameHint }}</div>
         </el-form-item>
       </el-form>
     </el-card>
@@ -914,5 +1065,53 @@ onMounted(() => {
   margin-top: 2px;
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+
+/* 自定义厂商卡 */
+.cp-list {
+  margin-bottom: 4px;
+}
+
+.cp-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.cp-row:last-child {
+  border-bottom: none;
+}
+
+.cp-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cp-detail {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  word-break: break-all;
+}
+
+.cp-masked-hint {
+  font-style: normal;
+  color: var(--el-text-color-placeholder);
+}
+
+.cp-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
+  gap: 0 24px;
+  width: 100%;
+}
+
+.worker-name-input {
+  max-width: 320px;
 }
 </style>
