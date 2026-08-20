@@ -241,6 +241,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 "content": _pending["content"],
                 "session_id": ws_session_id,
                 "task_id": _pending.get("task_id"),
+                "message_id": _pending.get("message_id"),
             })
             # Clear after successful delivery
             _pending_final_responses.pop(ws_session_id, None)
@@ -413,6 +414,10 @@ async def websocket_endpoint(websocket: WebSocket):
                             sub_task=event.get("sub_task"),
                             thinking_content=_pending_thinking["content"]
                         )
+                        # 思考只归属其后的首个工具步骤；缓冲随写随清，
+                        # 否则后续每步都带上同一段思考（生产实证：界面
+                        # 上同一思考过程重复显示 N 次）
+                        _pending_thinking["content"] = None
                     except Exception as e:
                         print(f"[Task] Failed to add step: {e}")
 
@@ -483,17 +488,32 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception as link_err:
                         print(f"[Task] tool_done link error: {link_err}")
                     try:
-                        # Update the step with result and tool_call_id
+                        # Update the step with result and tool_call_id.
+                        # 匹配键优先 tool_call_id：同轮并行工具共享 step_number，
+                        # 按 step 更新会把同 step 所有行刷成同一结果（生产实证：
+                        # 四个不同路径的 read_file 全部显示 player_screen.dart）。
                         conn = db_connect()
                         cursor = conn.cursor()
-                        cursor.execute(
-                            "UPDATE task_steps SET result_preview=?, full_result=?, success=?, tool_call_id=COALESCE(?, tool_call_id) WHERE task_id=? AND step_number=?",
-                            (event.get("result_preview", ""),
-                             event.get("full_result", event.get("result_preview", "")),
-                             1 if event.get("success") else 0,
-                             event.get("tool_call_id"),
-                             ws_task_id, adjusted_step)
-                        )
+                        _tcid = event.get("tool_call_id")
+                        if _tcid:
+                            cursor.execute(
+                                "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND tool_call_id=?",
+                                (event.get("result_preview", ""),
+                                 event.get("full_result", event.get("result_preview", "")),
+                                 1 if event.get("success") else 0,
+                                 ws_task_id, _tcid)
+                            )
+                        if not _tcid or cursor.rowcount == 0:
+                            # 无 id 或 id 未命中（旧行缺 id）：只更新同 step 中
+                            # 尚未写入结果的行，已写的不再覆盖
+                            cursor.execute(
+                                "UPDATE task_steps SET result_preview=?, full_result=?, success=?, tool_call_id=COALESCE(?, tool_call_id) WHERE task_id=? AND step_number=? AND (result_preview IS NULL OR result_preview='')",
+                                (event.get("result_preview", ""),
+                                 event.get("full_result", event.get("result_preview", "")),
+                                 1 if event.get("success") else 0,
+                                 _tcid,
+                                 ws_task_id, adjusted_step)
+                            )
                         conn.commit()
                         conn.close()
                     except Exception as e:
@@ -504,11 +524,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     try:
                         _rpreview = event.get("result_preview", "")
                         _success = 1 if event.get("success") else 0
+                        _tcid2 = event.get("tool_call_id")
                         _conn_step = db_connect()
-                        _conn_step.execute(
-                            "UPDATE task_steps SET result_preview=?, success=? WHERE task_id=? AND step_number=?",
-                            (_rpreview, _success, ws_task_id, adjusted_step)
-                        )
+                        if _tcid2:
+                            _conn_step.execute(
+                                "UPDATE task_steps SET result_preview=?, success=? WHERE task_id=? AND tool_call_id=?",
+                                (_rpreview, _success, ws_task_id, _tcid2)
+                            )
+                        else:
+                            # 无 id 时只更新同 step 未写结果的行（防并行工具结果串台）
+                            _conn_step.execute(
+                                "UPDATE task_steps SET result_preview=?, success=? WHERE task_id=? AND step_number=? AND (result_preview IS NULL OR result_preview='')",
+                                (_rpreview, _success, ws_task_id, adjusted_step)
+                            )
                         _conn_step.commit()
                         _conn_step.close()
                     except Exception as _step_e:
@@ -855,7 +883,13 @@ async def websocket_endpoint(websocket: WebSocket):
                             _uf_save = _user_facing(_tb_response)
                             if _uf_save:
                                 try:
-                                    save_message("agent", _uf_save, _tb_session_id)
+                                    _saved_mid = save_message("agent", _uf_save, _tb_session_id)
+                                    # 回写 message_id：pending 推送/broadcast 带上，
+                                    # 前端实时消息即可即时反馈（M3 好评率）
+                                    if _saved_mid:
+                                        _pend = _pending_final_responses.get(_tb_session_id)
+                                        if _pend is not None:
+                                            _pend["message_id"] = _saved_mid
                                 except Exception:
                                     pass
 
@@ -953,20 +987,10 @@ async def websocket_endpoint(websocket: WebSocket):
             raise
         finally:
             agent_is_running = False
-            # If ws_alive is False (WS disconnected mid-execution), broadcast the
-            # response to any reconnected client via the pending response mechanism.
-            # The main loop handles sending for the normal (alive) case.
-            try:
-                _resp = _user_facing(locals().get('response'))
-                if not ws_alive and _resp:
-                    _broadcast_to_websockets({
-                        "type": "message", "role": "agent",
-                        "content": _resp, "session_id": ws_session_id,
-                        "task_id": locals().get('ws_task_id'),
-                    })
-                    print(f"[WS] Broadcast final response after disconnect (session {ws_session_id})")
-            except Exception as _resp_e:
-                print(f"[WS] Broadcast final response error: {_resp_e}")
+            # 最终回复的唯一发送点是主循环（run 返回后 broadcast + pop pending）；
+            # 此处不再补广播——断开期间未送达的场景由 _pending_final_responses
+            # 在重连时投递（生产实证：旧连接判定死亡时的 finally 广播与主循环
+            # 广播会同时命中共存的新连接，前端渲染两条相同回复）。
             # Clean up finished agent from _active_agents so new messages
             # can start a fresh agent loop (instead of being queued to a dead agent)
             try:
@@ -1225,6 +1249,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     if _pasted:
                         query += f"\n\n[用户粘贴的图片已保存: {', '.join(_pasted)}]"
 
+                    # 即时回执：任务解析（可能含 LLM 目标匹配）+ 首轮非流式调用
+                    # 之前是 30-60s 静默期，先让前端亮起「思考中」（生产实证：
+                    # 用户发指令后 1 分钟看不到任何动静）
+                    await _safe_send({"type": "status", "session_id": ws_session_id})
+
                     # If an agent is already running for this session (from another WS
                     # connection or previous turn), queue the message instead of starting
                     # a new agent loop.
@@ -1246,8 +1275,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     ) if session_history else ""
                     # Calls llm.chat (sync network I/O) — run in a worker
                     # thread so the event loop keeps serving WS/HTTP.
+                    # dispatcher_mode 下跳过 LLM 目标判定（主 agent 在意图理解中
+                    # 自行关联目标）——每条消息省 10-30s 静默。
+                    try:
+                        _dm_fast_only = bool(load_config().get("dispatcher_mode", False))
+                    except Exception:
+                        _dm_fast_only = False
                     _resolved_goal = await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: _resolve_goal_for_query(query, recent_context=_recent_ctx))
+                        None, lambda: _resolve_goal_for_query(query, recent_context=_recent_ctx, session_id=ws_session_id, fast_only=_dm_fast_only))
                     if _resolved_goal > 0:
                         try:
                             from tools.task_plan import load_goals as _ct_load
@@ -1298,10 +1333,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 # 事件单独提示；max_iterations 剥前缀 + 可继续提示。
                 _uf_final = _user_facing(response)
                 if _uf_final:
+                    _pend_mid = (_pending_final_responses.get(ws_session_id) or {}).get("message_id")
                     _broadcast_to_websockets({
                         "type": "message", "role": "agent",
                         "content": _uf_final, "session_id": ws_session_id,
                         "task_id": ws_task_id,
+                        "message_id": _pend_mid,
                     })
                 # Clear pending response — successfully dispatched to all sockets
                 _pending_final_responses.pop(ws_session_id, None)

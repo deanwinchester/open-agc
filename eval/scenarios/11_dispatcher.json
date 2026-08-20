@@ -1,0 +1,73 @@
+[
+  {
+    "name": "disp_chat_no_dispatch",
+    "description": "分流：闲聊问答不派发 worker（对话者直答）",
+    "category": [
+      "dispatcher",
+      "regression"
+    ],
+    "level": "core",
+    "prompt": "你好，今天天气怎么样？回复一两句即可。",
+    "expected": {
+      "tool_not_used": [
+        "dispatch_worker"
+      ],
+      "max_steps": 10,
+      "max_errors": 0
+    },
+    "tags": [
+      "dispatcher",
+      "routing"
+    ]
+  },
+  {
+    "name": "disp_file_task_dispatches",
+    "description": "分流：实质任务（产出文件）必须派发 dispatch_worker",
+    "category": [
+      "dispatcher",
+      "filesystem"
+    ],
+    "level": "core",
+    "prompt": "帮我在 workspace 根目录创建 eval_disp_probe.txt，写入一行字：派发链路验证。",
+    "expected": {
+      "tool_used": [
+        "dispatch_worker"
+      ],
+      "max_errors": 0
+    },
+    "setup": "import os\np='workspace/eval_disp_probe.txt'\nos.path.exists(p) and os.remove(p)",
+    "teardown": "import os\np='workspace/eval_disp_probe.txt'\nos.path.exists(p) and os.remove(p)",
+    "tags": [
+      "dispatcher",
+      "routing"
+    ]
+  },
+  {
+    "name": "disp_multi_deliverable",
+    "description": "长任务：多文件交付（worker 执行+验收），产出内容正确",
+    "category": [
+      "dispatcher",
+      "filesystem",
+      "longrun"
+    ],
+    "level": "advanced",
+    "prompt": "帮我在 workspace/eval_disp_multi 目录下创建三个文件：x1.txt 写「一」、x2.txt 写「二」、x3.txt 写「三」，再创建 summary.txt 按行列出这三个文件名。",
+    "expected": {
+      "tool_used": [
+        "dispatch_worker"
+      ],
+      "output_contains": [
+        "x1",
+        "x2",
+        "x3"
+      ],
+      "max_errors": 0
+    },
+    "setup": "import shutil\nshutil.rmtree('workspace/eval_disp_multi', ignore_errors=True)",
+    "teardown": "import shutil\nshutil.rmtree('workspace/eval_disp_multi', ignore_errors=True)",
+    "tags": [
+      "dispatcher",
+      "longrun"
+    ]
+  }
+]

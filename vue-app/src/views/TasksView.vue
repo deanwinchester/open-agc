@@ -610,7 +610,7 @@ onUnmounted(() => {
     </el-card>
 
     <!-- 定时任务创建/编辑弹窗 -->
-    <el-dialog
+    <el-dialog :append-to-body="true"
       v-model="scheduleDialog"
       :title="scheduleEditId ? t.schedule.editTitle : t.schedule.createTitle"
       width="480px"

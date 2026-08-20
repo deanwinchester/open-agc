@@ -832,7 +832,7 @@ onUnmounted(() => {
     </template>
 
     <!-- 步骤详情弹窗 -->
-    <el-dialog v-model="stepDialog" :title="`${t.steps.stepPrefix}${activeStepNum} ${t.steps.detailTitle}`" width="640px">
+    <el-dialog :append-to-body="true" v-model="stepDialog" :title="`${t.steps.stepPrefix}${activeStepNum} ${t.steps.detailTitle}`" width="640px">
       <template v-if="activeStep">
         <div class="section">
           <div class="section-title">{{ t.steps.tool }}</div>
@@ -865,7 +865,7 @@ onUnmounted(() => {
     </el-dialog>
 
     <!-- 进程日志弹窗（进程区块「查看日志」） -->
-    <el-dialog v-model="procLogDialog" :title="t.process.logTitle" width="640px">
+    <el-dialog :append-to-body="true" v-model="procLogDialog" :title="t.process.logTitle" width="640px">
       <pre class="dialog-pre tall" v-loading="procLogLoading">{{ procLogText }}</pre>
     </el-dialog>
   </div>

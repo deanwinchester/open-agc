@@ -299,7 +299,7 @@ onMounted(loadSkills);
     </el-card>
 
     <!-- 编辑技能 -->
-    <el-dialog v-model="editVisible" :title="`${t.editTitle}: ${editFilename}`" width="720px">
+    <el-dialog :append-to-body="true" v-model="editVisible" :title="`${t.editTitle}: ${editFilename}`" width="720px">
       <div v-loading="editLoading">
         <el-input
           v-model="editContent"
@@ -318,7 +318,7 @@ onMounted(loadSkills);
     </el-dialog>
 
     <!-- 从 GitHub 安装技能 -->
-    <el-dialog v-model="installVisible" :title="t.installTitle" width="560px">
+    <el-dialog :append-to-body="true" v-model="installVisible" :title="t.installTitle" width="560px">
       <el-form label-position="top">
         <el-form-item :label="t.installUrlLabel">
           <el-input v-model="installUrl" :placeholder="t.installUrlPlaceholder" spellcheck="false" />
@@ -331,7 +331,7 @@ onMounted(loadSkills);
     </el-dialog>
 
     <!-- 导入技能 -->
-    <el-dialog v-model="importVisible" :title="t.importTitle" width="720px">
+    <el-dialog :append-to-body="true" v-model="importVisible" :title="t.importTitle" width="720px">
       <el-form label-position="top">
         <el-form-item :label="t.filenameLabel">
           <el-input v-model="importFilename" :placeholder="t.filenamePlaceholder" />
