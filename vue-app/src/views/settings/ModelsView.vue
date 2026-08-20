@@ -127,6 +127,7 @@ function providerFromModel(model) {
   if (ml.startsWith('gemini/')) return 'gemini';
   if (ml.startsWith('zai/')) return 'glm';
   if (ml.startsWith('minimax/')) return 'minimax';
+  if (ml.startsWith('xiaomi/')) return 'xiaomi';
   if (ml.startsWith('openai/')) return 'openai';
   if (ml.startsWith('anthropic/')) return 'anthropic';
   // 自定义厂商：model 前缀（xxx/ 前段）命中已加载自定义厂商 name 时归为 custom:<name>

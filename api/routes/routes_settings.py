@@ -1002,6 +1002,22 @@ async def get_provider_models(provider: str):
 
             except Exception: pass
 
+    elif provider == "xiaomi":
+
+        # 小米 MiMo（OpenAI 兼容端点）：先拉端点 /models，失败回退预置
+        key = api_keys.get("xiaomi")
+
+        _preset = ["xiaomi/mimo-v2.5", "xiaomi/mimo-v2.5-pro"]
+        try:
+            headers = {"Authorization": f"Bearer {key}"} if key else {}
+            res = requests.get("https://api.xiaomimimo.com/v1/models", headers=headers, timeout=5)
+            if res.status_code == 200:
+                models = [f"xiaomi/{m['id']}" for m in res.json().get("data", []) if m.get("id")]
+        except Exception:
+            pass
+        if not models:
+            models = _preset
+
 
 
 

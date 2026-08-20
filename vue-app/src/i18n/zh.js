@@ -81,6 +81,7 @@ export default {
       { key: 'gemini', label: 'Google Gemini' },
       { key: 'glm', label: 'GLM (智谱)' },
       { key: 'minimax', label: 'MiniMax' },
+      { key: 'xiaomi', label: '小米 MiMo' },
       { key: 'huggingface', label: 'HuggingFace Token' },
       { key: 'tavily', label: 'Tavily Search' },
       { key: 'brave_search', label: 'Brave Search' },
