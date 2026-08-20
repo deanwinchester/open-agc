@@ -372,6 +372,7 @@ class LLMClient:
             "kimi_code": "KIMI_CODE_API_KEY",
             "glm": "ZAI_API_KEY",
             "minimax": "MINIMAX_API_KEY",
+            "xiaomi": "XIAOMI_API_KEY",
             "llamacpp": "LLAMACPP_API_BASE",
             "huggingface": "HF_TOKEN"
         }
@@ -400,6 +401,9 @@ class LLMClient:
         # Kimi Code subscription endpoint (Anthropic-compatible)
         self.kimi_code_api_key = config.get("api_keys", {}).get("kimi_code", "") or os.environ.get("KIMI_CODE_API_KEY", "")
         self.kimi_code_api_base = "https://api.kimi.com/coding/"
+        # 小米 MiMo（OpenAI 兼容端点，预置厂商）
+        self.xiaomi_api_key = config.get("api_keys", {}).get("xiaomi", "") or os.environ.get("XIAOMI_API_KEY", "")
+        self.xiaomi_api_base = "https://api.xiaomimimo.com/v1"
 
         # 自定义厂商（OpenAI 兼容端点，用户要求：预置厂商之外可自由添加，
         # 如小米/自部署网关）。config.custom_providers:
@@ -721,6 +725,12 @@ class LLMClient:
             kwargs["api_key"] = self.kimi_code_api_key
             kwargs["api_base"] = self.kimi_code_api_base
             kwargs.setdefault("max_tokens", 8192)  # Anthropic Messages API 必填
+            kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
+        elif model.startswith("xiaomi/"):
+            # 小米 MiMo（OpenAI 兼容端点）：api_base/api_key 按调用传入
+            kwargs["model"] = f"openai/{model.split('/', 1)[1]}"
+            kwargs["api_base"] = self.xiaomi_api_base
+            kwargs["api_key"] = self.xiaomi_api_key or "sk-no-key-required"
             kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
         elif "llamacpp/" in model:
             kwargs["api_base"] = self.llamacpp_api_base
