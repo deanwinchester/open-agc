@@ -121,10 +121,11 @@ export default {
         maskedKeyKept: '掩码 key 原样保留',
         add: '添加厂商',
         remove: '删除',
-        saveHint: '列表为整体替换语义：点页面底部保存时，按当前列表（含新增/删除）全量提交。',
+        saveHint: '添加/删除后立即自动保存（整体替换语义：按当前列表全量提交），无需再点页面底部保存。',
         missingFields: '厂商名称与接口地址不能为空',
         invalidName: '厂商名称需为英文小写（字母开头，可含数字/下划线/中划线）',
         nameConflict: '厂商名称与预置厂商冲突，请换一个',
+        xiaomiConflict: '小米已是预置厂商（默认端点 api.xiaomimimo.com）；若要用订阅 Token Plan 端点（token-plan-cn.xiaomimimo.com），请换个名字，如 xiaomi_plan',
         duplicate: '同名厂商已存在',
       },
       dispatcher: {
