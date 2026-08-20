@@ -24,13 +24,15 @@ const apiKeyInputs = ref({});     // provider -> 用户新输入的 key（空 = 
 const modelOptions = ref([]);
 
 // ── 自定义厂商（custom_providers）──
-// GET /api/settings 读入 ref；POST 为整体替换语义：保存时按当前列表全量回传。
+// GET /api/settings 读入 ref；POST 为整体替换语义。
+// 添加/删除操作立即自动保存（不等页面底部统一保存），成功后清缓存重载刷新。
 // api_key 为掩码（含 "..."）时原样保留回传，后端按原样存储。
 const customProviders = ref([]);           // 编辑中的列表
 const initialCustomProviders = ref([]);    // 初始快照，用于 dirty 判断
+const cpSaving = ref(false);               // 添加/删除触发的立即保存中
 const newProvider = reactive({ name: '', base_url: '', api_key: '', models: '' });
 // 预置厂商名：自定义 name 不允许冲突（其模型 id 形如 <name>/<model>）
-const PRESET_PROVIDER_NAMES = ['kimi', 'deepseek', 'openai', 'anthropic', 'gemini', 'glm', 'minimax', 'llamacpp', 'kimi_code'];
+const PRESET_PROVIDER_NAMES = ['kimi', 'deepseek', 'openai', 'anthropic', 'gemini', 'glm', 'minimax', 'llamacpp', 'kimi_code', 'xiaomi'];
 
 // 默认模型厂商下拉：静态 providers + 动态追加的自定义厂商（值 custom:<name>）
 const providerOptions = computed(() => [
@@ -41,12 +43,47 @@ const providerOptions = computed(() => [
   })),
 ]);
 
-function addCustomProvider() {
+// 立即把当前列表全量 POST /api/settings（整体替换），成功后清缓存重载
+async function saveCustomProviders() {
+  if (cpSaving.value) return;
+  cpSaving.value = true;
+  try {
+    const res = await request('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        custom_providers: customProviders.value.map((p) => ({
+          name: p.name,
+          base_url: p.base_url,
+          api_key: p.api_key,
+          models: p.models,
+        })),
+      }),
+    });
+    if (res && res.status === 'success') {
+      ElMessage.success(t.saveSuccess);
+      invalidateCache('/api/settings');
+      await loadSettings();
+    } else {
+      ElMessage.error(`${t.saveFailed}: ${(res && (res.detail || res.message)) || t.unknownError}`);
+    }
+  } catch (err) {
+    ElMessage.error(`${t.saveFailed}: ${err.message}`);
+  } finally {
+    cpSaving.value = false;
+  }
+}
+
+async function addCustomProvider() {
   const name = newProvider.name.trim().toLowerCase();
   const baseUrl = newProvider.base_url.trim();
   if (!name || !baseUrl) { ElMessage.warning(t.customProviders.missingFields); return; }
   if (!/^[a-z][a-z0-9_-]*$/.test(name)) { ElMessage.warning(t.customProviders.invalidName); return; }
-  if (PRESET_PROVIDER_NAMES.includes(name)) { ElMessage.warning(t.customProviders.nameConflict); return; }
+  if (PRESET_PROVIDER_NAMES.includes(name)) {
+    // xiaomi 已是预置厂商：若要用订阅 Token Plan 端点（token-plan-cn.xiaomimimo.com），换个名字如 xiaomi_plan
+    ElMessage.warning(name === 'xiaomi' ? t.customProviders.xiaomiConflict : t.customProviders.nameConflict);
+    return;
+  }
   if (customProviders.value.some((p) => p.name === name)) { ElMessage.warning(t.customProviders.duplicate); return; }
   customProviders.value.push({
     name,
@@ -58,10 +95,12 @@ function addCustomProvider() {
   newProvider.base_url = '';
   newProvider.api_key = '';
   newProvider.models = '';
+  await saveCustomProviders();
 }
 
-function removeCustomProvider(idx) {
+async function removeCustomProvider(idx) {
   customProviders.value.splice(idx, 1);
+  await saveCustomProviders();
 }
 
 const form = reactive({
@@ -566,7 +605,7 @@ onMounted(() => {
             </span>
             <span class="cp-detail">{{ t.customProviders.models }}: {{ (p.models || []).join(', ') || '—' }}</span>
           </div>
-          <el-button size="small" type="danger" plain @click="removeCustomProvider(idx)">
+          <el-button size="small" type="danger" plain :loading="cpSaving" @click="removeCustomProvider(idx)">
             {{ t.customProviders.remove }}
           </el-button>
         </div>
@@ -588,7 +627,7 @@ onMounted(() => {
             <el-input v-model="newProvider.models" :placeholder="t.customProviders.modelsPlaceholder" />
           </el-form-item>
         </div>
-        <el-button type="primary" plain @click="addCustomProvider">{{ t.customProviders.add }}</el-button>
+        <el-button type="primary" plain :loading="cpSaving" @click="addCustomProvider">{{ t.customProviders.add }}</el-button>
         <div class="field-hint">{{ t.customProviders.saveHint }}</div>
       </el-form>
     </el-card>

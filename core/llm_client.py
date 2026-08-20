@@ -718,7 +718,16 @@ class LLMClient:
         if stream:
             kwargs["stream"] = True
 
-        if "kimi_code/" in model:
+        _cp_prefix = model.split('/', 1)[0] if '/' in model else ''
+        _cp = getattr(self, "_custom_providers", {}).get(_cp_prefix)
+        if _cp:
+            # 自定义厂商优先于预置分支（用户显式配置的端点/key 覆盖预置默认——
+            # 生产实证：自定义 xiaomi(token-plan 端点)被预置 xiaomi 抢走）
+            kwargs["model"] = f"openai/{model.split('/', 1)[1]}"
+            kwargs["api_base"] = _cp["base_url"]
+            kwargs["api_key"] = _cp.get("api_key") or "sk-no-key-required"
+            kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
+        elif "kimi_code/" in model:
             # Kimi Code 订阅渠道：Anthropic 兼容端点，模型名映射到 anthropic/ 前缀。
             # 与正式 Anthropic key 隔离，api_key/api_base 按调用传入。
             kwargs["model"] = f"anthropic/{model.split('/', 1)[1]}"
