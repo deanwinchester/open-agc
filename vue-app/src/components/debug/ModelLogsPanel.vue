@@ -238,7 +238,7 @@ onMounted(() => {
       />
     </div>
 
-    <el-dialog v-model="detailDialog" :title="t.detailTitle" width="720px">
+    <el-dialog :append-to-body="true" v-model="detailDialog" :title="t.detailTitle" width="720px" class="model-log-detail-dialog">
       <div v-loading="detailLoading">
         <template v-if="detail">
           <div class="detail-grid">
@@ -333,5 +333,15 @@ onMounted(() => {
 
 .detail-pre.tall {
   max-height: 320px;
+}
+</style>
+
+<!-- 详情弹窗被 teleport 到 body 下，组件 scoped 的 :deep 选择器够不到其
+     祖先链（生产实证：此前写在 scoped 里的修复从未生效）。全局样式 +
+     自定义类是 teleport 组件样式的唯一可靠通道。 -->
+<style>
+.model-log-detail-dialog .el-dialog__body {
+  max-height: 72vh;
+  overflow-y: auto;
 }
 </style>

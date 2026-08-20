@@ -139,7 +139,7 @@ function onUpdate(v) {
 </script>
 
 <template>
-  <el-dialog
+  <el-dialog :append-to-body="true"
     :model-value="modelValue"
     :title="title"
     width="480px"

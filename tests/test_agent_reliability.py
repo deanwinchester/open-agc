@@ -137,7 +137,9 @@ class TestLLMCallProtection:
         result = agent.run_turn("随便一个任务", verbose=False, skip_rag=True)
 
         assert result.startswith("[LLM_ERROR]")
-        assert "network down" in result
+        # 用户态文案净化：原始异常全文（含请求 dump）不上屏，只留类型名
+        assert "ConnectionError" in result
+        assert "network down" not in result
         assert saved == [False], "task stats must be saved as failure"
         assert kg_calls, "KG extraction must run on LLM failure"
 
@@ -150,15 +152,18 @@ class TestLLMCallProtection:
         result = agent.run_turn("随便一个任务", verbose=False, skip_rag=True)
 
         assert result.startswith("[LLM_ERROR]")
-        assert "empty choices" in result
+        assert "ValueError" in result
         assert saved == [False]
 
 
 # ── Fix 2: delegation robustness ──
 
 class TestDelegation:
-    def _make_agent(self, monkeypatch, plans, sub_success):
+    def _make_agent(self, monkeypatch, plans, sub_success, sub_tool_calls=1):
         agent = _bare_agent()
+        # 本组测试针对旧委派路径（dispatcher_mode 关闭语义）——强制模式关闭，
+        # 隔离运行环境真实 config.json 可能开启 dispatcher_mode 的影响。
+        agent._dispatcher_mode_enabled = lambda: False
         agent._should_delegate = lambda text: True
         agent._decompose_task = lambda text: [dict(p) for p in plans]
         seen_tasks = []
@@ -170,7 +175,7 @@ class TestDelegation:
 
             def run(self):
                 return {"success": sub_success, "summary": f"done: {self.task}",
-                        "duration": 0.1, "tool_calls": 1}
+                        "duration": 0.1, "tool_calls": sub_tool_calls}
 
         monkeypatch.setattr("agent.agent.SubAgent", FakeSubAgent)
         # Reflection call: content=None -> run_turn falls back to the synthesis report
@@ -208,12 +213,27 @@ class TestDelegation:
         assert "未执行" in report
         assert "依赖失败任务" in report
 
+    def test_hallucinated_subtask_rejected_by_verification(self, monkeypatch):
+        """子代理零工具调用假完成（幻觉编造内容仍报 success）→ 证据验收打回，
+        不计入完成（生产实证 eval R7/R8：子代理编造小说句子/文件名）。"""
+        plans = [{"id": 1, "task": "幻觉任务"}, {"id": 2, "task": "正常任务"}]
+        agent, seen = self._make_agent(monkeypatch, plans, sub_success=True,
+                                       sub_tool_calls=0)  # 零工具调用 = 空谈
+        result = agent.run_turn("复杂任务", verbose=False, skip_rag=True)
+        report = "\n".join(str(m.get("content", "")) for m in agent.messages)
+        # 两个子任务都被验收打回（tool_calls=0），报告里带打回标记
+        assert "验收打回" in report
+
 
 # ── Fix 3: interjection index ──
 
 class TestInterjectionIndex:
-    def test_accept_marks_user_interjection_not_assistant_message(self):
+    def test_accept_marks_user_interjection_not_assistant_message(self, monkeypatch):
         agent = _bare_agent()
+        # 动态段后置后，非空 goals 会以独立 system 消息插入——本测试断言
+        # 消息绝对索引，stub 空 goals 使动态段不插入（与本测试主题无关）
+        monkeypatch.setattr("tools.task_plan.load_goals", lambda: {"items": []})
+        monkeypatch.setattr("tools.task_plan.format_goal_list_for_prompt", lambda g: "")
         agent.pending_messages = ["请把结果也发到群里"]
         agent.llm = StubLLM([
             _tool_response("user_interjection_response",
@@ -224,18 +244,25 @@ class TestInterjectionIndex:
         result = agent.run_turn("原始任务", verbose=False, skip_rag=True)
 
         assert result == "已完成，结果已发到群里。"
-        # messages: [system, user原始任务, user插话, assistant tool_call, tool result, assistant final]
-        assert agent.messages[2]["role"] == "user"
-        assert agent.messages[2]["content"].startswith("[用户插入已接受]")
-        assert "好的" in agent.messages[2]["content"]
+        # 动态段（含当前时间）永驻消息流——断言前过滤「本轮检索补充」系统消息
+        core_msgs = [m for m in agent.messages
+                     if not (m.get("role") == "system"
+                             and "本轮为你检索" in str(m.get("content", "")))]
+        # core: [system, user原始任务, user插话, assistant tool_call, tool result, assistant final]
+        assert core_msgs[2]["role"] == "user"
+        assert core_msgs[2]["content"].startswith("[用户插入已接受]")
+        assert "好的" in core_msgs[2]["content"]
         # The assistant tool_call message must remain untouched
-        assert agent.messages[3]["role"] == "assistant"
-        assert agent.messages[3]["content"] == ""
-        assert agent.messages[3]["tool_calls"]
+        assert core_msgs[3]["role"] == "assistant"
+        assert core_msgs[3]["content"] == ""
+        assert core_msgs[3]["tool_calls"]
         assert agent.pending_messages == []
 
-    def test_reject_captures_user_interjection_content(self):
+    def test_reject_captures_user_interjection_content(self, monkeypatch):
         agent = _bare_agent()
+        # 同上：stub 空 goals，动态段不插入，消息结构保持 system/user/assistant
+        monkeypatch.setattr("tools.task_plan.load_goals", lambda: {"items": []})
+        monkeypatch.setattr("tools.task_plan.format_goal_list_for_prompt", lambda g: "")
         agent.pending_messages = ["帮我订一张机票"]
         agent.llm = StubLLM([
             _tool_response("user_interjection_response",
@@ -251,7 +278,11 @@ class TestInterjectionIndex:
         assert payload["reason"] == "新话题"
         assert "主任务已完成" in result
         # Interjection messages removed from context; only system/user/final remain
-        assert [m["role"] for m in agent.messages] == ["system", "user", "assistant"]
+        # （过滤动态段：时间注入使动态 system 消息永驻消息流末尾）
+        core_roles = [m["role"] for m in agent.messages
+                      if not (m.get("role") == "system"
+                              and "本轮为你检索" in str(m.get("content", "")))]
+        assert core_roles == ["system", "user", "assistant"]
         assert agent.pending_messages == []
 
 

@@ -297,6 +297,7 @@ def _resolve_task_goal_via_llm(session_id: int, query: str) -> str:
         from core.llm_client import LLMClient
         cfg = load_config()
         llm = LLMClient(default_model=cfg.get("default_model", "moonshot/kimi-latest"))
+        llm.set_log_context(session_id=session_id)
         conn2 = db_connect()
         conn2.row_factory = sqlite3.Row
         recent_msgs = conn2.execute(
@@ -385,13 +386,32 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
     except Exception as e:
         print(f"[Task] Error resolving task: {e}")
 
-    task_title = query if len(query.strip()) > 15 else _resolve_task_goal_via_llm(session_id, query)
+    # 标题先行（非阻塞）：短 query 的 LLM 精修筑到后台线程——此前同步调用
+    # 会让任务创建前静默 10-30s（生产实证：发指令后 1 分钟看不到动静，
+    # 静默期 = LLM 标题 + LLM 目标解析 + 首轮非流式调用）
+    task_title = query if len(query.strip()) > 15 else ""
     if not task_title:
         task_title = _extract_task_title(query) or query[:120]
     if len(task_title) > 120:
         task_title = task_title[:117] + '...'
     tid = create_task(task_title, query, session_id=session_id)
     print(f"[Task] Created task {tid} for session {session_id}")
+
+    if len(query.strip()) <= 15:
+        import threading as _th
+        def _refine_title(_tid=tid, _q=query, _sid=session_id):
+            try:
+                better = _resolve_task_goal_via_llm(_sid, _q)
+                if better:
+                    if len(better) > 120:
+                        better = better[:117] + '...'
+                    _c = db_connect()
+                    _c.execute("UPDATE tasks SET title=? WHERE id=?", (better, _tid))
+                    _c.commit()
+                    _c.close()
+            except Exception as _e:
+                print(f"[Task] Title refine error: {_e}")
+        _th.Thread(target=_refine_title, daemon=True).start()
 
     try:
         from tools.shell import adopt_orphan_processes
@@ -538,20 +558,23 @@ def save_message(role: str, content: str, session_id: int = 1, task_id: int = No
         att_json = json.dumps(attachments, ensure_ascii=False) if attachments else None
         conn = db_connect()
         if task_id:
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO messages (role, content, session_id, task_id, attachments) VALUES (?, ?, ?, ?, ?)",
                 (role, content, session_id, task_id, att_json)
             )
         else:
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO messages (role, content, session_id, attachments) VALUES (?, ?, ?, ?)",
                 (role, content, session_id, att_json)
             )
+        msg_id = cur.lastrowid
         conn.execute("UPDATE sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
         conn.commit()
         conn.close()
+        return msg_id
     except Exception as _e:
         print(f"[TaskCore] save_message error: {_e}")
+        return None
 
 
 def save_task_context(task_id: int, messages: list):
@@ -756,9 +779,12 @@ def add_task_step(task_id: int, step_number: int, tool_name: str, tool_label: st
         print(f"[Task] Add step error: {e}")
 
 
-def _resolve_goal_for_query(query: str, recent_context: str = "") -> int:
+def _resolve_goal_for_query(query: str, recent_context: str = "", session_id: int = None,
+                            fast_only: bool = False) -> int:
     """Determine which goal (if any) this query is continuing.
     recent_context: last 2-3 conversation turns to distinguish follow-up from goal.
+    fast_only: 只走续接词快速路径，跳过 LLM 判定（dispatcher_mode 下目标关联
+    由主 agent 在意图理解中完成，前置 LLM 是 10-30s 的重复劳动）。
     Returns goal_id, or 0 for new task.
     """
     q = query.strip().lower()
@@ -788,6 +814,11 @@ def _resolve_goal_for_query(query: str, recent_context: str = "") -> int:
     if not active:
         return 0
 
+    if fast_only:
+        # dispatcher_mode：目标关联交给主 agent 的全量上下文意图理解，
+        # 此处不再消耗一次 LLM 调用
+        return 0
+
     try:
         from core.llm_client import LLMClient
         model = load_config().get("default_model", "moonshot/kimi-latest")
@@ -804,6 +835,7 @@ def _resolve_goal_for_query(query: str, recent_context: str = "") -> int:
             + f"不确定 \u2192 回复 0"
         )
         llm = LLMClient(default_model=model)
+        llm.set_log_context(session_id=session_id)
         resp, _ = llm.chat([{"role": "user", "content": prompt}])
         text = resp.choices[0].message.content.strip()
         nums = re.findall(r'\d+', text)

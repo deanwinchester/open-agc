@@ -59,6 +59,24 @@ def match_tool_set(task: str, default: str = "filesystem") -> str:
     return best
 
 
+def _fork_trim_messages(trunk_messages, keep_recent_users: int = 3):
+    """fork 裁剪（成本实测驱动）：化身上下文 = system（前缀缓存共享）+
+    最近 K 个用户消息起的尾部 + 动态段（若在尾部随尾部带走）。
+
+    全量 fork 的化身首轮 prompt 30k×命中率 70% ≈ 9k billable；裁剪后首轮
+    ≈ system 命中 + 尾部 3-4k——化身首轮成本减半（R13 账单拆解实证：
+    化身首轮是全款大头）。简报自包含（M1 设计），裁剪不伤执行。
+    """
+    if not trunk_messages:
+        return trunk_messages
+    sys_msg = trunk_messages[0] if trunk_messages[0].get("role") == "system" else None
+    rest = list(trunk_messages[1:] if sys_msg else trunk_messages)
+    # 最近第 K 条 user 消息的位置（从该处起整段保留，轮内 tool 序列不断）
+    user_idx = [i for i, m in enumerate(rest) if m.get("role") == "user"]
+    cut = user_idx[-keep_recent_users] if len(user_idx) > keep_recent_users else 0
+    return ([sys_msg] if sys_msg else []) + rest[cut:]
+
+
 class SubAgent:
     """Lightweight child agent with its own context and tool set."""
 
@@ -81,7 +99,12 @@ class SubAgent:
                  network_whitelist=None,
                  permission_whitelist=None,
                  session_id=None,
-                 context_brief: str = ""):
+                 context_brief: str = "",
+                 full_tools_map: Optional[Dict] = None,
+                 external_interrupt_check: Optional[Callable] = None,
+                 pending_message_provider: Optional[Callable[[], str]] = None,
+                 fork_from=None,
+                 worker_name: str = "分身"):
         self.task = task
         self.max_iterations = max_iterations
         self.progress_callback = progress_callback
@@ -93,32 +116,81 @@ class SubAgent:
         self._permission_whitelist = permission_whitelist or set()
         self._session_id = session_id
         self.context_brief = context_brief or ""
+        # 全量工具发现（调度者模式 M1）：传入时 worker 可通过
+        # search_available_tools 从该 map 解锁更多工具；不传维持现状。
+        self._full_tools_map = full_tools_map
+        # 调度者模式 M1 联动钩子（均可选，不传维持现状）：
+        # - external_interrupt_check：主 agent 中断标志透传（评审 I-1）
+        # - pending_message_provider：每迭代拉取用户插话注入 worker 上下文（评审 I-2）
+        self._external_interrupt_check = external_interrupt_check
+        self._pending_message_provider = pending_message_provider
+        self._fork_from = fork_from
+        self._worker_name = (worker_name or "分身").strip() or "分身"
 
-        # Build system prompt
-        now = _time.strftime("%Y-%m-%d %H:%M:%S")
-        tool_list = "\n".join(f"  - {t}" for t in tools)
-        # Sub-agents run isolated from the main conversation; the brief
-        # carries the goal / recent user messages / session paths so the
-        # sub-agent never has to "find the repository" by blind scanning.
-        brief_section = (
-            f"\n\n## 会话上下文\n{self.context_brief}"
-            if self.context_brief else ""
-        )
-        self.messages = [
-            {
-                "role": "system",
+        # fork-context（调度者模式 M3+ 架构升级，实测驱动）：worker 上下文从
+        # 主 agent 主干 fork——系统提示词/历史前缀与主干逐字节相同（k3 缓存
+        # 前缀共享，billable 大头消失），信息天然回流（无需 enrich 重建），
+        # 执行者角色切换压成一条指派消息而非重写系统提示词。
+        if fork_from is not None and getattr(fork_from, "messages", None):
+            import copy as _copy
+            # 全量 fork（实证 R14-R17：裁剪会斩断前缀共享——化身尾部与主干
+            # 中部不同，缓存命中从 70% 掉到 50%，billable 不降反升；
+            # 全量 fork 化身首轮命中主干全部前缀，9k < 裁剪的 13k）
+            _wn = getattr(self, "_worker_name", "分身") or "分身"
+            self.messages = _copy.deepcopy(fork_from.messages)
+            self.messages.append({
+                "role": "user",
                 "content": (
-                    f"你是 Open-AGC 的子代理，当前时间：{now}\n"
-                    f"你的子任务是：{task}\n\n"
-                    f"可用工具：\n{tool_list}\n\n"
-                    f"规则：\n"
-                    f"1. 专注于完成子任务，完成后返回结果摘要\n"
-                    f"2. 不要使用未列出的工具\n"
-                    f"3. 不要执行超出子任务范围的操作"
-                    f"{brief_section}"
-                )
-            }
-        ]
+                    f"【执行指派】注意：你现在是从主干 fork 出的**{_wn}分支实例**——"
+                    "上面的调度者身份与对话历史属于主干，仅供你理解背景。"
+                    "你的唯一职责是直接执行下面的任务简报：**不派发、不分流、"
+                    "不等待，亲自动手用工具完成**。\n\n"
+                    "## 任务简报（权威依据）\n" + task + "\n\n"
+                    "## 执行纪律\n"
+                    "1. 用工具真实执行，每个意图都落到工具调用；禁止只描述计划。\n"
+                    "2. 高效执行：最少必要步骤，禁止重复确认/验证性重跑/额外探查。\n"
+                    "3. 产出文件写到简报指定位置（未指定则沙箱 outputs/），汇报给全路径。\n"
+                    "4. 同一方法失败两次换思路；客观不可行就明确报告「无法完成」+原因，"
+                    "严禁假装完成。\n"
+                    "5. 交付汇报必须含：完成内容 / 产出清单（全路径）/ 验收自评 / "
+                    "遗留风险；获取或生成的**关键内容本身**必须写进汇报（内容才会回流，"
+                    "「已读取/已生成」不是交付）。"
+                ),
+            })
+        else:
+            self._build_standalone_prompt(task, tools)
+        # 工具绑定在两分支汇合后统一执行
+        self._bind_tools(tools, parent_tools)
+
+    def _bind_tools(self, tools, parent_tools):
+        """按 tools 名单从 parent_tools 过滤绑定 + 全量工具发现的解锁回调。
+
+        fork 模式（一气化三清完全体）：化身直接继承主干的 available_tools 与
+        tool_schemas——请求的 system+tools+messages 前缀与主干逐字节一致，
+        缓存全命中（生产实证 R8：化身精简工具集导致缓存 key 不同、全价重算）。
+        """
+        if self._fork_from is not None:
+            self.available_tools = dict(getattr(self._fork_from, "available_tools", None)
+                                        or getattr(self._fork_from, "full_available_tools", {}))
+            self.tool_schemas = list(getattr(self._fork_from, "tool_schemas", None) or [])
+            # 化身继承主干工具后 search_available_tools 仍指主干解锁回调——
+            # 替换为本化身自己的（发现启用只影响化身，不回流主干）
+            if self._full_tools_map is not None:
+                from tools.discovery import ToolDiscoveryTool
+
+                def _enable_more(tool_names):
+                    added = False
+                    for _n in tool_names or []:
+                        if _n in self._full_tools_map and _n not in self.available_tools:
+                            self.available_tools[_n] = self._full_tools_map[_n]
+                            added = True
+                    if added:
+                        self.tool_schemas = [t.get_openai_schema()
+                                             for t in self.available_tools.values()
+                                             if t is not None]
+                self.available_tools["search_available_tools"] = ToolDiscoveryTool(
+                    full_tools=self._full_tools_map, enable_callback=_enable_more)
+            return
 
         # Filter parent tools to only what this sub-agent needs
         self.available_tools = {}
@@ -126,8 +198,88 @@ class SubAgent:
             if name in parent_tools:
                 self.available_tools[name] = parent_tools[name]
 
+        # 全量工具发现（M1）：发现工具必须绑定本子代理自己的解锁回调——
+        # 复用主 agent 的 ToolDiscoveryTool 实例会把工具启用到主 agent 上。
+        if self._full_tools_map is not None:
+            from tools.discovery import ToolDiscoveryTool
+
+            def _enable_more(tool_names):
+                added = False
+                for _n in tool_names or []:
+                    if _n in self._full_tools_map and _n not in self.available_tools:
+                        self.available_tools[_n] = self._full_tools_map[_n]
+                        added = True
+                if added:
+                    self.tool_schemas = [t.get_openai_schema()
+                                         for t in self.available_tools.values()
+                                         if t is not None]
+
+            self.available_tools["search_available_tools"] = ToolDiscoveryTool(
+                full_tools=self._full_tools_map, enable_callback=_enable_more)
+
         self.tool_schemas = [t.get_openai_schema()
                              for t in self.available_tools.values()]
+
+    def _build_standalone_prompt(self, task, tools):
+        """非 fork 模式（旧路径 dispatch_subagent 等）：独立执行者系统提示词。"""
+        # Build system prompt — 执行者角色提示（调度者模式重构轮重写）：
+        # 简报为权威依据；真实执行纪律；结构化交付汇报。
+        now = _time.strftime("%Y-%m-%d %H:%M:%S")
+        tool_list = "\n".join(f"  - {t}" for t in tools)
+        discovery_rule = (
+            "3. 需要未列出的能力时，先调用 search_available_tools 检索启用，再使用该工具\n"
+            if self._full_tools_map is not None else ""
+        )
+        # Sub-agents run isolated from the main conversation; the brief
+        # carries the goal / recent user messages / session paths so the
+        # sub-agent never has to "find the repository" by blind scanning.
+        brief_section = (
+            f"\n\n## 会话上下文（参考）\n{self.context_brief}"
+            if self.context_brief else ""
+        )
+        self.messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"你是执行者（work agent），由调度者指派任务。当前时间：{now}\n\n"
+                    f"## 任务简报（调度者撰写，是权威依据）\n{task}\n\n"
+                    f"## 可用工具\n{tool_list}\n\n"
+                    f"## 工作纪律\n"
+                    f"1. 用工具真实执行——禁止只描述计划不行动；每个意图都落到工具调用上。\n"
+                    f"2. 严格按简报的目标与产出要求执行，不做超出范围的操作。\n"
+                    f"   ⚡ 高效执行：用最少的必要步骤完成任务——能一条命令搞定的不分两条，"
+                    f"禁止反复读取同一文件确认、禁止对已成功的操作再做验证性重跑、"
+                    f"禁止「以防万一」式的额外探查。多轮交叉验证仅在结果确实可疑时使用。\n"
+                    f"{discovery_rule}"
+                    f"4. 产出文件写到简报指定位置；未指定则放沙箱 outputs/ 下，"
+                    f"并在汇报中给出完整路径。\n"
+                    f"5. 遇到困难先说明原因再换方案；同一方法失败两次就换思路，"
+                    f"不要重复尝试同样的操作。\n"
+                    f"6. 需求不清或客观不可行时：明确报告「无法完成」及原因、"
+                    f"已排除的路径——严禁假装完成。\n\n"
+                    f"## 交付汇报（最后一轮必须包含）\n"
+                    f"- 完成内容（实际做了什么）\n"
+                    f"- 产出清单（文件的完整路径）\n"
+                    f"- 验收标准逐条自评（简报里有的话）\n"
+                    f"- 遗留问题/风险（没有就写「无」）\n"
+                    f"- 信息回传：若任务涉及获取/生成内容（读文件/查资料/写文稿），"
+                    f"必须把**关键内容本身**写进汇报——调度者与用户都看不到你的上下文，"
+                    f"只有汇报会回流；「已读取/已生成」不是交付，内容才是"
+                    f"（长内容给要点摘要 + 完整文件路径）"
+                    f"{brief_section}"
+                )
+            }
+        ]
+
+    def _interrupted(self) -> bool:
+        """自身中断标志 + 外部（主 agent）中断标志联动（评审 I-1）。"""
+        if self.is_interrupted:
+            return True
+        try:
+            return bool(self._external_interrupt_check
+                        and self._external_interrupt_check())
+        except Exception:
+            return False
 
     def run(self) -> Dict[str, Any]:
         """Execute the sub-task. Returns structured result."""
@@ -148,22 +300,52 @@ class SubAgent:
         MAX_REPEATED_TOOL_CALLS = 3
 
         while current_iter < self.max_iterations:
-            if self.is_interrupted:
+            if self._interrupted():
                 return {"success": False, "summary": "Interrupted",
                         "duration": _time.time() - start_time, "output_files": []}
+
+            # 用户插话转发（I-2）：调度执行期间主循环轮询点到不了，
+            # 由 provider 拉取主 agent 队列里的新消息注入 worker 上下文。
+            if self._pending_message_provider:
+                try:
+                    _pending = self._pending_message_provider()
+                except Exception:
+                    _pending = ""
+                if _pending:
+                    self.messages.append({"role": "user", "content": _pending})
 
             current_iter += 1
 
             try:
-                response, _ = self.llm.chat(
-                    messages=self.messages,
+                # 漂移纠错重试（与主 agent 同款，公共 helper）：此前裸调用，
+                # 一次 JSON 漂移整个 worker 即死——worker 故障率远高于主 agent
+                # 的主因（生产实证 whisper 编译任务两轮漂移直接炸死）。
+                from core.llm_client import chat_with_drift_retry
+                response, _ = chat_with_drift_retry(
+                    self.llm, self.messages,
                     tools=self.tool_schemas if self.tool_schemas else None,
+                    retries=2,
+                    on_retry=lambda n: print(f"[SubAgent] 工具调用 JSON 漂移，纠错重试（{n}/2）"),
                 )
             except Exception as e:
-                return {"success": False, "summary": f"LLM error: {e}",
+                return {"success": False, "summary": f"LLM error: {type(e).__name__}: {str(e)[:300]}",
                         "duration": _time.time() - start_time, "output_files": []}
 
             message = response.choices[0].message
+
+            # thinking 可视化：worker 的思考过程同样转发进度（此前只有
+            # 主 agent 的 thinking 上屏，worker 是黑盒——用户反馈）
+            _reasoning = getattr(message, "reasoning_content", None)
+            if _reasoning and self.progress_callback:
+                try:
+                    self.progress_callback({
+                        "event": "thinking",
+                        "iteration": current_iter,
+                        "content": _reasoning,
+                        "sub_task": self.task[:50],
+                    })
+                except Exception:
+                    pass
 
             # Tool calls
             if message.tool_calls:
@@ -205,6 +387,7 @@ class SubAgent:
                             "tool": func_name,
                             "step": tool_call_count,
                             "args_preview": tc.function.arguments[:200],
+                            "tool_call_id": tc.id,
                             "sub_task": self.task[:50]
                         })
 
@@ -229,6 +412,7 @@ class SubAgent:
                                 "step": tool_call_count,
                                 "success": False,
                                 "result_preview": str(result)[:200],
+                                "tool_call_id": tc.id,
                                 "sub_task": self.task[:50],
                             })
                         steps.append({
@@ -242,7 +426,14 @@ class SubAgent:
                     tool = self.available_tools.get(func_name)
                     success = False
                     if not tool:
-                        result = f"Error: Tool '{func_name}' not available in this sub-agent"
+                        if self._full_tools_map and func_name in self._full_tools_map:
+                            # 已知但未解锁（全量工具发现）：引导走发现路径，
+                            # 与主 agent 的 tiered exposure 行为一致。
+                            result = (f"Error: Tool '{func_name}' is not enabled in this sub-agent. "
+                                      f"Call search_available_tools with a related query to enable it, "
+                                      f"then retry your call.")
+                        else:
+                            result = f"Error: Tool '{func_name}' not available in this sub-agent"
                     else:
                         try:
                             extra_kwargs = {
@@ -258,7 +449,7 @@ class SubAgent:
                                 self._tool_locks[func_name].acquire()
                                 try:
                                     result = tool.execute(
-                                        interrupt_check=lambda: self.is_interrupted,
+                                        interrupt_check=lambda: self._interrupted(),
                                         _agent_context=self._agent_context,
                                         **extra_kwargs,
                                         **func_args,
@@ -267,7 +458,7 @@ class SubAgent:
                                     self._tool_locks[func_name].release()
                             else:
                                 result = tool.execute(
-                                    interrupt_check=lambda: self.is_interrupted,
+                                    interrupt_check=lambda: self._interrupted(),
                                     _agent_context=self._agent_context,
                                     **extra_kwargs,
                                     **func_args,
@@ -307,6 +498,7 @@ class SubAgent:
                             "step": tool_call_count,
                             "success": success,
                             "result_preview": str(result)[:200],
+                            "tool_call_id": tc.id,
                             "sub_task": self.task[:50],
                         })
                     steps.append({
@@ -346,7 +538,7 @@ class SubAgent:
                 _tool = self.available_tools[_fn]
                 try:
                     _res = _tool.execute(
-                        interrupt_check=lambda: self.is_interrupted,
+                        interrupt_check=lambda: self._interrupted(),
                         _agent_context=self._agent_context,
                         _session_whitelist=self._session_whitelist,
                         _network_whitelist=self._network_whitelist,

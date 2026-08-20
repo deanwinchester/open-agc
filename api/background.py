@@ -278,11 +278,20 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
             try:
                 conn = db_connect()
                 cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=?",
-                    (event.get("result_preview", ""), event.get("full_result", event.get("result_preview", "")),
-                     1 if event.get("success") else 0, task_id, done_step)
-                )
+                _tcid = event.get("tool_call_id")
+                if _tcid:
+                    # 并行工具同 step 编号：按 call_id 精确匹配，防结果串台
+                    cursor.execute(
+                        "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND tool_call_id=?",
+                        (event.get("result_preview", ""), event.get("full_result", event.get("result_preview", "")),
+                         1 if event.get("success") else 0, task_id, _tcid)
+                    )
+                if not _tcid or cursor.rowcount == 0:
+                    cursor.execute(
+                        "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=? AND (result_preview IS NULL OR result_preview='')",
+                        (event.get("result_preview", ""), event.get("full_result", event.get("result_preview", "")),
+                         1 if event.get("success") else 0, task_id, done_step)
+                    )
                 conn.commit()
                 conn.close()
             except Exception:
@@ -1286,6 +1295,7 @@ def _guardian_resume_task(task_id: int) -> None:
                 _hb_thinking["content"] = e["content"]
             if e.get("event") == "tool_start":
                 add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", ""), session_id=_hb_session, sub_task=e.get("sub_task"), thinking_content=_hb_thinking["content"])
+                _hb_thinking["content"] = None  # 思考只随其后首个工具步骤落库一次（防重复显示）
             # Persist sandbox approvals so they survive agent recreation
             if e.get("event") == "sandbox_approved":
                 _path = e.get("path", "")

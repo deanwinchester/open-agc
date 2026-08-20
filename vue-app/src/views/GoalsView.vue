@@ -230,7 +230,7 @@ onMounted(loadGoals);
     </el-card>
 
     <!-- 创建/编辑弹窗 -->
-    <el-dialog v-model="dialogVisible" :title="editId ? t.editTitle : t.createTitle" width="480px">
+    <el-dialog :append-to-body="true" v-model="dialogVisible" :title="editId ? t.editTitle : t.createTitle" width="480px">
       <el-form label-position="top" @submit.prevent>
         <el-form-item :label="t.descLabel">
           <el-input

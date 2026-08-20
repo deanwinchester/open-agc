@@ -411,6 +411,11 @@ class ConfigUpdate(BaseModel):
     sandbox_janitor: Optional[Dict[str, Any]] = None
     # 访问控制：局域网访问密码。空字符串 = 清除密码 = 恢复仅本机访问
     access_password: Optional[str] = None
+    # 自定义厂商（OpenAI 兼容端点）：[{name, base_url, api_key, models[]}]
+    custom_providers: Optional[List[Dict[str, Any]]] = None
+    # 调度者（分身）模式开关与分身叫法
+    dispatcher_mode: Optional[bool] = None
+    agent_worker_name: Optional[str] = None
 
 
 
@@ -541,6 +546,16 @@ async def get_settings(session_id: int = None):
         # 访问控制：只暴露「是否已设置」，绝不回传密码本身
         "access_password_set": bool((config.get("access_password") or "").strip()),
 
+        # 自定义厂商（api_key 掩码）、调度者模式与分身叫法
+        "custom_providers": [
+            {**cp, "api_key": (f"{str(cp.get('api_key',''))[:3]}...{str(cp.get('api_key',''))[-3:]}"
+                               if len(str(cp.get("api_key", ""))) > 6 else
+                               ("***" if cp.get("api_key") else ""))}
+            for cp in (config.get("custom_providers") or [])
+        ],
+        "dispatcher_mode": bool(config.get("dispatcher_mode", False)),
+        "agent_worker_name": config.get("agent_worker_name", "分身"),
+
     }
 
 
@@ -661,6 +676,34 @@ async def update_settings(config_update: ConfigUpdate):
         if config_update.browser_headless is not None:
 
             config["browser_headless"] = config_update.browser_headless
+
+        # 自定义厂商（OpenAI 兼容端点）：整体替换（前端管理的就是完整列表）
+        if config_update.custom_providers is not None:
+
+            _clean = []
+            for cp in config_update.custom_providers:
+                try:
+                    name = str(cp.get("name", "")).strip()
+                    base_url = str(cp.get("base_url", "")).strip()
+                    if not (name and base_url):
+                        continue
+                    _clean.append({
+                        "name": name, "base_url": base_url,
+                        "api_key": str(cp.get("api_key", "") or "").strip(),
+                        "models": [str(m).strip() for m in (cp.get("models") or []) if str(m).strip()],
+                    })
+                except Exception:
+                    continue
+            config["custom_providers"] = _clean
+
+        # 调度者（分身）模式与叫法
+        if config_update.dispatcher_mode is not None:
+
+            config["dispatcher_mode"] = bool(config_update.dispatcher_mode)
+
+        if config_update.agent_worker_name is not None:
+
+            config["agent_worker_name"] = (config_update.agent_worker_name or "").strip() or "分身"
 
         if config_update.tool_tiered_exposure is not None:
 
@@ -867,7 +910,35 @@ async def get_provider_models(provider: str):
 
     models = []
 
-    
+    # 自定义厂商：直接返回配置里登记的模型列表（id 为 <name>/<model>），
+    # 并尝试从端点 /models 拉取补充（OpenAI 兼容）
+    _cp_name = provider[len("custom:"):] if provider.startswith("custom:") else None
+    if _cp_name:
+        for cp in (config.get("custom_providers") or []):
+            if str(cp.get("name", "")) == _cp_name:
+                base_url = str(cp.get("base_url", "")).rstrip("/")
+                key = str(cp.get("api_key", "") or "")
+                seen = set()
+                for m in (cp.get("models") or []):
+                    full = f"{_cp_name}/{m}"
+                    if full not in seen:
+                        models.append(full)
+                        seen.add(full)
+                try:
+                    headers = {"Authorization": f"Bearer {key}"} if key else {}
+                    res = requests.get(f"{base_url}/models", headers=headers, timeout=5)
+                    if res.status_code == 200:
+                        for m in (res.json().get("data") or []):
+                            mid = m.get("id") if isinstance(m, dict) else None
+                            if mid:
+                                full = f"{_cp_name}/{mid}"
+                                if full not in seen:
+                                    models.append(full)
+                                    seen.add(full)
+                except Exception:
+                    pass
+                return {"models": models}
+        return {"models": []}
 
     if provider == "gemini":
 
@@ -930,6 +1001,22 @@ async def get_provider_models(provider: str):
                     models = [f"deepseek/{m['id']}" for m in res.json().get("data", [])]
 
             except Exception: pass
+
+    elif provider == "xiaomi":
+
+        # 小米 MiMo（OpenAI 兼容端点）：先拉端点 /models，失败回退预置
+        key = api_keys.get("xiaomi")
+
+        _preset = ["xiaomi/mimo-v2.5", "xiaomi/mimo-v2.5-pro"]
+        try:
+            headers = {"Authorization": f"Bearer {key}"} if key else {}
+            res = requests.get("https://api.xiaomimimo.com/v1/models", headers=headers, timeout=5)
+            if res.status_code == 200:
+                models = [f"xiaomi/{m['id']}" for m in res.json().get("data", []) if m.get("id")]
+        except Exception:
+            pass
+        if not models:
+            models = _preset
 
 
 
