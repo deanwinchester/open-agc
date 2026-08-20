@@ -402,6 +402,14 @@ def reconcile_tasks():
 
 reconcile_tasks()
 
+# 分身持久化（M2.5）：启动时把仍为 running 的 dispatches 判 lost——新进程
+# 没有任何活跃线程，running 即失联（与上面 tasks 的 server_restart 同理）。
+try:
+    from agent.dispatcher import mark_stale_dispatches_lost as _mdl
+    _mdl()
+except Exception as _mdl_e:
+    print(f"[Startup] dispatch lost-mark error: {_mdl_e}")
+
 # reconcile_backgrounded_after_restart 移至 api.background（统一定义于恢复链路
 # 所在模块，便于测试）；启动时通过 _bg.reconcile_backgrounded_after_restart() 调用。
 

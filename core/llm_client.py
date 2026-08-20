@@ -356,6 +356,10 @@ class LLMClient:
         config = load_config()
         self.default_model = default_model or config.get("default_model", "gpt-4o")
         self.fallback_models = config.get("fallback_models", [])
+        # 调用日志归属（model_call_logs.session_id/task_id）：由调用方经
+        # set_log_context 注入；此前恒为 NULL，调试页按会话过滤查不到任何记录
+        self._log_session_id = None
+        self._log_task_id = None
 
         # Bootstrap: inject API keys from config.json into environment
         # so litellm can find them automatically
@@ -368,6 +372,7 @@ class LLMClient:
             "kimi_code": "KIMI_CODE_API_KEY",
             "glm": "ZAI_API_KEY",
             "minimax": "MINIMAX_API_KEY",
+            "xiaomi": "XIAOMI_API_KEY",
             "llamacpp": "LLAMACPP_API_BASE",
             "huggingface": "HF_TOKEN"
         }
@@ -396,6 +401,25 @@ class LLMClient:
         # Kimi Code subscription endpoint (Anthropic-compatible)
         self.kimi_code_api_key = config.get("api_keys", {}).get("kimi_code", "") or os.environ.get("KIMI_CODE_API_KEY", "")
         self.kimi_code_api_base = "https://api.kimi.com/coding/"
+        # 小米 MiMo（OpenAI 兼容端点，预置厂商）
+        self.xiaomi_api_key = config.get("api_keys", {}).get("xiaomi", "") or os.environ.get("XIAOMI_API_KEY", "")
+        self.xiaomi_api_base = "https://api.xiaomimimo.com/v1"
+
+        # 自定义厂商（OpenAI 兼容端点，用户要求：预置厂商之外可自由添加，
+        # 如小米/自部署网关）。config.custom_providers:
+        #   [{"name": "xiaomi", "base_url": "https://...", "api_key": "sk-...",
+        #     "models": ["m1", "m2"]}]；模型 id 约定 <name>/<model> 路由。
+        self._custom_providers = {}
+        for cp in (config.get("custom_providers") or []):
+            try:
+                name = str(cp.get("name", "")).strip()
+                base_url = str(cp.get("base_url", "")).strip()
+                api_key = str(cp.get("api_key", "")).strip()
+                models = [str(m).strip() for m in (cp.get("models") or []) if str(m).strip()]
+                if name and base_url:
+                    self._custom_providers[name] = {"base_url": base_url, "api_key": api_key, "models": models}
+            except Exception:
+                continue
 
         # Ensure local connections bypass proxy
         for var in ["no_proxy", "NO_PROXY"]:
@@ -702,6 +726,12 @@ class LLMClient:
             kwargs["api_base"] = self.kimi_code_api_base
             kwargs.setdefault("max_tokens", 8192)  # Anthropic Messages API 必填
             kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
+        elif model.startswith("xiaomi/"):
+            # 小米 MiMo（OpenAI 兼容端点）：api_base/api_key 按调用传入
+            kwargs["model"] = f"openai/{model.split('/', 1)[1]}"
+            kwargs["api_base"] = self.xiaomi_api_base
+            kwargs["api_key"] = self.xiaomi_api_key or "sk-no-key-required"
+            kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
         elif "llamacpp/" in model:
             kwargs["api_base"] = self.llamacpp_api_base
             if not model.startswith("openai/"):
@@ -713,9 +743,25 @@ class LLMClient:
             if not stream:
                 kwargs["timeout"] = 600
         else:
+            # 自定义厂商路由（OpenAI 兼容端点）：<name>/<model> → openai/<model>
+            prefix = model.split('/', 1)[0] if '/' in model else ''
+            _cp = getattr(self, "_custom_providers", {}).get(prefix)
+            if _cp:
+                kwargs["model"] = f"openai/{model.split('/', 1)[1]}"
+                kwargs["api_base"] = _cp["base_url"]
+                kwargs["api_key"] = _cp.get("api_key") or "sk-no-key-required"
             kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
 
         return kwargs
+
+    def set_log_context(self, session_id: Optional[int] = None, task_id: Optional[int] = None):
+        """设置调用日志的归属上下文（会话/任务）。
+
+        任务切换时由调用方重新设置（如 run_turn 开头）；SubAgent 共享主
+        agent 的 client，日志归属主任务（sub_task 列另行区分）。
+        """
+        self._log_session_id = session_id
+        self._log_task_id = task_id
 
     def chat(self, messages: List[Dict[str, Any]], model: Optional[str] = None,
              tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[Any, str]:
@@ -790,6 +836,7 @@ class LLMClient:
                             request_data=req_text, response_data=resp_text,
                             cache_hit=_detect_cache_hit(response), cached_tokens=_detect_cached_tokens(response),
                             latency_ms=int((t1 - t0) * 1000),
+                            session_id=self._log_session_id, task_id=self._log_task_id,
                         )
                     except Exception as log_e:
                         print(f"[LLMClient] Logging failed: {log_e}")
@@ -866,7 +913,8 @@ class LLMClient:
                         continue
 
                     # Clean the content just in case any markers remain
-                    cleaned = clean_llm_text(content)
+                    cleaned = re.sub(r"</?(thought|think)[^>]*>", "", content)  # chunk 级只剥标记不 strip：
+                    # strip 会把 chunk 边界换行剥掉（流式换行丢失致 markdown 挤成一坨）
                     chunk.choices[0].delta.content = cleaned
                     if not cleaned:
                         continue
@@ -900,6 +948,7 @@ class LLMClient:
                         cache_hit="hit" if _cached > 0 else "miss",
                         cached_tokens=_cached,
                         latency_ms=int((time.time() - _stream_start) * 1000),
+                        session_id=self._log_session_id, task_id=self._log_task_id,
                     )
                 except Exception as log_e:
                     print(f"[LLMClient] Stream log failed: {log_e}")
@@ -907,3 +956,104 @@ class LLMClient:
         except Exception as e:
             print(f"Error calling LLM stream ({target_model}): {str(e)}")
             raise
+
+
+# ────────────────────────── 工具调用 JSON 漂移容错（公共） ──────────────────────────
+# 生产实证：k3 经 Anthropic 协议返回 tool_call arguments 时偶发未闭合 JSON /
+# 裸文本（长 shell 命令、含换行的 Python 代码最易发）。盲重试同一 prompt
+# 漂移复发率高；把「格式非法」反馈给模型再试，大部分能救回。
+
+_DRIFT_ERROR_KEYS = ("Failed to parse tool call", "Unterminated string", "Expecting value")
+
+DRIFT_RETRY_HINT = (
+    "⚠️ 你刚才的工具调用参数不是合法 JSON（字符串未闭合/未转义或"
+    "直接输出了裸文本），已被 API 解析层拒绝，该次调用未执行。"
+    "请重新发起调用：arguments 必须是严格合法的 JSON 字符串"
+    "（换行写 \\n、双引号转义、对象完整闭合）。"
+)
+
+
+def is_tool_call_drift_error(err: BaseException) -> bool:
+    """判断异常是否为工具调用 JSON 漂移（可纠错重试）。"""
+    es = str(err)
+    return any(k in es for k in _DRIFT_ERROR_KEYS)
+
+
+def chat_with_drift_retry(llm, messages: List[Dict[str, Any]],
+                          tools: Optional[List[Dict[str, Any]]] = None,
+                          retries: int = 2, on_retry=None) -> Tuple[Any, str]:
+    """llm.chat + 漂移纠错重试：漂移时追加纠错 system 消息（反馈式重试）。
+
+    供 SubAgent/worker 等没有 run_turn 纠错层的调用方使用；主 agent 的
+    run_turn 内联同款逻辑（含 progress/continue 语义）不重复实现。
+    """
+    attempt = 0
+    while True:
+        try:
+            return llm.chat(messages=messages, tools=tools)
+        except Exception as e:
+            if is_tool_call_drift_error(e) and attempt < retries:
+                attempt += 1
+                messages.append({"role": "system", "content": DRIFT_RETRY_HINT})
+                if on_retry:
+                    try:
+                        on_retry(attempt)
+                    except Exception:
+                        pass
+                continue
+            raise
+
+
+# ────────────────────────── 流式调用（感知延迟优化） ──────────────────────────
+
+def chat_stream_collect(self, messages: List[Dict[str, Any]],
+                        model: Optional[str] = None,
+                        tools: Optional[List[Dict[str, Any]]] = None,
+                        on_delta=None) -> Tuple[Any, str]:
+    """流式调用 + 聚合完整响应（litellm.stream_chunk_builder）。
+
+    on_delta(kind, text)：增量回调，kind='content' 正文 / 'thinking' 思考——
+    run_turn 据此把生成过程实时推给前端（用户反馈：非流式首轮 30-60s
+    无任何动静）。返回 (response, actual_model)，结构与 chat() 兼容。
+    """
+    target_model = model or self.default_model
+    chunks = []
+    for chunk in self.chat_stream(messages, model=target_model, tools=tools):
+        chunks.append(chunk)
+        if on_delta:
+            try:
+                delta = chunk.choices[0].delta
+                rc = getattr(delta, "reasoning_content", None)
+                if rc:
+                    on_delta("thinking", rc)
+                c = getattr(delta, "content", None)
+                if c:
+                    on_delta("content", c)
+            except Exception:
+                pass
+    if not chunks:
+        raise ValueError("LLM stream returned no chunks")
+    response = litellm.stream_chunk_builder(chunks)
+    if response is None:
+        raise ValueError("stream_chunk_builder returned None")
+    # 流式空响应回退（生产实证 #420：k3 在 ~58k 上下文时长流式被切断/秒拒，
+    # 连续 7 次空响应、pt=0——聚合出空 message 会让 run_turn 整轮炸掉；
+    # 同上下文非流式随即恢复，故回退非流式 chat（自带 3 次重试+fallback））
+    _msg = None
+    try:
+        _choices = getattr(response, "choices", None) or []
+        _msg = _choices[0].message if _choices else None
+    except Exception:
+        _msg = None
+    _empty = (_msg is None
+              or (not (getattr(_msg, "content", "") or "").strip()
+                  and not getattr(_msg, "tool_calls", None)))
+    if _empty:
+        print("[LLMClient] 流式空响应，回退非流式 chat 重试")
+        return self.chat(messages, model=target_model, tools=tools)
+    return response, target_model
+
+
+# 挂到类上（保持文件结构：类内不便再加方法——本函数与 chat_with_drift_retry
+# 同为模块级公共件）
+LLMClient.chat_stream_collect = chat_stream_collect

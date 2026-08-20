@@ -264,7 +264,7 @@ onMounted(() => {
     </el-card>
 
     <!-- 新建 / 编辑 Agent -->
-    <el-dialog
+    <el-dialog :append-to-body="true"
       v-model="agentDialog.visible"
       :title="agentDialog.mode === 'create' ? t.agents.createTitle : t.agents.editTitle"
       width="560px"

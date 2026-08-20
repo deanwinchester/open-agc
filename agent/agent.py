@@ -51,6 +51,8 @@ from tools.plugin_dev import DevelopPluginTool
 from tools.install_skill import InstallSkillTool
 from tools.compact_context import CompactContextTool
 from tools.subagent_dispatch import DispatchSubagentTool
+from tools.dispatch_worker import DispatchWorkerTool
+from tools.message_worker import MessageWorkerTool
 from tools.request_secret import RequestSecretTool
 from tools.theme_tool import CustomizeThemeTool
 
@@ -275,9 +277,10 @@ class OpenAGCAgent:
         # Load skill index (progressive — full content is retrieved on demand)
         self.skill_store = SkillStore(skills_dir=get_skills_dir())
 
-        # Inject current date/time so the LLM knows "today"
+        # Inject current date/time so the LLM knows "today"（分钟精度——秒级
+        # 时间戳会破坏前缀缓存，见 _build_system_prompt 同注）
         from datetime import datetime
-        current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %z")
         current_date = datetime.now().strftime("%Y年%m月%d日")
 
         # Store config for later use
@@ -349,7 +352,7 @@ class OpenAGCAgent:
                 f"如想在调用工具前表达思考过程，放在 JSON 之前的独立段落中。\n"
             )
 
-        self.system_prompt_base = (
+        _prompt_head = (
             f"# 身份与人格\n"
             f"你是住在用户电脑里的数字生命——不是「Open-AGC」产品本身，那只是你运行的躯壳与工具箱；"
             f"被问到「你是谁」时不要自称 Open-AGC 或某个模型。"
@@ -367,13 +370,17 @@ class OpenAGCAgent:
             f"「试试吧」「继续」「开始吧」「做吧」这类回复是**执行指令**：必须立即调用"
             f"工具开始执行，严禁只用文字描述计划就结束回合。说「我现在去点击/下载/注册」"
             f"的当轮就必须真的发起对应工具调用。\n"
-            f"\n## 当前时间\n"
-            f"当前本地时间：{current_time}（含时区偏移）；今天：{current_date}。"
+            f"\n## 时间与时效\n"
+            f"当前时间由每轮消息流末尾的「本轮检索补充」段提供（含时区偏移）。"
             f"安排定时任务、计算截止时间、解释「明天上午9点」这类相对时间时，一律以该时区为准。"
             f"注意：任务/数据库时间戳统一为 UTC，与本地时间换算时必须先做时区换算再比较。\n"
             f"你的训练数据有知识截止日期。对于任何关于近期事件、当前新闻、最新动态或"
             f"时效性信息的问题，你必须使用 search_web 工具获取最新信息。"
             f"绝对不要仅依赖训练数据回答时事问题。\n"
+        )
+
+        # ── 任务执行规范（直执/接管时适用）──
+        _prompt_exec = (
             f"\n# 任务执行规范\n"
             f"\n## 1. 复杂任务先规划再执行\n"
             f"处理涉及多个步骤的复杂任务时，先说明你的计划，然后逐步执行。"
@@ -539,6 +546,10 @@ class OpenAGCAgent:
             f"查看全部记忆：manage_memory(action='read')\n"
             f"修改记忆：manage_memory(action='update', query=ID, content='新内容')\n"
             f"  - 先用 search_history 找到 ID，再用 update 修改\n"
+        )
+
+        # ── 通用机制（技能/记忆/扩展工具/架构红线等，两种模式共用）──
+        _prompt_mech = (
             f"\n## 技能系统\n"
             f"在每次任务开始时，系统会根据任务内容自动检索并注入相关技能供你参考执行。"
             f"如果你成功完成了一项之前未完成过的复杂任务，并且得到了用户的正面反馈，"
@@ -587,6 +598,84 @@ class OpenAGCAgent:
             f"```\n"
             f"⚠️ 每个 key 只写一次，覆盖更新即可。不要重复添加相同内容。\n"
         )
+
+        # ── 组装基础提示词：调度者模式下调度角色为主体，执行规范降级为
+        # 「直执小任务/接管时适用」；普通模式结构不变（生产实证：调度指引
+        # 挂在执行型提示词末尾时模型仍按主体指令直执）──
+        # worker 叫法（用户要求）：默认「分身」，config.agent_worker_name 自定义
+        try:
+            import json as _wj
+            from core.paths import get_data_path as _wgdp
+            with open(_wgdp("config.json"), encoding="utf-8") as _wf:
+                self._worker_name = (_wj.load(_wf).get("agent_worker_name") or "分身").strip() or "分身"
+        except Exception:
+            self._worker_name = "分身"
+        _wn = self._worker_name
+        if self._dispatcher_mode_enabled():
+            self.system_prompt_base = (
+                _prompt_head
+                + (
+                    f"\n# 角色：调度者（Dispatcher Mode）\n"
+                    f"你现在是**调度者**，不是{_wn}。你的工作闭环：理解 → 制定 → 验收 → 呈现。\n"
+                    f"\n## 分流（每条用户输入先判定）\n"
+                    f"你只有两种身份，没有第三种：\n"
+                    f"- **对话者**：闲聊、问答、讨论、澄清需求、汇报结果——直接回复，不动用工具。\n"
+                    f"  对话直接给出答案，不要反问用户（ask_user_question 只用于真正缺关键信息时）。\n"
+                    f"  ⚠️ 凡需要动用工具的请求（读文件/查文件/跑命令/搜索/读取后告知内容）"
+                    f"都不是对话——必须派发。「只是读一下」也是派发（生产实证：判成对话后"
+                    f"零工具编造文件内容）。\n"
+                    f"- **调度者**：凡是需要「做事」的请求——产出内容、读写文件、操作系统、"
+                    f"查资料整理、创作、重写/续写/改稿/润色——**一律派发{_wn}，没有例外**。\n"
+                    f"⚠️ 你没有「小任务直接做」的选项：再小的事也派发。\n"
+                    f"⚠️ 历史对话中你曾亲自执行任务，那只是历史行为，现在一律禁止沿用。\n"
+                    f"⚠️ 在回复里直接输出本应由{_wn}产出的内容（章节/稿件/代码/报告正文）"
+                    f"= 未完成交付。\n"
+                    f"⚠️ 行动前先显式声明：「对话：…」或「派发：…」＋一句理由。"
+                    f"声明与行动必须同一轮完成：声明「派发」后必须立即调用 dispatch_worker，"
+                    f"光声明不调用 = 未完成（生产实证：模型连续两轮只声明不派发）。\n"
+                    f"\n## 派发（dispatch_worker，异步）\n"
+                    f"基于全部会话上下文理解用户**真正**想要什么（不要只看字面一句话；"
+                    f"必要时回顾历史任务的执行情况与结果），然后**亲自撰写**任务简报，"
+                    f"以 task_brief 参数调用 dispatch_worker。简报必须自包含"
+                    f"（{_wn}看不到本会话）：\n"
+                    f"1. 目标：要达成什么结果\n"
+                    f"2. 背景：为什么做、当前处于什么状态\n"
+                    f"3. 关键信息：相关文件/路径/凭据引用/前序任务结论（你知道的全部写进去）\n"
+                    f"4. 产出要求：交付什么、放在哪里、什么格式\n"
+                    f"5. 验收标准 acceptance：1-3 条可客观检验的条件\n"
+                    f"系统会自动为简报补充相关历史任务、记忆与文件路径——检索是增强，"
+                    f"不能替代你的理解。\n"
+                    f"派发是**异步**的：调用立即返回，{_wn}在后台干活——**不要空等**，"
+                    f"立即回复用户已开工（一句话说清任务要点）；{_wn}完成（含证据验收）"
+                    f"后系统会以【{_wn}返回】通知你，届时你再验收呈现。\n"
+                    f"多个互不依赖的任务可以**并行派发多个{_wn}**（连续调用 dispatch_worker）；"
+                    f"{_wn}陆续返回时逐一验收，全部完成后汇总呈现——一气化三清，"
+                    f"{_wn}与你共享记忆与前缀，不必重复交代背景。\n"
+                    f"\n## 执行中的插话分类（你的职责，不要推给{_wn}）\n"
+                    f"{_wn}执行期间用户又发来消息时，先判定三类再行动：\n"
+                    f"- 闲聊/无关提问/讨论 → 直接回答，**不要打扰{_wn}**。\n"
+                    f"- 与当前任务相关的追加要求/纠正 → 用 message_worker 转发给{_wn}。\n"
+                    f"- 明显是新任务 → dispatch_worker 另派一个{_wn}（可并行）。\n"
+                    f"\n## 验收与接管\n"
+                    f"收到【{_wn}返回】后看验收结论与证据（产出文件/关键步骤），不信「成功」字样。"
+                    f"验收未通过：先针对性补充信息重派一次；再次失败则亲自接管执行"
+                    f"（此时适用下方执行规范），并如实告知用户。\n"
+                    f"接管是唯一的亲手执行场景——仅限{_wn}两次失败之后。\n"
+                    f"\n## 进展问询处理\n"
+                    f"用户问「有进展吗/好了吗/继续」时：先看「活跃分身」段——{_wn}还在跑就如实"
+                    f"说仍在执行；已结束/失联就**重新派发**继续任务，或如实告诉用户当前状态。"
+                    f"严禁只回「继续跟进/催办/在等」而没有任何实际动作（查证或重派）。\n"
+                    f"\n## 呈现\n"
+                    f"回答基于{_wn}的真实产出：交付了什么、在哪里。工具步骤不必逐条复述。\n"
+                    f"涉及交付物的回复若零工具调用、纯文本直接交付，视为违规（应派发而未派发）。\n"
+                    f"\n## 接管时的执行规范\n"
+                    f"（仅当{_wn}两次失败、你亲自接管时适用；日常任务你没有执行权）\n"
+                )
+                + _prompt_exec
+                + _prompt_mech
+            )
+        else:
+            self.system_prompt_base = _prompt_head + _prompt_exec + _prompt_mech
 
         self.messages: List[Dict[str, Any]] = [
             {
@@ -691,6 +780,18 @@ class OpenAGCAgent:
             "customize_theme": "界面风格定制",
         }
 
+        # 调度者模式 M1+M2（实验开关 dispatcher_mode）：仅在开启时注册并预启用
+        # dispatch_worker / message_worker（免 search_available_tools）；关闭时
+        # 完全不注册，工具列表/提示词均无痕迹（零影响）。
+        if self._dispatcher_mode_enabled():
+            self.full_available_tools["dispatch_worker"] = DispatchWorkerTool()
+            self.tool_display_names["dispatch_worker"] = f"派出{self._worker_name}"
+            self.full_available_tools["message_worker"] = MessageWorkerTool()
+            self.tool_display_names["message_worker"] = f"给{self._worker_name}递话"
+            # 隐藏旧的 dispatch_subagent 入口，避免模型 search 工具时发现两个
+            # 派发入口而绕开 dispatch_worker 的证据验收链路。
+            self.full_available_tools.pop("dispatch_subagent", None)
+
         # Load auto-generated tools (persisted from previous sessions)
         # Store in data/auto_tools/{session_id} to isolate per session
         if self.session_id is not None:
@@ -766,6 +867,10 @@ class OpenAGCAgent:
                                 "manage_task_plan", "shell_send"}
         CORE_TOOL_NAMES = TIERED_CORE_TOOL_NAMES if self.tool_tiered_exposure else FULL_CORE_TOOL_NAMES
         self.active_tool_names = set(CORE_TOOL_NAMES) | self._pre_enabled_tools
+        # 调度者模式：dispatch/message_worker 常驻（上面已在开启时注册进 full_available_tools）
+        if self._dispatcher_mode_enabled():
+            self.active_tool_names.add("dispatch_worker")
+            self.active_tool_names.add("message_worker")
 
         # Adaptive resident: auto-load frequently used non-core tools
         try:
@@ -860,8 +965,11 @@ class OpenAGCAgent:
     def _build_system_prompt(self, memory_context: str = "", skill_context: str = "",
                              experience_context: str = "", kg_context: str = "") -> str:
         # Inject current date/time so the LLM knows "today"
+        # 时间精确到分钟（生产实证 R7-R9：秒级时间戳让 system prompt 每秒都变，
+        # 前缀缓存从 messages[0] 起全部失效——跨任务/化身/呈现轮全灭，
+        # 首轮命中率 50-70% 而不是 98%）。分钟精度对 agent 足够。
         from datetime import datetime
-        current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %z")
         current_date = datetime.now().strftime("%Y年%m月%d日")
         
         prompt = self.system_prompt_base.replace("{current_time}", current_time).replace("{current_date}", current_date)
@@ -895,6 +1003,9 @@ class OpenAGCAgent:
         # Inject all available tool names (built after full_available_tools is populated)
         if hasattr(self, 'full_available_tools'):
             prompt += self._build_tool_list_section()
+
+        # 调度者角色提示已在 system_prompt_base 组装阶段按模式注入（见 __init__），
+        # 此处不再追加，避免角色指令重复稀释。
 
         # Inject Episodic Memory Context
         if memory_context:
@@ -1930,6 +2041,21 @@ class OpenAGCAgent:
         # The last (up to) 2 assistant turns must both touch the same topic.
         return all(_topic_tokens(t) & input_tokens for t in assistant_texts)
 
+    def _dispatcher_mode_enabled(self) -> bool:
+        """调度者模式 M1 实验开关：config.json 的 dispatcher_mode（默认 false）。
+
+        仅实验期手动开启；开启时注册并预启用 dispatch_worker 工具、在系统
+        提示注入调度指引；关闭时完全不注册，行为与现状一致（零侵入）。
+        """
+        try:
+            cfg_path = get_data_path("config.json")
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    return bool(json.load(f).get("dispatcher_mode", False))
+        except Exception:
+            pass
+        return False
+
     def _should_delegate(self, user_input: str) -> bool:
         """Assess whether a task is complex enough to warrant sub-agent delegation."""
         # 本轮已委派过一次：子代理结果已在上下文中，剩余工作由主代理完成，
@@ -2265,6 +2391,17 @@ class OpenAGCAgent:
         self.is_interrupted = False
         self.task_id = task_id
         self._consecutive_failures = 0
+        # 虚构交付拦截：本轮工具消息基线 + 重跑计数（dispatcher_mode 专用，
+        # 生产实证：主 agent 零工具调用虚构「编译完成/验收通过」报告）
+        self._tool_msg_baseline = sum(1 for m in self.messages if m.get("role") == "tool")
+        self._fabrication_retries = 0
+        # 工具调用 JSON 格式漂移纠错重试计数（上限 2 次/轮次）
+        self._format_drift_retries = 0
+        # 调用日志归属本会话/本任务（SubAgent 共享 self.llm，日志随主任务）
+        try:
+            self.llm.set_log_context(self.session_id, task_id)
+        except Exception:
+            pass
         self._delegated_this_turn = False
         # 失败尝试记录同样随新任务清空——否则上一任务的避坑清单会泄漏进
         # 本任务的 system prompt（跨任务污染）。
@@ -2342,58 +2479,73 @@ class OpenAGCAgent:
             except Exception as e:
                 if verbose: print(f"Knowledge graph retrieval error: {e}")
 
-        # Ensure System Prompt is always fresh and has the latest MEMORY.md and episodic context
+        # Ensure System Prompt is always fresh (仅静态部分：人格/角色/规范/机制/
+        # soul.md/MEMORY.md/工具列表)。动态内容一律不进 messages[0]——记忆/技能/
+        # 经验检索结果每轮不同，拼进 messages[0] 会让前缀缓存从头失效（fork 的
+        # 缓存共享也因此落空，生产实证 R6 fork billable 反涨 ×3.3）。
         if self.messages and self.messages[0]["role"] == "system":
-            system_content = self._build_system_prompt(
-                memory_context=memory_context,
-                skill_context=skill_context,
-                experience_context=experience_context,
-                kg_context=kg_context,
-            )
-            
-            if hasattr(self, 'failed_attempts') and self.failed_attempts:
-                attempts_str = "\n".join([f"- {attempt}" for attempt in self.failed_attempts])
-                system_content += f"\n\n## 历史失败尝试记录 (避坑指南)\n你过去曾尝试过以下操作但失败了，**请仔细分析原因，绝对不要原样重复**：\n{attempts_str}\n"
-
-            # Inject goal list
-            try:
-                from tools.task_plan import load_goals as _load_goals, format_goal_list_for_prompt as _fmt_goals
-                _goals = _load_goals()
-                _goal_text = _fmt_goals(_goals)
-                if _goal_text:
-                    system_content += "\n\n" + _goal_text
-            except Exception:
-                pass
-            # Inject task title as goal reminder so agent stays focused
-            if self.task_id:
-                try:
-                    import sqlite3 as _sq3
-                    from core.paths import get_data_path as _gdp
-                    _conn = _sq3.connect(_gdp("chat_history.db"))
-                    _row = _conn.execute("SELECT title FROM tasks WHERE id=?", (self.task_id,)).fetchone()
-                    _conn.close()
-                    if _row and _row[0]:
-                        _goal = _row[0].strip()
-                        # Only inject when title is a meaningful goal (> 5 chars)
-                        if len(_goal) > 5 and _goal not in system_content:
-                            system_content += f"\n\n## 当前任务目标\n始终聚焦于此目标，不要偏离：\n\n{_goal[:200]}\n"
-                    # 告知数字任务 ID 与检查点文件路径（「大任务检查点」约定的
-                    # 落盘位置）——任务 ID 只在运行期经 run_turn 传入，静态提示
-                    # 里无法写死；恢复时服务端读取同一文件把断点注入上下文。
-                    _ckpt_path = os.path.join(self.sandbox_dir or os.getcwd(),
-                                              ".checkpoints", f"task_{self.task_id}.json")
-                    system_content += (
-                        f"\n\n## 当前任务检查点\n当前任务 ID: {self.task_id}。"
-                        f"执行大批量/长耗时任务时，必须把进度检查点维护到 `{_ckpt_path}`"
-                        f"（字段与规则见「大任务检查点」约定），每处理完一批就更新。\n")
-                except Exception:
-                    pass
+            system_content = self._build_system_prompt()
             self.messages[0]["content"] = system_content
 
-        # 任务计划注入（唯一注入点，带标题段 + 去重守卫；skip_rag=True 的
-        # resume 场景也覆盖）。原先 system prompt 重建段里的第一段无标题注入
-        # 已删除——两段并存会导致计划文本在系统提示里出现两次。
-        if self.messages and self.messages[0]["role"] == "system" and self.task_id:
+        # ── 动态上下文后置：组装为一条 system 消息追加到消息流末尾 ──
+        _dyn_parts = []
+        # 当前时间在动态段（用户指正：放 system 里即使分钟级也周期性失效；
+        # 末尾段不参与前缀——前缀完全静态，跨分钟/跨化身缓存全命中）
+        try:
+            from datetime import datetime as _dt
+            _dyn_parts.append(
+                f"## 当前时间\n{_dt.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')}"
+                f"（本地，含时区偏移）；今天：{_dt.now().strftime('%Y年%m月%d日')}。")
+        except Exception:
+            pass
+        if memory_context:
+            _dyn_parts.append(f"--- 历史记忆回溯 (Episodic Memory) ---\n{memory_context}")
+        if skill_context:
+            _dyn_parts.append(skill_context)
+        if experience_context:
+            _dyn_parts.append(experience_context)
+        if kg_context:
+            _dyn_parts.append(kg_context)
+
+        if hasattr(self, 'failed_attempts') and self.failed_attempts:
+            attempts_str = "\n".join([f"- {attempt}" for attempt in self.failed_attempts])
+            _dyn_parts.append(f"## 历史失败尝试记录 (避坑指南)\n你过去曾尝试过以下操作但失败了，**请仔细分析原因，绝对不要原样重复**：\n{attempts_str}")
+
+        # Inject goal list（动态：目标列表随任务变化）
+        try:
+            from tools.task_plan import load_goals as _load_goals, format_goal_list_for_prompt as _fmt_goals
+            _goal_text = _fmt_goals(_load_goals())
+            if _goal_text:
+                _dyn_parts.append(_goal_text)
+        except Exception:
+            pass
+        # Inject task title as goal reminder so agent stays focused
+        if self.task_id:
+            try:
+                import sqlite3 as _sq3
+                from core.paths import get_data_path as _gdp
+                _conn = _sq3.connect(_gdp("chat_history.db"))
+                _row = _conn.execute("SELECT title FROM tasks WHERE id=?", (self.task_id,)).fetchone()
+                _conn.close()
+                if _row and _row[0]:
+                    _goal = _row[0].strip()
+                    if len(_goal) > 5:
+                        _dyn_parts.append(f"## 当前任务目标\n始终聚焦于此目标，不要偏离：\n\n{_goal[:200]}")
+                # 告知数字任务 ID 与检查点文件路径（「大任务检查点」约定的
+                # 落盘位置）——任务 ID 只在运行期经 run_turn 传入，静态提示
+                # 里无法写死；恢复时服务端读取同一文件把断点注入上下文。
+                _ckpt_path = os.path.join(self.sandbox_dir or os.getcwd(),
+                                          ".checkpoints", f"task_{self.task_id}.json")
+                _dyn_parts.append(
+                    f"## 当前任务检查点\n当前任务 ID: {self.task_id}。"
+                    f"执行大批量/长耗时任务时，必须把进度检查点维护到 `{_ckpt_path}`"
+                    f"（字段与规则见「大任务检查点」约定），每处理完一批就更新。")
+            except Exception:
+                pass
+
+        # 任务计划注入（动态段内；唯一注入点）——原先拼进 messages[0] 的做法
+        # 会让计划文本随任务切换改变前缀、缓存全灭。
+        if self.task_id:
             try:
                 from tools.task_plan import load_plan as _load_plan, format_plan_for_prompt as _fmt_plan
                 _plan = None
@@ -2410,14 +2562,71 @@ class OpenAGCAgent:
                 if not _plan:
                     _plan = _load_plan(plan_id=None, task_id=self.task_id)
                 if _plan:
-                    _plan_text = "\n\n## 当前计划进度\n" + _fmt_plan(_plan)
-                    if _plan_text not in self.messages[0]["content"]:
-                        self.messages[0]["content"] += _plan_text
+                    _dyn_parts.append("## 当前计划进度\n" + _fmt_plan(_plan))
             except Exception:
                 pass
 
+        # 活跃分身状态注入（生产实证 #413：主 agent 对「分身是否还在跑」毫无
+        # 感知，用户问进展时只能凭想象空谈「继续跟进」——现在每轮如实可见）
+        if self._dispatcher_mode_enabled():
+            try:
+                from agent.dispatcher import get_running_dispatches_for_session as _grds
+                _rds = _grds(self.session_id)
+                if _rds:
+                    _tids = "、".join(f"#{d['task_id']}" for d in _rds[:3])
+                    _dyn_parts.append(
+                        f"## 活跃分身\n当前会话有 {len(_rds)} 个{self._worker_name}正在后台执行"
+                        f"（任务 {_tids}，尚未返回）。用户问进展时如实说明「仍在执行，"
+                        "等其返回」即可，不要重复派发同一任务。")
+                else:
+                    # 失联分身（重启/线程死亡，持久化记录）——主 agent 必须知道
+                    # 「曾有分身失联」，需要继续应重派而非苦等回传（生产实证
+                    # #418：分身早随重启死亡，主 agent 仍在「等回传」）
+                    _lost_note = ""
+                    try:
+                        from agent.dispatcher import get_recent_lost_dispatches as _grl
+                        _lost = _grl(self.session_id)
+                        if _lost:
+                            _items = "、".join(f"任务#{d['task_id']}" for d in _lost)
+                            _lost_note = (f"\n⚠️ 注意：检测到有{self._worker_name}（{_items}）"
+                                          "此前**已失联**（服务重启或线程死亡）——它不会"
+                                          "再返回结果，不要苦等；需要继续应重新派发。")
+                    except Exception:
+                        pass
+                    _dyn_parts.append(
+                        f"## 活跃分身（系统事实，优先级高于对话历史中的任何说法）\n"
+                        f"当前会话**没有**运行中的{self._worker_name}。"
+                        f"历史对话里「已开工/已派发/{self._worker_name}正在执行」的说法"
+                        f"可能是你（主 agent）的幻觉，**从未真实发生或早已结束**——"
+                        "不要以那些说法为准。" + _lost_note + "\n"
+                        "若用户问此前任务的进展/催促继续：如实说明当前没有在执行的任务，"
+                        "需要继续时应**重新派发**（dispatch_worker）；"
+                        "严禁空谈「确认还在跑/继续跟进/催办」而无实际行动。")
+            except Exception:
+                pass
+
+        if _dyn_parts:
+            _dyn_msg = {"role": "system", "content": (
+                "（以下是本轮为你检索到的相关上下文，供参考）\n\n"
+                + "\n\n".join(_dyn_parts))}
+            # 移除上一次 run_turn 插入的动态段（identity 过滤）——否则连续
+            # 对话会在消息流里累积多份过期检索快照，既胀上下文又误导模型
+            _prev_dyn = getattr(self, "_last_dyn_msg", None)
+            if _prev_dyn is not None:
+                self.messages = [m for m in self.messages if m is not _prev_dyn]
+            # 永远放最末尾（生产实证 R7）：插到中间会让前缀在该位置分叉——
+            # 前缀缓存要求消息序列从头部逐字节相同；末尾追加则主干历史纯增长、
+            # 跨轮/fork 共享全部命中。动态段在最新用户输入之后，语义是
+            # 「本轮检索补充」，模型照读。
+            self.messages.append(_dyn_msg)
+            self._last_dyn_msg = _dyn_msg
+
         # Sub-agent delegation for complex tasks
-        if self._should_delegate(user_input):
+        # dispatcher_mode 下禁用旧的自动委派路径（关键词启发式 _should_delegate +
+        # 外包式 _decompose_task 一句话分解）——主 agent 应亲自理解全量上下文、
+        # 撰写简报并通过 dispatch_worker 工具显式派发；旧路径会在进入 LLM 工具
+        # 循环前截获任务，使 dispatch_worker 永远没机会被调用（生产实证）。
+        if not self._dispatcher_mode_enabled() and self._should_delegate(user_input):
             if verbose: print(f"[Agent] Delegating to sub-agents...")
             plans = self._decompose_task(user_input)
             if plans:
@@ -2481,6 +2690,22 @@ class OpenAGCAgent:
                                     sb, plan, progress_callback)
                             except Exception as e:
                                 result = {"success": False, "summary": str(e)}
+                            # 证据验收（生产实证 eval R7/R8：旧委派子代理零工具
+                            # 调用幻觉编造文件内容仍报 success——假完成打回，
+                            # 主 agent 经继续指引接管）
+                            if result.get("success"):
+                                try:
+                                    from agent.dispatcher import verify_execution as _ve
+                                    _v = _ve({"acceptance": []}, result,
+                                             sandbox_dir=getattr(self, "sandbox_dir", None))
+                                    if not _v["passed"]:
+                                        result["success"] = False
+                                        result["summary"] = (
+                                            str(result.get("summary", ""))
+                                            + "\n[验收打回] "
+                                            + "; ".join(_v["failures"][:2]))[:500]
+                                except Exception:
+                                    pass
                             # 带上子任务目标，报告才能看出每个子代理在做什么
                             result["task"] = plan.get("task", "")
                             sub_results.append(result)
@@ -2612,21 +2837,71 @@ class OpenAGCAgent:
                 progress_callback({"event": "thinking", "iteration": current_iter})
             
             try:
-                response, actual_model = self.llm.chat(messages=self.messages, tools=self.tool_schemas)
+                # 流式优先（感知延迟优化，用户反馈）：边生成边推 thinking/response
+                # 增量到前端，首 token 几秒可见（此前非流式首轮 30-60s 无动静）。
+                # config.llm_stream_enabled=false 或无 progress_callback（测试）时回退非流式。
+                _stream_on = False
+                if progress_callback is not None:
+                    try:
+                        with open(config_path, encoding="utf-8") as _scf:
+                            _stream_on = bool(json.load(_scf).get("llm_stream_enabled", True))
+                    except Exception:
+                        _stream_on = True
+                if _stream_on:
+                    def _on_delta(kind, text, _iter=current_iter, _pcb=progress_callback):
+                        try:
+                            if kind == "thinking":
+                                _pcb({"event": "thinking", "iteration": _iter,
+                                      "content": text, "stream": True})
+                            else:
+                                _pcb({"event": "response", "content": text, "stream": True})
+                        except Exception:
+                            pass
+                    response, actual_model = self.llm.chat_stream_collect(
+                        messages=self.messages, tools=self.tool_schemas,
+                        on_delta=_on_delta)
+                else:
+                    response, actual_model = self.llm.chat(messages=self.messages, tools=self.tool_schemas)
                 choices = getattr(response, "choices", None) or []
                 if not choices:
                     raise ValueError("LLM returned an empty choices list")
                 message = choices[0].message
             except Exception as e:
+                # 工具调用格式漂移（模型返回非法 JSON arguments，API 层解析
+                # 即失败）：注入纠错消息后重试本轮（上限 2 次）——生产实证：
+                # k3 偶发未闭合 JSON，LLMClient 三次盲重试同一 prompt 仍漂移，
+                # 不带纠错反馈的重试等于让模型在同一位置再摔三次。
+                from core.llm_client import is_tool_call_drift_error, DRIFT_RETRY_HINT
+                if is_tool_call_drift_error(e) and self._format_drift_retries < 2:
+                    self._format_drift_retries += 1
+                    print(f"[Agent] 工具调用 JSON 格式漂移，注入纠错重试（{self._format_drift_retries}/2）")
+                    self.messages.append({"role": "system", "content": DRIFT_RETRY_HINT})
+                    continue
                 # LLM call failed (network error, empty choices, malformed
                 # response). Must not escape run_turn — run the same cleanup
                 # as the max-iterations path so stats/KG/post-process still run.
-                error_text = (f"[LLM_ERROR] Agent stopped: LLM call failed at iteration "
-                              f"{current_iter}: {e}")
+                # 用户态文案净化：litellm 异常全文带着整个请求 dump（Received
+                # Messages，几千字代码/路径/历史），原样展示就是聊天界面里的
+                # 一大串技术垃圾（生产实证）——人话上屏，全文进日志。
+                _full_err = str(e)
+                print(f"[Agent] LLM_ERROR detail at iteration {current_iter}: {_full_err[:2000]}")
+                if ("parse tool call" in _full_err or "Unterminated" in _full_err
+                        or "Expecting value" in _full_err):
+                    _ehint = "模型连续返回了非法格式的工具调用（已自动重试仍失败）"
+                elif "timeout" in _full_err.lower():
+                    _ehint = "模型服务响应超时"
+                elif "rate" in _full_err.lower() and "limit" in _full_err.lower():
+                    _ehint = "模型服务限流"
+                else:
+                    _ehint = "模型服务调用失败"
+                error_text = (f"[LLM_ERROR] {_ehint}"
+                              f"（{type(e).__name__}，第 {current_iter} 轮）。"
+                              f"点「继续」可重试；反复失败请检查模型配置或更换模型。")
                 if verbose:
                     print(f"[Agent] {error_text}")
+                # messages 里同样只留净化版：完整 dump 会浪费恢复后的上下文
                 self.messages.append({"role": "assistant",
-                                      "content": f"Error: LLM call failed: {e}"})
+                                      "content": f"Error: LLM call failed: {type(e).__name__}: {_full_err[:300]}"})
                 self._finalize_failed_turn(user_input, current_iter,
                                            _time.time() - _task_start)
                 return error_text
@@ -3294,6 +3569,59 @@ class OpenAGCAgent:
                     continue
 
                 final_answer = message.content
+
+                # ── 虚构交付拦截（dispatcher_mode）：回复声明了交付/验收，
+                # 但本轮零工具执行 → 判定幻觉，注入纠错消息重跑一轮（一次为限）。
+                # 模式刻意保守（强交付信号组合），纯问答/讨论不触发。
+                # 扩展（生产实证 eval R12/R13）：零工具回复里带 ``` 代码块/文件
+                # 内容引用 = 疑似编造文件/命令输出内容——「读取后告知」类请求的
+                # 幻觉形态（没有交付声明词，但内容必须来自真实工具读取）。
+                if (self._dispatcher_mode_enabled()
+                        and self._fabrication_retries < 1
+                        and len(final_answer or "") > 150):
+                    _tools_used = (sum(1 for m in self.messages if m.get("role") == "tool")
+                                   - self._tool_msg_baseline)
+                    _declared_delivery = re.search(
+                        r"(验收通过|已跑通|链路已跑通|编译完成|部署完成|识别验证|"
+                        r"性能实测|交付物|文件位置[:：]|已下载.{0,12}模型|"
+                        r"已读完|已创建|已写入|已生成|已完成|已部署|已搞定|"
+                        r"已开工|已重新开工|已派出|已派发|已安排执行者|"
+                        r"✅\s*(编译|验证|部署|识别|跑通))", final_answer)
+                    _fabricated_content = ("```" in final_answer)  # 外层已 len>150
+                    # 「派发：」声明但零工具 = 声明与行动不符（生产实证 #411：
+                    # 新形态空话——不说「我做了」说「我会催办/在做」，词表拦不住；
+                    # 但它自己按提示词写的分流声明是可靠信号）
+                    _declared_dispatch = final_answer.lstrip().startswith("派发：")
+                    # 声称分身活跃 vs 系统事实无分身（确定性判据，生产实证 #416：
+                    # 主 agent 无视动态段的「无活跃分身」，顺着历史谎言说
+                    # 「确认还在跑」——声称进行时 vs 客观状态，零工具即拦截）
+                    _claims_alive = bool(re.search(
+                        r"(还在跑|仍在执行|正在执行中|正在后台运行|正在运行中|"
+                        r"确认还在跑|worker正在|分身正在)", final_answer))
+                    _no_running = False
+                    if _claims_alive and _tools_used == 0:
+                        try:
+                            from agent.dispatcher import get_running_dispatches_for_session as _grds2
+                            _no_running = not bool(_grds2(self.session_id))
+                        except Exception:
+                            _no_running = False
+                    if _tools_used == 0 and (_declared_delivery or _fabricated_content
+                                             or _declared_dispatch
+                                             or (_claims_alive and _no_running)):
+                        self._fabrication_retries += 1
+                        _why = ("声称分身正在执行，但系统事实是**当前会话没有任何运行中的"
+                                "分身**（历史上「已开工/已派发」的说法从未真实发生或早已结束）"
+                                if (_claims_alive and _no_running and not (
+                                    _declared_delivery or _fabricated_content or _declared_dispatch))
+                                else "回复给出了任务交付/文件内容，但本轮没有任何工具执行记录")
+                        print("[Agent] ⚠️ 虚构交付拦截：零工具调用却声明交付/在跑，注入纠错重跑")
+                        self.messages.append({"role": "system", "content": (
+                            f"⚠️ 系统检测：你刚才的回复{_why}——这属于虚构内容（幻觉），已被拦截。"
+                            "正确做法：作为调度者，立即调用 dispatch_worker 派发分身去"
+                            "真实执行（读取/生成/验证），或如实告诉用户当前没有任务在执行；"
+                            "汇报必须基于真实产出与系统状态，不得凭对话历史脑补。现在请重新行动。")})
+                        continue
+
                 if self.logger:
                     self.logger.log_agent_response(final_answer)
                 # [Removed] Auto-extract & save memories — was unreliable (no topic, noisy).

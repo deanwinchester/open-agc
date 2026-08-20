@@ -339,7 +339,8 @@ function onProgress(data) {
       if (data.content) {
         const ekey = `thought-${data.iteration || 0}`;
         const existing = card.entries.find((e) => e.kind === 'thinking' && e.ekey === ekey);
-        if (existing) existing.content = data.content;
+        // 流式增量追加（llm_stream_enabled）；非流式整换
+        if (existing) existing.content = data.stream ? (existing.content + data.content) : data.content;
         else card.entries.push({ kind: 'thinking', ekey, content: data.content });
       } else {
         thinking.text = t.thinking;
@@ -352,9 +353,18 @@ function onProgress(data) {
     case 'model_switched':
       card.entries.push({ kind: 'note', text: `${t.modelSwitched}: ${data.from} → ${data.to}` });
       break;
-    case 'response':
-      if (data.content) card.entries.push({ kind: 'response', content: data.content });
+    case 'response': {
+      if (!data.content) break;
+      if (data.stream) {
+        // 流式增量：追加到最新 response 条目（无则新建）——逐字可见
+        const last = [...card.entries].reverse().find((e) => e.kind === 'response');
+        if (last) last.content += data.content;
+        else card.entries.push({ kind: 'response', content: data.content });
+      } else {
+        card.entries.push({ kind: 'response', content: data.content });
+      }
       break;
+    }
     case 'usage': {
       // 服务端字段：total_tokens/prompt_tokens/completion_tokens/cached_tokens（无 cost，
       // 见 agent/agent.py usage 事件构造）；格式对齐旧 static/app.js:830-836
@@ -425,7 +435,7 @@ function onMessage(data) {
   retryBar.visible = false;
   // 中断等场景下 response 可能为空 —— 状态已重置，空内容不再渲染空气泡
   if (data.content && String(data.content).trim()) {
-    appendItem({ kind: 'msg', key: nextKey(), role, content: data.content, taskId: data.task_id || null });
+    appendItem({ kind: 'msg', key: nextKey(), role, content: data.content, taskId: data.task_id || null, id: data.message_id || null });
   }
   scrollToBottom();
 }
@@ -675,6 +685,7 @@ async function loadHistory(sid, { beforeId = 0 } = {}) {
     const msgs = (data.history || []).map((m) => ({
       kind: 'msg', key: nextKey(), role: m.role, content: m.content,
       id: m.id, timestamp: m.timestamp || null,
+      feedback: m.feedback || 0,
       // 附件（粘贴图片落盘路径 uploads/xxx）→ 缩略图 URL，经 /api/upload 提供
       images: (Array.isArray(m.attachments) && m.attachments.length)
         ? m.attachments.map((a) => '/api/upload/' + encodeURIComponent(String(a).split('/').pop()))

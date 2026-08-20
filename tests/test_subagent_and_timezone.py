@@ -100,8 +100,10 @@ class TestTimezone:
         src = open(os.path.join(PROJECT_ROOT, "agent", "agent.py"),
                    encoding="utf-8").read()
         assert "astimezone()" in src
-        assert "当前本地时间：{current_time}" in src
+        # 时间已挪出 system 前缀（缓存优化）：动态段末尾注入当前时间，
+        # system 里保留时区换算指引
         assert "时区" in src and "UTC" in src
+        assert "本轮检索补充" in src
 
     def test_frontend_db_time_formatter(self):
         src = open(os.path.join(PROJECT_ROOT, "vue-app", "src", "utils",
