@@ -1,19 +1,24 @@
 <script setup>
-// 设置 · 模型与服务（批次 1a）：迁移旧 view-settings-models 的字段。
+// 设置 · 模型与服务（批次 1a + 本地模型管理恢复）：API 密钥 / 默认模型 / 自定义厂商 / 本地模型 (Llama.cpp)。
 // 数据契约（dev-docs/API契约.md + api/routes/routes_settings.py）：
 // - GET /api/settings 返回 api_keys_masked（xxx...xxx 掩码）与各配置字段
 // - POST /api/settings 为增量语义：只提交用户实际修改的字段；掩码值（含 "..." 或以 "***" 结尾）
 //   会被后端拒绝，所以 API key 输入留空 = 不修改，绝不回传 placeholder 里的掩码
 // - GET /api/provider-models?provider=<p> 返回 {models: [...]}
-import { computed, onMounted, reactive, ref } from 'vue';
+// - 本地模型管理：GET /api/llamacpp/status（状态+下载进度）、POST /api/llamacpp/setup（装二进制）、
+//   POST /api/llamacpp/search-models、/api/llamacpp/model-files、/api/llamacpp/download-from-hf、
+//   /api/llamacpp/control（start/stop）；下载进度另经 WebSocket `llamacpp_download` 事件推送
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { Refresh } from '@element-plus/icons-vue';
 import { cachedFetch, invalidateCache, request } from '../../api/client';
+import { useWsStore } from '../../stores/ws';
 import ApiKeyRow from '../../components/ApiKeyRow.vue';
 import zh from '../../i18n/zh';
 
 const t = zh.settings.models;
 const providers = zh.settings.providers;
+const ws = useWsStore();
 
 const loading = ref(true);        // 初始配置加载中（期间禁止保存，避免用默认值覆盖真实配置）
 const saving = ref(false);
@@ -107,52 +112,11 @@ const form = reactive({
   provider: '',
   model: '',
   fallbackModels: '',             // 逗号分隔字符串，保存时切回数组
-  sandboxMode: true,
-  sandboxDir: '',
   llamacppCtxSize: 32768,
-  browserHeadless: false,
-  httpProxy: '',
-  heartbeatEnabled: false,
-  heartbeatInterval: 60,
-  searxngUrl: '',
-  maxCorrectionAttempts: 5,
-  coldCacheTtl: 3600,
-  maxResumeCount: 10,
-  maxTotalTokens: 128000,
-  // 沙箱自动清理（sandbox_janitor 节）
-  janitorEnabled: true,
-  janitorTtlDays: 7,
-  janitorIntervalHours: 1,
-  janitorSoftGb: 20,
-  janitorHardGb: 50,
-  // 调度者（分身）模式
-  dispatcherMode: false,
-  agentWorkerName: '分身',
-  // 访问控制：局域网访问密码（空 = 不修改；勾选清除 = 恢复仅本机）
-  accessPassword: '',
-  accessPasswordClear: false,
-  // 邮件监听与助手（重构时丢失的区块，恢复）
-  emailListenerEnabled: false,
-  ownerEmail: '',
-  emailAccount: '',
-  emailPassword: '',      // 仅保存用户新输入；GET 返回 *** 不回填
-  emailImap: '',
-  emailSmtp: '',
 });
 
 // 初始值快照（来自 GET 响应），保存时逐字段对比得出 dirty 集合
 const initial = ref(null);
-
-// 巡视间隔下拉：预设档位 + 当前值（若不在预设中，动态补一项，避免回显丢失）
-const intervalOptions = computed(() => {
-  const base = t.heartbeat.intervalOptions;
-  const v = form.heartbeatInterval;
-  if (v != null && !base.some((o) => o.value === v)) {
-    return [...base, { value: v, label: `${v}${t.heartbeat.secondsSuffix}` }]
-      .sort((a, b) => a.value - b.value);
-  }
-  return base;
-});
 
 // 从 default_model 反推 provider（model 字符串带 litellm 前缀）：
 // moonshot/xxx -> kimi，zai/xxx -> glm；无前缀的 claude*/gpt* 按关键字归属。
@@ -199,65 +163,12 @@ function applySettings(data) {
   const init = {
     default_model: data.default_model || '',
     fallback_models: Array.isArray(data.fallback_models) ? [...data.fallback_models] : [],
-    sandbox_mode: data.sandbox_mode ?? true,
-    sandbox_dir: data.sandbox_dir || '',
     llamacpp_ctx_size: data.llamacpp_ctx_size ?? 32768,
-    browser_headless: data.browser_headless ?? false,
-    http_proxy: data.http_proxy || '',
-    heartbeat_enabled: data.heartbeat_enabled ?? false,
-    heartbeat_interval: data.heartbeat_interval ?? 60,
-    searxng_url: data.searxng_url || '',
-    max_correction_attempts: data.max_correction_attempts ?? 5,
-    cold_cache_ttl: data.cold_cache_ttl ?? 3600,
-    max_resume_count: data.max_resume_count ?? 10,
-    max_total_tokens: data.context_budget?.max_total_tokens ?? 128000,
-    sandbox_janitor: {
-      enabled: data.sandbox_janitor?.enabled ?? true,
-      tmp_ttl_days: data.sandbox_janitor?.tmp_ttl_days ?? 7,
-      interval_hours: data.sandbox_janitor?.interval_hours ?? 1,
-      soft_gb: data.sandbox_janitor?.soft_gb ?? 20,
-      hard_gb: data.sandbox_janitor?.hard_gb ?? 50,
-    },
-    access_password_set: data.access_password_set ?? false,
-    dispatcher_mode: data.dispatcher_mode ?? false,
-    agent_worker_name: data.agent_worker_name || '分身',
-    email_listener_enabled: data.email_listener_enabled ?? false,
-    owner_email: data.owner_email || '',
-    email_account: data.email_account || '',
-    email_imap_server: data.email_imap_server || '',
-    email_smtp_server: data.email_smtp_server || '',
-    email_password_set: data.email_password === '***',
   };
   initial.value = init;
 
   form.fallbackModels = init.fallback_models.join(', ');
-  form.sandboxMode = init.sandbox_mode;
-  form.sandboxDir = init.sandbox_dir;
   form.llamacppCtxSize = init.llamacpp_ctx_size;
-  form.browserHeadless = init.browser_headless;
-  form.httpProxy = init.http_proxy;
-  form.heartbeatEnabled = init.heartbeat_enabled;
-  form.heartbeatInterval = init.heartbeat_interval;
-  form.searxngUrl = init.searxng_url;
-  form.maxCorrectionAttempts = init.max_correction_attempts;
-  form.coldCacheTtl = init.cold_cache_ttl;
-  form.maxResumeCount = init.max_resume_count;
-  form.maxTotalTokens = init.max_total_tokens;
-  form.janitorEnabled = init.sandbox_janitor.enabled;
-  form.janitorTtlDays = init.sandbox_janitor.tmp_ttl_days;
-  form.janitorIntervalHours = init.sandbox_janitor.interval_hours;
-  form.janitorSoftGb = init.sandbox_janitor.soft_gb;
-  form.janitorHardGb = init.sandbox_janitor.hard_gb;
-  form.accessPassword = '';          // 已设置显示占位，不回填真实值
-  form.accessPasswordClear = false;
-  form.dispatcherMode = init.dispatcher_mode;
-  form.agentWorkerName = init.agent_worker_name;
-  form.emailListenerEnabled = init.email_listener_enabled;
-  form.ownerEmail = init.owner_email;
-  form.emailAccount = init.email_account;
-  form.emailImap = init.email_imap_server;
-  form.emailSmtp = init.email_smtp_server;
-  form.emailPassword = '';   // 已设置显示占位，不回填真实值
 
   form.provider = providerFromModel(init.default_model);
   form.model = init.default_model;
@@ -337,190 +248,189 @@ function buildPayload() {
     payload.fallback_models = fallback;
   }
 
-  if (form.sandboxMode !== init.sandbox_mode) payload.sandbox_mode = form.sandboxMode;
-  if (form.sandboxDir.trim() !== init.sandbox_dir) payload.sandbox_dir = form.sandboxDir.trim();
   if (form.llamacppCtxSize != null && form.llamacppCtxSize !== init.llamacpp_ctx_size) {
     payload.llamacpp_ctx_size = form.llamacppCtxSize;
   }
-  if (form.browserHeadless !== init.browser_headless) payload.browser_headless = form.browserHeadless;
-  if (form.httpProxy.trim() !== init.http_proxy) payload.http_proxy = form.httpProxy.trim();
-  if (form.heartbeatEnabled !== init.heartbeat_enabled) payload.heartbeat_enabled = form.heartbeatEnabled;
-  if (form.heartbeatInterval != null && form.heartbeatInterval !== init.heartbeat_interval) {
-    payload.heartbeat_interval = form.heartbeatInterval;
-  }
-  if (form.searxngUrl.trim() !== init.searxng_url) payload.searxng_url = form.searxngUrl.trim();
-  if (form.maxCorrectionAttempts != null && form.maxCorrectionAttempts !== init.max_correction_attempts) {
-    payload.max_correction_attempts = form.maxCorrectionAttempts;
-  }
-  if (form.coldCacheTtl != null && form.coldCacheTtl !== init.cold_cache_ttl) {
-    payload.cold_cache_ttl = form.coldCacheTtl;
-  }
-  if (form.maxResumeCount != null && form.maxResumeCount !== init.max_resume_count) {
-    payload.max_resume_count = form.maxResumeCount;
-  }
-  if (form.maxTotalTokens != null && form.maxTotalTokens !== init.max_total_tokens) {
-    payload.max_total_tokens = form.maxTotalTokens;
-  }
-
-  // sandbox_janitor：逐键对比，只发变化键（后端白名单合并进配置节）
-  const jInit = init.sandbox_janitor;
-  const jCur = {
-    enabled: form.janitorEnabled,
-    tmp_ttl_days: form.janitorTtlDays,
-    interval_hours: form.janitorIntervalHours,
-    soft_gb: form.janitorSoftGb,
-    hard_gb: form.janitorHardGb,
-  };
-  const jDiff = {};
-  for (const [k, v] of Object.entries(jCur)) {
-    if (v != null && v !== jInit[k]) jDiff[k] = v;
-  }
-  if (Object.keys(jDiff).length > 0) payload.sandbox_janitor = jDiff;
-
-  // 访问控制密码：输入新值 = 设置/覆盖；未输入且勾选清除 = 恢复仅本机
-  const ap = form.accessPassword.trim();
-  if (ap) payload.access_password = ap;
-  else if (form.accessPasswordClear && init.access_password_set) payload.access_password = '';
-
-  // 调度者（分身）模式：仅在与初始值不同时提交；叫法留空视为「不修改」
-  if (form.dispatcherMode !== init.dispatcher_mode) payload.dispatcher_mode = form.dispatcherMode;
-  const wn = form.agentWorkerName.trim();
-  if (wn && wn !== init.agent_worker_name) payload.agent_worker_name = wn;
-
-  // 邮件监听与助手：密码仅用户新输入时才发送（*** 掩码不回传）
-  if (form.emailListenerEnabled !== init.email_listener_enabled) payload.email_listener_enabled = form.emailListenerEnabled;
-  if (form.ownerEmail.trim() !== init.owner_email) payload.owner_email = form.ownerEmail.trim();
-  if (form.emailAccount.trim() !== init.email_account) payload.email_account = form.emailAccount.trim();
-  if (form.emailImap.trim() !== init.email_imap_server) payload.email_imap_server = form.emailImap.trim();
-  if (form.emailSmtp.trim() !== init.email_smtp_server) payload.email_smtp_server = form.emailSmtp.trim();
-  if (form.emailPassword.trim()) payload.email_password = form.emailPassword.trim();
 
   return payload;
 }
 
-// ── 界面主题：导出/导入/主题市场 ──
-const themeInfo = ref({});
-const themeMarket = ref([]);
-const themeMarketLoading = ref(false);
-const themeImportVisible = ref(false);
-const themeImportText = ref('');
-const themeImporting = ref(false);
+// ── 本地模型管理（Llama.cpp）──
+// 状态走 GET /api/llamacpp/status（不走缓存，每次取最新）；
+// 下载进行中的进度由 WebSocket `llamacpp_download` 事件实时推送，落进 llamaStatus.download。
+const llamaStatus = reactive({
+  installed: false,
+  running: false,
+  models: [],
+  port: null,
+  download: null,   // {active, task, label, progress, stage, error}
+});
+const llamaStatusLoading = ref(false);
+const llamaSetupLoading = ref(false);
+const llamaControlLoading = ref(false);
+const llamaSelectedModel = ref('');
 
-const themeSummary = computed(() => {
-  const th = themeInfo.value || {};
-  const parts = [];
-  if (!th.primary_color && !th.sidebar_color && !th.logo_url && !th.chat_bg_url
-      && !th.glass && !th.bordered && !th.animations && (th.decor || 'none') === 'none'
-      && !th.custom_css) return t.theme.summaryDefault;
-  if (th.primary_color) parts.push(`${t.theme.summaryColor} ${th.primary_color}`);
-  if (th.sidebar_color) parts.push(`${t.theme.summarySidebar} ${th.sidebar_color}`);
-  if (th.logo_url) parts.push(t.theme.summaryLogo);
-  if (th.chat_bg_url) parts.push(t.theme.summaryBg);
-  for (const [k, label] of [['glass', t.theme.fx.glass], ['bordered', t.theme.fx.bordered],
-                            ['animations', t.theme.fx.animations]]) {
-    if (th[k]) parts.push(label);
-  }
-  if (th.decor && th.decor !== 'none') parts.push(t.theme.fx[th.decor] || th.decor);
-  if (th.custom_css) parts.push(t.theme.summaryCustomCss);
-  return parts.join(' · ');
+const llamaDownloadActive = computed(() => !!(llamaStatus.download && llamaStatus.download.active));
+const llamaDownloadPercent = computed(() =>
+  Math.round(((llamaStatus.download?.progress) || 0) * 100));
+const llamaDownloadStatus = computed(() => {
+  const stage = llamaStatus.download?.stage;
+  if (stage === 'complete') return 'success';
+  if (stage === 'error') return 'exception';
+  return '';
 });
 
-async function loadThemeInfo() {
-  try { themeInfo.value = await request('/api/theme'); } catch { /* 忽略 */ }
-}
-
-async function loadThemeMarket() {
-  themeMarketLoading.value = true;
+async function refreshLlamaStatus() {
+  llamaStatusLoading.value = true;
   try {
-    const data = await request('/api/theme/market');
-    themeMarket.value = (data?.themes || []).map((x) => ({ ...x, applying: false }));
-  } catch (err) {
-    ElMessage.error(`${t.theme.marketFailed}: ${err.message}`);
-  } finally {
-    themeMarketLoading.value = false;
-  }
-}
-
-async function exportTheme() {
-  // 走后端导出：主题包内嵌 Logo/背景图（base64）与自定义 CSS，好友导入即完整还原
-  try {
-    const pkg = await request('/api/theme/export');
-    const blob = new Blob([JSON.stringify(pkg, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `open-agc-theme-${Date.now()}.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    ElMessage.success(t.theme.exportSuccess);
-  } catch (err) {
-    ElMessage.error(`${t.theme.exportFailed}: ${err.message}`);
-  }
-}
-
-async function importTheme() {
-  if (!themeImportText.value.trim() || themeImporting.value) return;
-  themeImporting.value = true;
-  try {
-    const parsed = JSON.parse(themeImportText.value);
-    const theme = parsed.theme || parsed;
-    const res = await request('/api/theme', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ theme }),
-    });
-    if (res && res.status === 'success') {
-      ElMessage.success(t.theme.importSuccess);
-      themeImportVisible.value = false;
-      themeImportText.value = '';
-      // 导入后整页刷新，保证全部样式面生效（用户反馈：局部热更新不完整）
-      setTimeout(() => location.reload(), 400);
-    } else {
-      ElMessage.error(`${t.theme.importFailed}: ${(res && res.detail) || t.unknownError}`);
+    const data = await request('/api/llamacpp/status');
+    llamaStatus.installed = !!data?.installed;
+    llamaStatus.running = !!data?.running;
+    llamaStatus.models = Array.isArray(data?.models) ? data.models : [];
+    llamaStatus.port = data?.port ?? null;
+    llamaStatus.download = data?.download || null;
+    // 已安装列表变化后，当前选中项失效时清空
+    if (llamaSelectedModel.value && !llamaStatus.models.includes(llamaSelectedModel.value)) {
+      llamaSelectedModel.value = '';
     }
   } catch (err) {
-    ElMessage.error(`${t.theme.importFailed}: ${err.message}`);
+    ElMessage.error(`${t.llama.statusLoadFailed}: ${err.message}`);
   } finally {
-    themeImporting.value = false;
+    llamaStatusLoading.value = false;
   }
 }
 
-async function applyMarketTheme(th) {
-  th.applying = true;
+// WS 推送的下载进度；结束（complete/error）后补一次状态刷新（模型列表/二进制状态可能变化）
+function onLlamaDownload(msg) {
+  llamaStatus.download = {
+    active: msg.stage === 'downloading' || msg.stage === 'extracting',
+    task: msg.task || '',
+    label: msg.label || '',
+    progress: msg.progress ?? 0,
+    stage: msg.stage || '',
+    error: msg.error || '',
+  };
+  if (msg.stage === 'complete' || msg.stage === 'error') {
+    refreshLlamaStatus();
+  }
+}
+
+async function setupLlama() {
+  if (llamaSetupLoading.value || llamaDownloadActive.value) return;
+  llamaSetupLoading.value = true;
   try {
-    const res = await request('/api/theme', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ theme: th.theme }),
-    });
-    if (res && res.status === 'success') {
-      ElMessage.success(`${t.theme.applySuccess}: ${th.name}`);
-      setTimeout(() => location.reload(), 400);
-    } else {
-      ElMessage.error(`${t.theme.applyFailed}: ${(res && res.detail) || t.unknownError}`);
-    }
+    await request('/api/llamacpp/setup', { method: 'POST' });
+    ElMessage.success(t.llama.installStarted);
+    await refreshLlamaStatus();
   } catch (err) {
-    ElMessage.error(`${t.theme.applyFailed}: ${err.message}`);
+    // 409 = 已有下载任务进行中
+    ElMessage.error(`${t.llama.installFailed}: ${err.status === 409 ? t.llama.downloadBusy : err.message}`);
   } finally {
-    th.applying = false;
+    llamaSetupLoading.value = false;
   }
 }
 
-async function resetTheme() {
+async function controlLlama(action) {
+  if (llamaControlLoading.value) return;
+  if (action === 'start' && !llamaSelectedModel.value) {
+    ElMessage.warning(t.llama.needModel);
+    return;
+  }
+  llamaControlLoading.value = true;
   try {
-    await ElMessageBox.confirm(t.theme.resetConfirmText, t.theme.resetConfirmTitle,
-      { confirmButtonText: t.theme.reset, cancelButtonText: zh.goals.cancel, type: 'warning' });
-  } catch { return; }
-  try {
-    await request('/api/theme', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'replace', theme: {} }),
+    await request('/api/llamacpp/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(action === 'start'
+        ? { action: 'start', model: llamaSelectedModel.value }
+        : { action: 'stop' }),
     });
-    ElMessage.success(t.theme.resetSuccess);
-    setTimeout(() => location.reload(), 400);
+    ElMessage.success(action === 'start' ? t.llama.startSuccess : t.llama.stopSuccess);
+    // 进程起停有延迟，稍等再拉状态
+    setTimeout(refreshLlamaStatus, 800);
   } catch (err) {
-    ElMessage.error(`${t.theme.resetFailed}: ${err.message}`);
+    ElMessage.error(`${t.llama.controlFailed}: ${err.message}`);
+  } finally {
+    llamaControlLoading.value = false;
   }
 }
 
-// ── 界面主题（ui_theme）结束 ──
+// ── 模型搜索与下载 ──
+const searchQuery = ref('');
+const searchSource = ref('huggingface');
+const searchResults = ref([]);
+const searchLoading = ref(false);
+const searchDone = ref(false);          // 区分「未搜索」与「搜索无结果」
+const expandedRepo = ref('');           // 当前展开文件列表的 repo_id
+const repoFiles = reactive({});         // repo_id -> files[]
+const repoFilesLoading = ref('');       // 正在加载文件列表的 repo_id
+
+async function searchLlamaModels() {
+  const query = searchQuery.value.trim();
+  if (!query || searchLoading.value) return;
+  searchLoading.value = true;
+  searchDone.value = false;
+  expandedRepo.value = '';
+  try {
+    const data = await request('/api/llamacpp/search-models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, source: searchSource.value }),
+    });
+    searchResults.value = Array.isArray(data?.models) ? data.models : [];
+    searchDone.value = true;
+  } catch (err) {
+    ElMessage.error(`${t.llama.searchFailed}: ${err.message}`);
+  } finally {
+    searchLoading.value = false;
+  }
+}
+
+async function toggleRepoFiles(model) {
+  const repoId = model.repo_id;
+  if (expandedRepo.value === repoId) {
+    expandedRepo.value = '';
+    return;
+  }
+  expandedRepo.value = repoId;
+  if (repoFiles[repoId]) return;   // 已加载过，直接展开
+  repoFilesLoading.value = repoId;
+  try {
+    const data = await request('/api/llamacpp/model-files', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo_id: repoId, source: searchSource.value }),
+    });
+    repoFiles[repoId] = Array.isArray(data?.files) ? data.files : [];
+  } catch (err) {
+    repoFiles[repoId] = [];
+    ElMessage.error(`${t.llama.filesFailed}: ${err.message}`);
+  } finally {
+    repoFilesLoading.value = '';
+  }
+}
+
+async function downloadModelFile(model, file) {
+  if (llamaDownloadActive.value) {
+    ElMessage.warning(t.llama.downloadBusy);
+    return;
+  }
+  try {
+    await request('/api/llamacpp/download-from-hf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        repo_id: model.repo_id,
+        filename: file.filename,
+        source: searchSource.value,
+      }),
+    });
+    ElMessage.success(`${t.llama.downloadStarted}: ${file.filename}`);
+    await refreshLlamaStatus();
+  } catch (err) {
+    ElMessage.error(`${t.llama.downloadFailed}: ${err.status === 409 ? t.llama.downloadBusy : err.message}`);
+  }
+}
 
 async function save() {
   if (!initial.value || saving.value) return;
@@ -551,10 +461,16 @@ async function save() {
   }
 }
 
+let unsubLlama = null;
+
 onMounted(() => {
   loadSettings();
-  loadThemeInfo();
-  loadThemeMarket();
+  refreshLlamaStatus();
+  unsubLlama = ws.on('llamacpp_download', onLlamaDownload);
+});
+
+onUnmounted(() => {
+  unsubLlama?.();
 });
 </script>
 
@@ -679,244 +595,155 @@ onMounted(() => {
       <template #header>
         <div class="card-header">
           <span class="card-title">{{ t.llama.title }}</span>
-          <p class="card-desc">{{ t.llama.desc }}</p>
+          <p class="card-desc">{{ t.llama.manageDesc }}</p>
         </div>
       </template>
+
+      <!-- 状态与操作 -->
+      <div class="llama-status" v-loading="llamaStatusLoading">
+        <div class="llama-status-row">
+          <span class="llama-dot" :class="llamaStatus.installed ? 'ok' : 'err'"></span>
+          <span>{{ llamaStatus.installed ? t.llama.binInstalled : t.llama.binNotInstalled }}</span>
+          <span class="llama-dot" :class="llamaStatus.running ? 'ok' : 'idle'"></span>
+          <span>
+            {{ llamaStatus.running ? t.llama.serviceRunning.replace('{port}', llamaStatus.port) : t.llama.serviceStopped }}
+          </span>
+        </div>
+        <div class="llama-actions">
+          <el-button
+            size="small"
+            type="primary"
+            plain
+            :loading="llamaSetupLoading"
+            :disabled="llamaDownloadActive"
+            @click="setupLlama"
+          >
+            {{ t.llama.install }}
+          </el-button>
+          <el-button
+            size="small"
+            type="success"
+            plain
+            :loading="llamaControlLoading"
+            :disabled="!llamaStatus.installed || llamaStatus.running"
+            @click="controlLlama('start')"
+          >
+            {{ t.llama.start }}
+          </el-button>
+          <el-button
+            size="small"
+            type="danger"
+            plain
+            :loading="llamaControlLoading"
+            :disabled="!llamaStatus.running"
+            @click="controlLlama('stop')"
+          >
+            {{ t.llama.stop }}
+          </el-button>
+          <el-button size="small" :icon="Refresh" :loading="llamaStatusLoading" @click="refreshLlamaStatus">
+            {{ t.llama.refresh }}
+          </el-button>
+        </div>
+        <el-form label-position="top" class="llama-model-form">
+          <el-form-item :label="t.llama.installedModels">
+            <el-select
+              v-model="llamaSelectedModel"
+              filterable
+              class="llama-model-select"
+              :placeholder="t.llama.selectModel"
+              :no-data-text="t.llama.noModels"
+            >
+              <el-option v-for="m in llamaStatus.models" :key="m" :label="m" :value="m" />
+            </el-select>
+          </el-form-item>
+        </el-form>
+      </div>
+
+      <!-- 下载进度 -->
+      <div v-if="llamaStatus.download && (llamaStatus.download.active || llamaStatus.download.stage === 'error')" class="llama-download">
+        <div class="llama-download-label">{{ llamaStatus.download.label }}</div>
+        <el-progress
+          :percentage="llamaDownloadPercent"
+          :status="llamaDownloadStatus"
+        />
+        <div v-if="llamaStatus.download.error" class="llama-download-error">
+          {{ llamaStatus.download.error }}
+        </div>
+      </div>
+
+      <el-divider content-position="left">{{ t.llama.search }}</el-divider>
+
+      <!-- 模型搜索 -->
+      <div class="llama-search-row">
+        <el-input
+          v-model="searchQuery"
+          class="llama-search-input"
+          :placeholder="t.llama.searchPlaceholder"
+          clearable
+          @keyup.enter="searchLlamaModels"
+        />
+        <el-select v-model="searchSource" class="llama-source-select">
+          <el-option value="huggingface" :label="t.llama.sourceHf" />
+          <el-option value="modelscope" :label="t.llama.sourceMs" />
+        </el-select>
+        <el-button
+          type="primary"
+          :loading="searchLoading"
+          :disabled="!searchQuery.trim()"
+          @click="searchLlamaModels"
+        >
+          {{ t.llama.search }}
+        </el-button>
+      </div>
+
+      <!-- 搜索结果 -->
+      <div v-if="searchResults.length" class="llama-results">
+        <div v-for="m in searchResults" :key="m.repo_id" class="llama-result">
+          <div class="llama-result-head" @click="toggleRepoFiles(m)">
+            <div class="llama-result-info">
+              <strong>{{ m.repo_id }}</strong>
+              <span v-if="m.author" class="llama-result-meta">{{ m.author }}</span>
+              <span class="llama-result-meta">
+                ⬇ {{ (m.downloads || 0).toLocaleString() }} · ♥ {{ (m.likes || 0).toLocaleString() }}
+              </span>
+              <span v-if="m.description" class="llama-result-desc">{{ m.description }}</span>
+            </div>
+            <el-button size="small" text>
+              {{ expandedRepo === m.repo_id ? t.llama.hideFiles : t.llama.showFiles }}
+            </el-button>
+          </div>
+          <div v-if="expandedRepo === m.repo_id" class="llama-files">
+            <div v-if="repoFilesLoading === m.repo_id" class="llama-files-hint">{{ t.llama.filesLoading }}</div>
+            <template v-else-if="repoFiles[m.repo_id]?.length">
+              <div v-for="f in repoFiles[m.repo_id]" :key="f.filename" class="llama-file-row">
+                <span class="llama-file-name" :title="f.filename">{{ f.filename }}</span>
+                <span class="llama-file-size">{{ f.size }}</span>
+                <el-button
+                  size="small"
+                  type="primary"
+                  plain
+                  :disabled="llamaDownloadActive"
+                  @click="downloadModelFile(m, f)"
+                >
+                  {{ t.llama.download }}
+                </el-button>
+              </div>
+            </template>
+            <div v-else class="llama-files-hint">{{ t.llama.filesEmpty }}</div>
+          </div>
+        </div>
+      </div>
+      <div v-else-if="searchDone && !searchLoading" class="empty-state">
+        <p>{{ t.llama.searchEmpty }}</p>
+      </div>
+
+      <el-divider />
+
+      <!-- 运行参数 -->
       <el-form label-position="top">
         <el-form-item :label="t.llama.ctxSize">
           <el-input-number v-model="form.llamacppCtxSize" :min="512" :max="262144" :step="1024" />
           <div class="field-hint">{{ t.llama.ctxHint }}</div>
-        </el-form-item>
-      </el-form>
-    </el-card>
-
-    <!-- 后台巡视 -->
-    <el-card class="settings-card" shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span class="card-title">{{ t.heartbeat.title }}</span>
-          <p class="card-desc">{{ t.heartbeat.desc }}</p>
-        </div>
-      </template>
-      <el-form label-position="top">
-        <el-form-item :label="t.heartbeat.enable">
-          <el-switch v-model="form.heartbeatEnabled" />
-        </el-form-item>
-        <el-form-item :label="t.heartbeat.interval">
-          <el-select v-model="form.heartbeatInterval" class="interval-select">
-            <el-option v-for="o in intervalOptions" :key="o.value" :label="o.label" :value="o.value" />
-          </el-select>
-        </el-form-item>
-        <el-form-item :label="t.heartbeat.correction">
-          <el-input-number v-model="form.maxCorrectionAttempts" :min="0" :max="100" />
-          <div class="field-hint">{{ t.heartbeat.correctionHint }}</div>
-        </el-form-item>
-        <el-form-item :label="t.heartbeat.coldTtl">
-          <el-input-number v-model="form.coldCacheTtl" :min="60" :max="86400" :step="60" />
-          <div class="field-hint">{{ t.heartbeat.coldTtlHint }}</div>
-        </el-form-item>
-        <el-form-item :label="t.heartbeat.budget">
-          <el-input-number v-model="form.maxTotalTokens" :min="16000" :max="1048576" :step="16000" />
-          <div class="field-hint">{{ t.heartbeat.budgetHint }}</div>
-        </el-form-item>
-        <el-form-item :label="t.heartbeat.resume">
-          <el-input-number v-model="form.maxResumeCount" :min="0" :max="100" />
-          <div class="field-hint">{{ t.heartbeat.resumeHint }}</div>
-        </el-form-item>
-      </el-form>
-    </el-card>
-
-    <!-- 调度者（分身）模式 -->
-    <el-card class="settings-card" shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span class="card-title">{{ t.dispatcher.title }}</span>
-          <p class="card-desc">{{ t.dispatcher.desc }}</p>
-        </div>
-      </template>
-      <el-form label-position="top">
-        <el-form-item :label="t.dispatcher.enable">
-          <el-switch v-model="form.dispatcherMode" />
-          <div class="field-hint">{{ t.dispatcher.enableHint }}</div>
-        </el-form-item>
-        <el-form-item :label="t.dispatcher.workerName">
-          <el-input
-            v-model="form.agentWorkerName"
-            class="worker-name-input"
-            :placeholder="t.dispatcher.workerNamePlaceholder"
-          />
-          <div class="field-hint">{{ t.dispatcher.workerNameHint }}</div>
-        </el-form-item>
-      </el-form>
-    </el-card>
-
-    <!-- 沙箱与网络 -->
-    <el-card class="settings-card" shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span class="card-title">{{ t.sandbox.title }}</span>
-          <p class="card-desc">{{ t.sandbox.desc }}</p>
-        </div>
-      </template>
-      <el-form label-position="top">
-        <el-form-item :label="t.sandbox.mode">
-          <el-switch v-model="form.sandboxMode" />
-        </el-form-item>
-        <el-form-item :label="t.sandbox.dir">
-          <el-input v-model="form.sandboxDir" :placeholder="t.sandbox.dirPlaceholder" />
-          <div class="field-hint">{{ t.sandbox.dirHint }}</div>
-        </el-form-item>
-        <el-form-item :label="t.sandbox.proxy">
-          <el-input v-model="form.httpProxy" :placeholder="t.sandbox.proxyPlaceholder" />
-          <div class="field-hint">{{ t.sandbox.proxyHint }}</div>
-        </el-form-item>
-        <el-form-item :label="t.sandbox.headless">
-          <el-switch v-model="form.browserHeadless" />
-          <div class="field-hint">{{ t.sandbox.headlessHint }}</div>
-        </el-form-item>
-        <el-form-item :label="t.sandbox.searxng">
-          <el-input v-model="form.searxngUrl" :placeholder="t.sandbox.searxngPlaceholder" />
-          <div class="field-hint">{{ t.sandbox.searxngHint }}</div>
-        </el-form-item>
-        <el-divider content-position="left">{{ t.sandbox.janitorTitle }}</el-divider>
-        <el-form-item :label="t.sandbox.janitorEnabled">
-          <el-switch v-model="form.janitorEnabled" />
-          <div class="field-hint">{{ t.sandbox.janitorEnabledHint }}</div>
-        </el-form-item>
-        <template v-if="form.janitorEnabled">
-          <el-form-item :label="t.sandbox.janitorTtl">
-            <el-input-number v-model="form.janitorTtlDays" :min="0" :max="365" />
-            <div class="field-hint">{{ t.sandbox.janitorTtlHint }}</div>
-          </el-form-item>
-          <el-form-item :label="t.sandbox.janitorInterval">
-            <el-input-number v-model="form.janitorIntervalHours" :min="0.1" :max="168" :step="0.5" />
-            <div class="field-hint">{{ t.sandbox.janitorIntervalHint }}</div>
-          </el-form-item>
-          <el-form-item :label="t.sandbox.janitorSoft">
-            <el-input-number v-model="form.janitorSoftGb" :min="0" :max="100000" />
-            <div class="field-hint">{{ t.sandbox.janitorSoftHint }}</div>
-          </el-form-item>
-          <el-form-item :label="t.sandbox.janitorHard">
-            <el-input-number v-model="form.janitorHardGb" :min="0" :max="100000" />
-            <div class="field-hint">{{ t.sandbox.janitorHardHint }}</div>
-          </el-form-item>
-        </template>
-      </el-form>
-    </el-card>
-
-    <!-- 访问控制 -->
-    <el-card class="settings-card" shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span class="card-title">{{ t.access.title }}</span>
-          <p class="card-desc">{{ t.access.desc }}</p>
-        </div>
-      </template>
-      <el-form label-position="top">
-        <el-form-item :label="t.access.password">
-          <el-input
-            v-model="form.accessPassword"
-            type="password"
-            show-password
-            :placeholder="initial?.access_password_set ? t.access.passwordSetPlaceholder : t.access.passwordPlaceholder"
-          />
-          <div class="field-hint">{{ t.access.passwordHint }}</div>
-        </el-form-item>
-        <el-form-item v-if="initial?.access_password_set">
-          <el-checkbox v-model="form.accessPasswordClear" :disabled="!!form.accessPassword.trim()">
-            {{ t.access.clear }}
-          </el-checkbox>
-        </el-form-item>
-        <div class="field-hint">{{ t.access.policyHint }}</div>
-      </el-form>
-    </el-card>
-
-    <!-- 界面主题：导出/导入/主题市场 -->
-    <el-card class="settings-card" shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span class="card-title">{{ t.theme.title }}</span>
-          <p class="card-desc">{{ t.theme.desc }}</p>
-        </div>
-      </template>
-      <div class="theme-current">
-        <span class="theme-label">{{ t.theme.current }}:</span>
-        <span v-if="themeInfo.primary_color" class="color-chip" :style="{ background: themeInfo.primary_color }" :title="themeInfo.primary_color"></span>
-        <span v-if="themeInfo.sidebar_color" class="color-chip" :style="{ background: themeInfo.sidebar_color }" :title="themeInfo.sidebar_color"></span>
-        <span class="theme-summary">{{ themeSummary }}</span>
-      </div>
-      <div class="theme-actions">
-        <el-button size="small" @click="exportTheme">{{ t.theme.export }}</el-button>
-        <el-button size="small" @click="themeImportVisible = true">{{ t.theme.import }}</el-button>
-        <el-button size="small" type="danger" plain @click="resetTheme">{{ t.theme.reset }}</el-button>
-      </div>
-      <el-divider content-position="left">{{ t.theme.marketTitle }}</el-divider>
-      <div v-loading="themeMarketLoading" class="theme-market">
-        <div v-for="th in themeMarket" :key="th.name + th.source" class="theme-row">
-          <div class="theme-row-info">
-            <strong>{{ th.name }}</strong>
-            <el-tag size="small" :type="th.source === 'preset' ? 'info' : 'success'" disable-transitions>
-              {{ th.source === 'preset' ? t.theme.sourcePreset : t.theme.sourceMarket }}
-            </el-tag>
-            <span v-if="th.author" class="theme-author">{{ th.author }}</span>
-            <div class="theme-desc">{{ th.desc }}</div>
-          </div>
-          <el-button size="small" type="primary" plain :loading="th.applying" @click="applyMarketTheme(th)">
-            {{ t.theme.apply }}
-          </el-button>
-        </div>
-        <div v-if="!themeMarket.length && !themeMarketLoading" class="empty-state">
-          <p>{{ t.theme.marketEmpty }}</p>
-        </div>
-      </div>
-
-      <el-dialog :append-to-body="true" v-model="themeImportVisible" :title="t.theme.importTitle" width="480px">
-        <el-input
-          v-model="themeImportText"
-          type="textarea"
-          :rows="8"
-          :placeholder="t.theme.importPlaceholder"
-        />
-        <div class="field-hint">{{ t.theme.importHint }}</div>
-        <template #footer>
-          <el-button @click="themeImportVisible = false">{{ zh.goals.cancel }}</el-button>
-          <el-button type="primary" :loading="themeImporting" @click="importTheme">{{ t.theme.importDo }}</el-button>
-        </template>
-      </el-dialog>
-    </el-card>
-
-    <!-- 邮件监听与助手 -->
-    <el-card class="settings-card" shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span class="card-title">{{ t.email.title }}</span>
-          <p class="card-desc">{{ t.email.desc }}</p>
-        </div>
-      </template>
-      <el-form label-position="top">
-        <el-form-item :label="t.email.listenerEnabled">
-          <el-switch v-model="form.emailListenerEnabled" />
-          <div class="field-hint">{{ t.email.listenerHint }}</div>
-        </el-form-item>
-        <el-form-item :label="t.email.ownerEmail">
-          <el-input v-model="form.ownerEmail" :placeholder="t.email.ownerEmailPlaceholder" />
-        </el-form-item>
-        <el-form-item :label="t.email.account">
-          <el-input v-model="form.emailAccount" :placeholder="t.email.accountPlaceholder" />
-        </el-form-item>
-        <el-form-item :label="t.email.password">
-          <el-input
-            v-model="form.emailPassword"
-            type="password"
-            show-password
-            :placeholder="initial?.email_password_set ? t.email.passwordSetPlaceholder : t.email.passwordPlaceholder"
-          />
-        </el-form-item>
-        <el-form-item :label="t.email.imap">
-          <el-input v-model="form.emailImap" :placeholder="t.email.imapPlaceholder" />
-        </el-form-item>
-        <el-form-item :label="t.email.smtp">
-          <el-input v-model="form.emailSmtp" :placeholder="t.email.smtpPlaceholder" />
         </el-form-item>
       </el-form>
     </el-card>
@@ -1003,10 +830,6 @@ onMounted(() => {
   flex: 1;
 }
 
-.interval-select {
-  width: 180px;
-}
-
 .field-hint {
   width: 100%;
   margin-top: 4px;
@@ -1037,74 +860,28 @@ onMounted(() => {
   }
 
   .provider-item,
-  .model-item,
-  .interval-select {
+  .model-item {
     width: 100%;
     min-width: 0;
   }
-}
 
-/* 界面主题卡 */
-.theme-current {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-  flex-wrap: wrap;
-}
+  .llama-search-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
 
-.theme-label {
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-}
+  .llama-source-select {
+    width: 100%;
+  }
 
-.color-chip {
-  display: inline-block;
-  width: 18px;
-  height: 18px;
-  border-radius: 5px;
-  border: 1px solid var(--el-border-color);
-}
+  .llama-result-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 
-.theme-summary {
-  font-size: 13px;
-  color: var(--el-text-color-regular);
-}
-
-.theme-actions {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-
-.theme-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 4px;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-
-.theme-row:last-child {
-  border-bottom: none;
-}
-
-.theme-row-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.theme-author {
-  margin-left: 6px;
-  font-size: 12px;
-  color: var(--el-text-color-placeholder);
-}
-
-.theme-desc {
-  margin-top: 2px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
+  .llama-file-row {
+    flex-wrap: wrap;
+  }
 }
 
 /* 自定义厂商卡 */
@@ -1151,7 +928,159 @@ onMounted(() => {
   width: 100%;
 }
 
-.worker-name-input {
-  max-width: 320px;
+/* 本地模型管理 */
+.llama-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.llama-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.llama-dot.ok {
+  background: var(--el-color-success);
+}
+
+.llama-dot.err {
+  background: var(--el-color-danger);
+}
+
+.llama-dot.idle {
+  background: var(--el-text-color-secondary);
+}
+
+.llama-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.llama-actions .el-button + .el-button {
+  margin-left: 0;
+}
+
+.llama-model-form {
+  max-width: 480px;
+}
+
+.llama-model-select {
+  width: 100%;
+}
+
+.llama-download {
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+}
+
+.llama-download-label {
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.llama-download-error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--el-color-danger);
+}
+
+.llama-search-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.llama-search-input {
+  flex: 1;
+}
+
+.llama-source-select {
+  width: 150px;
+  flex-shrink: 0;
+}
+
+.llama-result {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.llama-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.llama-result-head:hover {
+  background: var(--el-fill-color-light);
+}
+
+.llama-result-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.llama-result-meta {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.llama-result-desc {
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llama-files {
+  border-top: 1px solid var(--el-border-color-lighter);
+  padding: 6px 12px 10px;
+}
+
+.llama-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.llama-file-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llama-file-size {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  flex-shrink: 0;
+}
+
+.llama-files-hint {
+  padding: 8px 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 </style>

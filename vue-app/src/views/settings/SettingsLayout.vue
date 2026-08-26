@@ -7,6 +7,8 @@ const route = useRoute();
 
 const navItems = [
   { path: '/settings/models', label: zh.settings.nav.models },
+  { path: '/settings/system', label: zh.settings.nav.system },
+  { path: '/settings/theme', label: zh.settings.nav.theme },
   { path: '/settings/skills', label: zh.settings.nav.skills },
   { path: '/settings/mcp', label: zh.settings.nav.mcpAgents },
   { path: '/settings/plugins', label: zh.settings.nav.plugins },

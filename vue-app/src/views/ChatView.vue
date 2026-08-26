@@ -361,7 +361,14 @@ function onProgress(data) {
         if (last) last.content += data.content;
         else card.entries.push({ kind: 'response', content: data.content });
       } else {
-        card.entries.push({ kind: 'response', content: data.content });
+        // 非流式：按迭代轮次去重。同一 current_iter 可能因网络/重连重复收到，
+        // 有则更新内容，无则新建，避免进度面板出现多条相同的「助手回复」。
+        const iter = data.iteration != null ? data.iteration : null;
+        const existing = iter != null
+          ? card.entries.find((e) => e.kind === 'response' && e.iteration === iter)
+          : [...card.entries].reverse().find((e) => e.kind === 'response' && e.iteration == null);
+        if (existing) existing.content = data.content;
+        else card.entries.push({ kind: 'response', content: data.content, iteration: iter });
       }
       break;
     }
