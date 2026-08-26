@@ -51,8 +51,9 @@ case "${BUILD_ARCH}" in
 esac
 
 if [ "${BUILD_ARCH}" != "$(host_arch)" ]; then
-    echo "  ⚠️  Warning: requested arch (${BUILD_ARCH}) differs from host ($(host_arch))."
-    echo "     PyInstaller cannot cross-compile — the binary will be for the host arch."
+    echo "ERROR: requested arch (${BUILD_ARCH}) differs from host ($(host_arch))."
+    echo "       PyInstaller cannot cross-compile — please build on a ${BUILD_ARCH} host."
+    exit 1
 fi
 
 DEB_NAME="${APP_NAME}-${VERSION}-Linux-${BUILD_ARCH}.deb"
@@ -117,12 +118,16 @@ echo "[3/5] Assembling deb directory structure..."
 rm -rf "${STAGING_DIR}"
 mkdir -p "${STAGING_DIR}/DEBIAN"
 mkdir -p "${STAGING_DIR}/opt/${PKG_NAME}"
+mkdir -p "${STAGING_DIR}/usr/bin"
 mkdir -p "${STAGING_DIR}/usr/share/applications"
 mkdir -p "${STAGING_DIR}/usr/share/icons/hicolor/256x256/apps"
 
 # Copy PyInstaller output
 cp -R "dist/linux/${APP_NAME}/." "${STAGING_DIR}/opt/${PKG_NAME}/"
 chmod +x "${STAGING_DIR}/opt/${PKG_NAME}/${APP_NAME}"
+
+# Relative symlink so `open-agc` is on PATH (Debian policy: no /usr/local writes from maintainer scripts)
+ln -s "../../opt/${PKG_NAME}/${APP_NAME}" "${STAGING_DIR}/usr/bin/${PKG_NAME}"
 
 # DEBIAN/control
 cat > "${STAGING_DIR}/DEBIAN/control" <<EOF
@@ -144,7 +149,6 @@ cat > "${STAGING_DIR}/DEBIAN/postinst" <<'EOF'
 set -e
 
 chmod +x /opt/open-agc/Open-AGC
-ln -sf /opt/open-agc/Open-AGC /usr/local/bin/open-agc
 
 if command -v update-desktop-database > /dev/null 2>&1; then
     update-desktop-database /usr/share/applications > /dev/null 2>&1 || true
@@ -173,7 +177,11 @@ cat > "${STAGING_DIR}/DEBIAN/postrm" <<'EOF'
 #!/bin/bash
 set -e
 
-rm -f /usr/local/bin/open-agc
+rm -f /usr/bin/open-agc
+
+if command -v update-desktop-database > /dev/null 2>&1; then
+    update-desktop-database /usr/share/applications > /dev/null 2>&1 || true
+fi
 
 exit 0
 EOF
@@ -192,8 +200,13 @@ Categories=Utility;Development;
 StartupNotify=true
 EOF
 
-# Icon
-cp "static/icon_rounded.png" "${STAGING_DIR}/usr/share/icons/hicolor/256x256/apps/${PKG_NAME}.png"
+# Icon (resize to 256x256 so gtk-update-icon-cache picks it up from the hicolor/256x256 dir)
+python -c "
+from PIL import Image
+img = Image.open('static/icon_rounded.png').convert('RGBA')
+img = img.resize((256, 256), Image.LANCZOS)
+img.save('${STAGING_DIR}/usr/share/icons/hicolor/256x256/apps/${PKG_NAME}.png')
+"
 
 echo "  ✅ Staged at ${STAGING_DIR}"
 
