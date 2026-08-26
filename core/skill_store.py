@@ -313,8 +313,11 @@ class SkillStore:
                 desc = (s.get("description") or "")[:100]
                 lines.append(f"- {s['filename']}: {s.get('title','')} — {desc}")
             prompt = (
-                "判断以下哪些技能与用户需求【相关】（可用于完成该需求的方法/风格/流程）。"
-                "只返回 JSON 数组（元素为 filename 字符串），都不相关返回 []。不要解释。\n\n"
+                "判断以下哪些技能与用户需求【严格相关】。\n"
+                "标准：技能描述中的方法/流程/工具必须【直接】适用于完成该需求；\n"
+                "仅因个别词语相似（如都包含“安装”“harness”）不算相关。\n"
+                "宁缺毋滥：不确定的一律不选，都不相关返回 []。\n"
+                "只返回 JSON 数组（元素为 filename 字符串），不要解释。\n\n"
                 f"用户需求：{query[:500]}\n\n技能列表：\n" + "\n".join(lines)
             )
             resp, _ = LLMClient().chat(messages=[{"role": "user", "content": prompt}])
