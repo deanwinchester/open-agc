@@ -464,6 +464,7 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
 
     is_max_iter = response.startswith("[MAX_ITERATIONS_REACHED]")
     is_backgrounded = response.startswith("[TASK_BACKGROUNDED]")
+    is_llm_error = response.startswith("[LLM_ERROR]")
     is_user_int = "interrupted by user" in response.lower()
     summary = response[:200]
 
@@ -519,6 +520,12 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
         except Exception:
             pass
         return 'interrupted'
+
+    # -- LLM service failure --
+    if is_llm_error:
+        save_task_context(task_id, agent_messages)
+        update_task_status(task_id, "failed", summary, interruption_reason="error")
+        return 'failed'
 
     # -- Normal completion --
     save_task_context(task_id, agent_messages)
