@@ -2443,9 +2443,12 @@ class OpenAGCAgent:
             recent_context = "\n".join([_msg_text(m) for m in self.messages[-3:] if m["role"] == "user"])
             try:
                 # Dual search: semantic (ChromaDB) → FTS5 fallback
-                results = self.memory_store.search_semantic(recent_context, top_k=3)
+                # 短查询（如“帮我装个X”）极易因“安装”等泛词命中无关记忆，
+                # 限制条数并依赖语义检索精度。
+                _mem_top_k = 2 if len(recent_context.strip()) < 40 else 3
+                results = self.memory_store.search_semantic(recent_context, top_k=_mem_top_k)
                 if not results:
-                    results = self.memory_store.search_memories(recent_context, top_k=3)
+                    results = self.memory_store.search_memories(recent_context, top_k=_mem_top_k)
                 if results:
                     memory_context = "\n".join([f"- {r['content']} (Type: {r['memory_type']})" for r in results])
             except Exception as e:
@@ -2836,17 +2839,17 @@ class OpenAGCAgent:
             if progress_callback:
                 progress_callback({"event": "thinking", "iteration": current_iter})
             
+            # 流式优先（感知延迟优化，用户反馈）：边生成边推 thinking/response
+            # 增量到前端，首 token 几秒可见（此前非流式首轮 30-60s 无动静）。
+            # config.llm_stream_enabled=false 或无 progress_callback（测试）时回退非流式。
+            _stream_on = False
+            if progress_callback is not None:
+                try:
+                    with open(config_path, encoding="utf-8") as _scf:
+                        _stream_on = bool(json.load(_scf).get("llm_stream_enabled", True))
+                except Exception:
+                    _stream_on = True
             try:
-                # 流式优先（感知延迟优化，用户反馈）：边生成边推 thinking/response
-                # 增量到前端，首 token 几秒可见（此前非流式首轮 30-60s 无动静）。
-                # config.llm_stream_enabled=false 或无 progress_callback（测试）时回退非流式。
-                _stream_on = False
-                if progress_callback is not None:
-                    try:
-                        with open(config_path, encoding="utf-8") as _scf:
-                            _stream_on = bool(json.load(_scf).get("llm_stream_enabled", True))
-                    except Exception:
-                        _stream_on = True
                 if _stream_on:
                     def _on_delta(kind, text, _iter=current_iter, _pcb=progress_callback):
                         try:
@@ -3038,11 +3041,14 @@ class OpenAGCAgent:
                 except Exception as e:
                     pass
             # ------------------------------
-            # Send LLM response text as a progress event before tool calls
-            if message.content and message.content.strip() and progress_callback:
+            # Send LLM response text as a progress event before tool calls.
+            # 流式模式下 on_delta 已实时推送完整 response，此处不再重复发送，
+            # 否则前端会把同一条回复渲染成两个「助手回复」步骤。
+            if (not _stream_on) and message.content and message.content.strip() and progress_callback:
                 progress_callback({
                     "event": "response",
                     "content": message.content.strip()[:500],
+                    "iteration": current_iter,
                 })
 
             if tool_calls:

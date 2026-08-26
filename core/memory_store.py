@@ -63,6 +63,7 @@ def _build_fts_query(query: str) -> str:
     """
     Build an FTS5 query string from natural language input.
     Extracts meaningful tokens and joins them with OR for flexible matching.
+    Short queries use AND to reduce false positives from generic tokens.
     """
     # Extract CJK characters and English words
     tokens = re.findall(r'[\u4e00-\u9fff]|[a-zA-Z0-9]+', query.lower())
@@ -70,7 +71,10 @@ def _build_fts_query(query: str) -> str:
     tokens = [t for t in tokens if len(t) > 1 or '\u4e00' <= t <= '\u9fff']
     if not tokens:
         return ""
-    # Use OR to match any of the tokens (more flexible than AND)
+    # 短查询（如“帮我装个deep seek harness”）若用 OR，任何一个泛词
+    # （装/deep/seek）都能命中大量无关安装记录；≤6 token 改用 AND 提升精度。
+    if len(tokens) <= 6:
+        return ' AND '.join(f'"{t}"' for t in tokens)
     return ' OR '.join(f'"{t}"' for t in tokens)
 
 
@@ -747,16 +751,25 @@ class MemoryStore:
         try:
             results = self._vectordb.query(
                 query_embeddings=[emb],
-                n_results=top_k
+                n_results=top_k,
+                include=["distances"]
             )
             ids = results.get("ids", [[]])[0]
+            distances = results.get("distances", [[]])[0]
             if not ids:
+                return []
+
+            # 距离阈值过滤：向量检索对短查询同样会把“安装 X”类记录全部
+            # 捞回来，距离过大的直接丢弃，宁可不注入也不注入噪音。
+            _max_dist = 1.2
+            keep_ids = [mid for mid, d in zip(ids, distances) if d <= _max_dist]
+            if not keep_ids:
                 return []
 
             # Fetch full memory records from SQLite
             mems = []
             with self._get_conn() as conn:
-                for mid in ids:
+                for mid in keep_ids:
                     row = conn.execute(
                         "SELECT id, category, memory_type, content, keywords, "
                         "created_at, access_count, importance FROM memories "
