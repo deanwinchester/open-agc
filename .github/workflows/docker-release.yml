@@ -353,7 +353,9 @@ jobs:
           #!/bin/bash
           set -e
 
-          rm -f /usr/bin/open-agc
+          # /usr/bin/open-agc is a packaged file, removed by dpkg on remove/purge;
+          # do not rm it here — the upgrade order (old postrm upgrade runs after
+          # the new files are unpacked) would delete the new symlink.
 
           if command -v update-desktop-database > /dev/null 2>&1; then
               update-desktop-database /usr/share/applications > /dev/null 2>&1 || true
