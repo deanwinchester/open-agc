@@ -214,3 +214,164 @@ jobs:
         with:
           tag_name: v${{ steps.version.outputs.version }}
           files: dist/Open-AGC-*.dmg
+
+  # ── Linux deb ──
+  linux-deb:
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        # 预留 arm64 扩展：PyInstaller 无法交叉编译，需在 ARM runner 上构建
+        arch: [amd64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Read VERSION
+        id: version
+        run: echo "version=$(cat VERSION)" >> $GITHUB_OUTPUT
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.0-37 libgtk-3-0 dpkg-dev
+
+      - name: Build frontend
+        run: |
+          npm install
+          npm run build
+
+      - name: Install Python dependencies
+        run: |
+          python -m venv build_venv
+          source build_venv/bin/activate
+          pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+          pip install pywebview
+
+      - name: Build with PyInstaller
+        run: |
+          source build_venv/bin/activate
+          pyinstaller open_agc.spec --clean --noconfirm --distpath dist/linux --workpath build/linux
+
+      - name: Assemble deb directory
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCH="${{ matrix.arch }}"
+          STAGING_DIR="dist/deb_staging/open-agc_${VERSION}_${ARCH}"
+
+          rm -rf "${STAGING_DIR}"
+          mkdir -p "${STAGING_DIR}/DEBIAN"
+          mkdir -p "${STAGING_DIR}/opt/open-agc"
+          mkdir -p "${STAGING_DIR}/usr/bin"
+          mkdir -p "${STAGING_DIR}/usr/share/applications"
+          mkdir -p "${STAGING_DIR}/usr/share/icons/hicolor/256x256/apps"
+
+          # PyInstaller 输出（CI 中已构建，此处内联组装，不再调用 build_deb.sh 避免二次构建）
+          cp -R "dist/linux/Open-AGC/." "${STAGING_DIR}/opt/open-agc/"
+          chmod +x "${STAGING_DIR}/opt/open-agc/Open-AGC"
+
+          # 相对符号链接，使 open-agc 进入 PATH
+          ln -s "../../opt/open-agc/Open-AGC" "${STAGING_DIR}/usr/bin/open-agc"
+
+          # 图标
+          cp "static/icon_rounded.png" "${STAGING_DIR}/usr/share/icons/hicolor/256x256/apps/open-agc.png"
+
+          # Desktop entry
+          cat > "${STAGING_DIR}/usr/share/applications/open-agc.desktop" <<EOF
+          [Desktop Entry]
+          Name=Open-AGC
+          Comment=Open-AGC - General AI Agent
+          Exec=/opt/open-agc/Open-AGC
+          Icon=open-agc
+          Terminal=false
+          Type=Application
+          Categories=Utility;Development;
+          StartupNotify=true
+          EOF
+
+          # DEBIAN/control
+          cat > "${STAGING_DIR}/DEBIAN/control" <<EOF
+          Package: open-agc
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: ${ARCH}
+          Depends: libwebkit2gtk-4.0-37, libgtk-3-0
+          Maintainer: Open-AGC <dev@open-agc.local>
+          Description: Open-AGC - General AI Agent
+           Open-AGC is a general-purpose AI agent for daily office, research,
+           development and LLM experimentation.
+          EOF
+
+          # DEBIAN/postinst
+          cat > "${STAGING_DIR}/DEBIAN/postinst" <<'EOF'
+          #!/bin/bash
+          set -e
+
+          chmod +x /opt/open-agc/Open-AGC
+
+          if command -v update-desktop-database > /dev/null 2>&1; then
+              update-desktop-database /usr/share/applications > /dev/null 2>&1 || true
+          fi
+          if command -v gtk-update-icon-cache > /dev/null 2>&1; then
+              gtk-update-icon-cache -q /usr/share/icons/hicolor > /dev/null 2>&1 || true
+          fi
+
+          exit 0
+          EOF
+          chmod 755 "${STAGING_DIR}/DEBIAN/postinst"
+
+          # DEBIAN/prerm
+          cat > "${STAGING_DIR}/DEBIAN/prerm" <<'EOF'
+          #!/bin/bash
+          set -e
+
+          pkill -f "/opt/open-agc/Open-AGC" > /dev/null 2>&1 || true
+
+          exit 0
+          EOF
+          chmod 755 "${STAGING_DIR}/DEBIAN/prerm"
+
+          # DEBIAN/postrm
+          cat > "${STAGING_DIR}/DEBIAN/postrm" <<'EOF'
+          #!/bin/bash
+          set -e
+
+          rm -f /usr/bin/open-agc
+
+          if command -v update-desktop-database > /dev/null 2>&1; then
+              update-desktop-database /usr/share/applications > /dev/null 2>&1 || true
+          fi
+
+          exit 0
+          EOF
+          chmod 755 "${STAGING_DIR}/DEBIAN/postrm"
+
+      - name: Build deb
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCH="${{ matrix.arch }}"
+          dpkg-deb --build --root-owner-group \
+            "dist/deb_staging/open-agc_${VERSION}_${ARCH}" \
+            "dist/Open-AGC-${VERSION}-Linux-${ARCH}.deb"
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          files: dist/Open-AGC-*-Linux-*.deb
