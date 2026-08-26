@@ -218,7 +218,8 @@ jobs:
   # ── Linux deb ──
   linux-deb:
     needs: create-release
-    runs-on: ubuntu-latest
+    # 固定在 ubuntu-22.04：jammy 提供 libwebkit2gtk-4.0-37，与 deb 的 Depends 目标环境一致
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
     strategy:
@@ -323,7 +324,7 @@ jobs:
           #!/bin/bash
           set -e
 
-          chmod +x /opt/open-agc/Open-AGC
+          chmod +x /opt/open-agc/Open-AGC || true
 
           if command -v update-desktop-database > /dev/null 2>&1; then
               update-desktop-database /usr/share/applications > /dev/null 2>&1 || true
