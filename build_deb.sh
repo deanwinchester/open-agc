@@ -177,7 +177,9 @@ cat > "${STAGING_DIR}/DEBIAN/postrm" <<'EOF'
 #!/bin/bash
 set -e
 
-rm -f /usr/bin/open-agc
+# /usr/bin/open-agc 是包文件，由 dpkg 在 remove/purge 时自动删除；
+# 不要在这里 rm —— 升级顺序（旧 postrm upgrade 在新文件解包之后）
+# 会误删新包装好的符号链接。
 
 if command -v update-desktop-database > /dev/null 2>&1; then
     update-desktop-database /usr/share/applications > /dev/null 2>&1 || true
