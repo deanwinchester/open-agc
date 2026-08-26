@@ -15,6 +15,22 @@ def clean_html(html_text):
     except:
         return html_text
 
+
+# 网易风控（生产实证）：login 成功后必须发 IMAP ID 声明客户端身份
+#（RFC 2971），否则 SELECT 被拒「Unsafe Login」。imaplib 未内置 ID，
+# 注册为 AUTH 阶段命令后用原始 send 发送。
+imaplib.Commands.setdefault('ID', ('AUTH',))
+
+
+def _imap_id(mail):
+    """发 IMAP ID 声明客户端身份（网易/Coremail 风控需要）。"""
+    try:
+        tag = mail._new_tag()
+        mail.send(tag + b' ID ("name" "open-agc" "version" "1.0" "vendor" "open-agc")\r\n')
+        mail._get_response()
+    except Exception:
+        pass
+
 def decode_str(s):
     if not s:
         return ""
@@ -33,6 +49,10 @@ def fetch_emails(imap_server, username, password, criteria='ALL', limit=10, mark
     try:
         mail = imaplib.IMAP4_SSL(imap_server)
         mail.login(username, password)
+        # 网易风控：login 后必须发 IMAP ID 声明客户端身份（RFC 2971），
+        # 否则 SELECT 被拒「Unsafe Login」——生产实证：授权码正确、登录成功，
+        # 但 SELECT 仍被风控拦。
+        _imap_id(mail)
         # SELECT 结果必须检查：网易 163 风控会返回 NO「Unsafe Login」——
         # 不检查直接 search 只会得到误导性的 "illegal in state AUTH"，
         # 把真实原因（需网页端确认/联系 kefu@188.com）淹没掉。
@@ -112,6 +132,8 @@ def mark_email_seen(imap_server, username, password, mail_id):
     try:
         mail = imaplib.IMAP4_SSL(imap_server)
         mail.login(username, password)
+        # 同 fetch_emails：网易风控需 ID 声明，否则 SELECT 被拒 Unsafe Login
+        _imap_id(mail)
         mail.select("inbox")
         mail.store(str(mail_id), '+FLAGS', '\\Seen')
         mail.logout()

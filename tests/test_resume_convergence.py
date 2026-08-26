@@ -448,3 +448,31 @@ class TestResumeCountResetOnCompletion:
         assert result == 'failed'
         st = _task_state(tmp_db, tid)
         assert st["status"] == "failed" and st["resume_count"] == 5
+
+
+# ---------- LLM_ERROR 必须判失败，不得伪装 completed ----------
+
+class TestLlmErrorCompletion:
+    """[LLM_ERROR] 前缀响应此前落到 Normal completion 分支，任务被错误标为
+    completed（生产实证：任务列表里「已完成」但执行结果是 APIConnectionError）。"""
+
+    def test_llm_error_marks_failed(self, tmp_db):
+        from api.task_core import handle_task_completion
+        tid = _insert_task(tmp_db, status="running")
+        result = handle_task_completion(
+            tid,
+            "[LLM_ERROR] 模型服务调用失败（APIConnectionError，第 2 轮）。点「继续」可重试；反复失败请检查模型配置或更换模型。",
+            [])
+        assert result == 'failed'
+        st = _task_state(tmp_db, tid)
+        assert st["status"] == "failed"
+        assert st["interruption_reason"] == "error"
+
+    def test_llm_error_keeps_resume_count(self, tmp_db):
+        from api.task_core import handle_task_completion
+        tid = _insert_task(tmp_db, status="running", resume_count=4)
+        result = handle_task_completion(
+            tid, "[LLM_ERROR] 模型服务调用失败", [])
+        assert result == 'failed'
+        st = _task_state(tmp_db, tid)
+        assert st["status"] == "failed" and st["resume_count"] == 4
