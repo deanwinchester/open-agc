@@ -244,10 +244,10 @@ class TestInterjectionIndex:
         result = agent.run_turn("原始任务", verbose=False, skip_rag=True)
 
         assert result == "已完成，结果已发到群里。"
-        # 动态段（含当前时间）永驻消息流——断言前过滤「本轮检索补充」系统消息
+        # 动态段（含当前时间）永驻消息流——断言前过滤「系统补充上下文」用户消息
         core_msgs = [m for m in agent.messages
-                     if not (m.get("role") == "system"
-                             and "本轮为你检索" in str(m.get("content", "")))]
+                     if not (m.get("role") == "user"
+                             and "系统补充上下文" in str(m.get("content", "")))]
         # core: [system, user原始任务, user插话, assistant tool_call, tool result, assistant final]
         assert core_msgs[2]["role"] == "user"
         assert core_msgs[2]["content"].startswith("[用户插入已接受]")
@@ -278,10 +278,10 @@ class TestInterjectionIndex:
         assert payload["reason"] == "新话题"
         assert "主任务已完成" in result
         # Interjection messages removed from context; only system/user/final remain
-        # （过滤动态段：时间注入使动态 system 消息永驻消息流末尾）
+        # （过滤动态段：时间注入使动态 user 消息永驻消息流）
         core_roles = [m["role"] for m in agent.messages
-                      if not (m.get("role") == "system"
-                              and "本轮为你检索" in str(m.get("content", "")))]
+                      if not (m.get("role") == "user"
+                              and "系统补充上下文" in str(m.get("content", "")))]
         assert core_roles == ["system", "user", "assistant"]
         assert agent.pending_messages == []
 
