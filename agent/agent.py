@@ -2441,46 +2441,58 @@ class OpenAGCAgent:
                 return c
 
             recent_context = "\n".join([_msg_text(m) for m in self.messages[-3:] if m["role"] == "user"])
-            try:
-                # Dual search: semantic (ChromaDB) → FTS5 fallback
-                # 短查询（如“帮我装个X”）极易因“安装”等泛词命中无关记忆，
-                # 限制条数并依赖语义检索精度。
-                _mem_top_k = 2 if len(recent_context.strip()) < 40 else 3
-                results = self.memory_store.search_semantic(recent_context, top_k=_mem_top_k)
-                if not results:
-                    results = self.memory_store.search_memories(recent_context, top_k=_mem_top_k)
-                if results:
-                    memory_context = "\n".join([f"- {r['content']} (Type: {r['memory_type']})" for r in results])
-            except Exception as e:
-                if verbose: print(f"Memory retrieval error: {e}")
+            # 简单查询（问候、询问模型/系统信息、短指令）跳过记忆/技能/经验/KG
+            # 检索——这些查询本身包含的语义极少，检索只会注入无关历史噪音。
+            _simple_patterns = (
+                "你好", "您好", "你是谁", "你叫什么", "什么模型", "哪个模型",
+                "你能做什么", "帮助", "help", "hello", "hi", "在吗", "谢谢",
+            )
+            _is_simple = (len(recent_context.strip()) < 20 and
+                          any(p in recent_context.lower() for p in _simple_patterns))
+            if not _is_simple:
+                try:
+                    # Dual search: semantic (ChromaDB) → FTS5 fallback
+                    # 短查询（如“帮我装个X”）极易因“安装”等泛词命中无关记忆，
+                    # 限制条数并依赖语义检索精度。
+                    _mem_top_k = 2 if len(recent_context.strip()) < 40 else 3
+                    results = self.memory_store.search_semantic(recent_context, top_k=_mem_top_k)
+                    if not results:
+                        results = self.memory_store.search_memories(recent_context, top_k=_mem_top_k)
+                    if results:
+                        memory_context = "\n".join([f"- {r['content']} (Type: {r['memory_type']})" for r in results])
+                except Exception as e:
+                    if verbose: print(f"Memory retrieval error: {e}")
 
             # Auto-retrieve relevant skills for this query
             self._active_skills = []
-            try:
-                self.skill_store.refresh()
-                # 混合检索：字面 bigram 优先 + 语义兜底（≥floor 才注入，宁缺毋滥）
-                matched_skills = self.skill_store.retrieve_semantic(recent_context, top_k=3)
-                if matched_skills:
-                    self._active_skills = [s["filename"] for s in matched_skills]
-                    skill_context = self.skill_store.format_skills_for_prompt(matched_skills)
-            except Exception as e:
-                if verbose: print(f"Skill retrieval error: {e}")
+            if not _is_simple:
+                try:
+                    self.skill_store.refresh()
+                    # 混合检索：字面 bigram 优先 + 语义兜底（≥floor 才注入，宁缺毋滥）
+                    matched_skills = self.skill_store.retrieve_semantic(recent_context, top_k=3)
+                    if matched_skills:
+                        self._active_skills = [s["filename"] for s in matched_skills]
+                        skill_context = self.skill_store.format_skills_for_prompt(matched_skills)
+                except Exception as e:
+                    if verbose: print(f"Skill retrieval error: {e}")
 
             # Retrieve relevant past experience (reflections + trajectories)
-            try:
-                experience = self.reflection_engine.retrieve_experience(recent_context, top_k=2)
-                if experience.get("reflections") or experience.get("trajectories"):
-                    experience_context = self.reflection_engine.format_experience_for_prompt(experience)
-            except Exception as e:
-                if verbose: print(f"Experience retrieval error: {e}")
+            if not _is_simple:
+                try:
+                    experience = self.reflection_engine.retrieve_experience(recent_context, top_k=2)
+                    if experience.get("reflections") or experience.get("trajectories"):
+                        experience_context = self.reflection_engine.format_experience_for_prompt(experience)
+                except Exception as e:
+                    if verbose: print(f"Experience retrieval error: {e}")
 
             # Retrieve knowledge graph context
-            try:
-                kg_results = self.knowledge_graph.retrieve_context(recent_context, top_k=5)
-                if kg_results:
-                    kg_context = self.knowledge_graph.format_context(kg_results)
-            except Exception as e:
-                if verbose: print(f"Knowledge graph retrieval error: {e}")
+            if not _is_simple:
+                try:
+                    kg_results = self.knowledge_graph.retrieve_context(recent_context, top_k=5)
+                    if kg_results:
+                        kg_context = self.knowledge_graph.format_context(kg_results)
+                except Exception as e:
+                    if verbose: print(f"Knowledge graph retrieval error: {e}")
 
         # Ensure System Prompt is always fresh (仅静态部分：人格/角色/规范/机制/
         # soul.md/MEMORY.md/工具列表)。动态内容一律不进 messages[0]——记忆/技能/
@@ -2490,8 +2502,17 @@ class OpenAGCAgent:
             system_content = self._build_system_prompt()
             self.messages[0]["content"] = system_content
 
-        # ── 动态上下文后置：组装为一条 system 消息追加到消息流末尾 ──
+        # ── 动态上下文后置：组装为一条 user 消息插入到当前用户输入之前 ──
+        # 每个部分限制最大长度，避免无关历史噪音过度膨胀上下文。
         _dyn_parts = []
+        _MAX_PART_LEN = 1200  # 单一部分最大字符数
+
+        def _trunc(s: str, limit: int = _MAX_PART_LEN) -> str:
+            s = s.strip()
+            if len(s) <= limit:
+                return s
+            return s[:limit] + "\n\n…[内容过长已截断]"
+
         # 当前时间在动态段（用户指正：放 system 里即使分钟级也周期性失效；
         # 末尾段不参与前缀——前缀完全静态，跨分钟/跨化身缓存全命中）
         try:
@@ -2502,13 +2523,13 @@ class OpenAGCAgent:
         except Exception:
             pass
         if memory_context:
-            _dyn_parts.append(f"--- 历史记忆回溯 (Episodic Memory) ---\n{memory_context}")
+            _dyn_parts.append(_trunc(f"--- 历史记忆回溯 (Episodic Memory) ---\n{memory_context}"))
         if skill_context:
-            _dyn_parts.append(skill_context)
+            _dyn_parts.append(_trunc(skill_context))
         if experience_context:
-            _dyn_parts.append(experience_context)
+            _dyn_parts.append(_trunc(experience_context))
         if kg_context:
-            _dyn_parts.append(kg_context)
+            _dyn_parts.append(_trunc(kg_context))
 
         if hasattr(self, 'failed_attempts') and self.failed_attempts:
             attempts_str = "\n".join([f"- {attempt}" for attempt in self.failed_attempts])
@@ -2609,19 +2630,19 @@ class OpenAGCAgent:
                 pass
 
         if _dyn_parts:
-            _dyn_msg = {"role": "system", "content": (
-                "（以下是本轮为你检索到的相关上下文，供参考）\n\n"
+            _dyn_msg = {"role": "user", "content": (
+                "【系统补充上下文】（仅供参考，非用户输入）\n\n"
                 + "\n\n".join(_dyn_parts))}
             # 移除上一次 run_turn 插入的动态段（identity 过滤）——否则连续
             # 对话会在消息流里累积多份过期检索快照，既胀上下文又误导模型
             _prev_dyn = getattr(self, "_last_dyn_msg", None)
             if _prev_dyn is not None:
                 self.messages = [m for m in self.messages if m is not _prev_dyn]
-            # 永远放最末尾（生产实证 R7）：插到中间会让前缀在该位置分叉——
-            # 前缀缓存要求消息序列从头部逐字节相同；末尾追加则主干历史纯增长、
-            # 跨轮/fork 共享全部命中。动态段在最新用户输入之后，语义是
-            # 「本轮检索补充」，模型照读。
-            self.messages.append(_dyn_msg)
+            # 改为 user 角色插入到当前用户输入之前：符合 LLM API 标准消息顺序
+            # （system → 历史 → 动态补充 → 当前 user），避免 system 消息穿插在
+            # 对话中间被模型忽略或误解。前缀缓存仍有效——动态段在末尾，主干
+            # 历史纯增长。
+            self.messages.insert(-1, _dyn_msg)
             self._last_dyn_msg = _dyn_msg
 
         # Sub-agent delegation for complex tasks
