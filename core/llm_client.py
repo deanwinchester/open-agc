@@ -103,6 +103,9 @@ def _detect_cache_hit(response) -> str:
         cd = getattr(usage, "completion_tokens_details", None)
         if cd and getattr(cd, "cached_tokens", 0) > 0:
             return "hit"
+        # DeepSeek: prompt_cache_hit_tokens > 0
+        if getattr(usage, "prompt_cache_hit_tokens", 0) > 0:
+            return "hit"
     except Exception as _e:
         print(f"[LLMClient] Cache hit detection error: {_e}")
     return "miss"
@@ -119,6 +122,10 @@ def _detect_cached_tokens(response) -> int:
         cd = getattr(usage, "completion_tokens_details", None)
         if cd:
             return getattr(cd, "cached_tokens", 0) or 0
+        # DeepSeek: prompt_cache_hit_tokens
+        hit = getattr(usage, "prompt_cache_hit_tokens", 0)
+        if hit:
+            return hit
     except Exception as _e:
         print(f"[LLMClient] Cached tokens detection error: {_e}")
     return 0
@@ -717,6 +724,11 @@ class LLMClient:
             kwargs["tools"] = tools
         if stream:
             kwargs["stream"] = True
+            # OpenAI 兼容 API（deepseek/xiaomi/自定义厂商等）流式默认不返回
+            # usage，需显式开启；Anthropic 渠道由服务端自动附加，无需此参数。
+            _is_anthropic = "kimi_code/" in model
+            if not _is_anthropic:
+                kwargs["stream_options"] = {"include_usage": True}
 
         _cp_prefix = model.split('/', 1)[0] if '/' in model else ''
         _cp = getattr(self, "_custom_providers", {}).get(_cp_prefix)
