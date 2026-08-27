@@ -12,20 +12,25 @@ Open-AGC 能够自主规划、思考并执行终端命令、文件系统操作�
 
 ![主界面](assets/screenshot_home.png)
 
+**Vue3 SPA 界面**：左侧会话导航 + 中央聊天区 + 右侧进度面板，支持流式响应实时渲染、工具执行步骤展开/收起、分身状态可视、主题市场一键切换。设置页按功能拆分（模型/系统/主题/技能/MCP/插件/凭证库），移动端抽屉式导航自适应。
+
 ## 🌟 核心特性 (Features)
 
-- **多模型即插即用 (Plug & Play LLMs)**: 基于 `litellm` 支持 OpenAI、Anthropic、Gemini、DeepSeek、Moonshot 等商业模型及 Ollama、vLLM、SGLang、llama.cpp 等本地部署方案。Web 界面提供一键切换与可视化配置。
+- **多模型即插即用 (Plug & Play LLMs)**: 基于 `litellm` 支持 OpenAI、Anthropic、Gemini、DeepSeek、Moonshot、小米 MiMo 等商业模型及 Ollama、vLLM、SGLang、llama.cpp 等本地部署方案。Web 界面提供一键切换、可视化配置与自定义厂商（OpenAI 兼容端点）扩展。
+- **调度者（分身）模式 (Dispatcher Mode)**: 主 Agent 可将复杂任务拆解并派发给多个分身（Sub-Agent）并行执行，支持断点续传、状态持久化与失联检测，服务重启后自动恢复。
 - **后台任务系统 (Background Task System)**: 支持定时/一次性任务调度，shell 命令超时自动后台化，服务重启后自动恢复未完成任务与孤儿进程管理。
 - **物理设备控制 (PyAutoGUI)**: Agent 可直接操控鼠标键盘，触发 FAILSAFE 防呆机制（鼠标移至屏幕四角强制中止）。
 - **浏览器自动化 (Playwright)**: 内置 Chromium 浏览器引擎，支持网页导航、表单填写、截图、JS 执行等完整浏览器操控能力。
-- **现代化 Web 界面**: **Panda Theme（熊猫流光主题）**，竹青色系 + 玻璃拟态面板，WebSocket 实时推送工具执行状态。前端基于 Vite 构建，JS 模块化组织，支持 sourcemap 调试。
+- **现代化 Web 界面**: **Vue3 SPA + Panda Theme（熊猫流光主题）**，竹青色系 + 玻璃拟态面板，WebSocket 实时推送工具执行状态与流式响应。设置页按功能拆分（模型/系统/主题/技能/MCP/插件/凭证库），支持移动端自适应。
+- **访问控制 (Access Control)**: 本机访问免密直连，局域网设备需输入访问密码，公网（含 IPv6）一律拒绝，Docker 部署同样生效。
+- **主题系统 (Theme System)**: 支持主题导出/导入、主题市场一键应用，自定义主色与侧边栏色。
 - **国际化 (i18n)**: 自动检测浏览器语言，中英双语无缝切换。
 - **智能记忆系统 (Smart Memory Engine)**:
   - **SQLite FTS5 全文检索** + BM25 排序，持久化跨会话记忆。
-  - **向量语义记忆 (Vector Semantic Memory)**: 支持语义级记忆检索。
+  - **向量语义记忆 (Vector Semantic Memory)**: 支持语义级记忆检索与距离阈值过滤。
   - **静默后台摘要 (Auto-Memory)**: 每轮对话后自动萃取关键事实存入记忆库，下次对话自动注入相关上下文。
 - **对话历史检索 (Search History)**: 全量对话历史词级部分匹配搜索，支持检索 task_steps 数据库，上下文自动注入关键发现。
-- **技能树系统 (Skills System)**: Agent 可自主编写 Markdown 格式 SOP 模板（`skills/` 目录），支持导入、验证与安全管理。
+- **技能树系统 (Skills System)**: Agent 可自主编写 Markdown 格式 SOP 模板（`skills/` 目录），支持导入、验证与安全管理。内置技能安装器与语义混合检索，避免无关技能误加载。
 - **工具信任评分 (Auto-Tool Graduation)**: 工具调用成功率自适应统计，自动毕业为可信工具，减少权限提示。
 - **并行子代理 (Parallel Sub-Agent)**: 支持并行执行多个子代理任务，输出深度综合分析报告。
 - **智能体防失控护盾 (Agent Safeguards)**:
@@ -35,6 +40,7 @@ Open-AGC 能够自主规划、思考并执行终端命令、文件系统操作�
   - **PID 自保护机制**: 自动记录服务进程 PID，拦截对服务本身及其父进程（VS Code Debugger）的误杀操作。
   - **tool_call JSON 自动修复**: LLM 返回格式不标准的 JSON 参数时自动修复并继续。
   - **异常自动恢复**: 未预期异常时自动重试一次，注入错误上下文让 Agent 换策略。
+  - **谎报治理**: 分身执行状态实时可见，杜绝「确认还在跑」等无依据空谈。
 - **MCP 协议支持 (MCP Tool)**: 支持 Model Context Protocol，可集成外部 MCP 工具服务。
 - **Docker 部署**: 提供 `Dockerfile` 和 `docker-compose.yml`，一键容器化运行（含 xvfb 无头显示支持）。
 
@@ -67,7 +73,7 @@ cd open-agc
 启动后访问 `http://localhost:8000`。
 
 ### 3. 配置 API Key
-在 Web 界面的 **Settings（设置）→ 系统配置** 中填写 API Key 并保存，无需手动编辑配置文件。支持通过 `.env` 文件设置环境变量（参考 `.env.example`）。
+在 Web 界面的 **设置 → 模型与服务** 中填写 API Key 并保存，无需手动编辑配置文件。支持自定义厂商（OpenAI 兼容端点）与本地模型（llama.cpp）下载管理。也可通过 `.env` 文件设置环境变量（参考 `.env.example`）。
 
 ### 4. 命令行模式
 ```bash
@@ -190,6 +196,11 @@ python db.py migrate --from ../../data/chat_history.db --to ../../data/plugins/o
 | `email_tool` | 邮件搜索与发送 | — |
 | `save_skill` | 技能学习与持久化 | — |
 | `system_mac` | macOS 系统级操作 | — |
+| `dispatch_worker` | 调度者模式分身派发 | — |
+| `message_worker` | 分身消息注入与状态同步 | — |
+| `install_skill` | 技能安装与验证 | — |
+| `theme_tool` | 主题导出/导入/市场应用 | — |
+| `task_plan` | 任务目标与计划管理 | — |
 
 ---
 
@@ -197,23 +208,29 @@ python db.py migrate --from ../../data/chat_history.db --to ../../data/plugins/o
 
 ```
 open-agc/
-├── agent/              # Agent 核心循环与编排
-├── api/                # FastAPI 服务端（路由、WebSocket）
-├── core/               # 核心模块（LLM 客户端、记忆存储、插件管理、路径管理）
-├── tools/              # 工具集（18 个工具）
-├── plugins/            # 插件目录
-├── static/             # 前端资源（SPA + Vite 构建）
-│   ├── js/             # JS 模块（缓存、导航、插件、会话、设置、任务等）
-│   ├── css/            # CSS 模块
-│   ├── vendor/         # 本地化第三方库（marked、highlight.js、chart.js）
-│   └── views/          # 视图模板
+├── agent/              # Agent 核心循环、调度者（分身）模式与子代理编排
+├── api/                # FastAPI 服务端（路由、WebSocket、访问控制）
+├── core/               # 核心模块（LLM 客户端、记忆存储、插件管理、技能安装）
+├── tools/              # 工具集（20+ 工具：shell/python/browser/computer/记忆/技能/主题等）
+├── plugins/            # 插件目录（内置 open-agc-train 训练插件）
+├── vue-app/            # Vue3 SPA 前端源码（Vite 构建）
+│   └── src/
+│       ├── views/      # 页面视图（聊天/任务/目标/下载/沙箱/调试/设置）
+│       ├── components/ # 组件（聊天/进度卡片/表单等）
+│       └── stores/     # Pinia 状态（WebSocket/主题）
+├── static/             # 前端构建产物（Vue SPA 输出目录）
 ├── skills/             # Agent 技能库（Markdown SOP）
-├── data/               # 运行时数据（SQLite、配置）
-├── models/             # 本地模型文件
+├── marketplace/        # 主题市场配置
+├── data/               # 运行时数据（SQLite、配置、记忆库）
+├── models/             # 本地模型文件（GGUF 等）
 ├── workspace/          # 沙箱工作目录
 ├── main.py             # CLI 入口
 ├── launcher.py         # PyInstaller 打包入口
-├── start.sh / start.bat   # 一键启动脚本
+├── gui_app.py          # 桌面 GUI 入口（pywebview）
+├── start.sh / start.bat   # 一键启动脚本（自动安装依赖）
+├── build_win.bat       # Windows 打包脚本
+├── build_mac.sh        # macOS 打包脚本
+├── build_deb.sh        # Linux/UOS deb 打包脚本
 ├── Dockerfile          # Docker 镜像
 └── docker-compose.yml  # Docker Compose 编排
 ```
@@ -222,12 +239,18 @@ open-agc/
 
 ## 📦 打包分发
 
-- **macOS**: 运行 `./build_mac.sh` → `dist/*.dmg`
-- **Windows**: 运行 `build_win.bat` → `dist/*.zip`
+| 平台 | 脚本 | 输出 | 说明 |
+|------|------|------|------|
+| **Windows** | `build_win.bat` | `dist/*.zip` / NSIS 安装包 | 包含 Python 运行时，无需预装环境 |
+| **macOS** | `./build_mac.sh` | `dist/*.dmg`（x86_64 / arm64 / universal） | 拖拽安装，支持 Apple Silicon |
+| **Linux/UOS** | `./build_deb.sh` | `dist/*.deb`（amd64 / arm64） | 桌面快捷方式 + 命令行入口 |
+
+推送 `release` 分支时，GitHub Actions 自动构建并发布全部平台安装包（Docker 镜像、Windows ZIP、macOS DMG、Linux deb）。
 
 打包后的应用将用户数据存储在系统标准路径：
 - macOS: `~/Library/Application Support/Open-AGC/`
 - Windows: `%APPDATA%\Open-AGC\`
+- Linux: `~/.open-agc/`
 
 ---
 
