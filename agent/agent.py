@@ -2940,12 +2940,18 @@ class OpenAGCAgent:
                 prompt_tokens = getattr(usage, 'prompt_tokens', 0)
                 completion_tokens = getattr(usage, 'completion_tokens', 0)
 
-                # Detect cached tokens
+                # Detect cached tokens（支持 OpenAI/Anthropic 与 DeepSeek 格式）
                 cached_tokens = 0
                 try:
                     details = getattr(usage, 'prompt_tokens_details', None)
                     if details:
                         cached_tokens = getattr(details, 'cached_tokens', 0) or 0
+                    if not cached_tokens:
+                        cd = getattr(usage, 'completion_tokens_details', None)
+                        if cd:
+                            cached_tokens = getattr(cd, 'cached_tokens', 0) or 0
+                    if not cached_tokens:
+                        cached_tokens = getattr(usage, 'prompt_cache_hit_tokens', 0) or 0
                 except Exception:
                     pass
 
