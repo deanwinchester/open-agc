@@ -8,7 +8,7 @@
 // - 本地模型管理：GET /api/llamacpp/status（状态+下载进度）、POST /api/llamacpp/setup（装二进制）、
 //   POST /api/llamacpp/search-models、/api/llamacpp/model-files、/api/llamacpp/download-from-hf、
 //   /api/llamacpp/control（start/stop）；下载进度另经 WebSocket `llamacpp_download` 事件推送
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { Refresh } from '@element-plus/icons-vue';
 import { cachedFetch, invalidateCache, request } from '../../api/client';
@@ -356,8 +356,21 @@ async function controlLlama(action) {
 }
 
 // ── 模型搜索与下载 ──
+const LS_SOURCE_KEY = 'open-agc:models-search-source';
+function getStoredSearchSource() {
+  try {
+    const v = localStorage.getItem(LS_SOURCE_KEY);
+    if (v === 'huggingface' || v === 'modelscope') return v;
+  } catch {}
+  return 'huggingface';
+}
 const searchQuery = ref('');
-const searchSource = ref('huggingface');
+const searchSource = ref(getStoredSearchSource());
+watch(searchSource, (val) => {
+  try {
+    localStorage.setItem(LS_SOURCE_KEY, val);
+  } catch {}
+});
 const searchResults = ref([]);
 const searchLoading = ref(false);
 const searchDone = ref(false);          // 区分「未搜索」与「搜索无结果」

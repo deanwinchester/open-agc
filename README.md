@@ -245,7 +245,9 @@ open-agc/
 | **macOS** | `./build_mac.sh` | `dist/*.dmg`（x86_64 / arm64 / universal） | 拖拽安装，支持 Apple Silicon |
 | **Linux/UOS** | `./build_deb.sh` | `dist/*.deb`（amd64 / arm64） | 桌面快捷方式 + 命令行入口 |
 
-推送 `release` 分支时，GitHub Actions 自动构建并发布全部平台安装包（Docker 镜像、Windows ZIP、macOS DMG、Linux deb）。
+> **架构选择**：x86_64（Intel/AMD）请下载 `Open-AGC-<VERSION>-Linux-amd64.deb`；UOS / 银河麒麟 / 鲲鹏 / 飞腾等 ARM64 设备请下载 `Open-AGC-<VERSION>-Linux-arm64.deb`。本地手动打包在目标架构机器上执行 `./build_deb.sh amd64` 或 `./build_deb.sh arm64`。
+
+推送 `release` 分支时，GitHub Actions 自动构建并发布全部平台安装包（Docker 镜像、Windows ZIP、macOS DMG、Linux amd64/arm64 deb）。
 
 打包后的应用将用户数据存储在系统标准路径：
 - macOS: `~/Library/Application Support/Open-AGC/`

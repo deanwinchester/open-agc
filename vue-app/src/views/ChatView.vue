@@ -356,10 +356,13 @@ function onProgress(data) {
     case 'response': {
       if (!data.content) break;
       if (data.stream) {
-        // 流式增量：追加到最新 response 条目（无则新建）——逐字可见
-        const last = [...card.entries].reverse().find((e) => e.kind === 'response');
-        if (last) last.content += data.content;
-        else card.entries.push({ kind: 'response', content: data.content });
+        // 流式增量：按迭代轮次分卡。同一轮追加，跨轮新建，避免多轮回复串成一条。
+        const iter = data.iteration != null ? data.iteration : null;
+        const existing = iter != null
+          ? card.entries.find((e) => e.kind === 'response' && e.iteration === iter)
+          : [...card.entries].reverse().find((e) => e.kind === 'response' && e.iteration == null);
+        if (existing) existing.content += data.content;
+        else card.entries.push({ kind: 'response', content: data.content, iteration: iter });
       } else {
         // 非流式：按迭代轮次去重。同一 current_iter 可能因网络/重连重复收到，
         // 有则更新内容，无则新建，避免进度面板出现多条相同的「助手回复」。
@@ -477,6 +480,16 @@ function onHistorySteps(data) {
 function onTaskBackgrounded(data) {
   if (!isForCurrent(data)) return;
   thinking.visible = false;
+  // 提问卡片超时转后台后，前台 WS 表单已不可答——标记过期并提示去任务页回答，
+  // 避免残留一个看似还能点但已失效的提问卡片。
+  const card = liveCard.value;
+  if (card) {
+    for (const entry of card.entries) {
+      if (entry.kind === 'ask' && !entry.answered) {
+        entry.error = t.askExpired;
+      }
+    }
+  }
   finishLiveCard();
   running.value = false;
   currentTaskId.value = null;

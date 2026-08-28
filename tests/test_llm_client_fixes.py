@@ -408,4 +408,182 @@ class TestCleanupStaleKgData:
         conn = sqlite3.connect(db_path)
         n = conn.execute("SELECT COUNT(*) FROM task_trajectories").fetchone()[0]
         conn.close()
-        assert n == 1
+
+
+@_litellm
+class TestCacheDetection:
+    """Cache hit detection must recognise provider-specific usage fields."""
+
+    def _response(self, usage):
+        class _R:
+            pass
+        r = _R()
+        r.usage = usage
+        return r
+
+    def test_anthropic_cache_read_input_tokens(self):
+        from core.llm_client import _detect_cache_hit, _detect_cached_tokens
+        u = type("U", (), {"prompt_tokens_details": None,
+                           "completion_tokens_details": None,
+                           "cache_read_input_tokens": 12,
+                           "prompt_cache_hit_tokens": 0})()
+        assert _detect_cache_hit(self._response(u)) == "hit"
+        assert _detect_cached_tokens(self._response(u)) == 12
+
+    def test_openai_prompt_tokens_details_cached(self):
+        from core.llm_client import _detect_cache_hit, _detect_cached_tokens
+        details = type("D", (), {"cached_tokens": 7})()
+        u = type("U", (), {"prompt_tokens_details": details,
+                           "completion_tokens_details": None,
+                           "cache_read_input_tokens": 0,
+                           "prompt_cache_hit_tokens": 0})()
+        assert _detect_cache_hit(self._response(u)) == "hit"
+        assert _detect_cached_tokens(self._response(u)) == 7
+
+    def test_deepseek_prompt_cache_hit_tokens(self):
+        from core.llm_client import _detect_cache_hit, _detect_cached_tokens
+        u = type("U", (), {"prompt_tokens_details": None,
+                           "completion_tokens_details": None,
+                           "cache_read_input_tokens": 0,
+                           "prompt_cache_hit_tokens": 9})()
+        assert _detect_cache_hit(self._response(u)) == "hit"
+        assert _detect_cached_tokens(self._response(u)) == 9
+
+    def test_no_cache_indicators_returns_miss(self):
+        from core.llm_client import _detect_cache_hit, _detect_cached_tokens
+        u = type("U", (), {"prompt_tokens_details": None,
+                           "completion_tokens_details": None,
+                           "cache_read_input_tokens": 0,
+                           "prompt_cache_hit_tokens": 0})()
+        assert _detect_cache_hit(self._response(u)) == "miss"
+        assert _detect_cached_tokens(self._response(u)) == 0
+
+
+@_litellm
+class TestAnthropicPromptCacheMarker:
+    """Anthropic-style endpoints need an explicit cache_control breakpoint."""
+
+    def _client(self):
+        from core.llm_client import LLMClient
+        c = LLMClient.__new__(LLMClient)
+        c.kimi_code_api_key = "sk-test"
+        c.kimi_code_api_base = "https://test/v1"
+        c.xiaomi_api_key = ""
+        c.xiaomi_api_base = ""
+        c.llamacpp_api_base = ""
+        c.llamacpp_ctx_size = 32768
+        c._custom_providers = {}
+        return c
+
+    def test_first_system_message_gets_cache_control(self):
+        from core.llm_client import LLMClient
+        messages = [
+            {"role": "system", "content": "STATIC PROMPT"},
+            {"role": "user", "content": "hi"},
+        ]
+        marked = LLMClient._mark_anthropic_prompt_cache(messages)
+        assert marked[0]["role"] == "system"
+        content = marked[0]["content"]
+        assert isinstance(content, list)
+        assert content[0]["text"] == "STATIC PROMPT"
+        assert content[0]["cache_control"] == {"type": "ephemeral"}
+        # The last message is also marked as a breakpoint so the next turn
+        # reuses the whole conversation prefix, not just the system prompt.
+        assert isinstance(marked[1]["content"], list)
+        assert marked[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_first_system_and_last_message_marked(self):
+        from core.llm_client import LLMClient
+        messages = [
+            {"role": "system", "content": "FIRST"},
+            {"role": "user", "content": "u"},
+            {"role": "system", "content": "SECOND"},
+        ]
+        marked = LLMClient._mark_anthropic_prompt_cache(messages)
+        assert isinstance(marked[0]["content"], list)
+        assert marked[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        # The middle message is untouched
+        assert marked[1]["content"] == "u"
+        # The last message becomes a breakpoint so the whole prefix is reused
+        assert isinstance(marked[2]["content"], list)
+        assert marked[2]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_kimi_code_build_kwargs_marks_system(self):
+        client = self._client()
+        kwargs = client._build_model_kwargs(
+            "kimi_code/k3",
+            [{"role": "system", "content": "STATIC"}, {"role": "user", "content": "hi"}],
+        )
+        assert kwargs["model"] == "anthropic/k3"
+        content = kwargs["messages"][0]["content"]
+        assert isinstance(content, list)
+        assert content[0]["cache_control"] == {"type": "ephemeral"}
+
+
+@_litellm
+class TestStreamCollectLogging:
+    """Streaming calls must log usage from the aggregated response, not just
+    the provider's optional final usage chunk."""
+
+    def _client(self):
+        from core.llm_client import LLMClient
+        c = LLMClient.__new__(LLMClient)
+        c.default_model = "kimi_code/k3"
+        c.fallback_models = []
+        c.kimi_code_api_key = "sk-test"
+        c.kimi_code_api_base = "https://test/v1"
+        c.xiaomi_api_key = ""
+        c.xiaomi_api_base = ""
+        c.llamacpp_api_base = ""
+        c.llamacpp_ctx_size = 32768
+        c._custom_providers = {}
+        c._log_session_id = None
+        c._log_task_id = None
+        return c
+
+    def test_logs_usage_from_stream_chunk_builder(self, monkeypatch):
+        from core.llm_client import _log_model_call, litellm
+
+        logged = []
+        monkeypatch.setattr("core.llm_client._log_model_call", lambda **kw: logged.append(kw))
+
+        class FakeDelta:
+            content = "hello"
+
+        class FakeChoice:
+            delta = FakeDelta()
+
+        class FakeChunk:
+            choices = [FakeChoice()]
+            model = "anthropic/k3"
+
+        def fake_completion(**kwargs):
+            yield FakeChunk()
+
+        class FakeMessage:
+            content = "hello"
+            tool_calls = None
+
+        class FakeUsage:
+            prompt_tokens = 42
+            completion_tokens = 5
+
+        class FakeResponse:
+            choices = [type("C", (), {"message": FakeMessage()})()]
+            usage = FakeUsage()
+
+        monkeypatch.setattr(litellm, "completion", fake_completion)
+        monkeypatch.setattr(litellm, "stream_chunk_builder", lambda chunks, **kw: FakeResponse())
+
+        client = self._client()
+        resp, model = client.chat_stream_collect(messages=[{"role": "user", "content": "hi"}])
+
+        assert model == "kimi_code/k3"
+        assert len(logged) == 1
+        entry = logged[0]
+        assert entry["provider"] == "kimi_code"
+        assert entry["model"] == "kimi_code/k3"
+        assert entry["prompt_tokens"] == 42
+        assert entry["completion_tokens"] == 5
+        assert entry["total_tokens"] == 47
+        assert entry["cache_hit"] == "miss"

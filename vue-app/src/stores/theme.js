@@ -79,7 +79,7 @@ export function applyTheme(theme) {
   themeState.bordered = !!t.bordered;
   themeState.animations = !!t.animations;
   themeState.decor = t.decor || 'none';
-  document.title = themeState.appName || 'Open-AGC';
+  document.title = themeState.appName || '熊猫事务所';
 
   // 主题色（Element Plus 档位色）
   const color = themeState.primaryColor;
