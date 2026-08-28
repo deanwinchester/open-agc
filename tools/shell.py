@@ -347,10 +347,24 @@ class ShellTool(BaseTool):
                 permission_whitelist = set(permission_whitelist) | _shared_wl
         except Exception:
             pass
-        allowed, perm_msg, perm_cat, perm_desc = check_command_permission(command, config, session_whitelist=permission_whitelist)
-        if not allowed:
-            raise SandboxBlocked(command, sandbox_dir="permission", tool_name="execute_shell",
-                                 category=perm_cat, description=perm_desc)
+        # One-shot permission grant（approve_once「授权本次」）：该确切命令被
+        # 授权一次——消费掉（用完即焚）并跳过类别检查，下一条同类命令重新弹窗。
+        _consumed_once = False
+        try:
+            from api.state import _session_permission_once
+            _sid_once = kwargs.get("_session_id")
+            if _sid_once is not None:
+                _once_set = _session_permission_once.get(_sid_once)
+                if _once_set and command in _once_set:
+                    _once_set.discard(command)
+                    _consumed_once = True
+        except Exception:
+            pass
+        if not _consumed_once:
+            allowed, perm_msg, perm_cat, perm_desc = check_command_permission(command, config, session_whitelist=permission_whitelist)
+            if not allowed:
+                raise SandboxBlocked(command, sandbox_dir="permission", tool_name="execute_shell",
+                                     category=perm_cat, description=perm_desc)
 
         # -- Sudo handling: use sudo -S to read password from stdin --
         # Password comes from user via popup (never from LLM). Written to proc.stdin after Popen.
