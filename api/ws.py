@@ -318,6 +318,13 @@ async def websocket_endpoint(websocket: WebSocket):
             return "BUSY"
 
         agent_is_running = True
+        # Reload latest session history from DB so the agent sees the most recent
+        # messages, including those saved by background tasks or other paths since
+        # this handler's cached copy was built. 此前仅在 WS 连接建立时加载一次，
+        # 后台任务/其他连接写入的新消息不会进入下一轮上下文（生产实证：用户
+        # 回复「B」时请求里丢了最近一条 assistant 回复）。
+        if not resume_task_id:
+            session_history = _load_session_history(ws_session_id)
         # Pre-resolve task_id BEFORE agent execution so tools always get a valid _task_id.
         # resume_task_id is used when explicitly resuming; otherwise detect new vs continuation.
         if resume_task_id:

@@ -416,6 +416,9 @@ class ConfigUpdate(BaseModel):
     # 调度者（分身）模式开关与分身叫法
     dispatcher_mode: Optional[bool] = None
     agent_worker_name: Optional[str] = None
+    # 视觉模型配置：vision_models 按模型名包含匹配；vision_capable 强制开关
+    vision_models: Optional[List[str]] = None
+    vision_capable: Optional[bool] = None
 
 
 
@@ -498,6 +501,10 @@ async def get_settings(session_id: int = None):
         "sandbox_dir": config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace"))),
 
         "llamacpp_ctx_size": config.get("llamacpp_ctx_size", 32768),
+
+        "vision_models": config.get("vision_models", []),
+
+        "vision_capable": config.get("vision_capable", None),
 
         "browser_headless": config.get("browser_headless", False),
 
@@ -672,6 +679,14 @@ async def update_settings(config_update: ConfigUpdate):
         if config_update.llamacpp_ctx_size is not None:
 
             config["llamacpp_ctx_size"] = config_update.llamacpp_ctx_size
+
+        if config_update.vision_models is not None:
+
+            config["vision_models"] = [str(s).strip() for s in config_update.vision_models if str(s).strip()]
+
+        if config_update.vision_capable is not None:
+
+            config["vision_capable"] = config_update.vision_capable
 
         if config_update.browser_headless is not None:
 

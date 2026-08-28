@@ -215,6 +215,28 @@ class TestVisionGating:
         assert result.startswith("Error")
         assert IMAGE_MARKER not in result
 
+    def test_config_vision_models_allows_custom_model(self, tmp_path, monkeypatch):
+        img = _make_image(tmp_path / "a.png")
+        _write_config(tmp_path, monkeypatch, vision_models=["qwen3.8"])
+        result = ImageViewTool().execute(
+            path=img, _agent_context=_vision_agent("qwen38/Qwen3.8-27B"))
+        assert IMAGE_MARKER in result
+
+    def test_config_vision_capable_overrides_heuristic(self, tmp_path, monkeypatch):
+        img = _make_image(tmp_path / "a.png")
+        _write_config(tmp_path, monkeypatch, vision_capable=True)
+        result = ImageViewTool().execute(
+            path=img, _agent_context=_vision_agent("some-random-text-model-9000"))
+        assert IMAGE_MARKER in result
+
+    def test_config_vision_capable_false_blocks_heuristic(self, tmp_path, monkeypatch):
+        img = _make_image(tmp_path / "a.png")
+        _write_config(tmp_path, monkeypatch, vision_capable=False)
+        result = ImageViewTool().execute(
+            path=img, _agent_context=_vision_agent("gpt-4o"))
+        assert result.startswith("Error")
+        assert IMAGE_MARKER not in result
+
 
 class TestIsVisionModel:
     @pytest.mark.parametrize("model", [
