@@ -509,6 +509,8 @@ class TestAnthropicPromptCacheMarker:
         assert marked[2]["content"][0]["cache_control"] == {"type": "ephemeral"}
 
     def test_kimi_code_build_kwargs_marks_system(self):
+        """kimi_code main-agent long prompts need explicit cache_control to hit
+        reliably (生产实证：有标记连续命中、回退后全灭)。"""
         client = self._client()
         kwargs = client._build_model_kwargs(
             "kimi_code/k3",
@@ -518,6 +520,42 @@ class TestAnthropicPromptCacheMarker:
         content = kwargs["messages"][0]["content"]
         assert isinstance(content, list)
         assert content[0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_anthropic_build_kwargs_marks_system(self):
+        client = self._client()
+        kwargs = client._build_model_kwargs(
+            "anthropic/claude-3-5-sonnet-20241022",
+            [{"role": "system", "content": "STATIC"}, {"role": "user", "content": "hi"}],
+        )
+        content = kwargs["messages"][0]["content"]
+        assert isinstance(content, list)
+        assert content[0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_breakpoint_skips_dynamic_context_message(self):
+        """The changing 【系统补充上下文】 block must not be inside the cached prefix."""
+        from core.llm_client import LLMClient
+        messages = [
+            {"role": "system", "content": "STATIC PROMPT"},
+            {"role": "assistant", "content": "之前的回复"},
+            {"role": "user", "content": "【系统补充上下文】（仅供参考，非用户输入）\n\n## 当前时间\n2026-08-28 10:00:00"},
+            {"role": "user", "content": "当前问题"},
+        ]
+        marked = LLMClient._mark_anthropic_prompt_cache(messages)
+        # first system marked
+        assert isinstance(marked[0]["content"], list)
+        assert marked[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        # the stable message BEFORE the dynamic context is the breakpoint
+        assert isinstance(marked[1]["content"], list)
+        assert marked[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        # dynamic context and current user message are NOT marked
+        dyn = marked[2]["content"]
+        if isinstance(dyn, list):
+            assert not any("cache_control" in b for b in dyn)
+        else:
+            assert True  # left as plain string
+        last = marked[3]["content"]
+        if isinstance(last, list):
+            assert not any("cache_control" in b for b in last)
 
 
 @_litellm
@@ -587,6 +625,88 @@ class TestStreamCollectLogging:
         assert entry["completion_tokens"] == 5
         assert entry["total_tokens"] == 47
         assert entry["cache_hit"] == "miss"
+
+    def test_end_to_end_cache_breakpoint_stable_across_turns(self, monkeypatch):
+        """Simulate two consecutive turns with a per-turn dynamic context block.
+        The cache_control breakpoint must sit on the stable message BEFORE the
+        dynamic block, so the API's cached prefix repeats across turns."""
+        from core.llm_client import litellm
+
+        logged = []
+        monkeypatch.setattr("core.llm_client._log_model_call", lambda **kw: logged.append(kw))
+        captured = []
+
+        class FakeDelta:
+            content = "ok"
+
+        class FakeChoice:
+            delta = FakeDelta()
+
+        class FakeUsageChunk:
+            prompt_tokens = 100
+            completion_tokens = 10
+            cache_read_input_tokens = 50
+
+        class FakeChunk:
+            choices = [FakeChoice()]
+            usage = FakeUsageChunk()
+            model = "anthropic/k3"
+
+        def fake_completion(**kwargs):
+            captured.append(kwargs)
+            yield FakeChunk()
+
+        class FakeMessage:
+            content = "ok"
+            tool_calls = None
+
+        class FakeUsage:
+            prompt_tokens = 100
+            completion_tokens = 10
+
+        class FakeResponse:
+            choices = [type("C", (), {"message": FakeMessage()})()]
+            usage = FakeUsage()
+
+        monkeypatch.setattr(litellm, "completion", fake_completion)
+        monkeypatch.setattr(litellm, "stream_chunk_builder", lambda chunks, **kw: FakeResponse())
+
+        client = self._client()
+
+        # Turn 1: dynamic context inserted before the current user message
+        msgs1 = [
+            {"role": "system", "content": "STATIC"},
+            {"role": "user", "content": "【系统补充上下文】（仅供参考）\n\n## 当前时间\n2026-08-28 10:00:00"},
+            {"role": "user", "content": "q1"},
+        ]
+        client.chat_stream_collect(messages=msgs1)
+
+        # Turn 2: previous dynamic block removed, new one inserted before q2
+        msgs2 = [
+            {"role": "system", "content": "STATIC"},
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "【系统补充上下文】（仅供参考）\n\n## 当前时间\n2026-08-28 10:01:00"},
+            {"role": "user", "content": "q2"},
+        ]
+        client.chat_stream_collect(messages=msgs2)
+
+        # Turn 2 request: breakpoint must be on the stable assistant message (index 2),
+        # not on the dynamic block (index 3) or the current user message (index 4).
+        req2 = captured[1]["messages"]
+        bp = req2[2]["content"]
+        assert isinstance(bp, list) and bp[0].get("cache_control") == {"type": "ephemeral"}
+        dyn = req2[3]["content"]
+        if isinstance(dyn, list):
+            assert not any("cache_control" in b for b in dyn)
+        last = req2[4]["content"]
+        if isinstance(last, list):
+            assert not any("cache_control" in b for b in last)
+
+        # Log must show the cache hit from the supplemented usage
+        assert len(logged) == 2
+        assert logged[1]["cache_hit"] == "hit"
+        assert logged[1]["cached_tokens"] == 50
 
     def test_stream_collect_supplements_deepseek_cache_hit(self, monkeypatch):
         """stream_chunk_builder drops DeepSeek's prompt_cache_hit_tokens when it
