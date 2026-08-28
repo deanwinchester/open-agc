@@ -74,6 +74,15 @@ def test_linux_deb_builds_binaries_in_glibc228_container():
     assert "pyinstaller" in run
 
 
+def test_assemble_step_recovers_ownership_from_root_container():
+    """容器以 root 构建产物，Assemble 步骤必须先 chown 归还 runner，
+    否则非 root 写 dist/ 报 Permission denied（CI 实证）。"""
+    job = _linux_deb_job()
+    step = next(s for s in job["steps"] if s.get("name") == "Assemble deb directory")
+    assert "chown -R" in step["run"]
+    assert "dist build" in step["run"]
+
+
 def test_litellm_pinned_below_198_for_python310():
     """litellm 1.98.0 起放弃 Python 3.10（typing.NotRequired 仅 3.11+）。"""
     req = os.path.join(
