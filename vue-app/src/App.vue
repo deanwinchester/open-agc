@@ -165,8 +165,8 @@ async function doUpgrade() {
     >☰</button>
     <aside class="sidebar" :class="{ open: sidebarOpen }">
       <div class="logo">
-        <img class="logo-img" :src="logoUrl" alt="Open-AGC" />
-        <span class="logo-text">{{ themeState.appName || 'Open-AGC' }}</span>
+        <img class="logo-img" :src="logoUrl" alt="熊猫事务所" />
+        <span class="logo-text">{{ themeState.appName || '熊猫事务所' }}</span>
       </div>
       <nav class="menu">
         <router-link
@@ -227,7 +227,7 @@ async function doUpgrade() {
     <!-- 全局访问密码遮罩：局域网未认证时拦截整个界面 -->
     <div v-if="authRequired" class="auth-overlay">
       <div class="auth-card">
-        <img class="auth-logo" :src="logoUrl" alt="Open-AGC" />
+        <img class="auth-logo" :src="logoUrl" alt="熊猫事务所" />
         <h1 class="auth-title">{{ zh.auth.title }}</h1>
         <p class="auth-desc">{{ authLocked ? authLockedMessage : zh.auth.desc }}</p>
         <template v-if="!authLocked">
