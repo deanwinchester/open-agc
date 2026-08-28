@@ -108,6 +108,41 @@ class LlamaCppManager:
             return []
         return [f for f in os.listdir(self.models_dir) if f.endswith(".gguf")]
 
+    @staticmethod
+    def _parse_content_range_total(header: str) -> int:
+        """Extract total size from a Content-Range header like 'bytes 0-99/12345'."""
+        import re
+        m = re.search(r"/(\d+)$", header)
+        if m:
+            return int(m.group(1))
+        return 0
+
+    def _get_with_range_redirects(self, url: str, headers: dict = None,
+                                   timeout: tuple = (10, 60),
+                                   max_redirects: int = 5):
+        """Make a GET request, manually following redirects to keep Range headers.
+
+        The standard ``requests`` redirect handler may strip headers (including
+        ``Range``) when crossing hosts. ModelScope/HF often redirect to CDNs,
+        so we resolve redirects manually and re-apply the Range header.
+        """
+        from urllib.parse import urljoin
+        current_url = url
+        request_headers = headers or {}
+        for _ in range(max_redirects):
+            resp = requests.get(
+                current_url, stream=True, headers=request_headers,
+                allow_redirects=False, timeout=timeout
+            )
+            if resp.status_code in (301, 302, 303, 307, 308):
+                location = resp.headers.get("Location") or resp.headers.get("location")
+                if not location:
+                    return resp
+                current_url = urljoin(current_url, location)
+                continue
+            return resp
+        return resp
+
     def download_model(self, url: str, filename: str, progress_callback=None, resume: bool = True) -> bool:
         """Download a GGUF model from a URL. Supports HTTP Range resume when resume=True."""
         from core.security import resolve_under
@@ -129,23 +164,28 @@ class LlamaCppManager:
                 print(f"[LlamaCPP] Resuming download from byte {resume_offset}...")
 
             print(f"[LlamaCPP] Downloading model to {target_path}...")
-            resp = requests.get(url, stream=True, headers=headers, timeout=30)
+            resp = self._get_with_range_redirects(url, headers=headers)
             resp.raise_for_status()
 
             # Determine total size and whether resume was accepted
             if resp.status_code == 206:
                 # Server accepted range request
                 content_range = resp.headers.get("Content-Range", "")
-                if "/" in content_range:
-                    total_size = int(content_range.split("/")[-1])
+                total_size = self._parse_content_range_total(content_range)
                 if total_size == 0:
                     total_size = int(resp.headers.get("content-length", 0)) + resume_offset
                 mode = "ab"
                 downloaded = resume_offset
             else:
+                if resume_offset > 0:
+                    # We asked for a range but the server ignored it.  Do NOT
+                    # overwrite the existing partial file; require a proper 206.
+                    raise RuntimeError(
+                        f"Server ignored Range request (got {resp.status_code} instead of 206); "
+                        "cannot resume without overwriting existing progress"
+                    )
                 # Server doesn't support range or no partial file; fresh download
                 total_size = int(resp.headers.get("content-length", 0))
-                resume_offset = 0
                 mode = "wb"
                 downloaded = 0
 
@@ -156,6 +196,14 @@ class LlamaCppManager:
                         downloaded += len(chunk)
                         if progress_callback and total_size > 0:
                             progress_callback(downloaded / total_size)
+
+            # Validate that we actually got the bytes we expected
+            if total_size > 0 and downloaded != total_size:
+                raise RuntimeError(
+                    f"Download size mismatch: expected {total_size} bytes, got {downloaded}"
+                )
+            if downloaded == 0:
+                raise RuntimeError("Download finished but no data was received")
 
             # Download complete — rename partial to final
             if os.path.exists(target_path):

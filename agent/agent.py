@@ -2878,7 +2878,8 @@ class OpenAGCAgent:
                                 _pcb({"event": "thinking", "iteration": _iter,
                                       "content": text, "stream": True})
                             else:
-                                _pcb({"event": "response", "content": text, "stream": True})
+                                _pcb({"event": "response", "iteration": _iter,
+                                      "content": text, "stream": True})
                         except Exception:
                             pass
                     response, actual_model = self.llm.chat_stream_collect(
@@ -2950,6 +2951,8 @@ class OpenAGCAgent:
                         cd = getattr(usage, 'completion_tokens_details', None)
                         if cd:
                             cached_tokens = getattr(cd, 'cached_tokens', 0) or 0
+                    if not cached_tokens:
+                        cached_tokens = getattr(usage, 'cache_read_input_tokens', 0) or 0
                     if not cached_tokens:
                         cached_tokens = getattr(usage, 'prompt_cache_hit_tokens', 0) or 0
                 except Exception:

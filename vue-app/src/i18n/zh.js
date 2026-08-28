@@ -3,7 +3,7 @@
 // 新增视图时把文案加到这里，避免字符串散落在组件中。
 
 export default {
-  appName: 'Open-AGC',
+  appName: '熊猫事务所',
 
   // 侧边栏菜单（同时用于路由 meta.title）
   menu: {
@@ -913,6 +913,7 @@ export default {
     askPlaceholder: '请输入您的回答...',
     askSubmit: '提交回答',
     askAnswered: '✓ 您的回答已提交',
+    askExpired: '⏱ 提问已超时，请在任务管理中回答',
     replyFailed: '提交失败',
     taskBackgrounded: '⏸️ **任务已进入后台**',
     taskBackgroundedHint: '完成后将自动恢复执行。',

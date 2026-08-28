@@ -218,14 +218,18 @@ jobs:
   # ── Linux deb ──
   linux-deb:
     needs: create-release
-    # 固定在 ubuntu-22.04：jammy 提供 libwebkit2gtk-4.0-37，与 deb 的 Depends 目标环境一致
-    runs-on: ubuntu-22.04
+    # amd64 固定在 ubuntu-22.04（jammy 提供 libwebkit2gtk-4.0-37，与 deb 的 Depends 目标环境一致）；
+    # arm64 使用 GitHub ARM64 runner（ubuntu-22.04-arm），PyInstaller 原生编译，避免交叉编译。
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
     strategy:
       matrix:
-        # 预留 arm64 扩展：PyInstaller 无法交叉编译，需在 ARM runner 上构建
-        arch: [amd64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4
         with:

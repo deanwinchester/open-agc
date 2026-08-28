@@ -37,7 +37,7 @@ function submit() {
     </div>
     <div v-else-if="entry.error" class="ask-error">✗ {{ entry.error }}</div>
 
-    <template v-if="!entry.answered">
+    <template v-if="!entry.answered && !entry.error">
       <div v-if="entry.options && entry.options.length" class="ask-options">
         <el-button
           v-for="opt in entry.options"

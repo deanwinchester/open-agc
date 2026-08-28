@@ -95,9 +95,12 @@ def _detect_cache_hit(response) -> str:
         usage = getattr(response, "usage", None)
         if usage is None:
             return "unknown"
-        # Anthropic: prompt_tokens_details.cached_tokens > 0
+        # Anthropic / litellm: prompt_tokens_details.cached_tokens > 0
         details = getattr(usage, "prompt_tokens_details", None)
         if details and getattr(details, "cached_tokens", 0) > 0:
+            return "hit"
+        # Anthropic raw usage fields
+        if getattr(usage, "cache_read_input_tokens", 0) > 0:
             return "hit"
         # OpenAI: completion_tokens_details may indicate cached content
         cd = getattr(usage, "completion_tokens_details", None)
@@ -118,10 +121,18 @@ def _detect_cached_tokens(response) -> int:
             return 0
         details = getattr(usage, "prompt_tokens_details", None)
         if details:
-            return getattr(details, "cached_tokens", 0) or 0
+            cached = getattr(details, "cached_tokens", 0) or 0
+            if cached:
+                return cached
         cd = getattr(usage, "completion_tokens_details", None)
         if cd:
-            return getattr(cd, "cached_tokens", 0) or 0
+            cached = getattr(cd, "cached_tokens", 0) or 0
+            if cached:
+                return cached
+        # Anthropic raw usage fields
+        anthropic_hit = getattr(usage, "cache_read_input_tokens", 0)
+        if anthropic_hit:
+            return anthropic_hit
         # DeepSeek: prompt_cache_hit_tokens
         hit = getattr(usage, "prompt_cache_hit_tokens", 0)
         if hit:
@@ -698,6 +709,45 @@ class LLMClient:
                 in_tool_round = False  # non-tool message ends any tool round
         return cleaned
 
+    @staticmethod
+    def _mark_anthropic_prompt_cache(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Add Anthropic prompt-caching breakpoints to a message list.
+
+        Anthropic only reports ``cache_read_input_tokens`` when the request
+        carries explicit ``cache_control`` breakpoints; without them every
+        call shows as a cache miss even with a stable prefix.  We set two
+        breakpoints:
+
+        * the first system message (static instructions/persona/tools)
+        * the last message (the whole conversation-so-far), so the next turn
+          reuses the full prefix and not just the system prompt.
+        """
+        if not messages:
+            return messages
+
+        def _mark(msg: Dict[str, Any]) -> None:
+            content = msg.get("content")
+            if isinstance(content, str):
+                msg["content"] = [
+                    {"type": "text", "text": content,
+                     "cache_control": {"type": "ephemeral"}}
+                ]
+            elif isinstance(content, list):
+                blocks = [dict(b) for b in content]
+                for b in reversed(blocks):
+                    if b.get("type") == "text":
+                        b["cache_control"] = {"type": "ephemeral"}
+                        break
+                msg["content"] = blocks
+
+        out = [dict(m) for m in messages]
+        for m in out:
+            if m.get("role") == "system":
+                _mark(m)
+                break
+        _mark(out[-1])
+        return out
+
     def _build_model_kwargs(self, model: str, messages: List[Dict[str, Any]],
                              tools: Optional[List[Dict[str, Any]]] = None,
                              stream: bool = False) -> Dict[str, Any]:
@@ -746,7 +796,8 @@ class LLMClient:
             kwargs["api_key"] = self.kimi_code_api_key
             kwargs["api_base"] = self.kimi_code_api_base
             kwargs.setdefault("max_tokens", 8192)  # Anthropic Messages API 必填
-            kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
+            kwargs["messages"] = self._mark_anthropic_prompt_cache(
+                self._remove_orphaned_tool_calls(messages))
         elif model.startswith("xiaomi/"):
             # 小米 MiMo（OpenAI 兼容端点）：api_base/api_key 按调用传入
             kwargs["model"] = f"openai/{model.split('/', 1)[1]}"
@@ -771,7 +822,11 @@ class LLMClient:
                 kwargs["model"] = f"openai/{model.split('/', 1)[1]}"
                 kwargs["api_base"] = _cp["base_url"]
                 kwargs["api_key"] = _cp.get("api_key") or "sk-no-key-required"
-            kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
+            cleaned = self._remove_orphaned_tool_calls(messages)
+            # Anthropic（官方或兼容端点）同样需要显式 cache_control 才会报告缓存命中。
+            if "claude" in model.lower() or "anthropic" in model.lower():
+                cleaned = self._mark_anthropic_prompt_cache(cleaned)
+            kwargs["messages"] = cleaned
 
         return kwargs
 
@@ -886,29 +941,22 @@ class LLMClient:
                     tools: Optional[List[Dict[str, Any]]] = None):
         """
         Send a streaming chat completion request with thought tag filtering.
+
+        Logging is intentionally done in :meth:`chat_stream_collect` after
+        ``litellm.stream_chunk_builder`` aggregates the full response and its
+        usage (including litellm's token-counter fallback when the provider
+        does not stream usage).
         """
         target_model = model or self.default_model
         kwargs = self._build_model_kwargs(target_model, messages, tools, stream=True)
-            
+
         try:
             response = litellm.completion(**kwargs)
 
             # Stateful filtering for streaming thought tags
             in_thought_block = False
 
-            # Track accumulated data for logging
-            _stream_start = time.time()
-            _stream_content = ""
-            _last_usage = None
-
             for chunk in response:
-                # Capture usage from final chunk
-                try:
-                    if hasattr(chunk, 'usage') and chunk.usage:
-                        _last_usage = chunk.usage
-                except Exception as _usage_e:
-                    print(f"[LLMClient] Stream usage detection error: {_usage_e}")
-
                 content = None
                 try:
                     content = chunk.choices[0].delta.content
@@ -939,40 +987,8 @@ class LLMClient:
                     chunk.choices[0].delta.content = cleaned
                     if not cleaned:
                         continue
-                    _stream_content += cleaned
-                else:
-                    # Check for tool_calls in delta
-                    try:
-                        delta = chunk.choices[0].delta
-                        tc = getattr(delta, "tool_calls", None)
-                        if tc:
-                            _stream_content += json.dumps([{"function": {"name": t.function.name, "arguments": getattr(t.function, 'arguments', '')}} for t in tc if hasattr(t, 'function') and hasattr(t.function, 'name')], ensure_ascii=False) + " "
-                    except Exception:
-                        pass
 
                 yield chunk
-
-            # Log after stream completes
-            pt = getattr(_last_usage, 'prompt_tokens', 0) if _last_usage else 0
-            ct = getattr(_last_usage, 'completion_tokens', 0) if _last_usage else 0
-            if pt or ct or _stream_content:
-                try:
-                    _cached = _detect_cached_tokens(_last_usage) if _last_usage else 0
-                    _log_model_call(
-                        provider=_infer_provider(target_model),
-                        model=target_model,
-                        prompt_tokens=pt,
-                        completion_tokens=ct,
-                        total_tokens=pt + ct,
-                        request_data=json.dumps(messages, ensure_ascii=False) if messages else "",
-                        response_data=_stream_content,
-                        cache_hit="hit" if _cached > 0 else "miss",
-                        cached_tokens=_cached,
-                        latency_ms=int((time.time() - _stream_start) * 1000),
-                        session_id=self._log_session_id, task_id=self._log_task_id,
-                    )
-                except Exception as log_e:
-                    print(f"[LLMClient] Stream log failed: {log_e}")
 
         except Exception as e:
             print(f"Error calling LLM stream ({target_model}): {str(e)}")
@@ -1038,6 +1054,7 @@ def chat_stream_collect(self, messages: List[Dict[str, Any]],
     无任何动静）。返回 (response, actual_model)，结构与 chat() 兼容。
     """
     target_model = model or self.default_model
+    _stream_start = time.time()
     chunks = []
     for chunk in self.chat_stream(messages, model=target_model, tools=tools):
         chunks.append(chunk)
@@ -1072,6 +1089,32 @@ def chat_stream_collect(self, messages: List[Dict[str, Any]],
     if _empty:
         print("[LLMClient] 流式空响应，回退非流式 chat 重试")
         return self.chat(messages, model=target_model, tools=tools)
+
+    # Log from the aggregated response so litellm can fall back to its
+    # token_counter when the provider did not stream usage chunks.
+    try:
+        usage = getattr(response, "usage", None)
+        pt = getattr(usage, "prompt_tokens", 0) if usage else 0
+        ct = getattr(usage, "completion_tokens", 0) if usage else 0
+        resp_text = ""
+        if _msg:
+            resp_text = getattr(_msg, "content", "") or ""
+            if not resp_text:
+                tc = getattr(_msg, "tool_calls", None)
+                if tc:
+                    resp_text = json.dumps([{"function": {"name": t.function.name, "arguments": getattr(t.function, 'arguments', '')}} for t in tc if hasattr(t, 'function') and hasattr(t.function, 'name')], ensure_ascii=False)
+        _log_model_call(
+            provider=_infer_provider(target_model), model=target_model,
+            prompt_tokens=pt, completion_tokens=ct, total_tokens=pt + ct,
+            request_data=json.dumps(messages, ensure_ascii=False) if messages else "",
+            response_data=resp_text,
+            cache_hit=_detect_cache_hit(response), cached_tokens=_detect_cached_tokens(response),
+            latency_ms=int((time.time() - _stream_start) * 1000),
+            session_id=self._log_session_id, task_id=self._log_task_id,
+        )
+    except Exception as log_e:
+        print(f"[LLMClient] Stream collect log failed: {log_e}")
+
     return response, target_model
 
 
