@@ -230,6 +230,26 @@ _SHORT_ANSWER_EXACT = {
 }
 
 
+def _resolve_stream_enabled(config_path: str, default_model: str) -> bool:
+    """Resolve whether to use streaming for the current model.
+
+    kimi_code（Moonshot Anthropic 端点）流式响应不返回
+    ``cache_read_input_tokens``，非流式才有缓存显示（分身/子代理即非流式
+    命中）。因此 kimi_code 默认强制非流式；确需流式可在 config.json 设
+    ``kimi_code_stream_enabled=true``。其他模型遵循全局
+    ``llm_stream_enabled``（默认 true）。
+    """
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return True
+    stream_on = bool(cfg.get("llm_stream_enabled", True))
+    if "kimi_code/" in str(default_model or ""):
+        stream_on = bool(cfg.get("kimi_code_stream_enabled", False))
+    return stream_on
+
+
 def _annotate_short_answer(user_input: str, messages: List[Dict[str, Any]]) -> str:
     """给「短选项回答」加上下文指向，避免模型把它关联到更早的提问。
 
@@ -2904,11 +2924,8 @@ class OpenAGCAgent:
             # config.llm_stream_enabled=false 或无 progress_callback（测试）时回退非流式。
             _stream_on = False
             if progress_callback is not None:
-                try:
-                    with open(config_path, encoding="utf-8") as _scf:
-                        _stream_on = bool(json.load(_scf).get("llm_stream_enabled", True))
-                except Exception:
-                    _stream_on = True
+                _stream_on = _resolve_stream_enabled(
+                    config_path, getattr(self.llm, "default_model", "") or "")
             try:
                 if _stream_on:
                     def _on_delta(kind, text, _iter=current_iter, _pcb=progress_callback):
