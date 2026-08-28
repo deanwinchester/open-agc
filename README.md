@@ -247,8 +247,8 @@ open-agc/
 
 > **架构选择**：x86_64（Intel/AMD）请下载 `Open-AGC-<VERSION>-Linux-amd64.deb`；UOS / 银河麒麟 / 鲲鹏 / 飞腾等 ARM64 设备请下载 `Open-AGC-<VERSION>-Linux-arm64.deb`。本地手动打包在目标架构机器上执行 `./build_deb.sh amd64` 或 `./build_deb.sh arm64`。
 >
-> **glibc 兼容**：Release CI 在 `manylinux_2_28`（glibc 2.28）容器内构建 Linux 二进制，可运行于 glibc ≥ 2.28 的系统（含 UOS / 银河麒麟）。本地用新系统（glibc 更高）直接 `./build_deb.sh` 打出的包**不兼容** glibc 2.28 目标机；如需本地兼容构建，请在 manylinux 容器内执行 PyInstaller，例如：
-> `docker run --rm -v "$PWD":/src -w /src quay.io/pypa/manylinux_2_28_x86_64 bash -c "/opt/python/cp310-cp310/bin/python -m venv /tmp/v && source /tmp/v/bin/activate && pip install pyinstaller -r requirements.txt pywebview && pyinstaller open_agc.spec --clean --noconfirm --distpath dist/linux --workpath build/linux"`（arm64 换 `manylinux_2_28_aarch64`），再运行 `./build_deb.sh` 的组装部分。
+> **glibc 兼容**：Release CI 在 `python:3.10-buster`（Debian 10, glibc 2.28）容器内构建 Linux 二进制，可运行于 glibc ≥ 2.28 的系统（含 UOS / 银河麒麟）。本地用新系统（glibc 更高）直接 `./build_deb.sh` 打出的包**不兼容** glibc 2.28 目标机；如需本地兼容构建，请在 glibc 2.28 容器内执行 PyInstaller，例如：
+> `docker run --rm -v "$PWD":/src -w /src python:3.10-buster bash -c "python -m venv /tmp/v && source /tmp/v/bin/activate && pip install pyinstaller -r requirements.txt pywebview && pyinstaller open_agc.spec --clean --noconfirm --distpath dist/linux --workpath build/linux"`（arm64 换 `arm64v8/python:3.10-buster`），再运行 `./build_deb.sh` 的组装部分。
 
 推送 `release` 分支时，GitHub Actions 自动构建并发布全部平台安装包（Docker 镜像、Windows ZIP、macOS DMG、Linux amd64/arm64 deb）。
 

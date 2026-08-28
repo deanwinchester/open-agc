@@ -85,12 +85,27 @@ def check_server_and_load(window, port):
         pass
 
 def create_window(port):
-    """Create a native window with the web UI embedded."""
+    """Create a native window with the web UI embedded.
+
+    原生窗口依赖系统 GUI 后端（Windows WinForms / macOS Cocoa / Linux GTK +
+    WebKit2 typelib）。Linux 上若 PyGObject/WebKit2 不可用（如目标机缺
+    gir1.2-webkit2-4.0 或 Python 版本不匹配），整个创建过程可能抛异常——
+    回退到默认浏览器打开 Web UI，保证应用可用。
+    """
     try:
         import webview
     except ImportError:
         print("pywebview not installed. Install with: pip install pywebview")
         print(f"Falling back to browser mode: http://localhost:{port}")
+        import webbrowser
+        webbrowser.open(f"http://localhost:{port}")
+        return False
+
+    def _browser_fallback(reason):
+        try:
+            print(f"Native window unavailable ({reason}); falling back to browser mode: http://localhost:{port}")
+        except Exception:
+            pass
         import webbrowser
         webbrowser.open(f"http://localhost:{port}")
         return False
@@ -120,33 +135,37 @@ def create_window(port):
     </html>
     """
 
-    # Create native window
-    window = webview.create_window(
-        title="🐼 Open-AGC Panda",
-        html=loading_html,
-        width=1200,
-        height=800,
-        min_size=(800, 600),
-        resizable=True,
-        text_select=True,
-        confirm_close=True,
-    )
+    # Create native window — 任一环节失败（GTK 后端缺 gi、WebKit2 typelib
+    # 缺失、Python 版本不匹配等）都回退浏览器模式，保证 Web UI 可用。
+    try:
+        window = webview.create_window(
+            title="🐼 Open-AGC Panda",
+            html=loading_html,
+            width=1200,
+            height=800,
+            min_size=(800, 600),
+            resizable=True,
+            text_select=True,
+            confirm_close=True,
+        )
 
-    # Add menu items for restart/about
-    def on_closing():
-        os._exit(0)
+        # Add menu items for restart/about
+        def on_closing():
+            os._exit(0)
 
-    window.events.closing += on_closing
+        window.events.closing += on_closing
 
-    import threading
-    t = threading.Thread(target=check_server_and_load, args=(window, port), daemon=True)
-    t.start()
+        import threading
+        t = threading.Thread(target=check_server_and_load, args=(window, port), daemon=True)
+        t.start()
 
-    webview.start(
-        debug=False,
-        gui=None,  # Auto-detect best backend
-    )
-    return True
+        webview.start(
+            debug=False,
+            gui=None,  # Auto-detect best backend
+        )
+        return True
+    except Exception as _gui_err:
+        return _browser_fallback(_gui_err)
 
 
 def main():

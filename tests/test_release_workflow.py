@@ -51,20 +51,36 @@ def test_build_deb_script_uses_xz_compression():
     assert "dpkg-deb --build -Zxz" in content
 
 
-def test_linux_deb_matrix_defines_manylinux_image_per_arch():
-    """PyInstaller 必须在 glibc 2.28 的 manylinux 容器内构建，兼容 UOS。"""
+def test_linux_deb_matrix_defines_glibc228_image_per_arch():
+    """PyInstaller 必须在 glibc 2.28 的 python:3.10-buster 容器内构建（兼容 UOS）。
+
+    官方 python 镜像以 --enable-shared 构建 CPython，满足 PyInstaller 对
+    libpython 的要求；manylinux 的 cp310 为静态库，不可用。
+    """
     job = _linux_deb_job()
     include = job["strategy"]["matrix"]["include"]
     images = {entry["arch"]: entry["image"] for entry in include}
-    assert images["amd64"] == "quay.io/pypa/manylinux_2_28_x86_64"
-    assert images["arm64"] == "quay.io/pypa/manylinux_2_28_aarch64"
+    assert images["amd64"] == "python:3.10-buster"
+    assert images["arm64"] == "arm64v8/python:3.10-buster"
 
 
-def test_linux_deb_builds_binaries_in_manylinux_container():
+def test_linux_deb_builds_binaries_in_glibc228_container():
     job = _linux_deb_job()
     steps = job["steps"]
-    step = next(s for s in steps if "manylinux" in s.get("name", "").lower())
+    step = next(s for s in steps if "glibc" in s.get("name", "").lower())
     run = step["run"]
     assert "docker run" in run
-    assert "/opt/python/cp310-cp310/bin/python" in run
+    assert "python -m venv" in run
     assert "pyinstaller" in run
+
+
+def test_litellm_pinned_below_198_for_python310():
+    """litellm 1.98.0 起放弃 Python 3.10（typing.NotRequired 仅 3.11+）。"""
+    req = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "requirements.txt",
+    )
+    with open(req, "r", encoding="utf-8") as f:
+        content = f.read()
+    line = next(l for l in content.splitlines() if l.strip().startswith("litellm"))
+    assert "<1.98.0" in line
