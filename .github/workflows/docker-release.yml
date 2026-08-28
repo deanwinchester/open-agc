@@ -218,8 +218,11 @@ jobs:
   # ── Linux deb ──
   linux-deb:
     needs: create-release
-    # amd64 固定在 ubuntu-22.04（jammy 提供 libwebkit2gtk-4.0-37，与 deb 的 Depends 目标环境一致）；
-    # arm64 使用 GitHub ARM64 runner（ubuntu-22.04-arm），PyInstaller 原生编译，避免交叉编译。
+    # PyInstaller 在 manylinux_2_28（glibc 2.28）容器内构建，使打包出的
+    # libpython/*.so 链接旧 glibc，兼容 UOS/银河麒麟等 glibc 2.28 目标机
+    # （此前在 ubuntu-22.04 上构建链接 glibc 2.35，目标机报 GLIBC_2.35 not found）。
+    # amd64 跑 x86_64 runner + manylinux_2_28_x86_64；arm64 跑 ARM runner +
+    # manylinux_2_28_aarch64，均原生编译，避免交叉编译。
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
@@ -228,8 +231,10 @@ jobs:
         include:
           - arch: amd64
             runner: ubuntu-22.04
+            image: quay.io/pypa/manylinux_2_28_x86_64
           - arch: arm64
             runner: ubuntu-22.04-arm
+            image: quay.io/pypa/manylinux_2_28_aarch64
     steps:
       - uses: actions/checkout@v4
         with:
@@ -239,11 +244,6 @@ jobs:
         id: version
         run: echo "version=$(cat VERSION)" >> $GITHUB_OUTPUT
 
-      - name: Setup Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -252,26 +252,28 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.0-37 libgtk-3-0 dpkg-dev
+          sudo apt-get install -y dpkg-dev
 
       - name: Build frontend
         run: |
           npm install
           npm run build
 
-      - name: Install Python dependencies
+      # 在 manylinux 容器内构建：venv 放容器 /tmp 避免污染仓库；dist/build
+      # 输出经卷挂载回 runner 供后续组装。manylinux 的 cp310 与系统 .so 均链接
+      # glibc 2.28，pip 也会优先选用 manylinux_2_28 / manylinux2014 wheel。
+      - name: Build binaries in manylinux container (glibc 2.28)
         run: |
-          python -m venv build_venv
-          source build_venv/bin/activate
-          pip install --upgrade pip
-          pip install pyinstaller
-          pip install -r requirements.txt
-          pip install pywebview
-
-      - name: Build with PyInstaller
-        run: |
-          source build_venv/bin/activate
-          pyinstaller open_agc.spec --clean --noconfirm --distpath dist/linux --workpath build/linux
+          docker run --rm -v "$PWD":/src -w /src "${{ matrix.image }}" bash -c "
+            set -e
+            /opt/python/cp310-cp310/bin/python -m venv /tmp/build_venv
+            source /tmp/build_venv/bin/activate
+            pip install --upgrade pip
+            pip install pyinstaller
+            pip install -r requirements.txt
+            pip install pywebview
+            pyinstaller open_agc.spec --clean --noconfirm --distpath dist/linux --workpath build/linux
+          "
 
       - name: Assemble deb directory
         run: |
