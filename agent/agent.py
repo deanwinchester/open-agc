@@ -1518,7 +1518,27 @@ class OpenAGCAgent:
                 return f"Operation denied by user: {desc} (permanent)"
             elif action == "deny_once":
                 return f"Operation denied by user: {desc}"
-            elif action in ("approve_once", "approve_session"):
+            elif action == "approve_once":
+                # 一次性授权（「授权本次」）：只放行当前这一条命令，下一条同类
+                # 命令重新弹窗。不把类别写进会话白名单（那是 approve_session 的
+                # 语义）——此前二者混用导致首次授权后同类命令再不弹窗。
+                _sudo_pw = ""
+                if category == "sudo":
+                    _sudo_pw = result_holder.get("password", "")
+                    if not _sudo_pw:
+                        return "Operation denied: sudo requires a password but none was provided."
+                    # 密码仅一次性用于本次重试（_pending_sudo_password 用完即清），
+                    # 不写入会话持久缓存——下一条 sudo 重新弹窗要求输入。
+                    self._pending_sudo_password = _sudo_pw
+                try:
+                    from api.state import _session_permission_once
+                    if self.session_id is not None:
+                        _session_permission_once.setdefault(self.session_id, set()).add(sb.path)
+                        print(f"[Agent] Permission approved (once): {category} — {sb.path[:80]}")
+                except Exception as _once_e:
+                    print(f"[Agent] once-store error: {_once_e}")
+                return None  # Retry（shell 侧消费该一次性授权）
+            elif action == "approve_session":
                 self._session_permission_whitelist.add(category)
                 print(f"[Agent] Permission approved (session): {category}")
                 _sudo_pw = ""

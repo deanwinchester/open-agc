@@ -59,6 +59,12 @@ _session_sudo_passwords: Dict[int, str] = {}
 # Session-level permission whitelist: {session_id: set(categories)}
 _session_permission_whitelists: Dict[int, set] = {}
 
+# Session-level ONE-SHOT permission grants: {session_id: set(command_strings)}
+# approve_once（「授权本次」）只授权当前这一条命令——shell 执行到该命令时
+# 消费掉（用完即焚），下一条同类命令重新弹窗；与 _session_permission_whitelists
+# （approve_session/approve_always 的整类放行）语义区分。
+_session_permission_once: Dict[int, set] = {}
+
 
 def check_protected_pid(pid: int) -> bool:
     """Check if a PID belongs to the Open-AGC server or its parent processes.
