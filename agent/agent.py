@@ -224,6 +224,44 @@ _DEFAULT_SOUL_MD = """# 人格设定（soul.md）
 """
 
 
+_SHORT_ANSWER_EXACT = {
+    "是", "否", "要", "不要", "好", "不好", "可以", "不行", "行", "对", "错",
+    "yes", "no", "y", "n", "ok", "okay", "sure", "cancel",
+}
+
+
+def _annotate_short_answer(user_input: str, messages: List[Dict[str, Any]]) -> str:
+    """给「短选项回答」加上下文指向，避免模型把它关联到更早的提问。
+
+    当用户只回 A/B/是/否 这类短答案，而上一条 assistant 消息末尾带有
+    问题时，在内容前加一句「针对你上一条提问的回答」。这样模型会把答案
+    绑定到最近的问题，而不是对话里更早的待办提问。
+    """
+    try:
+        short = (user_input or "").strip()
+        if not short or len(short) > 12:
+            return user_input
+        is_option = bool(re.fullmatch(r"[A-Da-d]", short)) or short.lower() in _SHORT_ANSWER_EXACT
+        if not is_option:
+            return user_input
+        last_assistant = None
+        for m in reversed(messages):
+            if m.get("role") == "assistant":
+                last_assistant = m
+                break
+        if not last_assistant:
+            return user_input
+        c = last_assistant.get("content", "")
+        if isinstance(c, list):
+            c = " ".join(str(p.get("text", "")) for p in c if isinstance(p, dict))
+        tail = str(c)[-400:]
+        if "？" not in tail and "?" not in tail:
+            return user_input
+        return f"（针对你上一条提问的回答）{user_input}"
+    except Exception:
+        return user_input
+
+
 class OpenAGCAgent:
     """
     Main Agent Loop handling context, Tool calling, and orchestration.
@@ -2413,7 +2451,8 @@ class OpenAGCAgent:
 
         # Only append user message if it's not None (None means we are resuming from ask_user_question)
         if user_input is not None:
-            self.messages.append(build_user_message(user_input, images))
+            _user_msg = _annotate_short_answer(user_input, self.messages)
+            self.messages.append(build_user_message(_user_msg, images))
             if self.logger:
                 self.logger.log_user_query(user_input)
 

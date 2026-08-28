@@ -106,6 +106,9 @@ export default {
         fallback: '回退模型（逗号分隔）',
         fallbackPlaceholder: '如：gpt-3.5-turbo, claude-3-haiku-20240307',
         fallbackHint: '当默认模型不可用时，将按此顺序依次尝试。',
+        visionModels: '视觉模型（逗号分隔）',
+        visionModelsPlaceholder: '如：qwen3.8, -vl, gpt-4o',
+        visionModelsHint: '按模型名包含匹配；命中的模型允许使用 image_view 查看图片。留空则按内置规则识别。',
       },
       customProviders: {
         title: '🧩 自定义厂商',

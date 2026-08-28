@@ -587,3 +587,58 @@ class TestStreamCollectLogging:
         assert entry["completion_tokens"] == 5
         assert entry["total_tokens"] == 47
         assert entry["cache_hit"] == "miss"
+
+    def test_stream_collect_supplements_deepseek_cache_hit(self, monkeypatch):
+        """stream_chunk_builder drops DeepSeek's prompt_cache_hit_tokens when it
+        is not pre-mapped into prompt_tokens_details; chat_stream_collect must
+        supplement it from the raw chunk usage so the debug log shows the hit."""
+        from core.llm_client import _log_model_call, litellm
+
+        logged = []
+        monkeypatch.setattr("core.llm_client._log_model_call", lambda **kw: logged.append(kw))
+
+        class FakeUsageChunk:
+            prompt_tokens = 100
+            completion_tokens = 10
+            prompt_cache_hit_tokens = 64
+
+        class FakeDelta:
+            content = "hello"
+
+        class FakeChoice:
+            delta = FakeDelta()
+
+        class FakeChunk:
+            choices = [FakeChoice()]
+            usage = FakeUsageChunk()
+            model = "deepseek/deepseek-chat"
+
+        def fake_completion(**kwargs):
+            yield FakeChunk()
+
+        class FakeMessage:
+            content = "hello"
+            tool_calls = None
+
+        class FakeUsage:
+            prompt_tokens = 100
+            completion_tokens = 10
+            prompt_tokens_details = None
+            cache_read_input_tokens = 0
+
+        class FakeResponse:
+            choices = [type("C", (), {"message": FakeMessage()})()]
+            usage = FakeUsage()
+
+        monkeypatch.setattr(litellm, "completion", fake_completion)
+        monkeypatch.setattr(litellm, "stream_chunk_builder", lambda chunks, **kw: FakeResponse())
+
+        client = self._client()
+        client.default_model = "deepseek/deepseek-chat"
+        resp, model = client.chat_stream_collect(messages=[{"role": "user", "content": "hi"}])
+
+        assert len(logged) == 1
+        entry = logged[0]
+        assert entry["provider"] == "deepseek"
+        assert entry["cached_tokens"] == 64
+        assert entry["cache_hit"] == "hit"

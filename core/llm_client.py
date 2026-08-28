@@ -1056,8 +1056,27 @@ def chat_stream_collect(self, messages: List[Dict[str, Any]],
     target_model = model or self.default_model
     _stream_start = time.time()
     chunks = []
+    _raw_usage = {}
     for chunk in self.chat_stream(messages, model=target_model, tools=tools):
         chunks.append(chunk)
+        # Capture raw usage fields from any chunk. litellm's stream_chunk_builder
+        # drops vendor-specific cache fields (e.g. DeepSeek's
+        # prompt_cache_hit_tokens) when they are not already mapped into
+        # prompt_tokens_details, so we keep a raw copy to supplement the
+        # aggregated response before logging.
+        try:
+            u = getattr(chunk, "usage", None)
+            if u:
+                for k in ("prompt_cache_hit_tokens", "cache_read_input_tokens",
+                          "cache_creation_input_tokens", "prompt_tokens",
+                          "completion_tokens"):
+                    v = getattr(u, k, None)
+                    if v is None and isinstance(u, dict):
+                        v = u.get(k)
+                    if v:
+                        _raw_usage[k] = v
+        except Exception:
+            pass
         if on_delta:
             try:
                 delta = chunk.choices[0].delta
@@ -1074,6 +1093,31 @@ def chat_stream_collect(self, messages: List[Dict[str, Any]],
     response = litellm.stream_chunk_builder(chunks)
     if response is None:
         raise ValueError("stream_chunk_builder returned None")
+
+    # Supplement vendor-specific cache fields that stream_chunk_builder drops.
+    usage = getattr(response, "usage", None)
+    if usage is not None and _raw_usage:
+        for k in ("prompt_cache_hit_tokens", "cache_read_input_tokens",
+                  "cache_creation_input_tokens"):
+            if _raw_usage.get(k) and not getattr(usage, k, 0):
+                try:
+                    setattr(usage, k, _raw_usage[k])
+                except Exception:
+                    pass
+        if _raw_usage.get("prompt_cache_hit_tokens"):
+            details = getattr(usage, "prompt_tokens_details", None)
+            if details is None:
+                try:
+                    from litellm.types.utils import PromptTokensDetailsWrapper
+                    usage.prompt_tokens_details = PromptTokensDetailsWrapper(
+                        cached_tokens=_raw_usage["prompt_cache_hit_tokens"])
+                except Exception:
+                    pass
+            elif not getattr(details, "cached_tokens", 0):
+                try:
+                    details.cached_tokens = _raw_usage["prompt_cache_hit_tokens"]
+                except Exception:
+                    pass
     # 流式空响应回退（生产实证 #420：k3 在 ~58k 上下文时长流式被切断/秒拒，
     # 连续 7 次空响应、pt=0——聚合出空 message 会让 run_turn 整轮炸掉；
     # 同上下文非流式随即恢复，故回退非流式 chat（自带 3 次重试+fallback））

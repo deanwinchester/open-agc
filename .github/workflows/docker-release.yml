@@ -373,7 +373,9 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           ARCH="${{ matrix.arch }}"
-          dpkg-deb --build --root-owner-group \
+          # 用 xz 压缩：新版 dpkg-deb 默认 zstd，UOS/旧版 dpkg 不支持会报
+          # 「对成员 control.tar.zst 使用了未知的压缩」。xz 在 Debian/UOS 上普遍可用。
+          dpkg-deb --build -Zxz --root-owner-group \
             "dist/deb_staging/open-agc_${VERSION}_${ARCH}" \
             "dist/Open-AGC-${VERSION}-Linux-${ARCH}.deb"
 
