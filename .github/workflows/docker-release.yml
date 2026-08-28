@@ -287,6 +287,9 @@ jobs:
 
       - name: Assemble deb directory
         run: |
+          # 容器以 root 运行，dist/build 产物默认 root 所有——先归还所有权给
+          # runner 用户，否则本步骤（非 root）写 dist/ 报 Permission denied。
+          sudo chown -R "$(id -u):$(id -g)" dist build || true
           VERSION="${{ steps.version.outputs.version }}"
           ARCH="${{ matrix.arch }}"
           STAGING_DIR="dist/deb_staging/open-agc_${VERSION}_${ARCH}"
