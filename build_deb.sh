@@ -216,7 +216,9 @@ echo "  ✅ Staged at ${STAGING_DIR}"
 echo "[4/5] Building .deb package..."
 
 rm -f "dist/${DEB_NAME}"
-dpkg-deb --build --root-owner-group "${STAGING_DIR}" "dist/${DEB_NAME}"
+# 用 xz 压缩：新版 dpkg-deb 默认 zstd，UOS/旧版 dpkg 不支持会报
+# 「对成员 control.tar.zst 使用了未知的压缩」。xz 在 Debian/UOS 上普遍可用。
+dpkg-deb --build -Zxz --root-owner-group "${STAGING_DIR}" "dist/${DEB_NAME}"
 
 echo "  ✅ Package created: dist/${DEB_NAME}"
 

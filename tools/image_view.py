@@ -68,6 +68,29 @@ def _resolve_model_name(agent) -> str:
     return str(model)
 
 
+def _config_vision_flag(config: dict, model_name: str) -> Optional[bool]:
+    """从 config.json 读视觉能力覆盖配置。
+
+    - ``vision_capable``：布尔值，显式开/关当前模型的视觉能力。
+    - ``vision_models``：字符串列表（或逗号分隔字符串），按模型名包含匹配；
+      命中即视为视觉模型。用于自定义渠道（如 qwen38/Qwen3.8-27B）无法被
+      litellm.supports_vision 识别的场景。
+    """
+    if not isinstance(config, dict):
+        return None
+    if "vision_capable" in config and config.get("vision_capable") is not None:
+        return bool(config.get("vision_capable"))
+    vision_models = config.get("vision_models") or []
+    if isinstance(vision_models, str):
+        vision_models = [s.strip() for s in vision_models.split(",") if s.strip()]
+    name = (model_name or "").lower()
+    for entry in vision_models:
+        e = str(entry).strip().lower()
+        if e and e in name:
+            return True
+    return None
+
+
 def _load_image_data_url(path: str, ext: str, max_size: int):
     """读取并（可选）缩放图片，返回 (data_url, orig_w, orig_h, scaled, note)。"""
     try:
@@ -167,10 +190,12 @@ class ImageViewTool(BaseTool):
             return ("Error: image_view 已被配置禁用（config.json: image_view_enabled=false）。"
                     "如需使用请开启该开关。")
 
-        # 视觉能力检查：agent 能力标记优先，否则按模型名启发式
+        # 视觉能力检查：config 显式配置 > agent 能力标记 > 模型名启发式
         agent = kwargs.get("_agent_context")
         model_name = _resolve_model_name(agent)
-        capability_flag = getattr(agent, "vision_capable", None) if agent is not None else None
+        capability_flag = _config_vision_flag(config, model_name)
+        if capability_flag is None:
+            capability_flag = getattr(agent, "vision_capable", None) if agent is not None else None
         if not is_vision_model(model_name, capability_flag):
             return (f"Error: 当前模型 '{model_name or '未知'}' 未识别为视觉模型，无法查看图片。"
                     "请切换到具备视觉能力的模型（如 gpt-4o、claude-sonnet 等）后再试，"

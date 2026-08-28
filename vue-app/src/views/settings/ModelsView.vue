@@ -112,6 +112,7 @@ const form = reactive({
   provider: '',
   model: '',
   fallbackModels: '',             // 逗号分隔字符串，保存时切回数组
+  visionModels: '',               // 逗号分隔字符串，保存时切回数组
   llamacppCtxSize: 32768,
 });
 
@@ -163,11 +164,13 @@ function applySettings(data) {
   const init = {
     default_model: data.default_model || '',
     fallback_models: Array.isArray(data.fallback_models) ? [...data.fallback_models] : [],
+    vision_models: Array.isArray(data.vision_models) ? [...data.vision_models] : [],
     llamacpp_ctx_size: data.llamacpp_ctx_size ?? 32768,
   };
   initial.value = init;
 
   form.fallbackModels = init.fallback_models.join(', ');
+  form.visionModels = init.vision_models.join(', ');
   form.llamacppCtxSize = init.llamacpp_ctx_size;
 
   form.provider = providerFromModel(init.default_model);
@@ -246,6 +249,11 @@ function buildPayload() {
   const fallback = form.fallbackModels.split(',').map((s) => s.trim()).filter(Boolean);
   if (JSON.stringify(fallback) !== JSON.stringify(init.fallback_models)) {
     payload.fallback_models = fallback;
+  }
+
+  const visionModels = form.visionModels.split(',').map((s) => s.trim()).filter(Boolean);
+  if (JSON.stringify(visionModels) !== JSON.stringify(init.vision_models)) {
+    payload.vision_models = visionModels;
   }
 
   if (form.llamacppCtxSize != null && form.llamacppCtxSize !== init.llamacpp_ctx_size) {
@@ -599,6 +607,10 @@ onUnmounted(() => {
         <el-form-item :label="t.defaultModel.fallback">
           <el-input v-model="form.fallbackModels" :placeholder="t.defaultModel.fallbackPlaceholder" />
           <div class="field-hint">{{ t.defaultModel.fallbackHint }}</div>
+        </el-form-item>
+        <el-form-item :label="t.defaultModel.visionModels">
+          <el-input v-model="form.visionModels" :placeholder="t.defaultModel.visionModelsPlaceholder" />
+          <div class="field-hint">{{ t.defaultModel.visionModelsHint }}</div>
         </el-form-item>
       </el-form>
     </el-card>
