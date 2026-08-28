@@ -719,8 +719,10 @@ class LLMClient:
         breakpoints:
 
         * the first system message (static instructions/persona/tools)
-        * the last message (the whole conversation-so-far), so the next turn
-          reuses the full prefix and not just the system prompt.
+        * the last **stable** message before the per-turn dynamic context
+          (``【系统补充上下文】``).  The dynamic block contains the current
+          time / memory / task state and changes every turn; putting the
+          breakpoint after it would make the cached prefix never repeat.
         """
         if not messages:
             return messages
@@ -740,12 +742,28 @@ class LLMClient:
                         break
                 msg["content"] = blocks
 
+        def _is_dyn_context(msg: Dict[str, Any]) -> bool:
+            c = msg.get("content", "")
+            if isinstance(c, list):
+                c = " ".join(str(b.get("text", "")) for b in c if isinstance(b, dict))
+            return str(c).startswith("【系统补充上下文】")
+
         out = [dict(m) for m in messages]
         for m in out:
             if m.get("role") == "system":
                 _mark(m)
                 break
-        _mark(out[-1])
+
+        # Find the per-turn dynamic context message; mark the stable message
+        # right before it so the cached prefix excludes the changing block.
+        dyn_idx = None
+        for i, m in enumerate(out):
+            if m.get("role") == "user" and _is_dyn_context(m):
+                dyn_idx = i
+        if dyn_idx is not None and dyn_idx > 0:
+            _mark(out[dyn_idx - 1])
+        else:
+            _mark(out[-1])
         return out
 
     def _build_model_kwargs(self, model: str, messages: List[Dict[str, Any]],
@@ -796,6 +814,10 @@ class LLMClient:
             kwargs["api_key"] = self.kimi_code_api_key
             kwargs["api_base"] = self.kimi_code_api_base
             kwargs.setdefault("max_tokens", 8192)  # Anthropic Messages API 必填
+            # 主 agent 长 prompt 需要显式 cache_control 才稳定命中（生产实证：
+            # 03:52 有标记连续命中、05:29 回退后全灭）；断点放在动态段之前，
+            # 避免每轮变化的「系统补充上下文」污染缓存前缀。分身/短 prompt 的
+            # 自动缓存不受影响。
             kwargs["messages"] = self._mark_anthropic_prompt_cache(
                 self._remove_orphaned_tool_calls(messages))
         elif model.startswith("xiaomi/"):
