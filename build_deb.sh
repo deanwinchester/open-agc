@@ -136,7 +136,7 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: ${BUILD_ARCH}
-Depends: libwebkit2gtk-4.0-37, libgtk-3-0
+Depends: libwebkit2gtk-4.0-37, libgtk-3-0, libgirepository-1.0-1, gir1.2-webkit2-4.0, gir1.2-gtk-3.0
 Maintainer: Open-AGC Team <noreply@open-agc.local>
 Description: Open-AGC — AI agent desktop application
  Open-AGC is a local AI agent desktop app with a web-based UI,

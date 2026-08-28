@@ -218,11 +218,12 @@ jobs:
   # ── Linux deb ──
   linux-deb:
     needs: create-release
-    # PyInstaller 在 manylinux_2_28（glibc 2.28）容器内构建，使打包出的
-    # libpython/*.so 链接旧 glibc，兼容 UOS/银河麒麟等 glibc 2.28 目标机
-    # （此前在 ubuntu-22.04 上构建链接 glibc 2.35，目标机报 GLIBC_2.35 not found）。
-    # amd64 跑 x86_64 runner + manylinux_2_28_x86_64；arm64 跑 ARM runner +
-    # manylinux_2_28_aarch64，均原生编译，避免交叉编译。
+    # PyInstaller 在 python:3.10-buster（Debian 10, glibc 2.28）容器内构建，
+    # 使打包出的 libpython/*.so 链接旧 glibc，兼容 UOS/银河麒麟等 glibc 2.28
+    # 目标机（此前在 ubuntu-22.04 上构建链接 glibc 2.35，目标机报
+    # GLIBC_2.35 not found）。官方 python 镜像以 --enable-shared 构建 CPython，
+    # 满足 PyInstaller 对 libpython 的要求（manylinux 的 cp310 为静态库，不可用）。
+    # amd64 跑 x86_64 runner；arm64 跑 ARM runner（arm64v8 镜像），均原生编译。
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
@@ -231,10 +232,10 @@ jobs:
         include:
           - arch: amd64
             runner: ubuntu-22.04
-            image: quay.io/pypa/manylinux_2_28_x86_64
+            image: python:3.10-buster
           - arch: arm64
             runner: ubuntu-22.04-arm
-            image: quay.io/pypa/manylinux_2_28_aarch64
+            image: arm64v8/python:3.10-buster
     steps:
       - uses: actions/checkout@v4
         with:
@@ -259,19 +260,28 @@ jobs:
           npm install
           npm run build
 
-      # 在 manylinux 容器内构建：venv 放容器 /tmp 避免污染仓库；dist/build
-      # 输出经卷挂载回 runner 供后续组装。manylinux 的 cp310 与系统 .so 均链接
-      # glibc 2.28，pip 也会优先选用 manylinux_2_28 / manylinux2014 wheel。
-      - name: Build binaries in manylinux container (glibc 2.28)
+      # 在 glibc 2.28 容器内构建：venv 放容器 /tmp 避免污染仓库；dist/build
+      # 输出经卷挂载回 runner 供后续组装。python:3.10-buster 的 CPython 与系统
+      # .so 均链接 glibc 2.28，pip 也会优先选用 manylinux 旧 glibc wheel。
+      # 另装 GIR/WebKit 开发包 + PyGObject，使 pywebview 的 GTK 后端可被
+      # PyInstaller 收集（Linux 原生窗口）；buster 已 EOL，apt 源指向 archive。
+      - name: Build binaries in glibc-2.28 container
         run: |
           docker run --rm -v "$PWD":/src -w /src "${{ matrix.image }}" bash -c "
             set -e
-            /opt/python/cp310-cp310/bin/python -m venv /tmp/build_venv
+            echo 'deb http://archive.debian.org/debian buster main' > /etc/apt/sources.list
+            echo 'deb http://archive.debian.org/debian-security buster/updates main' >> /etc/apt/sources.list
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              pkg-config libgirepository1.0-dev \
+              gir1.2-gtk-3.0 gir1.2-webkit2-4.0 libwebkit2gtk-4.0-dev || true
+            python -m venv /tmp/build_venv
             source /tmp/build_venv/bin/activate
             pip install --upgrade pip
             pip install pyinstaller
             pip install -r requirements.txt
             pip install pywebview
+            pip install 'PyGObject<3.50' || echo '[warn] PyGObject build failed, GTK backend will fall back to browser'
             pyinstaller open_agc.spec --clean --noconfirm --distpath dist/linux --workpath build/linux
           "
 
@@ -318,7 +328,7 @@ jobs:
           Section: utils
           Priority: optional
           Architecture: ${ARCH}
-          Depends: libwebkit2gtk-4.0-37, libgtk-3-0
+          Depends: libwebkit2gtk-4.0-37, libgtk-3-0, libgirepository-1.0-1, gir1.2-webkit2-4.0, gir1.2-gtk-3.0
           Maintainer: Open-AGC <dev@open-agc.local>
           Description: Open-AGC - General AI Agent
            Open-AGC is a general-purpose AI agent for daily office, research,
