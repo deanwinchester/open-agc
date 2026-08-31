@@ -376,9 +376,11 @@ function onProgress(data) {
       break;
     }
     case 'usage': {
-      // 服务端字段：total_tokens/prompt_tokens/completion_tokens/cached_tokens（无 cost，
-      // 见 agent/agent.py usage 事件构造）；格式对齐旧 static/app.js:830-836
-      const usageText = `${t.tokens}: ${data.total_tokens} (P:${data.prompt_tokens} / C:${data.completion_tokens}${data.cached_tokens ? `${t.cachedPrefix}${data.cached_tokens}` : ''})`;
+      // 服务端字段：total_tokens/prompt_tokens/completion_tokens/cached_tokens/
+      // tokens_per_second/duration_ms（见 agent/agent.py usage 事件构造）
+      const cachePart = data.cached_tokens ? `${t.cachedPrefix}${data.cached_tokens}` : '';
+      const speedPart = data.tokens_per_second ? ` · ${data.tokens_per_second} tok/s` : '';
+      const usageText = `${t.tokens}: ${data.total_tokens} (P:${data.prompt_tokens} / C:${data.completion_tokens}${cachePart})${speedPart}`;
       card.tokenUsage = usageText;
       tokenUsageText.value = usageText; // 头部栏同步显示
       break;
