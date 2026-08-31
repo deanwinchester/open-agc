@@ -238,6 +238,73 @@ class TestVisionGating:
         assert IMAGE_MARKER not in result
 
 
+class TestVisionProbe:
+    """端点探测兜底：名称启发式识别不了的自定义模型，探测端点是否接受图片。"""
+
+    def _agent_with_custom_provider(self, model, base_url, api_key="sk-x"):
+        import types
+        llm = types.SimpleNamespace(
+            default_model=model,
+            _custom_providers={model.split('/')[0]: {"base_url": base_url, "api_key": api_key}},
+            llamacpp_api_base="http://localhost:8080/v1",
+        )
+        return types.SimpleNamespace(model=model, llm=llm)
+
+    def _stub_post(self, monkeypatch, status_code=200, text=""):
+        import requests
+        class _Resp:
+            def __init__(self):
+                self.status_code = status_code
+                self.text = text
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp())
+
+    def test_probe_true_when_endpoint_accepts_image(self, monkeypatch):
+        from tools.image_view import _probe_vision_capability, _VISION_PROBE_CACHE
+        _VISION_PROBE_CACHE.clear()
+        self._stub_post(monkeypatch, status_code=200)
+        agent = self._agent_with_custom_provider("qwen38/Qwen3.8-27B", "http://x/v1")
+        assert _probe_vision_capability("qwen38/Qwen3.8-27B", agent) is True
+
+    def test_probe_false_when_endpoint_rejects_image(self, monkeypatch):
+        from tools.image_view import _probe_vision_capability, _VISION_PROBE_CACHE
+        _VISION_PROBE_CACHE.clear()
+        self._stub_post(monkeypatch, status_code=400,
+                        text='{"error": "image_url is not supported by this model"}')
+        agent = self._agent_with_custom_provider("qwen38/Qwen3.8-27B", "http://x/v1")
+        assert _probe_vision_capability("qwen38/Qwen3.8-27B", agent) is False
+
+    def test_probe_none_when_no_endpoint(self):
+        from tools.image_view import _probe_vision_capability
+        assert _probe_vision_capability("some-model", None) is None
+
+    def test_probe_result_cached(self, monkeypatch):
+        from tools.image_view import _probe_vision_capability, _VISION_PROBE_CACHE
+        _VISION_PROBE_CACHE.clear()
+        calls = {"n": 0}
+        import requests
+        class _Resp:
+            status_code = 200
+            text = ""
+        def _post(*a, **k):
+            calls["n"] += 1
+            return _Resp()
+        monkeypatch.setattr(requests, "post", _post)
+        agent = self._agent_with_custom_provider("qwen38/Qwen3.8-27B", "http://x/v1")
+        _probe_vision_capability("qwen38/Qwen3.8-27B", agent)
+        _probe_vision_capability("qwen38/Qwen3.8-27B", agent)
+        assert calls["n"] == 1
+
+    def test_execute_uses_probe_for_unknown_custom_model(self, tmp_path, monkeypatch):
+        from tools.image_view import _VISION_PROBE_CACHE
+        _VISION_PROBE_CACHE.clear()
+        img = _make_image(tmp_path / "a.png")
+        _write_config(tmp_path, monkeypatch)
+        self._stub_post(monkeypatch, status_code=200)
+        agent = self._agent_with_custom_provider("qwen38/Qwen3.8-27B", "http://x/v1")
+        result = ImageViewTool().execute(path=img, _agent_context=agent)
+        assert IMAGE_MARKER in result
+
+
 class TestIsVisionModel:
     @pytest.mark.parametrize("model", [
         "kimi_code/k3", "gpt-4o", "gpt-4o-mini", "gpt-4.1",
