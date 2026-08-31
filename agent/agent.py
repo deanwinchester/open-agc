@@ -2947,6 +2947,7 @@ class OpenAGCAgent:
                 _stream_on = _resolve_stream_enabled(
                     config_path, getattr(self.llm, "default_model", "") or "")
             try:
+                _llm_t0 = _time.time()  # 记录 LLM 调用起点，用于计算 token 速度
                 if _stream_on:
                     def _on_delta(kind, text, _iter=current_iter, _pcb=progress_callback):
                         try:
@@ -2963,6 +2964,7 @@ class OpenAGCAgent:
                         on_delta=_on_delta)
                 else:
                     response, actual_model = self.llm.chat(messages=self.messages, tools=self.tool_schemas)
+                _llm_duration = _time.time() - _llm_t0
                 choices = getattr(response, "choices", None) or []
                 if not choices:
                     raise ValueError("LLM returned an empty choices list")
@@ -3059,12 +3061,17 @@ class OpenAGCAgent:
                     cached_tokens=cached_tokens
                 )
                 if progress_callback:
+                    # token 速度 = 本次生成的 completion tokens / LLM 调用耗时
+                    _dur = _llm_duration if _llm_duration > 0 else 0
+                    _tps = round(completion_tokens / _dur, 1) if _dur > 0 else 0
                     progress_callback({
                         "event": "usage",
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
                         "total_tokens": prompt_tokens + completion_tokens,
                         "cached_tokens": cached_tokens,
+                        "tokens_per_second": _tps,
+                        "duration_ms": int(_dur * 1000),
                     })
             
             # Detect empty response (no content and no tool calls)
