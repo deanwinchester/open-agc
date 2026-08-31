@@ -37,6 +37,24 @@ def find_free_port():
         s.bind(('', 0))
         return s.getsockname()[1]
 
+
+def _crash_log_path() -> str:
+    """崩溃日志写入可写的数据目录（OPEN_AGC_DATA_DIR，frozen 下为
+    ~/.open-agc）。deb 安装到 /opt/open-agc 是 root 所有，裸写 cwd 会
+    Permission denied 并掩盖真实错误——必须先落到用户可写位置。"""
+    try:
+        data_dir = os.environ.get("OPEN_AGC_DATA_DIR") or os.path.join(
+            os.path.expanduser("~"), ".open-agc")
+        os.makedirs(data_dir, exist_ok=True)
+        return os.path.join(data_dir, "server_crash.log")
+    except Exception:
+        return os.path.join(os.path.expanduser("~"), "open-agc-server_crash.log")
+
+
+def _crash_log_hint() -> str:
+    return _crash_log_path()
+
+
 def start_server(port):
     """Start the uvicorn server in a background thread."""
     import uvicorn
@@ -57,22 +75,42 @@ def start_server(port):
         # 防止伪造 X-Forwarded-For: 127.0.0.1 绕过访问控制。
         uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=False)
     except Exception as e:
-        with open("server_crash.log", "a") as f:
-            f.write(f"Server crash: {e}\n")
+        try:
+            with open(_crash_log_path(), "a", encoding="utf-8") as f:
+                f.write(f"Server crash: {e}\n")
+        except Exception:
+            # 连日志都写不进时打到 stderr，避免掩盖真实崩溃原因
+            try:
+                print(f"Server crash: {e}", file=sys.stderr)
+            except Exception:
+                pass
 
 
-def check_server_and_load(window, port):
+def wait_for_server_ready(port, timeout=60):
+    """轮询直到 uvicorn 服务就绪或超时。返回 True 表示就绪。
+
+    浏览器回退与原生窗口都必须等服务起来再打开页面——否则浏览器会在
+    服务监听前就发起请求，显示「localhost 拒绝了我们的连接请求」。
+    """
     import requests
     import time
-    for _ in range(60):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
         try:
             resp = requests.get(f"http://localhost:{port}/static/icon_rounded.png", timeout=1)
             if resp.status_code == 200:
-                window.load_url(f"http://localhost:{port}")
-                return
-        except:
-            time.sleep(0.5)
-            
+                return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def check_server_and_load(window, port):
+    if wait_for_server_ready(port, timeout=60):
+        window.load_url(f"http://localhost:{port}")
+        return
+
     # Timeout reached without success
     try:
         window.evaluate_js("""
@@ -92,22 +130,33 @@ def create_window(port):
     gir1.2-webkit2-4.0 或 Python 版本不匹配），整个创建过程可能抛异常——
     回退到默认浏览器打开 Web UI，保证应用可用。
     """
-    try:
-        import webview
-    except ImportError:
-        print("pywebview not installed. Install with: pip install pywebview")
-        print(f"Falling back to browser mode: http://localhost:{port}")
-        import webbrowser
-        webbrowser.open(f"http://localhost:{port}")
-        return False
+    def _open_browser_when_ready():
+        """等待后端服务就绪后再打开浏览器（后台线程，不阻塞 create_window）。
+        服务 60s 内未就绪则提示查看 server_crash.log，不再裸开 URL。"""
+        if wait_for_server_ready(port, timeout=60):
+            import webbrowser
+            webbrowser.open(f"http://localhost:{port}")
+        else:
+            try:
+                print(f"后台服务未能正常启动（localhost 拒绝连接）。请查看 "
+                      f"{_crash_log_hint()} 排查。")
+            except Exception:
+                pass
 
     def _browser_fallback(reason):
         try:
             print(f"Native window unavailable ({reason}); falling back to browser mode: http://localhost:{port}")
         except Exception:
             pass
-        import webbrowser
-        webbrowser.open(f"http://localhost:{port}")
+        threading.Thread(target=_open_browser_when_ready, daemon=True).start()
+        return False
+
+    try:
+        import webview
+    except ImportError:
+        print("pywebview not installed. Install with: pip install pywebview")
+        print(f"Falling back to browser mode: http://localhost:{port}")
+        threading.Thread(target=_open_browser_when_ready, daemon=True).start()
         return False
 
     loading_html = """
