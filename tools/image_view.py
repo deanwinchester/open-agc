@@ -91,6 +91,79 @@ def _config_vision_flag(config: dict, model_name: str) -> Optional[bool]:
     return None
 
 
+# ---- 视觉能力端点探测（自定义/自部署模型兜底）----
+# 名称启发式 + litellm.supports_vision 都识别不了自定义渠道（如
+# qwen38/Qwen3.8-27B）时，向端点发一张 1x1 测试图，根据 API 是否接受图片
+# 输入判定视觉能力。结果按 base_url+model 缓存，只探测一次。
+
+_VISION_PROBE_CACHE: Dict[str, Optional[bool]] = {}
+
+# 1x1 透明 PNG（探测用，极小）
+_TINY_PNG_DATA_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
+
+
+def _resolve_model_endpoint(model_name: str, agent):
+    """按 LLMClient 的路由规则解析模型的 (base_url, api_key)。
+
+    只覆盖自定义厂商与 llamacpp（自部署/自建端点）；预置厂商走启发式已能
+    识别，无需探测。返回 (None, None) 表示无法探测。
+    """
+    llm = getattr(agent, "llm", None) if agent is not None else None
+    if llm is None:
+        return None, None
+    name = model_name or ""
+    prefix = name.split('/', 1)[0] if '/' in name else ''
+    cp = getattr(llm, "_custom_providers", {}).get(prefix)
+    if cp:
+        return cp.get("base_url"), cp.get("api_key") or "sk-no-key-required"
+    if "llamacpp/" in name:
+        return getattr(llm, "llamacpp_api_base", None), "sk-no-key-required"
+    return None, None
+
+
+def _probe_vision_capability(model_name: str, agent) -> Optional[bool]:
+    """探测端点是否接受图片输入。True=视觉模型，False=明确不支持，None=无法判定。"""
+    base_url, api_key = _resolve_model_endpoint(model_name, agent)
+    if not base_url:
+        return None
+    cache_key = f"{base_url}|{model_name}"
+    if cache_key in _VISION_PROBE_CACHE:
+        return _VISION_PROBE_CACHE[cache_key]
+    api_model = model_name.split('/', 1)[1] if '/' in (model_name or '') else model_name
+    body = {
+        "model": api_model,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "hi"},
+            {"type": "image_url", "image_url": {"url": _TINY_PNG_DATA_URL}},
+        ]}],
+        "max_tokens": 1,
+    }
+    result: Optional[bool] = None
+    try:
+        import requests
+        resp = requests.post(
+            f"{base_url.rstrip('/')}/chat/completions", json=body,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json"},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            result = True
+        else:
+            err = (resp.text or "").lower()
+            # 明确报图片/视觉不支持 → False；其它错误（认证/模型不存在等）无法判定
+            if any(k in err for k in ("image", "vision", "multimodal",
+                                      "not support", "unsupported", "invalid")):
+                result = False
+    except Exception:
+        result = None
+    _VISION_PROBE_CACHE[cache_key] = result
+    return result
+
+
 def _load_image_data_url(path: str, ext: str, max_size: int):
     """读取并（可选）缩放图片，返回 (data_url, orig_w, orig_h, scaled, note)。"""
     try:
@@ -190,16 +263,22 @@ class ImageViewTool(BaseTool):
             return ("Error: image_view 已被配置禁用（config.json: image_view_enabled=false）。"
                     "如需使用请开启该开关。")
 
-        # 视觉能力检查：config 显式配置 > agent 能力标记 > 模型名启发式
+        # 视觉能力检查：config 显式配置 > agent 能力标记 > 模型名启发式 >
+        # 端点探测（自定义/自部署模型兜底，结果缓存只探测一次）
         agent = kwargs.get("_agent_context")
         model_name = _resolve_model_name(agent)
         capability_flag = _config_vision_flag(config, model_name)
         if capability_flag is None:
             capability_flag = getattr(agent, "vision_capable", None) if agent is not None else None
         if not is_vision_model(model_name, capability_flag):
-            return (f"Error: 当前模型 '{model_name or '未知'}' 未识别为视觉模型，无法查看图片。"
-                    "请切换到具备视觉能力的模型（如 gpt-4o、claude-sonnet 等）后再试，"
-                    "或改用 read_file / execute_python 以文本方式处理该文件。")
+            probed = _probe_vision_capability(model_name, agent)
+            if probed is True:
+                pass  # 端点接受图片输入 → 视觉模型
+            else:
+                return (f"Error: 当前模型 '{model_name or '未知'}' 未识别为视觉模型，无法查看图片。"
+                        "请切换到具备视觉能力的模型（如 gpt-4o、claude-sonnet 等）后再试，"
+                        "或在「设置 → 模型与服务 → 视觉模型」里把该模型名加进去（按包含匹配），"
+                        "或改用 read_file / execute_python 以文本方式处理该文件。")
 
         # 沙箱限制（与 read_file 同一模式）
         if config.get("sandbox_mode", True):
