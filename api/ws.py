@@ -96,6 +96,32 @@ def _map_history_message(role: str, content: str):
     return {"role": role, "content": content}
 
 
+def _interrupt_session_agents(session_id: int):
+    """Set ``is_interrupted`` on all active + background agents of a session.
+
+    Shared by the run_agent_with_progress inner loop (foreground agent running)
+    and the outer WS loop's interrupt branch (async dispatch / background /
+    between-turn gaps — previously only the inner loop handled interrupt, so a
+    stop click while no foreground agent was running was silently dropped).
+
+    Returns (foreground_task_ids, background_task_ids) for process cleanup.
+    """
+    fg_tids = []
+    for _tid_a, _a in list(_active_agents.get(session_id, {}).items()):
+        try:
+            _a.is_interrupted = True
+            if isinstance(_tid_a, int) and _tid_a:
+                fg_tids.append(_tid_a)
+        except Exception:
+            pass
+    bg_tids = []
+    for tid, bg_agent in list(_background_agents.items()):
+        if getattr(bg_agent, 'session_id', None) == session_id:
+            bg_agent.is_interrupted = True
+            bg_tids.append(tid)
+    return fg_tids, bg_tids
+
+
 def _load_session_history(session_id: int, limit: int = 20) -> list:
     """Load the last `limit` chat messages of a session as LLM context.
 
@@ -673,11 +699,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             # Also interrupt background agents — but ONLY those
                             # belonging to this session (don't kill other
                             # sessions' email/scheduled background tasks)
-                            _session_bg_tids = []
-                            for tid, bg_agent in list(_background_agents.items()):
-                                if getattr(bg_agent, 'session_id', None) == ws_session_id:
-                                    bg_agent.is_interrupted = True
-                                    _session_bg_tids.append(tid)
+                            _, _session_bg_tids = _interrupt_session_agents(ws_session_id)
                             interrupt_shell()
                             # 联动终止这些任务注册的后台进程（先 kill_tree 杀
                             # 进程树再清跟踪表；杀失败不阻断中断流程本身）
@@ -1043,7 +1065,45 @@ async def websocket_endpoint(websocket: WebSocket):
                 msg_type = user_msg.get("type", "query")
                 resume_id_for_run = None
 
-                if msg_type == "switch_session":
+                if msg_type == "interrupt":
+                    # 外圈循环此前无 interrupt 分支——{type:'interrupt'} 落到 else
+                    # 后 query 为空被 continue 丢弃，导致「异步派发/后台运行/回合
+                    # 间隙」时点中断显示已发送但实际未中断。这里补全：中断本会话
+                    # 所有运行中的前台/后台 agent（与内层循环同一语义）。
+                    _intr_tids, _session_bg_tids = _interrupt_session_agents(ws_session_id)
+                    # 更新本会话 running 任务状态为 interrupted（否则 guardian 会
+                    # 按中断自动恢复，与「用户主动中断」语义冲突）
+                    try:
+                        _ir_conn = db_connect()
+                        _ir_rows = _ir_conn.execute(
+                            "SELECT id FROM tasks WHERE session_id=? AND status='running'",
+                            (ws_session_id,)).fetchall()
+                        _ir_conn.close()
+                        for (_tid_r,) in _ir_rows:
+                            update_task_status(_tid_r, "interrupted",
+                                               interruption_reason="user")
+                    except Exception as _ir_e:
+                        print(f"[WS] interrupt status update error: {_ir_e}")
+                    interrupt_shell()
+                    # 联动终止本会话任务注册的后台进程
+                    for _tid in [t for t in (_intr_tids + _session_bg_tids) if t]:
+                        try:
+                            kill_tracked_background_process(_tid)
+                        except Exception:
+                            pass
+                    # Cancel any active download
+                    if _llamacpp_download_state.get("active"):
+                        _llamacpp_download_state["cancelled"] = True
+                        _llamacpp_download_state["active"] = False
+                        _broadcast_to_websockets({
+                            "type": "llamacpp_download",
+                            "task": _llamacpp_download_state.get("type", ""),
+                            "label": "下载已取消",
+                            "progress": 0.0,
+                            "stage": "error",
+                            "error": "用户中断"
+                        })
+                    continue
                     # Switch to a different session without reconnecting WebSocket
                     new_sid = int(user_msg.get("session_id", 1))
                     if new_sid != ws_session_id:
