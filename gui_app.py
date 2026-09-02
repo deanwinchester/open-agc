@@ -122,6 +122,31 @@ def check_server_and_load(window, port):
     except Exception:
         pass
 
+def _setup_webview2_runtime():
+    """Windows 上使用包内嵌的 WebView2 fixed-version 运行时，使 pywebview 走
+    edgechromium（Chromium）而非 IE(mshtml)——edgechromium 才支持文件拖放与
+    Ctrl+C/V。目标机无需预装 WebView2 运行时。返回运行时路径（无内嵌则 None）。
+    """
+    try:
+        import webview
+    except Exception:
+        return None
+    candidates = []
+    if getattr(sys, 'frozen', False):
+        # frozen COLLECT：sys._MEIPASS 指向 _internal
+        candidates.append(os.path.join(sys._MEIPASS, 'webview2_runtime'))
+    candidates.append(os.path.abspath(os.path.join('build', 'webview2_runtime')))
+    for p in candidates:
+        if os.path.isfile(os.path.join(p, 'msedgewebview2.exe')):
+            try:
+                webview.settings['WEBVIEW2_RUNTIME_PATH'] = p
+                print(f"[webview2] 使用内嵌运行时: {p}")
+                return p
+            except Exception as e:
+                print(f"[webview2] 设置运行时路径失败: {e}")
+    return None
+
+
 def create_window(port):
     """Create a native window with the web UI embedded.
 
@@ -158,6 +183,10 @@ def create_window(port):
         print(f"Falling back to browser mode: http://localhost:{port}")
         threading.Thread(target=_open_browser_when_ready, daemon=True).start()
         return False
+
+    # Windows：优先使用包内嵌的 WebView2 fixed-version 运行时（edgechromium，
+    # 支持文件拖放与 Ctrl+C/V）；无内嵌时回退系统 WebView2/IE。
+    _setup_webview2_runtime()
 
     loading_html = """
     <!DOCTYPE html>

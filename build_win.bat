@@ -49,6 +49,11 @@ pip install --upgrade pip -q
 pip install pyinstaller -q
 pip install -r requirements.txt -q
 
+REM ---- Download embedded WebView2 fixed-version runtime（edgechromium 用，
+REM 支持文件拖放与 Ctrl+C/V；目标机无需预装 WebView2 运行时）----
+echo   Downloading embedded WebView2 runtime...
+python scripts\download_webview2_runtime.py build\webview2_runtime || echo [warn] WebView2 runtime download failed, will use system runtime
+
 REM ---- 2. Build with PyInstaller ----
 echo [2/4] Building with PyInstaller...
 echo   Using spec file: open_agc.spec
