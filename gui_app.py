@@ -277,10 +277,21 @@ def create_window(port):
         # OPEN_AGC_GTK_DIAG=1 时开启 debug（GTK 下启用 WebKit 开发者工具，
         # 窗口内右键 → Inspect Element 可看控制台）
         _diag_mode = os.environ.get('OPEN_AGC_GTK_DIAG') == '1'
-        webview.start(
-            debug=_diag_mode,
-            gui=None,  # Auto-detect best backend
-        )
+        _start_kwargs = {'debug': _diag_mode, 'gui': None}  # gui=None：自动选后端
+        if sys.platform.startswith('linux'):
+            # pywebview 默认 private_mode=True，GTK 后端会据此关闭
+            # enable_html5_local_storage。该设置在 WebKitGTK 2.40+ 已废弃
+            # （无效），但 2.38 等旧版上真实生效——localStorage 变成 null，
+            # 前端启动即 TypeError 崩溃，窗口白屏（UOS/deepin 实测）。
+            # Linux 上显式关闭 private_mode 并把存储目录放到数据目录下。
+            _start_kwargs['private_mode'] = False
+            _storage = os.path.join(
+                os.environ.get('OPEN_AGC_DATA_DIR')
+                or os.path.join(os.path.expanduser('~'), '.open-agc'),
+                'webview_storage')
+            os.makedirs(_storage, exist_ok=True)
+            _start_kwargs['storage_path'] = _storage
+        webview.start(**_start_kwargs)
         return True
     except Exception as _gui_err:
         return _browser_fallback(_gui_err)
