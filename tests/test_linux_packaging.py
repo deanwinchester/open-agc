@@ -65,6 +65,13 @@ class TestBuildDebScript:
             assert lib in depends_line, f"missing {lib} in build_deb.sh Depends"
         assert "gir1.2-webkit2-4.0" not in depends_line
 
+    def test_build_deb_uses_local_node_folder(self):
+        """build_deb.sh 必须优先用本地 .node/bin（与 start.sh 同一套），
+        否则本地装了便携 Node 的机器上会报「npm not found」。"""
+        sh = _read("build_deb.sh")
+        assert ".node/bin/npm" in sh
+        assert '.node/bin:$PATH' in sh or '".node/bin' in sh
+
 
 class TestRequirements:
     def test_pyqt6_pinned_uos_compatible_versions(self):
