@@ -77,6 +77,46 @@ echo "[1/5] Preparing build environment..."
 
 # Build frontend with Vite (required for packaging)
 echo "  Building frontend with Vite..."
+
+# Resolve Node.js：优先本地便携 .node/bin（与 start.sh 同一套），再查 PATH，
+# 都没有则下载便携 Node.js 到 .node/。此前只查 PATH，本地 .node 被忽略导致
+# 「npm not found」（start.sh 能跑是因为它会用 .node/）。
+if [ -f ".node/bin/npm" ]; then
+    if .node/bin/node --version &>/dev/null; then
+        export PATH="$PWD/.node/bin:$PATH"
+    else
+        echo "  Existing .node/ binary not executable (wrong architecture?), re-downloading..."
+        rm -rf .node
+    fi
+fi
+if ! command -v npm &> /dev/null; then
+    echo "  npm not found. Downloading portable Node.js to .node/..."
+    mkdir -p .node
+    NODE_ARCH="linux-x64"
+    case "$(uname -m)" in
+        aarch64) NODE_ARCH="linux-arm64" ;;
+        armv7l)  NODE_ARCH="linux-armv7l" ;;
+    esac
+    echo "  Architecture: $(uname -m) -> ${NODE_ARCH}"
+    NODE_URL="https://nodejs.org/dist/v22.14.0/node-v22.14.0-${NODE_ARCH}.tar.xz"
+    if command -v curl &> /dev/null; then
+        curl -fL --progress-bar "$NODE_URL" -o /tmp/node-agc.tar.xz || { echo "  ERROR: Node.js download failed"; exit 1; }
+    elif command -v wget &> /dev/null; then
+        wget --show-progress "$NODE_URL" -O /tmp/node-agc.tar.xz || { echo "  ERROR: Node.js download failed"; exit 1; }
+    else
+        echo "  ERROR: neither curl nor wget found. Install Node.js manually: https://nodejs.org/"
+        exit 1
+    fi
+    tar -xf /tmp/node-agc.tar.xz -C .node --strip-components=1 || { echo "  ERROR: extract failed"; rm -f /tmp/node-agc.tar.xz; exit 1; }
+    rm -f /tmp/node-agc.tar.xz
+    if ! .node/bin/node --version &>/dev/null; then
+        echo "  ERROR: downloaded Node.js not executable. Install manually: https://nodejs.org/"
+        rm -rf .node
+        exit 1
+    fi
+    export PATH="$PWD/.node/bin:$PATH"
+fi
+
 if command -v npm &> /dev/null; then
     [ ! -d "node_modules/@vitejs/plugin-vue" ] && npm install
     npm run build
