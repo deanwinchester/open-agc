@@ -122,6 +122,75 @@ def check_server_and_load(window, port):
     except Exception:
         pass
 
+LOADING_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Loading...</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f7f9fa; color: #333; }
+        .container { text-align: center; }
+        .loader { border: 4px solid #e2e8f0; border-top: 4px solid #3b82f6; border-radius: 50%; width: 48px; height: 48px; animation: spin 1s linear infinite; margin: 0 auto 20px auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        h2 { margin: 0; font-weight: 500; font-size: 20px; color: #475569; }
+        p { color: #94a3b8; font-size: 14px; margin-top: 8px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="loader"></div>
+        <h2>Starting Open-AGC...</h2>
+        <p>Loading core components...</p>
+    </div>
+</body>
+</html>
+"""
+
+
+def _server_ready_once(port):
+    """单次快速探测服务是否就绪（不阻塞事件循环太久）。"""
+    import requests
+    try:
+        resp = requests.get(f"http://localhost:{port}/static/icon_rounded.png", timeout=0.3)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _create_qt_window(port):
+    """用 PyQt6 QWebEngineView 创建原生窗口（Chromium 内核，Windows/Linux 行为一致）。
+
+    app.exec() 阻塞至窗口关闭；Qt 不可用/创建失败时抛异常，由 create_window
+    回退到系统浏览器。
+    """
+    from PyQt6.QtWidgets import QApplication, QMainWindow
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    from PyQt6.QtCore import QUrl, QTimer
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    win = QMainWindow()
+    win.setWindowTitle("Open-AGC")
+    win.resize(1200, 800)
+    win.setMinimumSize(800, 600)
+    view = QWebEngineView(win)
+    win.setCentralWidget(view)
+    view.setHtml(LOADING_HTML)
+    win.show()
+
+    # 轮询等服务就绪后加载真实页面（每次探测很短，不卡事件循环）
+    def _try_load():
+        if _server_ready_once(port):
+            view.load(QUrl(f"http://localhost:{port}"))
+        else:
+            QTimer.singleShot(400, _try_load)
+
+    QTimer.singleShot(0, _try_load)
+
+    app.exec()  # 阻塞至窗口关闭
+    return True
+
+
 def create_window(port):
     """Create a native window with the web UI embedded.
 
@@ -152,67 +221,7 @@ def create_window(port):
         return False
 
     try:
-        import webview
-    except ImportError:
-        print("pywebview not installed. Install with: pip install pywebview")
-        print(f"Falling back to browser mode: http://localhost:{port}")
-        threading.Thread(target=_open_browser_when_ready, daemon=True).start()
-        return False
-
-    loading_html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>Loading...</title>
-        <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f7f9fa; color: #333; }
-            .container { text-align: center; }
-            .loader { border: 4px solid #e2e8f0; border-top: 4px solid #3b82f6; border-radius: 50%; width: 48px; height: 48px; animation: spin 1s linear infinite; margin: 0 auto 20px auto; }
-            @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-            h2 { margin: 0; font-weight: 500; font-size: 20px; color: #475569; }
-            p { color: #94a3b8; font-size: 14px; margin-top: 8px; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="loader"></div>
-            <h2>Starting Open-AGC Panda...</h2>
-            <p>Loading core components...</p>
-        </div>
-    </body>
-    </html>
-    """
-
-    # Create native window — 任一环节失败（GTK 后端缺 gi、WebKit2 typelib
-    # 缺失、Python 版本不匹配等）都回退浏览器模式，保证 Web UI 可用。
-    try:
-        window = webview.create_window(
-            title="🐼 Open-AGC Panda",
-            html=loading_html,
-            width=1200,
-            height=800,
-            min_size=(800, 600),
-            resizable=True,
-            text_select=True,
-            confirm_close=True,
-        )
-
-        # Add menu items for restart/about
-        def on_closing():
-            os._exit(0)
-
-        window.events.closing += on_closing
-
-        import threading
-        t = threading.Thread(target=check_server_and_load, args=(window, port), daemon=True)
-        t.start()
-
-        webview.start(
-            debug=False,
-            gui=None,  # Auto-detect best backend
-        )
-        return True
+        return _create_qt_window(port)
     except Exception as _gui_err:
         return _browser_fallback(_gui_err)
 

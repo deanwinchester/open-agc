@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Linux 打包适配测试：pywebview GTK 后端、GIR/WebKit typelib、deb Depends、浏览器回退。"""
+"""Linux 打包适配测试：PyQt6 QWebEngineView 原生窗口、Qt 依赖收集、deb Depends、浏览器回退。"""
 import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -10,21 +10,25 @@ def _read(path):
         return f.read()
 
 
-class TestSpecLinuxGtk:
-    def test_spec_includes_gtk_backend_hiddenimport(self):
+class TestSpecQtWebEngine:
+    def test_spec_includes_qt_webengine_hiddenimports(self):
         spec = _read("open_agc.spec")
-        assert "webview.platforms.gtk" in spec
+        assert "PyQt6.QtWebEngineWidgets" in spec
+        assert "PyQt6.QtWebEngineCore" in spec
+        assert "PyQt6.QtWidgets" in spec
 
-    def test_spec_collects_webkit2_javascriptcore_typelibs(self):
+    def test_spec_does_not_exclude_pyqt6(self):
+        """PyQt6 用上了就不能再出现在 excludes（此前为不打包 Qt 而排除，
+        会导致 PyQt6 被剔除出 bundle）。"""
         spec = _read("open_agc.spec")
-        assert "WebKit2" in spec
-        assert "JavaScriptCore" in spec
-        assert "GiModuleInfo" in spec
+        excludes = spec.split("excludes=[", 1)[1].split("]", 1)[0]
+        assert "'PyQt6'" not in excludes
 
-    def test_spec_gtk_collection_is_guarded(self):
-        """GiModuleInfo 收集必须在 try/except 中，未装 GIR 时安全跳过。"""
+    def test_spec_no_pywebview_gtk_backend(self):
+        """pywebview 已替换为 Qt，spec 不应再含 pywebview GTK 后端/GIR 收集。"""
         spec = _read("open_agc.spec")
-        assert "if _info.available" in spec
+        assert "webview.platforms.gtk" not in spec
+        assert "GiModuleInfo" not in spec
 
 
 class TestGuiAppBrowserFallback:
@@ -33,34 +37,42 @@ class TestGuiAppBrowserFallback:
         assert "_browser_fallback" in src
         assert "except Exception as _gui_err" in src
 
+    def test_create_window_uses_qt_webengine(self):
+        src = _read("gui_app.py")
+        assert "QWebEngineView" in src
+        assert "_create_qt_window" in src
 
-class TestWorkflowGirPackages:
+
+class TestWorkflowQtPackages:
     def _workflow(self):
         return _read(os.path.join(".github", "workflows", "docker-release.yml"))
 
-    def test_container_installs_gir_webkit_dev_packages(self):
+    def test_deb_depends_includes_qt_webengine_libs(self):
         wf = self._workflow()
-        assert "gir1.2-webkit2-4.0" in wf
-        assert "gir1.2-gtk-3.0" in wf
-        assert "libgirepository1.0-dev" in wf
-
-    def test_container_installs_pygobject(self):
-        wf = self._workflow()
-        assert "PyGObject" in wf
-
-    def test_buster_apt_uses_archive(self):
-        wf = self._workflow()
-        assert "archive.debian.org" in wf
-
-    def test_deb_depends_includes_gir_webkit(self):
-        wf = self._workflow()
-        assert "gir1.2-webkit2-4.0" in wf.split("Depends:")[1].split("\n")[0]
-        assert "gir1.2-gtk-3.0" in wf.split("Depends:")[1].split("\n")[0]
+        depends_line = wf.split("Depends:")[1].split("\n")[0]
+        # Qt WebEngine(Chromium) 运行时系统库
+        for lib in ("libnss3", "libgbm1", "libxkbcommon0", "libasound2"):
+            assert lib in depends_line, f"missing {lib} in deb Depends"
+        # 不再依赖 WebKit2/GIR
+        assert "gir1.2-webkit2-4.0" not in depends_line
 
 
 class TestBuildDebScript:
-    def test_build_deb_depends_includes_gir_webkit(self):
+    def test_build_deb_depends_includes_qt_webengine_libs(self):
         sh = _read("build_deb.sh")
         depends_line = next(l for l in sh.splitlines() if l.strip().startswith("Depends:"))
-        assert "gir1.2-webkit2-4.0" in depends_line
-        assert "gir1.2-gtk-3.0" in depends_line
+        for lib in ("libnss3", "libgbm1", "libxkbcommon0", "libasound2"):
+            assert lib in depends_line, f"missing {lib} in build_deb.sh Depends"
+        assert "gir1.2-webkit2-4.0" not in depends_line
+
+
+class TestRequirements:
+    def test_pyqt6_pinned_uos_compatible_versions(self):
+        req = _read("requirements.txt")
+        assert "PyQt6==6.7.1" in req
+        assert "PyQt6-WebEngine==6.7.0" in req
+        assert "PyQt6-Qt6==6.7.3" in req
+        # pywebview 已被 Qt 替代（不作为实际依赖行存在；注释提及不算）
+        dep_lines = [l.strip() for l in req.splitlines()
+                     if l.strip() and not l.strip().startswith("#")]
+        assert not any(l.lower().startswith("pywebview") for l in dep_lines)
