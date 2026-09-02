@@ -192,6 +192,34 @@ a = Analysis(
     noarchive=False,
 )
 
+# ---- Linux: GTK/GNOME 系统库不打进包 ----
+# PyInstaller 的 gi hook 会把 libgtk/libglib/libwebkit2gtk 等系统库收进
+# _internal，bootloader 又把它设为 LD_LIBRARY_PATH 优先加载——GTK 因此
+# 加载不到系统输入法模块（im-fcitx 等 immodules），窗口内无法切中文
+# （UOS ARM64 实测）。deb Depends 已保证目标机系统装有这些库，打包时
+# 剔除，运行时回退系统库，行为与系统 Python 直跑一致。
+if sys.platform.startswith('linux'):
+    _SYS_LIB_PREFIXES = (
+        'libgtk-3', 'libgdk-3', 'libgdk_pixbuf', 'libglib-2.0',
+        'libgobject-2.0', 'libgio-2.0', 'libgmodule-2.0', 'libgthread-2.0',
+        'libgirepository-1.0', 'libwebkit2gtk-4.0', 'libjavascriptcoregtk-4.0',
+        'libpango', 'libcairo', 'libatk', 'libharfbuzz', 'libsoup',
+        'libepoxy',
+    )
+
+    def _is_gnome_sys_lib(entry):
+        # TOC 条目为 (name, path, typecode)
+        names = [os.path.basename(str(entry[0])).lower()]
+        if len(entry) > 1 and entry[1]:
+            names.append(os.path.basename(str(entry[1])).lower())
+        return any(
+            n.startswith(p)
+            for n in names
+            for p in _SYS_LIB_PREFIXES
+        )
+
+    a.binaries = [b for b in a.binaries if not _is_gnome_sys_lib(b)]
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 # Determine target architecture
