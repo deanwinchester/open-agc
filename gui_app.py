@@ -188,6 +188,14 @@ def create_window(port):
     # 支持文件拖放与 Ctrl+C/V）；无内嵌时回退系统 WebView2/IE。
     _setup_webview2_runtime()
 
+    # Linux：pywebview 5.0+ 的 GTK 后端依赖 WebKitGTK 2.40+ API，UOS/deepin
+    # 的 2.38 上会 AttributeError 中断 decide-policy 回调导致导航挂起白屏。
+    try:
+        from core.pywebview_gtk_compat import apply_if_needed
+        apply_if_needed()
+    except Exception:
+        pass
+
     loading_html = """
     <!DOCTYPE html>
     <html>
