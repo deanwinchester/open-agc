@@ -176,7 +176,7 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: ${BUILD_ARCH}
-Depends: libnss3, libasound2, libgbm1, libxkbcommon0, libxkbcommon-x11-0, libxcomposite1, libxdamage1, libxrandr2, libxfixes3, libcups2, libdbus-1-3, libdrm2, libpango-1.0-0, libcairo2, libatk1.0-0, libatk-bridge2.0-0, libfontconfig1
+Depends: libwebkit2gtk-4.0-37, libgtk-3-0, libgirepository-1.0-1, gir1.2-webkit2-4.0, gir1.2-gtk-3.0
 Maintainer: Open-AGC Team <noreply@open-agc.local>
 Description: Open-AGC — AI agent desktop application
  Open-AGC is a local AI agent desktop app with a web-based UI,
