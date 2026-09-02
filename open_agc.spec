@@ -58,10 +58,32 @@ datas += litellm_datas
 datas += openai_datas
 datas += tiktoken_datas
 
+# ---- Linux: pywebview GTK backend (WebKit2 / JavaScriptCore typelibs) ----
+# PyInstaller 自带 hook-gi.repository.Gtk 收集 Gtk/Gdk/Gio/GLib/GObject，
+# 但没有 WebKit2/JavaScriptCore 的 hook，这里用 GiModuleInfo 手动收集。
+# 需要构建环境安装 gir1.2-webkit2-4.0（typelib 在容器/目标机均为数据文件，
+# 与 Python 版本无关）；未安装时 GiModuleInfo.available=False，安全跳过。
+gi_binaries = []
+gi_hiddenimports = []
+try:
+    from PyInstaller.utils.hooks.gi import GiModuleInfo
+    for _gir_name, _gir_ver in [('WebKit2', '4.0'), ('JavaScriptCore', '4.0')]:
+        try:
+            _info = GiModuleInfo(_gir_name, _gir_ver)
+            if _info.available:
+                _b, _d, _h = _info.collect_typelib_data()
+                gi_binaries += _b
+                datas += _d
+                gi_hiddenimports += _h
+        except Exception:
+            pass
+except Exception:
+    pass
+
 a = Analysis(
     ['gui_app.py'],
     pathex=[],
-    binaries=[],
+    binaries=gi_binaries,
     datas=datas,
     hiddenimports=[
         # Uvicorn
@@ -107,23 +129,18 @@ a = Analysis(
         'tools.memory',
         'tools.web_search',
         'tools.system_mac',
-        # 桌面原生窗口：PyQt6 QWebEngineView（Chromium 内核；PyInstaller 的
-        # hook-PyQt6.* 会自动收集 QtWebEngineProcess/资源/Qt 插件）
-        'PyQt6.QtCore',
-        'PyQt6.QtGui',
-        'PyQt6.QtWidgets',
-        'PyQt6.QtNetwork',
-        'PyQt6.QtWebChannel',
-        'PyQt6.QtPrintSupport',
-        'PyQt6.QtWebEngineCore',
-        'PyQt6.QtWebEngineWidgets',
-    ] + litellm_submodules + tiktoken_submodules + httpx_submodules + httpcore_submodules + anyio_submodules + aiohttp_submodules + ['tiktoken_ext.openai_public'],
+        'webview',
+        'webview.platforms.cocoa',
+        'webview.platforms.winforms',
+        # Linux GTK 后端（此前缺失，Linux 下 pywebview 找不到 GTK 后端）
+        'webview.platforms.gtk',
+    ] + litellm_submodules + tiktoken_submodules + httpx_submodules + httpcore_submodules + anyio_submodules + aiohttp_submodules + gi_hiddenimports + ['tiktoken_ext.openai_public'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Qt/PySide：我们使用 PyQt6（不要排除）；仅排除不用的 PySide/PyQt5
-        'PySide6', 'PySide2', 'PyQt5',
+        # Qt/PySide (pulled by pywebview but we use WinForms/Cocoa, not Qt)
+        'PySide6', 'PySide2', 'PyQt5', 'PyQt6',
         'shiboken6',
         # Heavy ML frameworks (litellm pulls them but we don't need them)
         'tensorboardX', 'tensorboard',
