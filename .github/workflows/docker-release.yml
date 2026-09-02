@@ -139,6 +139,12 @@ jobs:
           pip install -r requirements.txt
           pip install pywebview pywin32
 
+      # 下载内嵌 WebView2 fixed-version 运行时（edgechromium 用，支持文件
+      # 拖放与 Ctrl+C/V；目标机无需预装 WebView2 运行时）
+      - name: Download embedded WebView2 runtime
+        run: |
+          python scripts/download_webview2_runtime.py build/webview2_runtime
+
       - name: Build with PyInstaller
         run: |
           pyinstaller open_agc.spec --clean --noconfirm --distpath dist --workpath build\work
