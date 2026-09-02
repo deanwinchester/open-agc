@@ -19,7 +19,10 @@ class ComputerTool(BaseTool):
             pyautogui.FAILSAFE = True
             # Add a slight delay after every pyautogui call
             pyautogui.PAUSE = 0.5
-        except ImportError as e:
+        except (ImportError, SystemExit) as e:
+            # SystemExit：mouseinfo 在 Linux 无 tkinter 时直接 sys.exit()
+            # （打包环境 spec 排除了 tkinter），不能用 except Exception 漏掉它——
+            # SystemExit 继承 BaseException，会穿透 ASGI 让整个会话报错。
             print(f"[ComputerTool] pyautogui not available: {e}. "
                   "Install python3-tk or disable computer_control tool.")
 
