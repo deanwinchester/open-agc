@@ -326,6 +326,18 @@ def main():
         base_dir = sys._MEIPASS
         os.chdir(base_dir)
 
+        # Linux：清除 PyInstaller gi 运行时钩子设置的 GTK/GIO/PANGO 路径变量。
+        # 这些钩子面向「GTK 库全部打进包」的方式（pyi_rth_gtk 等），会把
+        # GTK_EXE_PREFIX/GTK_PATH 等指向 sys._MEIPASS。我们改用系统 GTK 库
+        # （deb Depends 保证），这些变量会导致 GTK 在 _internal 里找输入法
+        # 模块（im-fcitx）而找不到 → 窗口内无法切中文（UOS 实测）。必须在
+        # gi/GTK 初始化（webview.start）之前清除。
+        if sys.platform.startswith('linux'):
+            for _v in ('GTK_DATA_PREFIX', 'GTK_EXE_PREFIX', 'GTK_PATH',
+                       'PANGO_LIBDIR', 'PANGO_SYSCONFDIR', 'GIO_MODULE_DIR',
+                       'GI_TYPELIB_PATH'):
+                os.environ.pop(_v, None)
+
         # Set writable data dir BEFORE calling get_base_dir()
         app_data = os.path.join(os.path.expanduser("~"), ".open-agc")
         os.environ["OPEN_AGC_DATA_DIR"] = app_data
