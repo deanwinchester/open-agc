@@ -53,6 +53,12 @@ if os.path.exists('.env.example'):
 if os.path.exists('VERSION'):
     datas.append(('VERSION', '.'))
 
+# Windows: 包内嵌 WebView2 fixed-version 运行时（edgechromium 用，支持文件
+# 拖放与 Ctrl+C/V；目标机无需预装 WebView2 运行时）。由 build 脚本先调用
+# scripts/download_webview2_runtime.py 下载解包到 build/webview2_runtime/。
+if os.path.isdir('build/webview2_runtime'):
+    datas.append(('build/webview2_runtime', 'webview2_runtime'))
+
 # Merge package data files
 datas += litellm_datas
 datas += openai_datas
