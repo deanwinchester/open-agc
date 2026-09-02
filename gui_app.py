@@ -106,9 +106,38 @@ def wait_for_server_ready(port, timeout=60):
     return False
 
 
+def _gtk_diag_dump(window, tag, delay):
+    """诊断：输出 pywebview GTK 窗口内部状态（透明度/URL/DOM/localStorage）。
+    仅 OPEN_AGC_GTK_DIAG=1 时启用——用于排查 UOS 上 WebView 白屏
+    （pywebview 先 set_opacity(0) 再等 load_changed 恢复 1.0 的链路是否断开）。"""
+    time.sleep(delay)
+    try:
+        bv = getattr(window, 'gui', None)
+        wv = getattr(bv, 'webview', None)
+        if wv is not None:
+            print(f"[diag:{tag}] opacity={wv.props.opacity} uri={wv.get_uri()} visible={wv.props.visible}")
+        else:
+            print(f"[diag:{tag}] no gui/webview handle (gui={type(bv).__name__})")
+    except Exception as e:
+        print(f"[diag:{tag}] widget state error: {e}")
+    try:
+        r = window.evaluate_js(
+            "JSON.stringify({state:document.readyState,"
+            "body:document.body?document.body.innerHTML.length:-1,"
+            "app:(document.getElementById('app')||{innerHTML:''}).innerHTML.length,"
+            "ls:(function(){try{localStorage.setItem('__t','1');return 'ok'}catch(e){return 'ERR:'+e.message}})()})"
+        )
+        print(f"[diag:{tag}] js={r}")
+    except Exception as e:
+        print(f"[diag:{tag}] evaluate_js error: {e}")
+
+
 def check_server_and_load(window, port):
     if wait_for_server_ready(port, timeout=60):
         window.load_url(f"http://localhost:{port}")
+        if os.environ.get('OPEN_AGC_GTK_DIAG') == '1':
+            for tag, delay in (('t+4s', 4), ('t+10s', 10)):
+                threading.Thread(target=_gtk_diag_dump, args=(window, tag, delay), daemon=True).start()
         return
 
     # Timeout reached without success
@@ -245,8 +274,11 @@ def create_window(port):
         t = threading.Thread(target=check_server_and_load, args=(window, port), daemon=True)
         t.start()
 
+        # OPEN_AGC_GTK_DIAG=1 时开启 debug（GTK 下启用 WebKit 开发者工具，
+        # 窗口内右键 → Inspect Element 可看控制台）
+        _diag_mode = os.environ.get('OPEN_AGC_GTK_DIAG') == '1'
         webview.start(
-            debug=False,
+            debug=_diag_mode,
             gui=None,  # Auto-detect best backend
         )
         return True
