@@ -187,10 +187,10 @@ if ! python -c "import gi" 2>/dev/null; then
             echo "  [warn] apt 安装失败"
     fi
     # 不带 -q：源码编译失败的报错必须可见。
-    # 版本钉 3.44.1：3.46+ 要求 gobject-introspection>=1.64，而 UOS/buster
-    # 只有 1.58；3.40–3.44.x 要求 >=1.56 正好兼容（pygobject.gnome.org 官方
-    # 兼容表）
-    pip install 'PyGObject==3.44.1'
+    # 版本钉 3.42.2：3.46+ 要求 gobject-introspection>=1.64，而 UOS/buster
+    # 只有 1.58；3.40–3.44.x 要求 >=1.56。其中 3.42.2 在 UOS ARM64 +
+    # Python 3.12 上生产实证可用（3.44.1 虽能编译但打出的包白屏）
+    pip install 'PyGObject==3.42.2'
 fi
 # 硬性卡口：gi 不可用的包等于没有原生窗口，直接判构建失败
 if ! python -c "import gi" 2>/dev/null; then
