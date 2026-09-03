@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from api.db import DB_PATH
 from api import deliverables_registry as _dr
 from api.config import load_config
-from api.state import _active_agents, _background_agents, connected_websockets, _broadcast_to_websockets, _llamacpp_download_state
+from api.state import _active_agents, _background_agents, connected_websockets, _broadcast_to_websockets, _llamacpp_download_state, mark_task_deleted
 from api.task_core import (
     create_task, update_task_status, update_task_type, get_task_context,
     save_task_context, add_task_step, _extract_task_title,
@@ -243,21 +243,34 @@ async def delete_task(task_id: int, delete_artifacts: bool = False,
                                 detail="artifact_dirs 需为 JSON 数组字符串")
         # 逐项校验 + 规范化（I1/I2）——在任何删除动作之前完成
         selected_dirs = _normalize_artifact_dirs(task_id, selected_dirs)
-    # Interrupt running agents
+    # Interrupt running agents — 与 interrupt_task 同一套完整终止序列：
+    # 此前删除运行中任务只置标志 + interrupt_shell，漏了
+    # kill_tracked_background_process（任务登记的后台进程树继续跑）和
+    # _completed_by_user；backgrounded 任务没有活 agent 可置标志，行删后
+    # 进程彻底变孤儿（生产实证：删了任务进程还在后台跑）。
     for _agents in _active_agents.values():
         for _aid, _a in list(_agents.items()):
             if _aid == task_id:
                 try:
                     _a.is_interrupted = True
+                    _a._completed_by_user = True
                 except Exception:
                     pass
     for _tid, _bg_a in list(_background_agents.items()):
         if _tid == task_id:
             try:
                 _bg_a.is_interrupted = True
+                _bg_a._completed_by_user = True
             except Exception:
                 pass
     interrupt_shell()
+    try:
+        kill_tracked_background_process(task_id, notify=False)
+    except Exception:
+        pass
+    # tombstone：覆盖注册表竞态窗口（agent 已注册前的删除），完成/恢复
+    # 路径据此拒绝再为该任务写库或重启线程
+    mark_task_deleted(task_id)
     # Collect and remove temp files
     try:
         conn_tmp = sqlite3.connect(DB_PATH)
@@ -771,7 +784,7 @@ def _backgrounded_task_ids() -> set:
 
 
 def _build_processes_payload() -> dict:
-    from tools.shell_interact import _is_pid_alive
+    from core.process import pid_alive_as as _pid_alive_as
     from tools.shell import reap_dead_background_processes
     reaped = reap_dead_background_processes(
         exclude_task_ids=_backgrounded_task_ids())
@@ -784,7 +797,9 @@ def _build_processes_payload() -> dict:
             if pid:
                 tracked_pids.add(int(pid))
             pinfo["task_id"] = tid
-            pinfo["alive"] = _is_pid_alive(pid) if pid else False
+            # pid_alive_as 校验 create_time：pid 复用后裸判活恒真，
+            # 死进程条目会永远显示"运行中"
+            pinfo["alive"] = _pid_alive_as(pid, pinfo.get("started_at")) if pid else False
             pinfo["uptime"] = _time.time() - pinfo.get("started_at", _time.time()) if pinfo.get("started_at") else 0
             procs[f"{tid}:{pid_key}"] = pinfo
     for oid, info in get_orphan_processes().items():
@@ -792,7 +807,7 @@ def _build_processes_payload() -> dict:
         pid = pinfo.get("pid")
         if pid:
             tracked_pids.add(int(pid))
-        pinfo["alive"] = _is_pid_alive(pid) if pid else False
+        pinfo["alive"] = _pid_alive_as(pid, pinfo.get("started_at")) if pid else False
         pinfo["uptime"] = _time.time() - pinfo.get("started_at", _time.time()) if pinfo.get("started_at") else 0
         procs[oid] = pinfo
     for entry in reaped:
@@ -963,7 +978,7 @@ async def get_task_process(task_id: int):
     （输出文件还在→保留路径，已删→output_file_deleted 标记）。Also
     adopts orphans.
     """
-    from tools.shell_interact import _is_pid_alive
+    from core.process import pid_alive_as as _pid_alive_as
     from tools.shell import reap_dead_background_processes
     # Try to adopt any orphans that might belong to this task
     adopt_orphan_processes(task_id)
@@ -979,7 +994,8 @@ async def get_task_process(task_id: int):
     rows = [{
         "pid": info.get("pid"),
         "command": info.get("command", ""),
-        "alive": _is_pid_alive(info.get("pid")) if info.get("pid") else False,
+        # 校验 create_time，pid 复用后不再谎报"运行中"
+        "alive": _pid_alive_as(info.get("pid"), info.get("started_at")) if info.get("pid") else False,
         "uptime": round(now - info.get("started_at", now), 1),
         "output_file": info.get("output_file", ""),
     } for info in procs.values()]
@@ -1001,19 +1017,35 @@ async def get_task_logs(task_id: int, lines: int = 50):
             output_path = pinfo["output_file"]
             break
     if not output_path:
+        # fallback 1：tasks.log_file（任务进入后台/唤醒时持久化的进程日志
+        # 路径，精确来源）；旧库无该列时容忍
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            row = conn.execute("SELECT log_file FROM tasks WHERE id=?", (task_id,)).fetchone()
+            conn.close()
+            if row and row[0]:
+                output_path = row[0]
+        except sqlite3.OperationalError:
+            pass
+    if not output_path:
+        # fallback 2（兼容旧任务）：交付物列表中仅认 .log 后缀——此前无差别
+        # 取第一个文件，会把无关交付物当日志内容显示（生产实证）
         conn = sqlite3.connect(DB_PATH)
         row = conn.execute("SELECT output_files FROM tasks WHERE id=?", (task_id,)).fetchone()
         conn.close()
         if row and row[0]:
             try:
                 files = json.loads(row[0])
-                output_path = files[0] if isinstance(files, list) and files else None
+                if isinstance(files, list):
+                    output_path = next(
+                        (f for f in files
+                         if isinstance(f, str) and f.lower().endswith('.log')),
+                        None)
             except Exception:
                 output_path = None
-        else:
-            output_path = None
     if not output_path or not os.path.exists(output_path):
-        return {"logs": "", "lines": []}
+        return {"logs": "", "lines": [],
+                "hint": "该任务没有可读取的进程日志（进程未产生输出文件，或文件已被清理）"}
     # 进程日志是原始字节，可能逐行混杂 UTF-8/GBK（cmd 内建 vs python 子进程），
     # 整块 utf-8+replace 会把 GBK 行全变 �；按行解码后再截取行数
     with open(output_path, "rb") as f:

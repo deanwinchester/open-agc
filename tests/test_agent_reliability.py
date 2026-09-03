@@ -57,7 +57,7 @@ class StubLLM:
         self.calls = []
         self.default_model = "stub-model"
 
-    def chat(self, messages=None, tools=None):
+    def chat(self, messages=None, tools=None, interrupt_check=None):
         self.calls.append({"messages": messages, "tools": tools})
         item = self.script.pop(0)
         if isinstance(item, Exception):

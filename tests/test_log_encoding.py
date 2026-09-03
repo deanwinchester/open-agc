@@ -223,7 +223,11 @@ class TestGetTaskLogs:
         from api.routes import routes_tasks as rt
         monkeypatch.setattr(rt, "DB_PATH",
                             _make_tasks_db(tmp_path, 1, [str(tmp_path / "nope.log")]))
-        assert _fetch_logs() == {"logs": "", "lines": []}
+        result = _fetch_logs()
+        # 注册表 miss 且无可读日志 → 空结果 + 兜底 hint（新契约多一个 hint 键）
+        assert result["logs"] == ""
+        assert result["lines"] == []
+        assert result.get("hint")
 
 
 # ── execute_shell env 注入 ─────────────────────────────────────

@@ -191,6 +191,10 @@ def _user_facing(response: str):
     """
     if not response:
         return response
+    if response.strip().lower().startswith("task interrupted by user"):
+        # 中断哨兵不进聊天：中断动作已有 toast + 进度卡片「继续」按钮提示，
+        # 单独的 "Task interrupted by user." 消息是纯噪音（用户反馈）
+        return None
     if response.startswith("[TASK_BACKGROUNDED]"):
         return None
     if response.startswith("[MAX_ITERATIONS_REACHED]"):
@@ -354,6 +358,10 @@ async def websocket_endpoint(websocket: WebSocket):
         # Pre-resolve task_id BEFORE agent execution so tools always get a valid _task_id.
         # resume_task_id is used when explicitly resuming; otherwise detect new vs continuation.
         if resume_task_id:
+            # tombstone：任务已被删除（删除即终止）——拒绝复活，直接返回
+            from api.state import is_task_deleted as _is_task_deleted
+            if _is_task_deleted(resume_task_id):
+                return (None, None)
             ws_task_id = resume_task_id
         else:
             # May call llm.chat (sync network I/O with retries) — run in a
@@ -670,10 +678,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     print(f"[WS] Save user message failed: {_msg_e}")
 
             loop = asyncio.get_event_loop()
-            
+
             import concurrent.futures
+            # 在事件循环线程内、提交前复位中断标志：与 WS 置位（同线程）
+            # 保持先后序，消除「WS 已置 True、线程后启动又清掉」的竞态。
+            agent.is_interrupted = False
             agent_future = loop.run_in_executor(
-                None, 
+                None,
                 lambda: agent.run_turn(query, False, progress_callback, images=images, task_id=ws_task_id, skip_rag=bool(resume_task_id))
             )
             
@@ -696,6 +707,14 @@ async def websocket_endpoint(websocket: WebSocket):
                             agent.is_interrupted = True
                             if ws_task_id:
                                 update_task_status(ws_task_id, "interrupted", interruption_reason="user")
+                            # 显式中断事件：中断哨兵文本不再进聊天（_user_facing
+                            # 返回 None），前端靠它复位运行态并把进度卡片置为
+                            # 可续跑（显示「继续」按钮）
+                            _broadcast_to_websockets({
+                                "type": "task_interrupted",
+                                "task_id": ws_task_id,
+                                "session_id": ws_session_id,
+                            })
                             # Also interrupt background agents — but ONLY those
                             # belonging to this session (don't kill other
                             # sessions' email/scheduled background tasks)
@@ -921,6 +940,14 @@ async def websocket_endpoint(websocket: WebSocket):
                                             _pend["message_id"] = _saved_mid
                                 except Exception:
                                     pass
+                        else:
+                            # 用户中断：重播历史步骤卡片（status=interrupted →
+                            # 卡片显示「继续」按钮可从断点恢复），哨兵文本本身
+                            # 不进聊天（_user_facing 已滤掉）
+                            try:
+                                _broadcast_task_history(_tb_ws_task_id, _tb_session_id, "interrupted")
+                            except Exception:
+                                pass
 
                         if _r == 'backgrounded':
                             if _bg_pid:
@@ -985,13 +1012,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 agent.messages.append({"role": "user", "content": retry_prompt})
                 try:
-                    # Re-run with skip_rag=True (context already loaded)
-                    response = agent.run_turn(
-                        user_input=None,  # None = resume, don't re-add user message
-                        verbose=False,
-                        progress_callback=progress_callback,
-                        task_id=ws_task_id,
-                        skip_rag=True,
+                    # Re-run with skip_rag=True (context already loaded).
+                    # 必须走 executor：这里是 async 上下文，同步调用会堵死
+                    # 事件循环，重试期间 interrupt 消息完全收不到（生产实证：
+                    # 重试阶段按停止无效）。复位同样在提交前于本线程完成。
+                    agent.is_interrupted = False
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: agent.run_turn(
+                            user_input=None,  # None = resume, don't re-add user message
+                            verbose=False,
+                            progress_callback=progress_callback,
+                            task_id=ws_task_id,
+                            skip_rag=True,
+                        )
                     )
                     # If retry succeeded, log and return（落库前剥内部协议串）
                     try:
@@ -1091,6 +1125,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             kill_tracked_background_process(_tid)
                         except Exception:
                             pass
+                    # 显式中断事件（同内层循环）：前端复位运行态 + 卡片可续跑
+                    _broadcast_to_websockets({
+                        "type": "task_interrupted",
+                        "task_id": None,
+                        "session_id": ws_session_id,
+                    })
                     # Cancel any active download
                     if _llamacpp_download_state.get("active"):
                         _llamacpp_download_state["cancelled"] = True
@@ -1104,6 +1144,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             "error": "用户中断"
                         })
                     continue
+
+                if msg_type == "switch_session":
                     # Switch to a different session without reconnecting WebSocket
                     new_sid = int(user_msg.get("session_id", 1))
                     if new_sid != ws_session_id:

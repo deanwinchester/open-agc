@@ -18,3 +18,14 @@ def _janitor_data_dir(tmp_path, monkeypatch):
     data_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(sj, "get_data_path", lambda name: str(data_dir / name))
     yield
+
+
+@pytest.fixture(autouse=True)
+def _clean_deleted_task_tombstones():
+    """delete_task 的墓碑集（api.state._deleted_task_ids）是全局状态：
+    各测试用临时库，任务 id 多为 1——不清干净会让后续用例的
+    claim_task_for_resume / handle_task_completion 误判已删除。"""
+    from api.state import _deleted_task_ids
+    _deleted_task_ids.clear()
+    yield
+    _deleted_task_ids.clear()

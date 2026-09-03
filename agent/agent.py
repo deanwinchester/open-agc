@@ -2453,6 +2453,15 @@ class OpenAGCAgent:
             except Exception:
                 return messages, False
 
+    def _finish_interrupted(self, user_input: str, current_iter: int,
+                            task_start: float) -> str:
+        """用户中断的统一收尾（迭代顶部 / LLM 调用中 / 工具执行前共用）。"""
+        self._record_skill_feedback(success=False, task_input=self._reflection_task_input,
+                                    duration=_time.time() - task_start)
+        cat = self._classify_task_category(user_input)
+        self._save_task_stats(cat, current_iter, False)
+        return "Task interrupted by user."
+
     def run_turn(self, user_input: str, verbose: bool = False,
                  progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
                  images: Optional[List[str]] = None,
@@ -2466,9 +2475,17 @@ class OpenAGCAgent:
                       and system prompt rebuild. Used when resuming interrupted tasks
                       where the full conversation context is already loaded in messages.
         """
-        self.is_interrupted = False
+        # 注意：is_interrupted 的复位由提交方负责（ws.py 在 run_in_executor
+        # 提交前、background.py 在线程启动前——与 WS 置位同在事件循环线程，
+        # 无竞态）。此前在 run_turn 开头复位，WS 置位后线程才启动时中断会
+        # 被清掉（「第一下白按」）。仅补初始化以兼容绕过 __init__ 的构造。
+        if not hasattr(self, 'is_interrupted'):
+            self.is_interrupted = False
         self.task_id = task_id
         self._consecutive_failures = 0
+        # 空响应催促计数（推理型本地模型偶发「只输出思考就 EOS」——
+        # reasoning_content 有内容、正文为空，直接停任务太脆，先催促重试）
+        self._empty_response_retries = 0
         # 虚构交付拦截：本轮工具消息基线 + 重跑计数（dispatcher_mode 专用，
         # 生产实证：主 agent 零工具调用虚构「编译完成/验收通过」报告）
         self._tool_msg_baseline = sum(1 for m in self.messages if m.get("role") == "tool")
@@ -2886,11 +2903,7 @@ class OpenAGCAgent:
                self._pending_final_answer or
                self._correction_attempts < self._max_correction_attempts):
             if self.is_interrupted:
-                self._record_skill_feedback(success=False, task_input=self._reflection_task_input,
-                                            duration=_time.time() - _task_start)
-                cat = self._classify_task_category(user_input)
-                self._save_task_stats(cat, current_iter, False)
-                return "Task interrupted by user."
+                return self._finish_interrupted(user_input, current_iter, _task_start)
 
             # Check for pending messages from non-blocking input
             injected = self._check_pending_messages(user_input)
@@ -2961,15 +2974,21 @@ class OpenAGCAgent:
                             pass
                     response, actual_model = self.llm.chat_stream_collect(
                         messages=self.messages, tools=self.tool_schemas,
-                        on_delta=_on_delta)
+                        on_delta=_on_delta,
+                        interrupt_check=lambda: self.is_interrupted)
                 else:
-                    response, actual_model = self.llm.chat(messages=self.messages, tools=self.tool_schemas)
+                    response, actual_model = self.llm.chat(messages=self.messages, tools=self.tool_schemas,
+                                                           interrupt_check=lambda: self.is_interrupted)
                 _llm_duration = _time.time() - _llm_t0
                 choices = getattr(response, "choices", None) or []
                 if not choices:
                     raise ValueError("LLM returned an empty choices list")
                 message = choices[0].message
             except Exception as e:
+                # 用户中断（LLM 流式/重试期间置位）：与迭代顶部同一收尾路径
+                from core.llm_client import LLMInterrupted as _LLMInterrupted
+                if isinstance(e, _LLMInterrupted):
+                    return self._finish_interrupted(user_input, current_iter, _task_start)
                 # 工具调用格式漂移（模型返回非法 JSON arguments，API 层解析
                 # 即失败）：注入纠错消息后重试本轮（上限 2 次）——生产实证：
                 # k3 偶发未闭合 JSON，LLMClient 三次盲重试同一 prompt 仍漂移，
@@ -3077,12 +3096,24 @@ class OpenAGCAgent:
             # Detect empty response (no content and no tool calls)
             # This can happen with some models like Ollama's Qwen when they malfunction or refuse to answer.
             if not message.content and not message.tool_calls:
+                # 推理型模型（llamacpp/Qwen 等）偶发「只输出 reasoning_content
+                # 就 EOS」——有思考内容时先催促重试（上限 2 次），不直接停任务
+                _has_reasoning = bool(getattr(message, "reasoning_content", None))
+                if _has_reasoning and self._empty_response_retries < 2:
+                    self._empty_response_retries += 1
+                    print(f"[Agent] 模型只输出了思考内容就停止（空正文），催促重试 "
+                          f"（{self._empty_response_retries}/2）")
+                    self.messages.append({"role": "system", "content": (
+                        "⚠️ 你刚才只进行了思考但没有给出任何实际回答或工具调用。"
+                        "请立即给出正面回应：要么直接回答用户，要么调用合适的工具继续任务。"
+                    )})
+                    continue
                 error_msg = f"[Agent] Model {actual_model} returned an empty response (no content and no tool calls). Breaking loop."
                 if verbose:
                     print(error_msg)
                 # Save as a system message to history to explain why it stopped
                 self.messages.append({"role": "assistant", "content": "Error: Empty response from model. Please check the model logs or try a different model."})
-                return "Agent stopped: Received an empty response from the model. This usually indicates a model failure or refusal."
+                return "任务已停止：模型返回了空响应（无正文也无工具调用），通常是模型服务故障或拒绝回答。请检查模型配置/日志，或换个模型重试。"
             
             # Notify if model was switched
             if progress_callback:
@@ -3165,6 +3196,10 @@ class OpenAGCAgent:
                 })
 
             if tool_calls:
+                # 中断可能在 LLM 调用期间到达（非流式路径要等调用返回才
+                # 检查得到）：本轮回传的工具不再执行，直接按中断收尾。
+                if self.is_interrupted:
+                    return self._finish_interrupted(user_input, current_iter, _task_start)
                 screenshot_urls = []
                 for tool_call in tool_calls:
                     function_name = tool_call.function.name
@@ -3771,10 +3806,10 @@ class OpenAGCAgent:
                 for h in self._self_review_history[-3:]
             )
             return (
-                f"[MAX_ITERATIONS_REACHED] Agent stopped after {current_iter} iterations and {self._correction_attempts} correction attempts. "
-                f"Review history: {summaries}"
+                f"[MAX_ITERATIONS_REACHED] 任务已停止：执行了 {current_iter} 步、{self._correction_attempts} 次纠错后仍未完成。"
+                f"近期进展：{summaries}"
             )
-        return f"[MAX_ITERATIONS_REACHED] Agent stopped: Reached maximum iterations ({current_iter}) without a final answer ({self._correction_attempts}/{self._max_correction_attempts} corrections used). The task may be incomplete."
+        return f"[MAX_ITERATIONS_REACHED] 任务已停止：达到最大步数（{current_iter} 步）仍未得出最终结果（已用 {self._correction_attempts}/{self._max_correction_attempts} 次纠错），任务可能未完成。"
 
     def _classify_task_category(self, user_input: str) -> str:
         """Return the category name for a user input (for stats tracking)."""

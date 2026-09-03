@@ -11,7 +11,7 @@ from api.db import DB_PATH, db_connect
 from api.config import load_config
 from api.state import (
     _pending_sandbox_approvals, _active_agents, _background_agents,
-    _guardian_resume_lock,
+    _guardian_resume_lock, is_task_deleted,
 )
 
 _CONTINUATION_PREFIXES = [
@@ -220,6 +220,10 @@ def claim_task_for_resume(task_id: int, allowed_statuses: tuple) -> bool:
     认领成功后任何路径都不得再把状态写回 interrupted；resume_count 收敛到
     本函数唯一计数，wake/shell/下载/Guardian/Scheduler 各路径自然计数。
     """
+    if is_task_deleted(task_id):
+        # 任务已删除（tombstone）：删除动作与注册表/轮询存在竞态窗口，
+        # 恢复路径可能捞到还没来得及删的行——拒绝认领，不再为其重启线程
+        return False
     try:
         conn = db_connect()
         placeholders = ",".join("?" for _ in allowed_statuses)
@@ -456,8 +460,12 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
     Called by ws.py, background.py _run_background_task, and guardian.
     Parses the response for special prefixes and updates task status accordingly.
 
-    Returns: 'completed', 'interrupted', 'backgrounded', 'interrupted_user'
+    Returns: 'completed', 'interrupted', 'backgrounded', 'interrupted_user',
+             'deleted'（任务已被删除——tombstone，拒绝再写库）
     """
+    if is_task_deleted(task_id):
+        # 任务已被用户删除（删除即终止 + tombstone）：不再做任何状态写库
+        return 'deleted'
     if not response:
         update_task_status(task_id, "failed", "No response from agent", interruption_reason="error")
         return 'failed'
@@ -469,7 +477,9 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
     summary = response[:200]
 
     # Extract and save title from first response line
-    if update_title and response and not is_max_iter and not is_backgrounded:
+    # 用户中断的哨兵文本（"Task interrupted by user."）不得写进标题/摘要——
+    # 否则任务列表里看不到任务本身是什么（生产实证 #487）
+    if update_title and response and not is_max_iter and not is_backgrounded and not is_user_int:
         title = _extract_task_title(response)
         if title:
             try:
@@ -483,6 +493,21 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
     # -- Backgrounded --
     if is_backgrounded:
         save_task_context(task_id, agent_messages)
+        # 后台进程日志路径随任务持久化：进程条目被收割/唤醒清理后，
+        # 日志接口仍能按 tasks.log_file 找到文件（文件本身不再被删）。
+        try:
+            from tools.shell import get_background_processes_for_task as _gbpt
+            _procs = _gbpt(task_id)
+            _log_path = next((i.get("output_file") for i in _procs.values()
+                              if i.get("output_file")), None)
+            if _log_path:
+                _lf_conn = db_connect()
+                _lf_conn.execute("UPDATE tasks SET log_file=? WHERE id=?",
+                                 (_log_path, task_id))
+                _lf_conn.commit()
+                _lf_conn.close()
+        except Exception as _lf_e:
+            print(f"[TaskCore] Failed to persist log_file: {_lf_e}")
         # Parse WAKE_IN=N
         _wake_match = re.search(r'WAKE_IN=(\d+)', response)
         _wake_min = int(_wake_match.group(1)) if _wake_match else wake_minutes
@@ -502,7 +527,8 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
 
     # -- User interrupted --
     if is_user_int:
-        update_task_status(task_id, "interrupted", summary, interruption_reason="user")
+        # 不写 result_summary：哨兵文本会盖掉任务摘要，列表里看不到任务内容
+        update_task_status(task_id, "interrupted", interruption_reason="user")
         return 'interrupted_user'
 
     # -- Max iterations --

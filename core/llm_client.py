@@ -15,6 +15,14 @@ from typing import List, Dict, Any, Optional, Tuple
 from core.model_pricing import calculate_cost
 from api.db import db_connect
 
+
+class LLMInterrupted(Exception):
+    """用户中断（interrupt_check 置位）时从 LLM 调用中抛出。
+
+    独立于通用异常分类：不应触发重试/fallback，由 agent 主循环按
+    「用户中断」语义收尾（返回 "Task interrupted by user."）。
+    """
+
 # ── Model call logging ──
 # Connections are opened per write via api.db.db_connect() (busy_timeout +
 # Row factory) and closed immediately. The previous thread-local connection
@@ -556,15 +564,10 @@ class LLMClient:
         try:
             from chromadb.utils import embedding_functions
             import numpy as np
-            from core.paths import get_data_dir
 
-            # Store model in data/ for Docker persistence
-            model_dir = os.path.join(get_data_dir(), "chroma_embedding")
-            os.makedirs(model_dir, exist_ok=True)
-
-            ef = embedding_functions.DefaultEmbeddingFunction(
-                download_path=model_dir
-            )
+            # chromadb ≥1.x 的 DefaultEmbeddingFunction 不再接受 download_path
+            # 参数（模型下到默认缓存目录），旧代码传参会 TypeError 落入 TF-IDF
+            ef = embedding_functions.DefaultEmbeddingFunction()
 
             ref_text = " ".join(
                 str(m.get("content", ""))[:500] for m in ref_msgs
@@ -862,31 +865,42 @@ class LLMClient:
         self._log_task_id = task_id
 
     def chat(self, messages: List[Dict[str, Any]], model: Optional[str] = None,
-             tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[Any, str]:
+             tools: Optional[List[Dict[str, Any]]] = None,
+             interrupt_check=None) -> Tuple[Any, str]:
         """
         Send a chat completion request with automatic model failover.
-        
+
+        interrupt_check: 可选回调，返回 True 表示用户已中断——在重试/
+        fallback 间隙检查并抛 LLMInterrupted（单次 HTTP 调用本身无法
+        中途取消，但重试等待与模型轮换会被立即打断）。
+
         Returns:
             Tuple of (response, actual_model_used)
         """
         target_model = model or self.default_model
-        
+
         # Build the ordered list of models to try
         models_to_try = [target_model]
         for fb in self.fallback_models:
             fb = fb.strip()
             if fb and fb not in models_to_try:
                 models_to_try.append(fb)
-        
+
         last_error = None
         for attempt_model in models_to_try:
             # Retry transient errors (connection reset, timeout, 5xx) up to 3 times
             _max_retries = 3
             _retry_delay = 2  # seconds, doubles each retry
             for _retry in range(_max_retries):
+                if interrupt_check and interrupt_check():
+                    raise LLMInterrupted("interrupted by user")
                 if _retry > 0:
                     import time as _rt
-                    _rt.sleep(_retry_delay)
+                    # 分段 sleep，中断可在 0.5s 内生效
+                    for _ in range(int(_retry_delay * 2)):
+                        if interrupt_check and interrupt_check():
+                            raise LLMInterrupted("interrupted by user")
+                        _rt.sleep(0.5)
                     _retry_delay *= 2
                     print(f"[LLMClient] Retry {_retry}/{_max_retries} for {attempt_model}...")
                 kwargs = self._build_model_kwargs(attempt_model, messages, tools, stream=False)
@@ -941,6 +955,8 @@ class LLMClient:
 
                     return response, attempt_model
                 except Exception as e:
+                    if isinstance(e, LLMInterrupted):
+                        raise  # 用户中断：不重试、不 fallback
                     last_error = e
                     _err_str = str(e).lower()
                     print(f"[LLMClient] Model {attempt_model} failed: {str(e)[:150]}")
@@ -1040,17 +1056,30 @@ def is_tool_call_drift_error(err: BaseException) -> bool:
 
 def chat_with_drift_retry(llm, messages: List[Dict[str, Any]],
                           tools: Optional[List[Dict[str, Any]]] = None,
-                          retries: int = 2, on_retry=None) -> Tuple[Any, str]:
+                          retries: int = 2, on_retry=None,
+                          interrupt_check=None) -> Tuple[Any, str]:
     """llm.chat + 漂移纠错重试：漂移时追加纠错 system 消息（反馈式重试）。
 
     供 SubAgent/worker 等没有 run_turn 纠错层的调用方使用；主 agent 的
     run_turn 内联同款逻辑（含 progress/continue 语义）不重复实现。
+
+    interrupt_check：可选中断回调，透传给 llm.chat 并在纠错重试间隙检查，
+    置位时抛 LLMInterrupted（SubAgent 的中断与主 agent 联动）。
     """
     attempt = 0
     while True:
+        if interrupt_check and interrupt_check():
+            raise LLMInterrupted("interrupted by user")
         try:
-            return llm.chat(messages=messages, tools=tools)
+            # 仅在提供时才透传 interrupt_check——调用方可能是鸭子类型的
+            # 假 client（测试替身），其 chat() 不接受该参数
+            _kw = {"messages": messages, "tools": tools}
+            if interrupt_check is not None:
+                _kw["interrupt_check"] = interrupt_check
+            return llm.chat(**_kw)
         except Exception as e:
+            if isinstance(e, LLMInterrupted):
+                raise
             if is_tool_call_drift_error(e) and attempt < retries:
                 attempt += 1
                 messages.append({"role": "system", "content": DRIFT_RETRY_HINT})
@@ -1068,48 +1097,63 @@ def chat_with_drift_retry(llm, messages: List[Dict[str, Any]],
 def chat_stream_collect(self, messages: List[Dict[str, Any]],
                         model: Optional[str] = None,
                         tools: Optional[List[Dict[str, Any]]] = None,
-                        on_delta=None) -> Tuple[Any, str]:
+                        on_delta=None,
+                        interrupt_check=None) -> Tuple[Any, str]:
     """流式调用 + 聚合完整响应（litellm.stream_chunk_builder）。
 
     on_delta(kind, text)：增量回调，kind='content' 正文 / 'thinking' 思考——
     run_turn 据此把生成过程实时推给前端（用户反馈：非流式首轮 30-60s
     无任何动静）。返回 (response, actual_model)，结构与 chat() 兼容。
+
+    interrupt_check：可选回调，每个 chunk 到达时检查，置位即关闭流并抛
+    LLMInterrupted——长生成过程中按一次停止即可中止（不再等整轮生成完）。
     """
     target_model = model or self.default_model
     _stream_start = time.time()
     chunks = []
     _raw_usage = {}
-    for chunk in self.chat_stream(messages, model=target_model, tools=tools):
-        chunks.append(chunk)
-        # Capture raw usage fields from any chunk. litellm's stream_chunk_builder
-        # drops vendor-specific cache fields (e.g. DeepSeek's
-        # prompt_cache_hit_tokens) when they are not already mapped into
-        # prompt_tokens_details, so we keep a raw copy to supplement the
-        # aggregated response before logging.
-        try:
-            u = getattr(chunk, "usage", None)
-            if u:
-                for k in ("prompt_cache_hit_tokens", "cache_read_input_tokens",
-                          "cache_creation_input_tokens", "prompt_tokens",
-                          "completion_tokens"):
-                    v = getattr(u, k, None)
-                    if v is None and isinstance(u, dict):
-                        v = u.get(k)
-                    if v:
-                        _raw_usage[k] = v
-        except Exception:
-            pass
-        if on_delta:
+    _stream = self.chat_stream(messages, model=target_model, tools=tools)
+    try:
+        for chunk in _stream:
+            if interrupt_check and interrupt_check():
+                raise LLMInterrupted("interrupted by user")
+            chunks.append(chunk)
+            # Capture raw usage fields from any chunk. litellm's stream_chunk_builder
+            # drops vendor-specific cache fields (e.g. DeepSeek's
+            # prompt_cache_hit_tokens) when they are not already mapped into
+            # prompt_tokens_details, so we keep a raw copy to supplement the
+            # aggregated response before logging.
             try:
-                delta = chunk.choices[0].delta
-                rc = getattr(delta, "reasoning_content", None)
-                if rc:
-                    on_delta("thinking", rc)
-                c = getattr(delta, "content", None)
-                if c:
-                    on_delta("content", c)
+                u = getattr(chunk, "usage", None)
+                if u:
+                    for k in ("prompt_cache_hit_tokens", "cache_read_input_tokens",
+                              "cache_creation_input_tokens", "prompt_tokens",
+                              "completion_tokens"):
+                        v = getattr(u, k, None)
+                        if v is None and isinstance(u, dict):
+                            v = u.get(k)
+                        if v:
+                            _raw_usage[k] = v
             except Exception:
                 pass
+            if on_delta:
+                try:
+                    delta = chunk.choices[0].delta
+                    rc = getattr(delta, "reasoning_content", None)
+                    if rc:
+                        on_delta("thinking", rc)
+                    c = getattr(delta, "content", None)
+                    if c:
+                        on_delta("content", c)
+                except Exception:
+                    pass
+    except BaseException:
+        # 中断或出错时显式关闭底层流（断开 HTTP 连接），避免悬挂
+        try:
+            _stream.close()
+        except Exception:
+            pass
+        raise
     if not chunks:
         raise ValueError("LLM stream returned no chunks")
     response = litellm.stream_chunk_builder(chunks)
@@ -1154,7 +1198,8 @@ def chat_stream_collect(self, messages: List[Dict[str, Any]],
                   and not getattr(_msg, "tool_calls", None)))
     if _empty:
         print("[LLMClient] 流式空响应，回退非流式 chat 重试")
-        return self.chat(messages, model=target_model, tools=tools)
+        return self.chat(messages, model=target_model, tools=tools,
+                         interrupt_check=interrupt_check)
 
     # Log from the aggregated response so litellm can fall back to its
     # token_counter when the provider did not stream usage chunks.

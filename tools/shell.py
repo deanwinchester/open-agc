@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional, Callable
 from pydantic import Field
 
 from tools.base import BaseTool, SandboxBlocked
-from core.process import kill_tree, pid_alive
+from core.process import kill_tree, pid_alive, pid_alive_as
 
 # Module-level process tracking for interrupt support
 _current_process: Optional[subprocess.Popen] = None
@@ -840,8 +840,19 @@ def reap_dead_background_processes(alive_fn=None, exclude_task_ids=None) -> list
     任务（其死条目由监控分支自己判定，关系"全死才恢复"的触发）。
     返回被清条目（附 task_id/orphan_id），并逐条打日志：输出文件还在
     → 保留路径；已删 → 标记（想查日志的用户有据可循）。清表后持久化。
+
+    判活默认用 pid_alive_as（校验 create_time，防 pid 复用后恒判活）；
+    调用方可传 alive_fn 覆盖（测试注入）。orphan 死条目保留 10 分钟
+    收割宽限：BgMonitor 的 adopt 还需要领到它们并观察到死亡来唤醒
+    等待中的任务——此前死 orphan 被立即清掉，任务永远看不到进程记录，
+    只能等 6h 兜底置 background_failed。
     """
-    check = alive_fn or pid_alive
+    if alive_fn is None:
+        def check(pid, info):
+            return pid_alive_as(pid, info.get("started_at"))
+    else:
+        def check(pid, info):
+            return alive_fn(pid)
     excluded = {str(t) for t in (exclude_task_ids or ())}
     with _background_process_lock:
         snapshot = {tid: dict(procs) for tid, procs in _background_process_info.items()}
@@ -851,14 +862,19 @@ def reap_dead_background_processes(alive_fn=None, exclude_task_ids=None) -> list
             continue
         for pid_key, info in procs.items():
             pid = info.get("pid")
-            if not pid or not check(pid):
+            if not pid or not check(pid, info):
                 dead.append((tid, pid_key, info))
     with _orphan_process_lock:
         orphan_snapshot = dict(_orphan_process_info)
     dead_orphans = []
+    _now = time.time()
     for oid, info in orphan_snapshot.items():
         pid = info.get("pid")
-        if not pid or not check(pid):
+        if not pid or not check(pid, info):
+            # 收割宽限：近期登记的 orphan 可能正等待 backgrounded 任务认领，
+            # 立即清掉会让任务的唤醒信号永久丢失
+            if _now - (info.get("started_at") or 0) < 600:
+                continue
             dead_orphans.append((oid, info))
     if not dead and not dead_orphans:
         return []

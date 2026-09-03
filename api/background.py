@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 from api.db import DB_PATH, db_connect
 from api.config import load_config
-from core.process import pid_alive
+from core.process import pid_alive, pid_alive_as
 from api.state import (
     connected_websockets, _main_event_loop, _active_agents, _background_agents,
     _pending_sandbox_approvals, _guardian_resume_lock, _SERVER_START_TIME,
@@ -828,9 +828,9 @@ def reconcile_backgrounded_after_restart():
             # interrupted、不重复恢复。
             try:
                 from tools.shell import get_background_processes_for_task
-                from core.process import pid_alive as _pid_alive
+                from core.process import pid_alive_as as _pid_alive_as
                 _tp = get_background_processes_for_task(tid)
-                if any(_pid_alive(i.get("pid")) for i in _tp.values() if i.get("pid")):
+                if any(_pid_alive_as(i.get("pid"), i.get("started_at")) for i in _tp.values() if i.get("pid")):
                     print(f"[Startup] Task {tid}: tracked process still alive — leaving to BgMonitor")
                     continue
             except Exception:
@@ -914,8 +914,8 @@ def start_background_monitor():
                 # 任务排除在外：其死条目留给下方分支判定（关系"全死才恢复"）。
                 try:
                     from tools.shell import reap_dead_background_processes
+                    # 默认判活即 pid_alive_as（校验 create_time，防 pid 复用）
                     reap_dead_background_processes(
-                        alive_fn=pid_alive,
                         exclude_task_ids={str(t["id"]) for t in bg_tasks})
                 except Exception as _reap_e:
                     print(f"[BgMonitor] Reap error: {_reap_e}")
@@ -1110,7 +1110,9 @@ def start_background_monitor():
                                 _p = _pi.get("pid")
                                 # NOTE: os.kill(pid, 0) would TERMINATE the process on
                                 # Windows (TerminateProcess), so use psutil-based check.
-                                if _p and pid_alive(_p):
+                                # pid_alive_as 校验 create_time：pid 复用后裸判活
+                                # 恒真，任务会永远等不到「全死」信号而不唤醒。
+                                if _p and pid_alive_as(_p, _pi.get("started_at")):
                                     _alive_entries.append(_pi)
                                 else:
                                     _dead_keys.append(_pk)
@@ -1193,10 +1195,8 @@ def start_background_monitor():
                             if out_file and _os.path.exists(out_file):
                                 # Masked read: raw output may contain credentials
                                 full_out = _read_masked_output_tail(out_file, 5000)
-                                try:
-                                    _os.remove(out_file)
-                                except Exception:
-                                    pass
+                                # 不再删除日志文件——唤醒后用户仍可能在进程管理/
+                                # 任务详情里回看日志（此前唤醒即删，日志永久丢失）
                             ctx = get_task_context(tid)
                             if ctx:
                                 ctx.append({"role": "user", "content": (
