@@ -129,32 +129,35 @@ else
     exit 1
 fi
 
-# build_venv 可能是其他平台残留的（如从 Windows 复制的 Scripts/ 布局，
-# 没有 bin/activate）——source 失败在 set -e 下会静默退出，表现为
-# 「前端构建完就没了」。这里按 POSIX activate 脚本是否存在来判断。
-# Python 需 >= 3.10：UOS 20 默认 python3 是 3.7，requirements 解析不了
-# （pip 报 Requires-Python >=3.8）。优先自动寻找 python3.10/3.11/3.12。
-PYTHON_BIN="python3"
-if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
-    for _cand in python3.13 python3.12 python3.11 python3.10; do
-        if command -v "$_cand" >/dev/null 2>&1; then
-            PYTHON_BIN="$_cand"
+# Python 解析与 start.sh 同一套思路：优先项目本地 .python/（便携 Python，
+# start.sh 在缺 Python 的机器上会自动下载到这里），再按版本找系统
+# python3.13→3.10（UOS 默认 python3 是 3.7，requirements 全部解析失败——
+# 生产实证 zxs 机器 pip 报 Requires-Python >=3.8 整屏跳过）。
+PYTHON_BIN=""
+for cmd in .python/bin/python3 .python/bin/python \
+           python3.13 python3.12 python3.11 python3.10 python3; do
+    if command -v "$cmd" >/dev/null 2>&1 || [ -x "$cmd" ]; then
+        if "$cmd" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+            PYTHON_BIN="$cmd"
             break
         fi
-    done
-    if [ "$PYTHON_BIN" = "python3" ]; then
-        echo "ERROR: 系统 python3 版本过低（$(python3 --version 2>&1)），需要 Python >= 3.10。"
-        echo "       请先安装：sudo apt install python3.10 python3.10-venv（或更高版本）"
-        exit 1
     fi
-    echo "  系统 python3 过旧，改用 $PYTHON_BIN ($($PYTHON_BIN --version 2>&1))"
+done
+if [ -z "$PYTHON_BIN" ]; then
+    echo "ERROR: 未找到 Python >= 3.10。"
+    echo "       可先运行一次 ./start.sh（会自动下载便携 Python 到 .python/），"
+    echo "       或手动安装：sudo apt install python3.10 python3.10-venv"
+    exit 1
 fi
+echo "  Using Python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
+
+# build_venv 可能是其他平台残留（Windows 的 Scripts/ 布局没有 bin/activate）
+# 或旧 Python 建的——这两种情况都重建，否则 source/pip 在 set -e 下静默失败。
 if [ ! -f "build_venv/bin/activate" ]; then
     [ -d "build_venv" ] && echo "  build_venv 非本机平台布局，重建..."
     rm -rf build_venv
     "$PYTHON_BIN" -m venv build_venv
 elif ! build_venv/bin/python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
-    # 既有 venv 是旧 Python 建的（如 3.7），依赖装不上——重建
     echo "  build_venv 的 Python 版本过低（$(build_venv/bin/python --version 2>&1)），用 $PYTHON_BIN 重建..."
     rm -rf build_venv
     "$PYTHON_BIN" -m venv build_venv
