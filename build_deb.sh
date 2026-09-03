@@ -10,6 +10,9 @@
 # ===========================================
 
 set -e
+# 失败时打出行号，避免 set -e 静默退出（生产实证：前端构建完就没下文，
+# 实际是后续某步失败但无任何提示）
+trap 'echo "ERROR: build failed at line $LINENO (exit $?)" >&2' ERR
 
 APP_NAME="Open-AGC"
 PKG_NAME="open-agc"
@@ -126,7 +129,12 @@ else
     exit 1
 fi
 
-if [ ! -d "build_venv" ]; then
+# build_venv 可能是其他平台残留的（如从 Windows 复制的 Scripts/ 布局，
+# 没有 bin/activate）——source 失败在 set -e 下会静默退出，表现为
+# 「前端构建完就没了」。这里按 POSIX activate 脚本是否存在来判断。
+if [ ! -f "build_venv/bin/activate" ]; then
+    [ -d "build_venv" ] && echo "  build_venv 非本机平台布局，重建..."
+    rm -rf build_venv
     python3 -m venv build_venv
 fi
 source build_venv/bin/activate

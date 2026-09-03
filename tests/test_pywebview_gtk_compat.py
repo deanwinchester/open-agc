@@ -141,3 +141,46 @@ def test_evaluate_js_uses_run_javascript(fake_gtk):
     assert fake_gtk.BrowserView.evaluate_js(view, 'return 42;') == 42
     # parse_json=False 时原样返回字符串
     assert fake_gtk.BrowserView.evaluate_js(view, 'return 42;', False) == '42'
+
+
+class TestContextMenuLinux:
+    """enable_context_menu_linux：包裹 BrowserView.__init__，初始化期间临时
+    翻转 _state['debug'] 使 pywebview 不抑制右键菜单，结束后恢复原值。"""
+
+    @pytest.fixture
+    def fake_gtk_debug(self, monkeypatch):
+        mod = _make_fake_gtk(webkit_ver=(2, 40, 0))  # 任意版本都适用
+        mod._state = {'debug': False}
+        seen = {}
+
+        class BrowserView:
+            def __init__(self, window):
+                # 模拟 pywebview 原版：debug=False 时抑制右键菜单
+                seen['debug_during_init'] = mod._state['debug']
+                seen['suppressed'] = not mod._state['debug']
+
+        mod.BrowserView = BrowserView
+        monkeypatch.setitem(sys.modules, 'webview.platforms.gtk', mod)
+        monkeypatch.setattr(sys, 'platform', 'linux')
+        monkeypatch.setattr(compat, '_context_menu_patched', False)
+        return mod, seen
+
+    def test_debug_flipped_during_init_and_restored(self, fake_gtk_debug):
+        mod, seen = fake_gtk_debug
+        assert compat.enable_context_menu_linux() is True
+        mod.BrowserView(None)
+        assert seen['debug_during_init'] is True   # 初始化期间 debug=True（不抑制）
+        assert seen['suppressed'] is False
+        assert mod._state['debug'] is False        # 结束后恢复
+
+    def test_idempotent(self, fake_gtk_debug):
+        mod, _ = fake_gtk_debug
+        assert compat.enable_context_menu_linux() is True
+        first = mod.BrowserView.__init__
+        assert compat.enable_context_menu_linux() is False  # 第二次不再包
+        assert mod.BrowserView.__init__ is first
+
+    def test_noop_on_windows(self, monkeypatch):
+        monkeypatch.setattr(sys, 'platform', 'win32')
+        monkeypatch.setattr(compat, '_context_menu_patched', False)
+        assert compat.enable_context_menu_linux() is False
