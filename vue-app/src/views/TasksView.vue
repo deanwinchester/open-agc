@@ -58,7 +58,8 @@ function statusPill(status) {
 // 标题兜底：空 title 回退 user_query 截断 80 字符，再空显示（无标题）
 function displayTitle(task) {
   const title = (task.title || '').trim();
-  if (title) return title;
+  // 兼容历史脏数据：此前中断哨兵文本会被写成标题，列表里看不到任务内容
+  if (title && !/^task interrupted by user/i.test(title)) return title;
   const query = (task.user_query || '').trim();
   if (query) return query.length > 80 ? `${query.slice(0, 80)}…` : query;
   return t.noTitle;
@@ -163,6 +164,46 @@ async function killProcess(proc) {
   }
 }
 
+// ── 进程日志查看（弹窗 + 3s 自动刷新，打开期间持续拉取新增输出）──
+
+const procLogVisible = ref(false);
+const procLogTaskId = ref(null);
+const procLogContent = ref('');
+const procLogLoading = ref(false);
+let procLogTimer = null;
+
+async function fetchProcLog() {
+  if (!procLogTaskId.value) return;
+  try {
+    const data = await request(`/api/tasks/${procLogTaskId.value}/logs?lines=300`);
+    const lines = Array.isArray(data?.lines) ? data.lines.join('') : (data?.logs || '');
+    procLogContent.value = lines || data?.hint || t.processes.logEmpty;
+  } catch (err) {
+    procLogContent.value = `${t.processes.logLoadFailed}: ${err.message}`;
+  } finally {
+    procLogLoading.value = false;
+  }
+}
+
+function viewProcLog(row) {
+  const tid = rowTaskId(row);
+  if (!tid) return;
+  procLogTaskId.value = tid;
+  procLogContent.value = '';
+  procLogLoading.value = true;
+  procLogVisible.value = true;
+  fetchProcLog();
+  clearInterval(procLogTimer);
+  procLogTimer = setInterval(fetchProcLog, 3000);
+}
+
+function closeProcLog() {
+  clearInterval(procLogTimer);
+  procLogTimer = null;
+  procLogVisible.value = false;
+  procLogTaskId.value = null;
+}
+
 // ── 筛选 / 搜索 / 分页 ──
 
 function onFilterChange() {
@@ -254,6 +295,12 @@ async function deleteTask(task) {
   deleteArtifacts.value = false;
   deleteDirChecks.value = {};
   const header = `#${task.id} ${task.title} — ${t.actions.deleteConfirmText}`;
+  // 运行中/后台等待的任务：删除即终止（后端已补完整终止序列），给用户明确提示
+  const isRunning = ['running', 'backgrounded'].includes(task.status);
+  const runningWarn = isRunning
+    ? h('p', { style: 'margin: 0 0 8px; color: var(--el-color-danger); font-weight: 500;' },
+        t.actions.deleteRunningWarning)
+    : null;
   let message;
   if (dirs.length) {
     for (const d of dirs) {
@@ -261,6 +308,7 @@ async function deleteTask(task) {
       deleteDirChecks.value[d.dir] = !(Array.isArray(d.shared_with) && d.shared_with.length);
     }
     message = h('div', null, [
+      ...(runningWarn ? [runningWarn] : []),
       h('p', { style: 'margin: 0 0 8px;' }, header),
       h('p', { style: 'margin: 0 0 6px;' }, t.actions.deleteArtifactsDirsHint),
       ...dirs.map((d) => h('label', { style: 'display: flex; align-items: center; gap: 6px; cursor: pointer; margin: 2px 0;' }, [
@@ -279,6 +327,7 @@ async function deleteTask(task) {
     ]);
   } else if (legacyFiles) {
     message = h('div', null, [
+      ...(runningWarn ? [runningWarn] : []),
       h('p', { style: 'margin: 0 0 8px;' }, header),
       h('label', { style: 'display: flex; align-items: center; gap: 6px; cursor: pointer;' }, [
         h('input', {
@@ -289,7 +338,10 @@ async function deleteTask(task) {
       ]),
     ]);
   } else {
-    message = header;
+    message = h('div', null, [
+      ...(runningWarn ? [runningWarn] : []),
+      h('p', { style: 'margin: 0;' }, header),
+    ]);
   }
   try {
     await ElMessageBox.confirm(
@@ -401,6 +453,7 @@ onMounted(() => {
 onUnmounted(() => {
   stopPolling();
   clearTimeout(searchTimer);
+  clearInterval(procLogTimer);
 });
 </script>
 
@@ -455,8 +508,16 @@ onUnmounted(() => {
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column :label="t.processes.colActions" width="90" align="center">
+            <el-table-column :label="t.processes.colActions" width="140" align="center">
               <template #default="{ row }">
+                <el-button
+                  v-if="rowTaskId(row)"
+                  size="small"
+                  plain
+                  @click="viewProcLog(row)"
+                >
+                  {{ t.processes.viewLog }}
+                </el-button>
                 <el-button
                   v-if="row.alive && row.pid"
                   size="small"
@@ -498,6 +559,18 @@ onUnmounted(() => {
         </div>
       </el-collapse-item>
     </el-collapse>
+
+    <!-- 进程日志弹窗（打开期间每 3s 自动刷新） -->
+    <el-dialog
+      :model-value="procLogVisible"
+      :title="`${t.processes.logTitle} — #${procLogTaskId}`"
+      width="720px"
+      @close="closeProcLog"
+    >
+      <div v-loading="procLogLoading" class="proc-log-viewer">
+        <pre class="proc-log-content">{{ procLogContent }}</pre>
+      </div>
+    </el-dialog>
 
     <el-card class="list-card" shadow="never">
       <div class="toolbar">
@@ -642,6 +715,24 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.proc-log-viewer {
+  max-height: 480px;
+  overflow: auto;
+  background: #0f172a;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.proc-log-content {
+  margin: 0;
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 .tasks-view {
   padding: 24px 28px 40px;
   max-width: 1080px;

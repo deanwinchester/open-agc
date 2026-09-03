@@ -356,9 +356,10 @@ class TestReconcileSkipsLiveTracked:
         tid = _insert_task(tmp_db, status="backgrounded")
         sh.register_background_process(tid, _seed_info(900001))
         monkeypatch.setattr("tools.shell.pid_alive", lambda pid: True)
-        # core.process.pid_alive 被 reconcile 以 _pid_alive 局部引用使用——
-        # 其来源是 core.process，打源头
-        monkeypatch.setattr("core.process.pid_alive", lambda pid: True)
+        # reconcile 判活走 core.process.pid_alive_as(pid, started_at)（校验
+        # create_time）——局部 import 自 core.process，打源头
+        monkeypatch.setattr("core.process.pid_alive_as",
+                            lambda pid, started_at=None: True)
         spawned = []
         monkeypatch.setattr(bg, "threading", types.SimpleNamespace(
             Thread=lambda **kw: spawned.append(kw) or types.SimpleNamespace(start=lambda: None)))
@@ -378,7 +379,8 @@ class TestBgMonitorMultiProcess:
         tid = _insert_task(tmp_db, status="backgrounded")
         sh.register_background_process(tid, _seed_info(900001))
         sh.register_background_process(tid, _seed_info(900002))
-        monkeypatch.setattr(bg, "pid_alive", lambda pid: pid == 900001)
+        monkeypatch.setattr(bg, "pid_alive_as",
+                            lambda pid, started_at=None: pid == 900001)
         spawned, rounds_done, release_loop = _install_monitor_harness(
             monkeypatch, bg, run_rounds=3)
         bg.start_background_monitor()
@@ -424,8 +426,10 @@ class TestBgMonitorMultiProcess:
         save_task_context(tid, [{"role": "user", "content": "原始任务"}])
         out_file = tmp_path / "out.log"
         out_file.write_text("partial", encoding="utf-8")
-        sh.register_background_process(tid, _seed_info(900001, output_file=str(out_file)))
-        monkeypatch.setattr(bg, "pid_alive", lambda pid: True)
+        import time as _t
+        sh.register_background_process(tid, _seed_info(
+            900001, output_file=str(out_file), started_at=_t.time()))
+        monkeypatch.setattr(bg, "pid_alive_as", lambda pid, started_at=None: True)
         spawned, rounds_done, release_loop = _install_monitor_harness(
             monkeypatch, bg, run_rounds=8)
         bg.start_background_monitor()
@@ -564,12 +568,19 @@ class TestDiscoveredScan:
     def test_list_processes_flattens_and_adds_discovered(self, monkeypatch):
         """/api/processes：主表按 {task:pid} 展平每进程一行，附 discovered 分区。
         （用真实存活 pid——死 pid 会被惰性回收，见 TestZombieReaping）"""
+        import psutil
         import tools.shell as sh
         from api.routes import routes_tasks as rt
         live1, live2 = os.getpid(), os.getppid()
-        sh.register_background_process(55, _seed_info(live1))
-        sh.register_background_process(55, _seed_info(live2))
-        oid = sh.register_orphan_process(_seed_info(live1), session_id=2)
+        # pid_alive_as 校验 create_time：真实存活 pid 需带真实 started_at，
+        # 否则被判作 pid 复用而回收
+        sh.register_background_process(
+            55, _seed_info(live1, started_at=psutil.Process(live1).create_time()))
+        sh.register_background_process(
+            55, _seed_info(live2, started_at=psutil.Process(live2).create_time()))
+        oid = sh.register_orphan_process(
+            _seed_info(live1, started_at=psutil.Process(live1).create_time()),
+            session_id=2)
         monkeypatch.setattr(rt, "_discover_sandbox_processes",
                             lambda exclude, **kw: [
                                 {"pid": 987699, "name": "wild", "cmdline": "x",
@@ -850,13 +861,16 @@ class TestZombieReaping:
         """detail 端点：每个 pid 计算真实 alive（不再硬编码 True）；死 pid
         条目回收后以 alive=false/reaped=true 标志返回一次，输出文件还在
         → 保留路径；再读不再出现。"""
+        import psutil
         import tools.shell as sh
         from api.routes import routes_tasks as rt
         tid = _insert_task(tmp_db, status="running")
         out_file = tmp_path / "x.log"
         out_file.write_text("log", encoding="utf-8")
         sh.register_background_process(tid, _seed_info(987654, output_file=str(out_file)))
-        sh.register_background_process(tid, _seed_info(os.getpid()))
+        sh.register_background_process(
+            tid, _seed_info(os.getpid(),
+                            started_at=psutil.Process(os.getpid()).create_time()))
         resp = asyncio.run(rt.get_task_process(tid))
         rows = resp["processes"]
         live = [r for r in rows if r.get("alive")]
@@ -886,9 +900,12 @@ class TestZombieReaping:
 
     def test_list_processes_reaps_dead_once_with_flag(self, monkeypatch):
         """list 端点：死条目首次读取带 reaped 标志返回，之后不再出现。"""
+        import psutil
         import tools.shell as sh
         from api.routes import routes_tasks as rt
-        sh.register_background_process(55, _seed_info(os.getpid()))
+        sh.register_background_process(
+            55, _seed_info(os.getpid(),
+                           started_at=psutil.Process(os.getpid()).create_time()))
         sh.register_background_process(55, _seed_info(987654))
         monkeypatch.setattr(rt, "_discover_sandbox_processes", lambda *a, **k: [])
         resp = asyncio.run(rt.list_processes())

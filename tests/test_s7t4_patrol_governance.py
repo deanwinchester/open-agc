@@ -210,7 +210,7 @@ class TestStallConservative:
         out_file = tmp_path / "out.log"
         out_file.write_text("partial output", encoding="utf-8")
         _patch_shell_idle(monkeypatch, tid, out_file)
-        monkeypatch.setattr(bg, "pid_alive", lambda pid: True)
+        monkeypatch.setattr(bg, "pid_alive_as", lambda pid, started_at=None: True)
         cleaned = []
         monkeypatch.setattr("tools.shell.cleanup_background_process",
                             lambda key: cleaned.append(key))
@@ -240,7 +240,7 @@ class TestStallConservative:
         out_file = tmp_path / "out.log"
         out_file.write_text("partial output", encoding="utf-8")
         procs = _patch_shell_idle(monkeypatch, tid, out_file)
-        monkeypatch.setattr(bg, "pid_alive", lambda pid: True)
+        monkeypatch.setattr(bg, "pid_alive_as", lambda pid, started_at=None: True)
         detached = []
 
         def _fake_detach(task_id, pid):

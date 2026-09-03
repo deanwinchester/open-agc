@@ -56,6 +56,32 @@ def resolve_sandbox_wait(wait: dict, msg: dict) -> None:
 # Passwords live here only (never sent to the LLM, never persisted to disk).
 _session_sudo_passwords: Dict[int, str] = {}
 
+# Deleted-task tombstones: {task_id}
+# 删除运行中的任务时，agent 可能因注册表竞态错过中断标志（先注册后运行
+# 的窗口）；完成/恢复路径据此拒绝再为该任务写库或重启线程。
+_deleted_task_ids: set = set()
+_deleted_task_ids_lock = threading.Lock()
+
+
+def mark_task_deleted(task_id) -> None:
+    if task_id is None:
+        return
+    try:
+        tid = int(task_id)
+    except (TypeError, ValueError):
+        return
+    with _deleted_task_ids_lock:
+        _deleted_task_ids.add(tid)
+
+
+def is_task_deleted(task_id) -> bool:
+    try:
+        tid = int(task_id)
+    except (TypeError, ValueError):
+        return False
+    with _deleted_task_ids_lock:
+        return tid in _deleted_task_ids
+
 # Session-level permission whitelist: {session_id: set(categories)}
 _session_permission_whitelists: Dict[int, set] = {}
 

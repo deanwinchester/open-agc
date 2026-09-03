@@ -324,6 +324,14 @@ def _run_migrations(cursor):
     except Exception:
         pass  # Already exists
 
+    # Add log_file to tasks — 后台进程日志文件路径随任务持久化。进程条目
+    # 被收割/唤醒清理后，任务详情与进程管理仍能回看日志（此前日志路径只
+    # 在内存注册表里，条目一清日志就永久找不到）
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN log_file TEXT")
+    except Exception:
+        pass  # Already exists
+
 
 def create_indexes():
     """Create indexes for query performance."""
