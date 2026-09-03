@@ -271,6 +271,8 @@ jobs:
       # .so 均链接 glibc 2.28，pip 也会优先选用 manylinux 旧 glibc wheel。
       # 另装 GIR/WebKit 开发包 + PyGObject，使 pywebview 的 GTK 后端可被
       # PyInstaller 收集（Linux 原生窗口）；buster 已 EOL，apt 源指向 archive。
+      # libcairo2-dev 是 pycairo（PyGObject 依赖）源码编译必需——缺它 PyGObject
+      # 安装失败，产物缺 gi 模块静默回退浏览器模式（生产实证 rc18 arm64 包）。
       - name: Build binaries in glibc-2.28 container
         run: |
           docker run --rm -v "$PWD":/src -w /src "${{ matrix.image }}" bash -c "
@@ -279,15 +281,17 @@ jobs:
             echo 'deb http://archive.debian.org/debian-security buster/updates main' >> /etc/apt/sources.list
             apt-get update
             apt-get install -y --no-install-recommends \
-              pkg-config libgirepository1.0-dev \
-              gir1.2-gtk-3.0 gir1.2-webkit2-4.0 libwebkit2gtk-4.0-dev || true
+              pkg-config libgirepository1.0-dev libcairo2-dev \
+              gir1.2-gtk-3.0 gir1.2-webkit2-4.0 libwebkit2gtk-4.0-dev
             python -m venv /tmp/build_venv
             source /tmp/build_venv/bin/activate
             pip install --upgrade pip
             pip install pyinstaller
             pip install -r requirements.txt
             pip install pywebview
-            pip install 'PyGObject<3.50' || echo '[warn] PyGObject build failed, GTK backend will fall back to browser'
+            pip install 'PyGObject<3.50'
+            # 硬性卡口：gi 不可用的 deb 等于没有原生窗口，直接判构建失败
+            python -c 'import gi; gi.require_version(\"WebKit2\", \"4.0\")'
             pyinstaller open_agc.spec --clean --noconfirm --distpath dist/linux --workpath build/linux
           "
 
