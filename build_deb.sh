@@ -170,6 +170,23 @@ pip install pyinstaller -q
 pip install -r requirements.txt -q
 pip install pywebview -q || true
 
+# ---- GTK 原生窗口依赖（与 CI 的 linux-deb job 对齐）----
+# pywebview 的 GTK 后端需要 PyGObject（gi）+ 系统 GIR/WebKit 开发包，
+# 否则 PyInstaller 收集不到 gi，冻结应用 import webview 失败 → 静默回退
+# 浏览器模式（生产实证：zxs 机器全新 venv 打出的包默认进浏览器）。
+if ! python -c "import gi" 2>/dev/null; then
+    echo "  PyGObject 不可用，准备 GTK 后端依赖..."
+    if ! pkg-config --exists girepository-1.0 2>/dev/null; then
+        echo "  安装系统依赖（需要 sudo）：libgirepository1.0-dev 等"
+        sudo apt-get install -y --no-install-recommends \
+            pkg-config libgirepository1.0-dev libcairo2-dev \
+            gir1.2-gtk-3.0 gir1.2-webkit2-4.0 || \
+            echo "  [warn] apt 安装失败，GTK 原生窗口可能不可用（将回退浏览器模式）"
+    fi
+    pip install 'PyGObject<3.50' || \
+        echo "  [warn] PyGObject 安装失败，GTK 原生窗口将回退浏览器模式"
+fi
+
 # ---- 2. Build with PyInstaller ----
 echo "[2/5] Building application with PyInstaller..."
 
