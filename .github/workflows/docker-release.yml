@@ -289,7 +289,9 @@ jobs:
             pip install pyinstaller
             pip install -r requirements.txt
             pip install pywebview
-            pip install 'PyGObject<3.50'
+            # PyGObject 钉 3.44.1：3.46+ 要求 gobject-introspection>=1.64，
+            # buster/UOS 只有 1.58；3.40–3.44.x 要求 >=1.56 正好兼容
+            pip install 'PyGObject==3.44.1'
             # 硬性卡口：gi 不可用的 deb 等于没有原生窗口，直接判构建失败
             python -c 'import gi; gi.require_version(\"WebKit2\", \"4.0\")'
             pyinstaller open_agc.spec --clean --noconfirm --distpath dist/linux --workpath build/linux
