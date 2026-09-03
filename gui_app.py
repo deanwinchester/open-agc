@@ -176,6 +176,36 @@ def _setup_webview2_runtime():
     return None
 
 
+def _enable_context_menu_windows(window):
+    """Windows(WinForms/WebView2)：恢复右键菜单（输入框右键粘贴）。
+
+    pywebview 非 debug 模式下 AreDefaultContextMenusEnabled=False
+    （edgechromium.py）。window 显示后在 UI 线程置回 True；CoreWebView2
+    未初始化完时重试几次。
+    """
+    def _try_set(attempts_left=20):
+        try:
+            edge = getattr(window.gui, 'browser', None)
+            wv2 = getattr(edge, 'webview', None)
+            core = getattr(wv2, 'CoreWebView2', None) if wv2 is not None else None
+            if core is None:
+                raise RuntimeError('CoreWebView2 not ready')
+            from System import Action
+
+            def _set():
+                try:
+                    core.Settings.AreDefaultContextMenusEnabled = True
+                    print("[webview] 已恢复 WebView2 右键菜单")
+                except Exception:
+                    pass
+            wv2.Invoke(Action(_set))
+        except Exception:
+            if attempts_left > 0:
+                threading.Timer(0.5, _try_set, args=(attempts_left - 1,)).start()
+
+    _try_set()
+
+
 def create_window(port):
     """Create a native window with the web UI embedded.
 
@@ -219,9 +249,11 @@ def create_window(port):
 
     # Linux：pywebview 5.0+ 的 GTK 后端依赖 WebKitGTK 2.40+ API，UOS/deepin
     # 的 2.38 上会 AttributeError 中断 decide-policy 回调导致导航挂起白屏。
+    # 同时恢复 GTK 右键菜单（pywebview 非 debug 默认抑制，输入框无法右键粘贴）。
     try:
-        from core.pywebview_gtk_compat import apply_if_needed
+        from core.pywebview_gtk_compat import apply_if_needed, enable_context_menu_linux
         apply_if_needed()
+        enable_context_menu_linux()
     except Exception:
         pass
 
@@ -269,6 +301,11 @@ def create_window(port):
             os._exit(0)
 
         window.events.closing += on_closing
+
+        # Windows：恢复 WebView2 右键菜单（pywebview 非 debug 默认禁用，
+        # 打包版输入框无法右键粘贴）
+        if sys.platform.startswith('win'):
+            window.events.shown += lambda: _enable_context_menu_windows(window)
 
         import threading
         t = threading.Thread(target=check_server_and_load, args=(window, port), daemon=True)

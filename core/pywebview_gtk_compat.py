@@ -145,3 +145,43 @@ def apply_if_needed():
     )
     print(f'[webview] WebKitGTK {ver[0]}.{ver[1]} < 2.40，已应用 GTK 兼容补丁')
     return True
+
+
+_context_menu_patched = False
+
+
+def enable_context_menu_linux():
+    """Linux(GTK)：恢复 WebView 右键菜单（输入框右键粘贴等）。
+
+    pywebview 在非 debug 模式下 connect('context-menu', True) 抑制右键菜单
+    （gtk.py BrowserView.__init__），打包版输入框无法右键粘贴（UOS/Windows
+    均有，此处为 GTK 侧）。做法：包裹 __init__，初始化期间临时翻转
+    _state['debug'] 使抑制分支不执行（副作用仅为启用开发者工具能力，
+    不会自动打开）。所有 WebKitGTK 版本适用；重复调用幂等。
+    """
+    global _context_menu_patched
+    if _context_menu_patched:
+        return False
+    import sys
+    if not sys.platform.startswith('linux'):
+        return False
+    try:
+        from webview.platforms import gtk as gtk_mod
+    except Exception:
+        return False
+
+    _orig_init = gtk_mod.BrowserView.__init__
+
+    def _patched_init(self, window):
+        state = gtk_mod._state
+        was_debug = state['debug']
+        if not was_debug:
+            state['debug'] = True
+        try:
+            _orig_init(self, window)
+        finally:
+            state['debug'] = was_debug
+
+    gtk_mod.BrowserView.__init__ = _patched_init
+    _context_menu_patched = True
+    return True
