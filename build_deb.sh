@@ -174,17 +174,26 @@ pip install pywebview -q || true
 # pywebview 的 GTK 后端需要 PyGObject（gi）+ 系统 GIR/WebKit 开发包，
 # 否则 PyInstaller 收集不到 gi，冻结应用 import webview 失败 → 静默回退
 # 浏览器模式（生产实证：zxs 机器全新 venv 打出的包默认进浏览器）。
+# PyGObject 无 wheel 只能源码编译：需要 gcc/make（build-essential）、
+# pkg-config、libgirepository/libffi/libcairo 开发头文件。
 if ! python -c "import gi" 2>/dev/null; then
     echo "  PyGObject 不可用，准备 GTK 后端依赖..."
     if ! pkg-config --exists girepository-1.0 2>/dev/null; then
-        echo "  安装系统依赖（需要 sudo）：libgirepository1.0-dev 等"
+        echo "  安装系统依赖（需要 sudo）：build-essential libgirepository1.0-dev 等"
         sudo apt-get install -y --no-install-recommends \
-            pkg-config libgirepository1.0-dev libcairo2-dev \
+            build-essential pkg-config libgirepository1.0-dev \
+            libffi-dev libcairo2-dev \
             gir1.2-gtk-3.0 gir1.2-webkit2-4.0 || \
-            echo "  [warn] apt 安装失败，GTK 原生窗口可能不可用（将回退浏览器模式）"
+            echo "  [warn] apt 安装失败"
     fi
-    pip install 'PyGObject<3.50' || \
-        echo "  [warn] PyGObject 安装失败，GTK 原生窗口将回退浏览器模式"
+    # 不带 -q：源码编译失败的报错必须可见
+    pip install 'PyGObject<3.50'
+fi
+# 硬性卡口：gi 不可用的包等于没有原生窗口，直接判构建失败
+if ! python -c "import gi" 2>/dev/null; then
+    echo "ERROR: PyGObject (gi) 仍不可用——打出的包将无法使用原生窗口。"
+    echo "       请把上方 pip install PyGObject 的报错发出来排查。"
+    exit 1
 fi
 
 # ---- 2. Build with PyInstaller ----
