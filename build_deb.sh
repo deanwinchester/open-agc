@@ -139,10 +139,11 @@ if [ ! -f "build_venv/bin/activate" ]; then
 fi
 source build_venv/bin/activate
 
-pip install --upgrade pip -q 2>/dev/null
-pip install pyinstaller -q 2>/dev/null
-pip install -r requirements.txt -q 2>/dev/null
-pip install pywebview -q 2>/dev/null || true
+# pip 失败原因不能吞（2>/dev/null 会把网络/依赖错误全藏掉，只剩一行号）
+pip install --upgrade pip -q
+pip install pyinstaller -q
+pip install -r requirements.txt -q
+pip install pywebview -q || true
 
 # ---- 2. Build with PyInstaller ----
 echo "[2/5] Building application with PyInstaller..."
