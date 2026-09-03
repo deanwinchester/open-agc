@@ -320,14 +320,22 @@ class SubAgent:
                 # 漂移纠错重试（与主 agent 同款，公共 helper）：此前裸调用，
                 # 一次 JSON 漂移整个 worker 即死——worker 故障率远高于主 agent
                 # 的主因（生产实证 whisper 编译任务两轮漂移直接炸死）。
-                from core.llm_client import chat_with_drift_retry
+                from core.llm_client import chat_with_drift_retry, LLMInterrupted, LLMClient
+                # 仅对真实 LLMClient 传 interrupt_check（支持运行中中断
+                # LLM 重试/退避）；测试替身等鸭子类型 client 不接受该参数
+                _ic = self._interrupted if isinstance(self.llm, LLMClient) else None
                 response, _ = chat_with_drift_retry(
                     self.llm, self.messages,
                     tools=self.tool_schemas if self.tool_schemas else None,
                     retries=2,
                     on_retry=lambda n: print(f"[SubAgent] 工具调用 JSON 漂移，纠错重试（{n}/2）"),
+                    interrupt_check=_ic,
                 )
             except Exception as e:
+                from core.llm_client import LLMInterrupted as _LLMI
+                if isinstance(e, _LLMI):
+                    return {"success": False, "summary": "Interrupted",
+                            "duration": _time.time() - start_time, "output_files": []}
                 return {"success": False, "summary": f"LLM error: {type(e).__name__}: {str(e)[:300]}",
                         "duration": _time.time() - start_time, "output_files": []}
 

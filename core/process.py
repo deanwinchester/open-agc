@@ -26,6 +26,24 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
+def pid_alive_as(pid: int, started_at: float = None, tolerance: float = 120.0) -> bool:
+    """判活并校验进程身份：pid 存在且其创建时间与登记的 started_at 一致。
+
+    Windows 上 pid 复用很常见——原进程退出后 pid 被无关进程占用，裸
+    `pid_alive` 会恒判活，导致后台进程条目永不收割、等待中的任务永不
+    唤醒。started_at 为 None 时退化为普通 pid_alive。
+    """
+    if not pid_alive(pid):
+        return False
+    if not started_at:
+        return True
+    try:
+        create_time = psutil.Process(pid).create_time()
+    except (psutil.Error, OSError):
+        return False
+    return abs(create_time - started_at) <= tolerance
+
+
 def kill_tree(pid: int) -> None:
     """Terminate the process and all of its children (best effort)."""
     if not pid or pid <= 0:

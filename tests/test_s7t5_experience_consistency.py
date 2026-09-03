@@ -54,11 +54,10 @@ class TestUserFacing:
         """[MAX_ITERATIONS_REACHED] 剥前缀、保留正文、附可继续提示。"""
         from api.ws import _user_facing
         out = _user_facing(
-            "[MAX_ITERATIONS_REACHED] Agent stopped: Reached maximum iterations (50) "
-            "without a final answer. The task may be incomplete.")
+            "[MAX_ITERATIONS_REACHED] 任务已停止：达到最大步数（50 步）仍未得出最终结果。")
         assert out is not None
         assert "[MAX_ITERATIONS_REACHED]" not in out
-        assert "Reached maximum iterations" in out   # 正文保留
+        assert "达到最大步数" in out   # 正文保留
         assert "继续" in out                          # 可继续提示
 
     def test_max_iterations_empty_body_still_has_hint(self):
@@ -71,6 +70,29 @@ class TestUserFacing:
         assert _user_facing("普通回复") == "普通回复"
         assert _user_facing(None) is None
         assert _user_facing("") == ""
+
+    def test_interrupt_sentinel_returns_none(self):
+        """中断哨兵不进聊天/广播——中断已有 task_interrupted 事件 +
+        进度卡片「继续」按钮提示，单独文本消息是噪音（用户反馈）。"""
+        from api.ws import _user_facing
+        assert _user_facing("Task interrupted by user.") is None
+        assert _user_facing("  Task Interrupted By User.  ") is None
+
+    def test_interrupt_sentinel_not_saved_as_title(self, tmp_db):
+        """中断时任务标题/摘要不得被哨兵文本覆盖（列表要能看到任务内容）。"""
+        from api.task_core import handle_task_completion
+        tid = _insert_task(tmp_db, status="running")
+        conn = tmp_db.db_connect()
+        conn.execute("UPDATE tasks SET title=?, result_summary=? WHERE id=?",
+                     ("分析股票", "已有摘要", tid))
+        conn.commit()
+        assert handle_task_completion(tid, "Task interrupted by user.", []) == 'interrupted_user'
+        row = conn.execute("SELECT title, result_summary, status FROM tasks WHERE id=?",
+                           (tid,)).fetchone()
+        conn.close()
+        assert row["title"] == "分析股票"
+        assert row["result_summary"] == "已有摘要"
+        assert row["status"] == "interrupted"
 
 
 # ---------- 归属启发式矩阵 ----------

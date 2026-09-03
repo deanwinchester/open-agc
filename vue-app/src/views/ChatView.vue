@@ -440,6 +440,16 @@ function onMessage(data) {
   const role = data.role || 'agent';
   if (role === 'tool_step') return; // 步骤消息由进度卡片呈现
   if (isDupFromHistory(role, data.content)) return;
+  // 后台任务的完成广播（background:true）不得清前台的运行态——否则前台
+  // 任务还在跑时，一个后台任务完结就把「停止」按钮弄没了（生产实证：
+  // 中断按钮时有时无、点了无效）
+  if (data.background) {
+    if (data.content && String(data.content).trim()) {
+      appendItem({ kind: 'msg', key: nextKey(), role, content: data.content, taskId: data.task_id || null, id: data.message_id || null });
+      scrollToBottom();
+    }
+    return;
+  }
   thinking.visible = false;
   finishLiveCard();
   running.value = false;
@@ -471,6 +481,24 @@ function onError(data) {
   }
   retryBar.originalQuery = data.original_query || '';
   retryBar.visible = true;
+  scrollToBottom();
+}
+
+function onTaskInterrupted(data) {
+  if (!isForCurrent(data)) return;
+  thinking.visible = false;
+  finishLiveCard();
+  running.value = false;
+  currentTaskId.value = null;
+  // 进度卡片置为可续跑（显示「继续」按钮，从断点恢复）；历史步骤重播
+  // （_do_completion 里 status=interrupted 的 history_steps）会随后覆盖更新
+  const card = (data.task_id && items.value.find((i) => i.kind === 'progress' && i.taskId === data.task_id))
+    || liveCard.value;
+  if (card && card.kind === 'progress') {
+    card.live = false;
+    card.resumable = true;
+  }
+  ElMessage.info(t.taskInterrupted);
   scrollToBottom();
 }
 
@@ -894,6 +922,7 @@ onMounted(async () => {
     ws.on('error', onError),
     ws.on('history_steps', onHistorySteps),
     ws.on('task_backgrounded', onTaskBackgrounded),
+    ws.on('task_interrupted', onTaskInterrupted),
     ws.on('system_message', onSystemMessage),
     ws.on('llamacpp_download', onLlamaDownload),
     ws.on('download_success', onDownloadSuccess),

@@ -44,7 +44,7 @@ class _ScriptLLM:
         self.seen_tools = []
         self.seen_messages = []
 
-    def chat(self, messages=None, tools=None):
+    def chat(self, messages=None, tools=None, interrupt_check=None):
         self.seen_tools.append(
             [t["function"]["name"] for t in (tools or []) if isinstance(t, dict)])
         self.seen_messages.append(list(messages or []))
@@ -967,7 +967,7 @@ class TestWorkerThinkingVisibility:
         class _ReasonLLM:
             def __init__(self):
                 self.calls = 0
-            def chat(self, messages=None, tools=None):
+            def chat(self, messages=None, tools=None, interrupt_check=None):
                 self.calls += 1
                 if self.calls == 1:
                     return _resp_with_reasoning(tool_calls=[_tc("execute_shell")],

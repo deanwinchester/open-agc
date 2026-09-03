@@ -376,7 +376,7 @@ class _StubLLM:
         self.script = list(script)
         self.default_model = "gpt-4o"
 
-    def chat(self, messages=None, tools=None):
+    def chat(self, messages=None, tools=None, interrupt_check=None):
         return self.script.pop(0), self.default_model
 
 
