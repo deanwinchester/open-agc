@@ -144,34 +144,50 @@ def test_evaluate_js_uses_run_javascript(fake_gtk):
 
 
 class TestContextMenuLinux:
-    """enable_context_menu_linux：包裹 BrowserView.__init__，初始化期间临时
-    翻转 _state['debug'] 使 pywebview 不抑制右键菜单，结束后恢复原值。"""
+    """enable_context_menu_linux：包裹 BrowserView.__init__，初始化期间过滤掉
+    'context-menu' 信号的注册（摘掉右键抑制处理器），其余信号照常，且不动
+    _state['debug']（翻转 debug 会连带开启开发者工具，右键弹出检查器）。"""
 
     @pytest.fixture
     def fake_gtk_debug(self, monkeypatch):
         mod = _make_fake_gtk(webkit_ver=(2, 40, 0))  # 任意版本都适用
         mod._state = {'debug': False}
-        seen = {}
+        seen = {'connects': []}
+
+        class WebView:
+            def connect(self, signal, *args, **kwargs):
+                seen['connects'].append(signal)
+                return 1
 
         class BrowserView:
             def __init__(self, window):
-                # 模拟 pywebview 原版：debug=False 时抑制右键菜单
-                seen['debug_during_init'] = mod._state['debug']
-                seen['suppressed'] = not mod._state['debug']
+                # 模拟 pywebview 原版：注册一批信号，其中 context-menu 是抑制器
+                wv = WebView()
+                wv.connect('notify::visible', None)
+                wv.connect('load_changed', None)
+                wv.connect('decide-policy', None)
+                if not mod._state['debug']:
+                    wv.connect('context-menu', lambda *a: True)  # 抑制右键
 
+        mod.webkit.WebView = WebView
         mod.BrowserView = BrowserView
         monkeypatch.setitem(sys.modules, 'webview.platforms.gtk', mod)
         monkeypatch.setattr(sys, 'platform', 'linux')
         monkeypatch.setattr(compat, '_context_menu_patched', False)
         return mod, seen
 
-    def test_debug_flipped_during_init_and_restored(self, fake_gtk_debug):
+    def test_context_menu_connect_filtered_and_restored(self, fake_gtk_debug):
         mod, seen = fake_gtk_debug
+        orig_connect = mod.webkit.WebView.connect
         assert compat.enable_context_menu_linux() is True
         mod.BrowserView(None)
-        assert seen['debug_during_init'] is True   # 初始化期间 debug=True（不抑制）
-        assert seen['suppressed'] is False
-        assert mod._state['debug'] is False        # 结束后恢复
+        # context-menu 抑制未注册，其余信号正常
+        assert 'context-menu' not in seen['connects']
+        assert 'decide-policy' in seen['connects']
+        # 初始化结束后 connect 恢复原样
+        assert mod.webkit.WebView.connect is orig_connect
+        # debug 标志未被触碰（否则右键会多出 Inspect Element）
+        assert mod._state['debug'] is False
 
     def test_idempotent(self, fake_gtk_debug):
         mod, _ = fake_gtk_debug
