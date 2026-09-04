@@ -26,9 +26,36 @@ export function isAuthCloseCode(code) {
   return code === 4401 || code === 4403;
 }
 
+// WS 大消息重组器（与服务端 api/state.py 的 _ws_chunk_frames 对应）：
+// 服务端把 >8KB 的消息拆成 {type:'_chunk', id, i, n, data} 帧发送——
+// UOS/deepin 的 libsoup2 2.64 处理 >16KB 的 WS 帧会把网络进程卡死
+// （100% CPU 空转、全部请求饿死，生产实证）。收齐 n 片后拼接还原。
+// 纯函数式封装，可测。
+export function createChunkReassembler() {
+  const buffers = new Map(); // id -> { n, parts: [] }
+
+  // 返回 null 表示尚未收齐；收齐返回重组后的完整 JSON 文本。
+  function feed(frame) {
+    const { id, i, n, data } = frame;
+    let buf = buffers.get(id);
+    if (!buf) {
+      buf = { n, parts: new Array(n).fill(null), got: 0 };
+      buffers.set(id, buf);
+    }
+    if (buf.parts[i] === null) {
+      buf.parts[i] = data;
+      buf.got += 1;
+    }
+    if (buf.got < buf.n) return null;
+    buffers.delete(id);
+    return buf.parts.join('');
+  }
+
+  return { feed };
+}
+
 // 纯 pub/sub 注册表：按事件 type 订阅/退订/分发。与浏览器无关，可测。
-export function createDispatcher() {
-  const subscribers = new Map(); // type -> Set<fn>
+export function createDispatcher() {  const subscribers = new Map(); // type -> Set<fn>
 
   function on(type, fn) {
     if (!subscribers.has(type)) subscribers.set(type, new Set());
@@ -72,6 +99,7 @@ export const useWsStore = defineStore('ws', {
     _ensureInternals() {
       if (!this._dispatcher) {
         this._dispatcher = createDispatcher();
+        this._chunkReassembler = createChunkReassembler();
         this._ws = null;
         this._reconnectTimer = null;
         this._intentionalClose = false;
@@ -111,6 +139,16 @@ export const useWsStore = defineStore('ws', {
           data = JSON.parse(evt.data);
         } catch {
           return; // 非 JSON 帧直接忽略
+        }
+        // 分片重组（服务端对 >8KB 的消息分片发送，见 createChunkReassembler）
+        if (data && data.type === '_chunk') {
+          const full = this._chunkReassembler.feed(data);
+          if (full === null) return;
+          try {
+            data = JSON.parse(full);
+          } catch {
+            return;
+          }
         }
         this._dispatcher.dispatch(data);
       };

@@ -178,14 +178,19 @@ def _broadcast_task_history(task_id: int, session_id: int, task_status: str = "i
             return
         steps = []
         for r in rows:
+            full_r = r["full_result"] or ""
+            full_a = r["full_args"] or ""
             steps.append({
                 "step_number": r["step_number"],
                 "tool_name": r["tool_name"],
                 "tool_label": r["tool_label"] or r["tool_name"],
                 "args_preview": r["args_preview"] or "",
                 "result_preview": r["result_preview"] or "",
-                "full_result": r["full_result"] or "",
-                "full_args": r["full_args"] or "",
+                # full_result/full_args 不随 WS 广播：老任务的全量输出动辄
+                # 数百 KB，连接即推送会在旧 libsoup2（UOS WebKitGTK 2.38）上
+                # 把网络进程冲垮（100% CPU 空转、全部请求饿死）。改为标记
+                # has_full，前端展开步骤详情时按需走 REST 拉取。
+                "has_full": bool(full_r or full_a),
                 "success": bool(r["success"]),
                 "thinking_content": r["thinking_content"] if "thinking_content" in r.keys() else None,
                 "sub_task": r["sub_task"] or "",
@@ -198,13 +203,40 @@ def _broadcast_task_history(task_id: int, session_id: int, task_status: str = "i
         print(f"[Task] Failed to broadcast task history: {e}")
 
 
+# WS 消息分片（libsoup2 兼容）：UOS/deepin 的 WebKitGTK 2.38 + libsoup2 2.64
+# 处理 >16KB 的 WebSocket 帧有缺陷——网络进程主循环卡死在 100% CPU 空转，
+# 页面所有请求饿死（生产实证，实测阈值在 16~32KB 之间）。大消息拆成 8KB 的
+# _chunk 帧，前端重组后按原消息分发；小消息（绝大多数）不受影响。
+WS_CHUNK_SIZE = 8000
+
+
+def _ws_chunk_frames(message) -> list:
+    """把待发送的 dict 消息拆成一组 JSON 文本帧（<=8KB）。小消息原样单帧。"""
+    import json as _json
+    import uuid as _uuid
+    text = _json.dumps(message, ensure_ascii=False)
+    if len(text.encode("utf-8")) <= WS_CHUNK_SIZE:
+        return [text]
+    cid = _uuid.uuid4().hex[:8]
+    pieces = [text[i:i + WS_CHUNK_SIZE] for i in range(0, len(text), WS_CHUNK_SIZE)]
+    n = len(pieces)
+    return [
+        _json.dumps({"type": "_chunk", "id": cid, "i": i, "n": n, "data": p},
+                    ensure_ascii=False)
+        for i, p in enumerate(pieces)
+    ]
+
+
 async def _ws_send_safe(ws, message):
-    """Send a message via WebSocket, ignoring connection errors."""
+    """Send a message via WebSocket, ignoring connection errors.
+
+    大消息自动分片（见 _ws_chunk_frames 注释）。
+    """
     try:
-        await ws.send_json(message)
+        for frame in _ws_chunk_frames(message):
+            await ws.send_text(frame)
     except Exception:
         pass
-
 
 def _broadcast_to_websockets(message: dict):
     """Send a message to all connected WebSocket clients (best-effort). Thread-safe."""

@@ -267,6 +267,8 @@ function renderHistorySteps(data) {
         // 行内只显示短概览；完整结果点击后在右侧抽屉查看（对齐旧版交互）
         resultPreview: String(s.result_preview || '').substring(0, 120),
         fullResult: s.full_result || '',
+        // 后端瘦身后的历史步骤带 has_full 标记，展开时按需走 REST 拉全量
+        hasFull: !!(s.full_result || s.has_full),
         subTask: s.sub_task || '',
         success: ok ? true : failed ? false : null,
         status: ok ? 'done' : failed ? 'failed' : 'running',
