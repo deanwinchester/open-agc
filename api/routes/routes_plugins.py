@@ -57,14 +57,25 @@ async def remove_tool_permission(body: dict):
 
 _builtin_plugins_dir = os.path.abspath(os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "plugins"))
-_user_plugins_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "plugins")
-os.makedirs(_user_plugins_dir, exist_ok=True)
+
+
+def _get_user_plugins_dir() -> str:
+    """用户插件目录：走 core.paths.get_data_dir()（遵循 OPEN_AGC_DATA_DIR，
+    frozen 下落在可写的 ~/.open-agc/data/plugins）。
+
+    此前用 __file__ 相对路径 + import 期 makedirs——frozen 下 __file__ 在
+    /opt/open-agc/_internal 里（root 所有），全新机器首启 import 即
+    Permission denied，整个服务起不来（生产实证）。"""
+    from core.paths import get_data_dir
+    d = os.path.join(get_data_dir(), "plugins")
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
 def _all_plugin_dirs():
     """Return plugin directories to scan — user-installed dir only.
     Built-in plugins are copied to data/plugins on first run by server.py."""
-    return [_user_plugins_dir]
+    return [_get_user_plugins_dir()]
 
 
 def _find_plugin_dir(name: str) -> str:
@@ -72,7 +83,7 @@ def _find_plugin_dir(name: str) -> str:
     for d in _all_plugin_dirs():
         if os.path.isdir(os.path.join(d, name)):
             return d
-    return _user_plugins_dir  # default to user dir for installs
+    return _get_user_plugins_dir()  # default to user dir for installs
 
 
 @router.get("/api/plugins")
@@ -82,8 +93,8 @@ async def get_plugins():
     # open-agc-train）经 _loaded_plugins 呈现一次；此前对内置+用户两个目录
     # 各调一次 list_all_plugins，每次都会带上 _loaded_plugins，导致内置插件
     # 在列表中出现两次。
-    all_plugins = list_all_plugins(_user_plugins_dir)
-    return {"plugins": all_plugins, "plugins_dir": str(_user_plugins_dir)}
+    all_plugins = list_all_plugins(_get_user_plugins_dir())
+    return {"plugins": all_plugins, "plugins_dir": str(_get_user_plugins_dir())}
 
 
 def _plugins_to_preserve_on_scan() -> set:
@@ -178,12 +189,13 @@ async def plugin_install(req: Request):
     if not name or not url:
         raise HTTPException(status_code=400, detail="name and url required")
     from core.security import resolve_under
+    _plugins_dir = _get_user_plugins_dir()
     try:
-        resolve_under(_user_plugins_dir, name)
+        resolve_under(_plugins_dir, name)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid plugin name: {name}")
     from core.plugin_manager import install_from_git
-    ok = install_from_git(name, url, _user_plugins_dir)
+    ok = install_from_git(name, url, _plugins_dir)
     if not ok:
         raise HTTPException(status_code=500, detail="Install failed")
     return {"status": "ok", "message": f"Plugin {name} installed in data/plugins/"}
