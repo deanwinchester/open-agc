@@ -265,14 +265,17 @@ async def websocket_endpoint(websocket: WebSocket):
     _pending = _pending_final_responses.get(ws_session_id)
     if _pending:
         try:
-            await websocket.send_json({
+            # 重投内容可能很长（最终回复全文）——同样走分片，防 libsoup2 卡死
+            from api.state import _ws_chunk_frames
+            for _frame in _ws_chunk_frames({
                 "type": "message",
                 "role": "agent",
                 "content": _pending["content"],
                 "session_id": ws_session_id,
                 "task_id": _pending.get("task_id"),
                 "message_id": _pending.get("message_id"),
-            })
+            }):
+                await websocket.send_text(_frame)
             # Clear after successful delivery
             _pending_final_responses.pop(ws_session_id, None)
             print(f"[WS] Delivered pending final response to reconnected client (session {ws_session_id})")
@@ -283,12 +286,17 @@ async def websocket_endpoint(websocket: WebSocket):
     ws_alive = True
 
     async def _safe_send(data: dict):
-        """Send JSON via WebSocket, silently ignore if connection is dead."""
+        """Send JSON via WebSocket, silently ignore if connection is dead.
+
+        大消息经 _ws_chunk_frames 分片（libsoup2 >16KB 帧会卡死网络进程）。
+        """
         nonlocal ws_alive
         if not ws_alive:
             return
         try:
-            await websocket.send_json(data)
+            from api.state import _ws_chunk_frames
+            for _frame in _ws_chunk_frames(data):
+                await websocket.send_text(_frame)
         except Exception:
             ws_alive = False
 
@@ -326,11 +334,21 @@ async def websocket_endpoint(websocket: WebSocket):
                     "WHERE task_id=? ORDER BY id",
                     (last_task["id"],)).fetchall()
                 if steps:
+                    _slim = []
+                    for _s in steps:
+                        _d = dict(_s)
+                        # full_result/full_args 不随 WS 推送（防止老任务全量输出
+                        # 冲垮旧 libsoup2 网络进程，见 state.py 同注）；前端展开
+                        # 步骤详情时按 has_full 走 REST 拉取
+                        _d["has_full"] = bool(_d.get("full_result") or _d.get("full_args"))
+                        _d.pop("full_result", None)
+                        _d.pop("full_args", None)
+                        _slim.append(_d)
                     await _safe_send({
                         "type": "history_steps",
                         "task_id": last_task["id"],
                         "task_status": last_task["status"],
-                        "steps": [dict(s) for s in steps],
+                        "steps": _slim,
                         "session_id": ws_session_id
                     })
         conn.close()
@@ -1305,11 +1323,18 @@ async def websocket_endpoint(websocket: WebSocket):
                             task_row = conn2.execute(
                                 "SELECT user_query FROM tasks WHERE id=?", (task_id,)).fetchone()
                             conn2.close()
+                            _slim_steps = []
+                            for _s in steps:
+                                _d = dict(_s)
+                                _d["has_full"] = bool(_d.get("full_result") or _d.get("full_args"))
+                                _d.pop("full_result", None)
+                                _d.pop("full_args", None)
+                                _slim_steps.append(_d)
                             await _safe_send({
                                 "type": "history_steps",
                                 "task_id": task_id,
                                 "task_status": "resuming",
-                                "steps": [dict(s) for s in steps]
+                                "steps": _slim_steps
                             })
                             if ctx:
                                 session_history = ctx

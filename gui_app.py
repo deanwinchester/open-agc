@@ -73,7 +73,12 @@ def start_server(port):
         host = os.environ.get("OPEN_AGC_HOST", "127.0.0.1")
         # proxy_headers=False：同 launcher.py——禁用 uvicorn 默认的 XFF 信任，
         # 防止伪造 X-Forwarded-For: 127.0.0.1 绕过访问控制。
-        uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=False)
+        # ws_ping_interval=None：关闭服务端 WS 心跳。pywebview GTK 后端的
+        # libsoup2（UOS/deepin 2.64）对 ping 帧处理有缺陷——网络进程主循环
+        # 会被卡死在 100% CPU 空转，所有页面请求饿死（生产实证）。本机桌面
+        # 应用无需 NAT 保活，TCP 断开已由内核可靠上报。
+        uvicorn.run(app, host=host, port=port, log_level="warning",
+                    proxy_headers=False, ws_ping_interval=None, ws_ping_timeout=None)
     except Exception as e:
         try:
             with open(_crash_log_path(), "a", encoding="utf-8") as f:
