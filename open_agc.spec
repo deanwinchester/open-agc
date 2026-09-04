@@ -169,7 +169,9 @@ a = Analysis(
         'sentry_sdk',
         'prometheus_client', 'prometheus_fastapi_instrumentator',
         'grpc', 'grpc_reflection',
-        'opentelemetry',
+        # 注意：opentelemetry 不能排除——chromadb（memory_store/embedding 打分）
+        # 的 import 链会 import 它，开发机上它只是 litellm/chromadb 的传递依赖
+        # 所以无感，冻结包里一旦排除，全新机器启动即崩（生产实证）。
         'tkinter',
         'matplotlib', 'mpl_toolkits',
         'scipy',

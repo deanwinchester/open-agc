@@ -81,8 +81,11 @@ def start_server(port):
                     proxy_headers=False, ws_ping_interval=None, ws_ping_timeout=None)
     except Exception as e:
         try:
+            import traceback
             with open(_crash_log_path(), "a", encoding="utf-8") as f:
-                f.write(f"Server crash: {e}\n")
+                # 完整 traceback：冻结包里模块缺失类崩溃只有 traceback 才能
+                # 指出是谁在 import（生产实证：单行 message 完全没法定位）
+                f.write(f"Server crash: {e}\n{traceback.format_exc()}\n")
         except Exception:
             # 连日志都写不进时打到 stderr，避免掩盖真实崩溃原因
             try:
