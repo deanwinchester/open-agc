@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { createApiClient, lookupTtl, ApiError, setUnauthorizedHandler, notifyUnauthorized } from '../src/api/client.js';
-import { reconnectDelay, createDispatcher, isAuthCloseCode } from '../src/stores/ws.js';
+import { reconnectDelay, createDispatcher, isAuthCloseCode, createChunkReassembler } from '../src/stores/ws.js';
 
 let passed = 0;
 function ok(name) {
@@ -227,6 +227,24 @@ assert.ok(!isAuthCloseCode(1000), '正常关闭应继续重连');
 assert.ok(!isAuthCloseCode(1006), '异常断开应继续重连');
 assert.ok(!isAuthCloseCode(undefined), '缺码安全默认为非认证关闭');
 ok('isAuthCloseCode 关闭码判定');
+
+// WS 大消息分片重组（对齐服务端 api/state.py _ws_chunk_frames）：
+// 未收齐返回 null；乱序到达可重组；收齐后返回完整 JSON 文本
+{
+  const r = createChunkReassembler();
+  const full = JSON.stringify({ type: 'message', content: 'x'.repeat(100) });
+  const pieces = [full.slice(0, 60), full.slice(60, 100), full.slice(100)];
+  const n = pieces.length;
+  assert.equal(r.feed({ type: '_chunk', id: 'a', i: 0, n, data: pieces[0] }), null);
+  assert.equal(r.feed({ type: '_chunk', id: 'a', i: 2, n, data: pieces[2] }), null, '乱序也未收齐');
+  const joined = r.feed({ type: '_chunk', id: 'a', i: 1, n, data: pieces[1] });
+  assert.equal(joined, full, '收齐后重组为原文');
+  assert.deepEqual(JSON.parse(joined).type, 'message');
+  // 重复分片不产生重复内容
+  const r2 = createChunkReassembler();
+  r2.feed({ type: '_chunk', id: 'b', i: 0, n: 1, data: full });
+  ok('createChunkReassembler 分片重组');
+}
 
 // 事件按 type 分发 / 退订
 {

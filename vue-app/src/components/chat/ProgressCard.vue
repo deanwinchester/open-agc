@@ -4,6 +4,7 @@
 // note（模型切换等提示）/ ask（Agent 提问）。shellLines 为实时 shell 输出。
 import { computed, ref } from 'vue';
 import zh from '../../i18n/zh';
+import { request } from '../../api/client';
 import AskUserForm from './AskUserForm.vue';
 import MarkdownView from '../MarkdownView.vue';
 
@@ -30,8 +31,20 @@ const detailVisible = computed({
   get: () => detailEntry.value !== null,
   set: (v) => { if (!v) detailEntry.value = null; },
 });
-function openDetail(entry) {
-  if (entry.fullResult) detailEntry.value = entry;
+async function openDetail(entry) {
+  if (entry.fullResult) { detailEntry.value = entry; return; }
+  // 后端瘦身后的历史步骤不再带 full_result（WS 大帧会冲垮 UOS 旧
+  // libsoup2 的网络进程）——有 has_full 标记的按需走 REST 拉全量
+  if (entry.hasFull && props.card.taskId && entry.step != null) {
+    try {
+      const data = await request(`/api/tasks/${props.card.taskId}/steps?page=1&page_size=200`);
+      const row = (data?.steps || []).find((s) => s.step_number === entry.step);
+      if (row && (row.full_result || row.full_args)) {
+        entry.fullResult = row.full_result || row.full_args;
+        detailEntry.value = entry;
+      }
+    } catch { /* 拉取失败则不展开 */ }
+  }
 }
 
 const stepCount = computed(() => props.card.entries.filter((e) => e.kind === 'tool').length);
@@ -94,11 +107,11 @@ function onSubmitAsk(entry, answer) {
 
     <div v-show="!card.collapsed" class="pc-steps">
       <template v-for="(entry, idx) in card.entries" :key="idx">
-        <div v-if="entry.kind === 'tool'" class="pc-step" :class="[entry.status, { clickable: entry.fullResult }]" @click.stop="openDetail(entry)">
+        <div v-if="entry.kind === 'tool'" class="pc-step" :class="[entry.status, { clickable: entry.fullResult || entry.hasFull }]" @click.stop="openDetail(entry)">
           <span class="step-icon">{{ stepIcon(entry) }}</span>
           <div class="step-body">
             <span class="step-label">
-              <span v-if="entry.subTask" class="subtask-badge" :title="entry.subTask">🧩 {{ entry.subTask.substring(0, 18) }}</span>{{ entry.step }}. {{ entry.toolLabel }}<span v-if="entry.fullResult" class="step-more"> 🔍</span>
+              <span v-if="entry.subTask" class="subtask-badge" :title="entry.subTask">🧩 {{ entry.subTask.substring(0, 18) }}</span>{{ entry.step }}. {{ entry.toolLabel }}<span v-if="entry.fullResult || entry.hasFull" class="step-more"> 🔍</span>
             </span>
             <span v-if="entry.argsPreview" class="step-detail">{{ entry.argsPreview }}</span>
             <span v-if="entry.resultPreview" class="step-detail">{{ entry.resultPreview }}</span>
