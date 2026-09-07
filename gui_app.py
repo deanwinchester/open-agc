@@ -342,7 +342,46 @@ def create_window(port):
         return _browser_fallback(_gui_err)
 
 
+def _acquire_single_instance_lock():
+    """单实例锁：已有实例运行时返回 False。
+
+    App 启动总是找空闲端口、没有任何互斥——agent 任务中执行了启动命令
+    （“测一下”“重启服务”等场景）就会每起一个新进程多开一个窗口（生产实证，
+    反复出现多个 Open-AGC 窗口）。Windows 用命名互斥体，POSIX 用 flock；
+    进程退出（含崩溃）自动释放。
+    """
+    if sys.platform.startswith('win'):
+        import ctypes
+        _ERROR_ALREADY_EXISTS = 183
+        handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\OpenAGC-SingleInstance")
+        if ctypes.windll.kernel32.GetLastError() == _ERROR_ALREADY_EXISTS:
+            try:
+                ctypes.windll.kernel32.CloseHandle(handle)
+            except Exception:
+                pass
+            return False
+        _acquire_single_instance_lock._handle = handle  # 防 GC 关闭句柄
+        return True
+
+    import fcntl
+    lock_path = os.path.join(os.path.expanduser("~"), ".open-agc", "app.lock")
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    fd = open(lock_path, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fd.close()
+        return False
+    _acquire_single_instance_lock._fd = fd  # 防 GC 关闭 fd
+    return True
+
+
 def main():
+    # 单实例：已有实例在跑就直接退出，不再开新窗口
+    if not _acquire_single_instance_lock():
+        print("Open-AGC 已在运行中，不再启动第二个实例。")
+        sys.exit(0)
+
     # Attempt to find a free port instead of hardcoding 8765
     try:
         port = int(os.environ.get("PORT", find_free_port()))
