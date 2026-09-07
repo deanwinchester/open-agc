@@ -248,18 +248,10 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception as _sb_e:
             print(f"[WS] sandbox re-broadcast error: {_sb_e}")
 
-    # Broadcast history_steps if this session has a recent or in-progress task
-    try:
-        _hb_conn = db_connect()
-        _hb_row = _hb_conn.execute(
-            "SELECT id, status FROM tasks WHERE session_id=? AND status IN ('interrupted','completed','running','backgrounded') ORDER BY updated_at DESC LIMIT 1",
-            (ws_session_id,)
-        ).fetchone()
-        _hb_conn.close()
-        if _hb_row:
-            _broadcast_task_history(_hb_row[0], ws_session_id, _hb_row[1])
-    except Exception as _hb_e:
-        print(f"[WS] Broadcast task history error: {_hb_e}")
+    # 不在 WS 连接时重放任务历史：全量历史走 REST（前端 loadRecentTaskCard /
+    # 按需拉 steps），WS 只传增量实时事件。此前连接即推 history_steps（含
+    # full_result 全量输出，老任务可积累数百 KB），既重复又在旧 libsoup2
+    # （UOS WebKitGTK 2.38）上会把网络进程冲垮（生产实证）。
 
     # Deliver any pending final response that wasn't sent due to WS disconnect
     _pending = _pending_final_responses.get(ws_session_id)
@@ -309,52 +301,10 @@ async def websocket_endpoint(websocket: WebSocket):
     agent_is_running = False
     receive_task = None # Persistent receive_task to avoid concurrency issues
 
-    # Replay the most recent task's steps for this session
-    # Only replay if the user hasn't sent new messages after the task completed
-    try:
-        conn = db_connect()
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT t.id, t.status, t.created_at, t.updated_at FROM tasks t "
-            "WHERE t.id IN (SELECT DISTINCT task_id FROM task_steps WHERE session_id=?) "
-            "ORDER BY t.created_at DESC LIMIT 1",
-            (ws_session_id,))
-        last_task = cursor.fetchone()
-        if last_task:
-            # Only replay if no newer user messages exist after the task completed
-            check_time = last_task["updated_at"] or last_task["created_at"]
-            newer_msgs = cursor.execute(
-                "SELECT COUNT(*) FROM messages WHERE session_id=? AND role='user' AND timestamp > ?",
-                (ws_session_id, check_time)).fetchone()[0]
-            if newer_msgs == 0:
-                steps = cursor.execute(
-                    "SELECT step_number, tool_name, tool_label, args_preview, "
-                    "result_preview, full_result, full_args, success, thinking_content, sub_task FROM task_steps "
-                    "WHERE task_id=? ORDER BY id",
-                    (last_task["id"],)).fetchall()
-                if steps:
-                    _slim = []
-                    for _s in steps:
-                        _d = dict(_s)
-                        # full_result/full_args 不随 WS 推送（防止老任务全量输出
-                        # 冲垮旧 libsoup2 网络进程，见 state.py 同注）；前端展开
-                        # 步骤详情时按 has_full 走 REST 拉取
-                        _d["has_full"] = bool(_d.get("full_result") or _d.get("full_args"))
-                        _d.pop("full_result", None)
-                        _d.pop("full_args", None)
-                        _slim.append(_d)
-                    await _safe_send({
-                        "type": "history_steps",
-                        "task_id": last_task["id"],
-                        "task_status": last_task["status"],
-                        "steps": _slim,
-                        "session_id": ws_session_id
-                    })
-        conn.close()
-    except Exception as e:
-        print(f"[WS] Task replay error: {e}")
-    
+    # 不在 WS 连接时重放任务步骤历史——全量历史走 REST（前端 loadRecentTaskCard
+    # 按会话拉最近任务卡片），WS 只传增量实时事件。此前连接即重放最近任务
+    # 的全部 steps（与前端 REST 补卡重复，且大 payload 会冲垮旧 libsoup2）。
+
     async def run_agent_with_progress(query: str, model: str = None, agent_profile_name: str = None, images: list = None, resume_task_id: int = None):
         """Run agent in a thread and push progress to WebSocket via a Queue.
 

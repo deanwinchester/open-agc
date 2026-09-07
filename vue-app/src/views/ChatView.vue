@@ -57,6 +57,11 @@ function toggleNoticeGroup(key) {
   if (expandedNoticeGroups.has(key)) expandedNoticeGroups.delete(key);
   else expandedNoticeGroups.add(key);
 }
+
+// 稳定消息 ID 去重表：REST 历史与 WS 推送共用同一套 id（messages 表主键），
+// 命中即丢弃——替代旧的「角色+内容+3s 窗口」猜测式去重（会误杀连续的
+// 相同内容消息，也拦不住带 id 的重复重投）
+const seenMsgIds = new Set();
 const displayItems = computed(() => {
   const out = [];
   let run = null;
@@ -195,7 +200,14 @@ function appendItem(item) {
   items.value.push(item);
 }
 
-function isDupFromHistory(role, content) {
+function isDupMessage(role, content, messageId) {
+  // 有稳定 id：纯 ID 判定（命中即重复；未命中登记后放行）
+  if (messageId) {
+    if (seenMsgIds.has(messageId)) return true;
+    seenMsgIds.add(messageId);
+    return false;
+  }
+  // 无 id 的旧消息：退回内容+时间窗的猜测式去重
   if (Date.now() - historyLoadedAt.value > DEDUP_WINDOW_MS) return false;
   return items.value.some((i) => i.kind === 'msg' && i.role === role && i.content === content);
 }
@@ -441,7 +453,7 @@ function onMessage(data) {
   if (!isForCurrent(data)) return;
   const role = data.role || 'agent';
   if (role === 'tool_step') return; // 步骤消息由进度卡片呈现
-  if (isDupFromHistory(role, data.content)) return;
+  if (isDupMessage(role, data.content, data.message_id)) return;
   // 后台任务的完成广播（background:true）不得清前台的运行态——否则前台
   // 任务还在跑时，一个后台任务完结就把「停止」按钮弄没了（生产实证：
   // 中断按钮时有时无、点了无效）
@@ -536,7 +548,7 @@ function onTaskBackgrounded(data) {
 function onSystemMessage(data) {
   if (!isForCurrent(data)) return;
   if (!data.message) return;
-  if (isDupFromHistory('system', data.message)) return;
+  if (isDupMessage('system', data.message, data.message_id)) return;
   appendItem({ kind: 'msg', key: nextKey(), role: 'system', content: data.message });
   scrollToBottom();
 }
@@ -734,7 +746,9 @@ async function loadHistory(sid, { beforeId = 0 } = {}) {
     if (sid !== currentSessionId.value) return; // 会话已切换，丢弃过期结果
     historyPaging.oldestId = data.oldest_id || 0;
     historyPaging.hasMore = !!data.has_more;
-    const msgs = (data.history || []).map((m) => ({
+    const msgs = (data.history || []).map((m) => {
+      if (m.id) seenMsgIds.add(m.id);  // 历史消息登记进 ID 去重表
+      return {
       kind: 'msg', key: nextKey(), role: m.role, content: m.content,
       id: m.id, timestamp: m.timestamp || null,
       feedback: m.feedback || 0,
@@ -743,7 +757,8 @@ async function loadHistory(sid, { beforeId = 0 } = {}) {
         ? m.attachments.map((a) => '/api/upload/' + encodeURIComponent(String(a).split('/').pop()))
         : (m.images || null),
       files: m.files || null,
-    }));
+    };
+    });
     if (beforeId) {
       // 向前翻页：顶部插入并保持滚动位置
       const el = listEl.value;
@@ -765,13 +780,18 @@ async function loadHistory(sid, { beforeId = 0 } = {}) {
   }
 }
 
-// 进入会话时用 REST 补一张最近任务的进度卡片（WS 连接后也会推 history_steps，按 task_id 去重）
+// 进入会话时用 REST 补一张最近任务的进度卡片（全量历史一律走 REST，WS 只传增量）
 async function loadRecentTaskCard(sid) {
   try {
     const data = await request(`/api/tasks?session_id=${sid}&page=1&page_size=1`);
     if (sid !== currentSessionId.value) return;
     const task = (data.tasks || [])[0];
-    if (!task || !RECENT_CARD_STATUSES.includes(task.status)) return;
+    if (!task) return;
+    // completed 只补最近 1 小时内完成的（避免每次进会话都弹出远古任务卡片）
+    const RECENT_COMPLETED_MS = 3600e3;
+    const recentlyCompleted = task.status === 'completed' && task.updated_at
+      && (Date.now() - new Date(String(task.updated_at).replace(' ', 'T') + 'Z').getTime()) < RECENT_COMPLETED_MS;
+    if (!(RECENT_CARD_STATUSES.includes(task.status) || recentlyCompleted)) return;
     const stepData = await request(`/api/tasks/${task.id}/steps?page=1&page_size=100`);
     if (sid !== currentSessionId.value) return;
     // 该接口按 created_at DESC 返回，渲染前反转为正序（修正旧版历史卡片顺序 bug）
