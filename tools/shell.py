@@ -410,7 +410,8 @@ class ShellTool(BaseTool):
                     if agent_ctx and getattr(agent_ctx, "sandbox_dir", None):
                         sandbox_dir = agent_ctx.sandbox_dir
                     else:
-                        sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+                        from core.paths import resolve_sandbox_dir
+                        sandbox_dir = resolve_sandbox_dir(config.get("sandbox_dir"))
                     os.makedirs(sandbox_dir, exist_ok=True)
                     cwd = sandbox_dir
             except Exception as e:

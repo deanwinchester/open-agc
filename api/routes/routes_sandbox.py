@@ -43,6 +43,7 @@ from api.config import load_config
 from api.task_core import read_task_checkpoint
 from api import deliverables_registry as _dr
 from core import sandbox_janitor as _janitor
+from core.paths import resolve_sandbox_dir
 
 router = APIRouter()
 
@@ -73,7 +74,7 @@ def _sandbox_root() -> str:
         cfg = load_config() or {}
     except Exception:
         cfg = {}
-    return os.path.abspath(cfg.get("sandbox_dir") or os.path.join(os.getcwd(), "workspace"))
+    return resolve_sandbox_dir(cfg.get("sandbox_dir"))
 
 
 def _fmt_mtime(ts) -> str:

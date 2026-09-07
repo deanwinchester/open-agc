@@ -40,7 +40,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 from dotenv import load_dotenv, set_key
 
-from core.paths import get_data_path, get_skills_dir
+from core.paths import get_data_path, get_skills_dir, resolve_sandbox_dir
 from core.llamacpp_manager import get_llamacpp_manager
 from tools.shell import interrupt_shell
 from core.plugin_manager import discover_plugins, list_plugins, list_all_plugins, unload_plugin, toggle_plugin, install_from_git, fetch_marketplace
@@ -495,7 +495,7 @@ async def read_index():
 async def get_sandbox_file(file_path: str):
     """Serve files dynamically from the current sandbox directory to the UI."""
     config = load_config()
-    sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+    sandbox_dir = resolve_sandbox_dir(config.get("sandbox_dir"))
     full_path = os.path.abspath(os.path.join(sandbox_dir, file_path))
     if not full_path.startswith(os.path.abspath(sandbox_dir)):
         raise HTTPException(status_code=403, detail="Forbidden directory traversal")
@@ -525,7 +525,7 @@ def load_config() -> dict:
         "fallback_models": ["deepseek/deepseek-chat"],
         "disabled_skills": [],
         "sandbox_mode": True,
-        "sandbox_dir": os.path.abspath(os.path.join(os.getcwd(), "workspace")),
+        "sandbox_dir": "./workspace",
         "llamacpp_ctx_size": 32768,
         "browser_headless": False,
         "http_proxy": "",

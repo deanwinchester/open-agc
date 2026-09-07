@@ -114,8 +114,8 @@ def _resolve_relative(path: str, config: dict) -> str:
     （此处只在 sandbox_mode 开启的分支被调用）。"""
     if os.path.isabs(path):
         return path
-    sandbox_dir = (config or {}).get(
-        "sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+    from core.paths import resolve_sandbox_dir
+    sandbox_dir = resolve_sandbox_dir((config or {}).get("sandbox_dir"))
     return os.path.normpath(os.path.join(sandbox_dir, path))
 
 

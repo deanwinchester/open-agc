@@ -13,6 +13,7 @@ from api.state import (
     _pending_sandbox_approvals, _active_agents, _background_agents,
     _guardian_resume_lock, is_task_deleted,
 )
+from core.paths import resolve_sandbox_dir
 
 _CONTINUATION_PREFIXES = [
     "继续", "继续搞", "继续做", "继续下载", "接着", "retry", "continue",
@@ -659,7 +660,7 @@ def get_checkpoint_dir() -> str:
         cfg = load_config() or {}
     except Exception:
         cfg = {}
-    sandbox = cfg.get("sandbox_dir") or os.path.abspath(os.path.join(os.getcwd(), "workspace"))
+    sandbox = resolve_sandbox_dir(cfg.get("sandbox_dir"))
     return os.path.join(sandbox, ".checkpoints")
 
 

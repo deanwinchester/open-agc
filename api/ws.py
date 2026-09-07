@@ -163,8 +163,9 @@ def _with_history_images(msg: dict, attachments_json: str) -> dict:
         if not isinstance(rels, list) or not rels:
             return msg
         from api.config import load_config as _lc
+        from core.paths import resolve_sandbox_dir as _rsd
         cfg = _lc() or {}
-        sandbox = cfg.get("sandbox_dir") or os.path.join(os.getcwd(), "workspace")
+        sandbox = _rsd(cfg.get("sandbox_dir"))
         paths = []
         for rel in rels:
             if not isinstance(rel, str) or ".." in rel.split("/"):

@@ -354,7 +354,8 @@ class OpenAGCAgent:
                 with open(config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
                     if config.get("sandbox_mode", True):
-                        self.sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+                        from core.paths import resolve_sandbox_dir
+                        self.sandbox_dir = resolve_sandbox_dir(config.get("sandbox_dir"))
                     self.browser_headless = config.get("browser_headless", False)
                     self.tool_tiered_exposure = config.get("tool_tiered_exposure", True)
                     # Initialize token budget from config if available
