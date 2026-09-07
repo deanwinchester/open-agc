@@ -16,7 +16,7 @@ MAX_UPLOAD_MB = 500
 
 
 def _load_sandbox_config():
-    from core.paths import get_data_path
+    from core.paths import get_data_path, resolve_sandbox_dir
     config_path = get_data_path("config.json")
     if os.path.exists(config_path):
         try:
@@ -24,12 +24,13 @@ def _load_sandbox_config():
                 return json.load(f)
         except Exception:
             pass
-    return {"sandbox_dir": os.path.abspath(os.path.join(os.getcwd(), "workspace"))}
+    return {"sandbox_dir": resolve_sandbox_dir()}
 
 
 def _uploads_dir():
+    from core.paths import resolve_sandbox_dir
     cfg = _load_sandbox_config()
-    sandbox_dir = cfg.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+    sandbox_dir = resolve_sandbox_dir(cfg.get("sandbox_dir"))
     return os.path.abspath(os.path.join(sandbox_dir, "uploads"))
 
 

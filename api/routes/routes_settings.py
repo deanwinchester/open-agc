@@ -10,7 +10,7 @@ from api.db import DB_PATH
 from api.config import load_config, save_config, CONFIG_PATH
 from api.state import connected_websockets, _llamacpp_download_state, _broadcast_to_websockets, _active_agents, _background_agents, _sandbox_waits
 from api.task_core import create_task, get_task_context, save_task_context, add_task_step, claim_task_for_resume
-from core.paths import get_data_path
+from core.paths import get_data_path, resolve_sandbox_dir
 from core.llamacpp_manager import get_llamacpp_manager
 from api.background import _run_background_task
 from api.ws import save_message
@@ -498,7 +498,7 @@ async def get_settings(session_id: int = None):
 
         "sandbox_mode": config.get("sandbox_mode", True),
 
-        "sandbox_dir": config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace"))),
+        "sandbox_dir": resolve_sandbox_dir(config.get("sandbox_dir")),
 
         "llamacpp_ctx_size": config.get("llamacpp_ctx_size", 32768),
 
@@ -674,7 +674,7 @@ async def update_settings(config_update: ConfigUpdate):
 
         if config_update.sandbox_dir is not None:
 
-            config["sandbox_dir"] = os.path.abspath(config_update.sandbox_dir) if config_update.sandbox_dir else os.path.abspath(os.path.join(os.getcwd(), "workspace"))
+            config["sandbox_dir"] = resolve_sandbox_dir(config_update.sandbox_dir)
 
         if config_update.llamacpp_ctx_size is not None:
 
