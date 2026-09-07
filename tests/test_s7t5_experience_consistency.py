@@ -217,13 +217,14 @@ def _squash(text: str) -> str:
 
 
 def test_replay_sql_has_sub_task_and_order_by_id():
-    """三处 history_steps 查询（state.py 广播 + ws.py 连接回放/恢复回放）
-    补 sub_task 列并统一 ORDER BY id；task_core 上下文重建同步改序。"""
+    """history_steps 查询（state.py 广播 + ws.py 恢复回放）补 sub_task 列并统一
+    ORDER BY id；连接时的全量回放已删除（架构收敛：历史一律走 REST，WS 只传
+    增量）；task_core 上下文重建同步改序。"""
     ws = _squash((_SRC / "api" / "ws.py").read_text(encoding="utf-8"))
     st = _squash((_SRC / "api" / "state.py").read_text(encoding="utf-8"))
     core = _squash((_SRC / "api" / "task_core.py").read_text(encoding="utf-8"))
-    # ws.py 两处 history_steps 查询：连接时回放 + resume 回放
-    assert ws.count("sub_taskFROMtask_stepsWHEREtask_id=?ORDERBYid") == 2
+    # ws.py 仅剩 resume 回放一处 history_steps 查询（连接时回放已删）
+    assert ws.count("sub_taskFROMtask_stepsWHEREtask_id=?ORDERBYid") == 1
     # state.py _broadcast_task_history
     assert st.count("sub_taskFROMtask_stepsWHEREtask_id=?ORDERBYidASC") == 1
     # task_core get_task_context 回放重建
