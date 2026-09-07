@@ -118,7 +118,8 @@ def resolve_sandbox_dir(configured: str = None) -> str:
         return os.path.abspath(configured)
     rel = (configured or "").strip() or "workspace"
     if getattr(sys, 'frozen', False):
-        root = os.path.join(get_data_dir(), rel)
+        # 与 data/ 并列（<base>/workspace），不要塞进 data 里（用户要求）
+        root = os.path.join(get_base_dir(), rel)
     else:
         root = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), rel)

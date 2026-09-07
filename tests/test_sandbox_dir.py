@@ -24,13 +24,13 @@ def test_default_source_mode_is_project_root():
 
 
 def test_frozen_relative_goes_under_data_dir(tmp_path, monkeypatch):
-    """frozen + 相对路径 → <data>/workspace，绝不落在 _internal。"""
+    """frozen + 相对路径 → <base>/workspace（与 data 并列），绝不落在 _internal。"""
     monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
-    monkeypatch.setenv("OPEN_AGC_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPEN_AGC_DATA_DIR", str(tmp_path / "base"))
     out = resolve_sandbox_dir("./workspace")
-    assert out.startswith(str(tmp_path))
+    assert out == os.path.join(str(tmp_path), "base", "workspace")
     assert "_internal" not in out
-    assert out.endswith("workspace")
+    assert f"{os.sep}data{os.sep}" not in out  # workspace 与 data 并列
 
 
 def test_frozen_absolute_still_passthrough(tmp_path, monkeypatch):

@@ -47,6 +47,40 @@ from core.paths import resolve_sandbox_dir
 
 router = APIRouter()
 
+
+@router.get("/api/sandbox/browse_dirs")
+async def browse_dirs(path: Optional[str] = None):
+    """目录浏览（沙箱页可视化选择沙箱目录用，只读）。
+
+    path 为空时从用户主目录起（Windows 另附盘符列表）。返回当前路径、
+    父目录、子目录列表（按名称排序，目录不存在/无权限报 400）。
+    """
+    import sys as _sys
+    if not path:
+        path = os.path.expanduser("~")
+    path = os.path.abspath(path)
+    if not os.path.isdir(path):
+        raise HTTPException(status_code=400, detail=f"目录不存在: {path}")
+    parent = os.path.dirname(path)
+    if parent == path:
+        parent = None
+    dirs = []
+    try:
+        for name in sorted(os.listdir(path), key=str.lower):
+            full = os.path.join(path, name)
+            if os.path.isdir(full) and not name.startswith('.'):
+                dirs.append({"name": name, "path": full})
+    except PermissionError:
+        raise HTTPException(status_code=400, detail=f"没有读取权限: {path}")
+    drives = []
+    if _sys.platform.startswith("win") and parent is None:
+        # Windows 盘符根（如 C:\）再往上无父目录——给盘符列表供切换
+        import string
+        drives = [f"{d}:\\" for d in string.ascii_uppercase
+                  if os.path.isdir(f"{d}:\\")]
+    return {"path": path, "parent": parent, "dirs": dirs, "drives": drives,
+            "writable": os.access(path, os.W_OK)}
+
 _INSTALLER_EXTS = {".exe", ".msi", ".7z", ".zip", ".dmg", ".pkg"}
 _STATS_CACHE_TTL = 600        # 统计缓存 TTL（秒）
 _STATS_TIME_BUDGET = 60.0     # 单目录遍历时间预算（秒）
