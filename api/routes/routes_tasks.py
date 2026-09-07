@@ -21,6 +21,7 @@ from api.task_core import (
     _record_task_deliverables, _check_goal_completeness,
     kill_tracked_background_process,
 )
+from core.paths import resolve_sandbox_dir
 from tools.shell import (
     interrupt_shell, get_background_processes, get_background_processes_for_task,
     get_orphan_processes, adopt_orphan_processes, _decode_mixed,
@@ -600,9 +601,8 @@ def _sandbox_dir_from_config() -> Optional[str]:
         config = load_config()
         if not config.get("sandbox_mode", True):
             return None
-        sandbox_dir = config.get("sandbox_dir") or os.path.abspath(
-            os.path.join(os.getcwd(), "workspace"))
-        return os.path.abspath(sandbox_dir)
+        sandbox_dir = resolve_sandbox_dir(config.get("sandbox_dir"))
+        return sandbox_dir
     except Exception:
         return None
 

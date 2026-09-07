@@ -178,7 +178,8 @@ class PythonREPLTool(BaseTool):
                 with open(config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
                 if config.get("sandbox_mode", True):
-                    sandbox_dir = config.get("sandbox_dir", os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+                    from core.paths import resolve_sandbox_dir
+                    sandbox_dir = resolve_sandbox_dir(config.get("sandbox_dir"))
                     os.makedirs(sandbox_dir, exist_ok=True)
                     cwd = sandbox_dir
             except Exception:

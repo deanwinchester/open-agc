@@ -48,8 +48,8 @@ class BaseTool(BaseModel):
 
         import json
         if sandbox_dir is None:
-            sandbox_dir = config.get("sandbox_dir",
-                os.path.abspath(os.path.join(os.getcwd(), "workspace")))
+            from core.paths import resolve_sandbox_dir
+            sandbox_dir = resolve_sandbox_dir(config.get("sandbox_dir"))
         # Normalize case for cross-platform path comparison (critical on Windows:
         # "D:\\AndroidSDK" and "d:\\androidsdk" should match)
         abs_path = os.path.normcase(os.path.abspath(path))

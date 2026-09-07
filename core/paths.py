@@ -105,6 +105,26 @@ def get_models_dir() -> str:
     return dir_path
 
 
+def resolve_sandbox_dir(configured: str = None) -> str:
+    """解析沙箱根目录（唯一口径，全项目共用）。
+
+    - 绝对路径配置原样使用；
+    - 相对路径（如默认的 "./workspace"）不再随 CWD 漂移：frozen 下解析到
+      数据目录 <data>/workspace（用户可写；CWD 是 _MEIPASS，Linux 下
+      /opt/open-agc/_internal 为 root 所有，写不进去——生产实证），
+      源码模式解析到项目根目录。
+    """
+    if configured and os.path.isabs(configured):
+        return os.path.abspath(configured)
+    rel = (configured or "").strip() or "workspace"
+    if getattr(sys, 'frozen', False):
+        root = os.path.join(get_data_dir(), rel)
+    else:
+        root = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), rel)
+    return os.path.abspath(root)
+
+
 def get_user_plugins_dir() -> str:
     """Get the directory for user-installed plugins (under data/ for Docker persistence)."""
     dir_path = os.path.join(get_data_dir(), "plugins")

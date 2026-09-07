@@ -23,6 +23,7 @@ import re
 
 from api.db import db_connect
 from api.config import load_config
+from core.paths import resolve_sandbox_dir
 
 _TASK_DIR_RE = re.compile(r"task_(\d+)")
 _CKPT_FILE_RE = re.compile(r"task_(\d+)\.json")
@@ -68,7 +69,7 @@ def sandbox_root() -> str:
         cfg = load_config() or {}
     except Exception:
         cfg = {}
-    return os.path.abspath(cfg.get("sandbox_dir") or os.path.join(os.getcwd(), "workspace"))
+    return resolve_sandbox_dir(cfg.get("sandbox_dir"))
 
 
 def is_under_root(root: str, path: str) -> bool:
