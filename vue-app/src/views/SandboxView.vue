@@ -131,6 +131,7 @@ async function loadEntries({ silent = false } = {}) {
     totalSize.value = data?.total_size ?? null;
     if (data?.watermark) watermark.value = data.watermark;
     if (data?.janitor) janitor.value = data.janitor;
+    if (data?.sandbox) sandboxDir.value = data.sandbox;
     pollFailures = 0;
   } catch (err) {
     if (silent) {
@@ -141,6 +142,53 @@ async function loadEntries({ silent = false } = {}) {
     }
   } finally {
     if (!silent) loading.value = false;
+  }
+}
+
+// ── 沙箱目录：展示 + 可视化更改（从设置页合并过来，非技术用户友好）──
+
+const sandboxDir = ref('');
+const browseVisible = ref(false);
+const browsePath = ref('');
+const browseParent = ref(null);
+const browseDirs = ref([]);
+const browseDrives = ref([]);
+const browseWritable = ref(true);
+const browseLoading = ref(false);
+
+async function browseTo(path) {
+  browseLoading.value = true;
+  try {
+    const data = await request(`/api/sandbox/browse_dirs?path=${encodeURIComponent(path || '')}`);
+    browsePath.value = data.path;
+    browseParent.value = data.parent;
+    browseDirs.value = data.dirs || [];
+    browseDrives.value = data.drives || [];
+    browseWritable.value = !!data.writable;
+  } catch (err) {
+    ElMessage.error(`${t.browseLoadFailed}: ${err.message}`);
+  } finally {
+    browseLoading.value = false;
+  }
+}
+
+function openBrowse() {
+  browseVisible.value = true;
+  browseTo(sandboxDir.value || '');
+}
+
+async function pickBrowseDir() {
+  try {
+    await request('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sandbox_dir: browsePath.value }),
+    });
+    ElMessage.success(t.dirChanged);
+    browseVisible.value = false;
+    loadEntries({ silent: true });
+  } catch (err) {
+    ElMessage.error(`${t.dirChangeFailed}: ${err.message}`);
   }
 }
 
@@ -312,6 +360,66 @@ function resultTagType(result) {
       <h1>{{ t.title }}</h1>
       <p class="view-desc">{{ t.desc }}</p>
     </header>
+
+    <!-- 沙箱简介 + 当前目录 + 可视化更改（从设置页合并过来） -->
+    <el-card class="intro-card" shadow="never">
+      <div class="intro-row">
+        <div class="intro-text">
+          <div class="intro-title">{{ t.introTitle }}</div>
+          <div class="intro-desc">{{ t.introText }}</div>
+          <div class="intro-dir">
+            <span class="intro-dir-label">{{ t.currentDir }}：</span>
+            <code>{{ sandboxDir || '…' }}</code>
+          </div>
+        </div>
+        <el-button size="small" type="primary" plain @click="openBrowse">
+          {{ t.changeDir }}
+        </el-button>
+      </div>
+    </el-card>
+
+    <!-- 目录选择弹窗 -->
+    <el-dialog
+      :model-value="browseVisible"
+      :title="t.browseTitle"
+      width="560px"
+      @close="browseVisible = false"
+    >
+      <div v-loading="browseLoading" class="browse-body">
+        <div class="browse-current">
+          <el-button size="small" :disabled="!browseParent && !browseDrives.length" @click="browseTo(browseParent || '')">
+            ← {{ t.browseUp }}
+          </el-button>
+          <code class="browse-path">{{ browsePath }}</code>
+        </div>
+        <div v-if="browseDrives.length" class="browse-drives">
+          <el-button
+            v-for="d in browseDrives"
+            :key="d"
+            size="small"
+            plain
+            @click="browseTo(d)"
+          >💽 {{ d }}</el-button>
+        </div>
+        <div class="browse-list">
+          <div
+            v-for="d in browseDirs"
+            :key="d.path"
+            class="browse-item"
+            @dblclick="browseTo(d.path)"
+            @click="browseTo(d.path)"
+          >📁 {{ d.name }}</div>
+          <div v-if="!browseDirs.length && !browseLoading" class="browse-empty">{{ t.browseEmpty }}</div>
+        </div>
+        <div v-if="!browseWritable" class="browse-nowrite">{{ t.browseNotWritable }}</div>
+      </div>
+      <template #footer>
+        <el-button @click="browseVisible = false">{{ t.cancel || '取消' }}</el-button>
+        <el-button type="primary" :disabled="!browseWritable" @click="pickBrowseDir">
+          {{ t.browseSelect }}
+        </el-button>
+      </template>
+    </el-dialog>
 
     <el-alert
       v-if="watermark.level === 'soft'"
@@ -490,6 +598,93 @@ function resultTagType(result) {
 </template>
 
 <style scoped>
+.intro-card {
+  margin-bottom: 12px;
+}
+
+.intro-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.intro-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.intro-desc {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.intro-dir {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.intro-dir code {
+  background: var(--el-fill-color-light);
+  padding: 2px 8px;
+  border-radius: 4px;
+  word-break: break-all;
+}
+
+.browse-current {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.browse-path {
+  flex: 1;
+  font-size: 12px;
+  background: var(--el-fill-color-light);
+  padding: 4px 8px;
+  border-radius: 4px;
+  word-break: break-all;
+}
+
+.browse-drives {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.browse-list {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+}
+
+.browse-item {
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.browse-item:hover {
+  background: var(--el-fill-color-light);
+}
+
+.browse-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
+
+.browse-nowrite {
+  margin-top: 8px;
+  color: var(--el-color-danger);
+  font-size: 12px;
+}
+
 .sandbox-view {
   padding: 24px 28px 40px;
   max-width: 1080px;

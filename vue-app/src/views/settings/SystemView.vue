@@ -22,7 +22,7 @@ const form = reactive({
   dispatcherMode: false,
   agentWorkerName: '分身',
   sandboxMode: true,
-  sandboxDir: '',
+  // 沙箱目录设置已合并到左侧「沙箱」页（可视化选择 + 简介），此处不再展示
   httpProxy: '',
   browserHeadless: false,
   searxngUrl: '',
@@ -99,7 +99,6 @@ function applySettings(data) {
   form.dispatcherMode = init.dispatcher_mode;
   form.agentWorkerName = init.agent_worker_name;
   form.sandboxMode = init.sandbox_mode;
-  form.sandboxDir = init.sandbox_dir;
   form.httpProxy = init.http_proxy;
   form.browserHeadless = init.browser_headless;
   form.searxngUrl = init.searxng_url;
@@ -158,7 +157,6 @@ function buildPayload() {
   if (wn && wn !== init.agent_worker_name) payload.agent_worker_name = wn;
 
   if (form.sandboxMode !== init.sandbox_mode) payload.sandbox_mode = form.sandboxMode;
-  if (form.sandboxDir.trim() !== init.sandbox_dir) payload.sandbox_dir = form.sandboxDir.trim();
   if (form.httpProxy.trim() !== init.http_proxy) payload.http_proxy = form.httpProxy.trim();
   if (form.browserHeadless !== init.browser_headless) payload.browser_headless = form.browserHeadless;
   if (form.searxngUrl.trim() !== init.searxng_url) payload.searxng_url = form.searxngUrl.trim();
@@ -304,10 +302,6 @@ onMounted(loadSettings);
       <el-form label-position="top">
         <el-form-item :label="t.sandbox.mode">
           <el-switch v-model="form.sandboxMode" />
-        </el-form-item>
-        <el-form-item :label="t.sandbox.dir">
-          <el-input v-model="form.sandboxDir" :placeholder="t.sandbox.dirPlaceholder" />
-          <div class="field-hint">{{ t.sandbox.dirHint }}</div>
         </el-form-item>
         <el-form-item :label="t.sandbox.proxy">
           <el-input v-model="form.httpProxy" :placeholder="t.sandbox.proxyPlaceholder" />
