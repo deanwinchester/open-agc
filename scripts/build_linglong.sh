@@ -76,6 +76,7 @@ sed -e "s|@APP_ID@|${APP_ID}|g" \
     -e "s|@LL_VERSION@|${LL_VERSION}|g" \
     -e "s|@LL_BASE@|${LL_BASE}|g" \
     -e "s|@DEB_FILE@|file://${PWD}/${PROJECT_DIR}/open-agc.deb|g" \
+    -e "s|@DEB_DIGEST@|$(sha256sum "${PROJECT_DIR}/open-agc.deb" | cut -d' ' -f1)|g" \
     packaging/linglong.yaml.template > "${PROJECT_DIR}/linglong.yaml"
 
 # ---- 3. Build ----
