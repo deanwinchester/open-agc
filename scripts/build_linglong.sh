@@ -81,6 +81,8 @@ sed -e "s|@APP_ID@|${APP_ID}|g" \
 echo "[3/4] ll-builder build (base ${LL_BASE} 首次会拉取基础环境，耗时较长)..."
 # 优先 docker 构建：宿主 ll-box 在定制内核（如 UOS 5.10-arm64）上起不来
 # 容器时（newuidmap 写 uid_map 被拒），docker 内环境干净可控。
+# 注意 overlay 工作区放容器本地盘——bind mount 宿主目录时，ll-box 的
+# userns 映射 uid 打不开宿主 workdir（Permission denied 生产实证）。
 # 无 docker 或 docker 构建失败时回退宿主 ll-builder。
 LL_CONTAINER_OK=0
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
@@ -91,19 +93,25 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     fi
     docker run --rm --privileged \
         --add-host mirror-repo-linglong.deepin.com:42.56.65.201 \
-        -v "$PWD:/work" -w /work/dist/linglong \
-        "${LL_IMAGE}" ll-builder build && LL_CONTAINER_OK=1
+        -v "$PWD/dist/linglong:/out" \
+        "${LL_IMAGE}" bash -c '
+            set -e
+            rm -rf /tmp/llwork && mkdir -p /tmp/llwork
+            cp /out/open-agc.deb /out/linglong.yaml /tmp/llwork/
+            cd /tmp/llwork && ll-builder build && ll-builder export
+            mkdir -p /out/artifacts
+            cp -r linglong /out/ 2>/dev/null || true
+            find . -maxdepth 2 -name "*.uab" -o -maxdepth 2 -name "*.layer" | while read f; do cp -r "$f" /out/artifacts/; done
+        ' && LL_CONTAINER_OK=1
     # 容器以 root 运行，产物归 root 所有——归还所有权
     sudo chown -R "$(id -u):$(id -g)" dist/linglong 2>/dev/null || true
 fi
 if [ "${LL_CONTAINER_OK}" != "1" ]; then
     echo "  docker 构建不可用或失败，回退宿主 ll-builder..."
     (cd "${PROJECT_DIR}" && ll-builder build)
+    echo "[4/4] Exporting .uab..."
+    (cd "${PROJECT_DIR}" && ll-builder export || echo "[warn] ll-builder export 失败，可检查 ${PROJECT_DIR} 下产物")
 fi
-
-# ---- 4. Export .uab ----
-echo "[4/4] Exporting .uab..."
-(cd "${PROJECT_DIR}" && ll-builder export || echo "[warn] ll-builder export 失败，可检查 ${PROJECT_DIR} 下产物")
 
 echo ""
 echo "============================================="
