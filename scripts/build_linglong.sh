@@ -59,9 +59,9 @@ else
     echo "[1/4] Using existing deb: ${DEB_NAME}"
 fi
 
-if ! command -v ll-builder >/dev/null 2>&1; then
-    echo "ERROR: ll-builder 未安装。请先安装：sudo apt install ll-builder"
-    echo "       （或按玲珑官方文档安装构建工具链：https://linyaps.org.cn/guide/start/）"
+if ! command -v ll-builder >/dev/null 2>&1 \
+    && ! { command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; }; then
+    echo "ERROR: 需要 ll-builder 或 docker 之一。ll-builder: sudo apt install linglong-builder"
     exit 1
 fi
 
@@ -79,7 +79,27 @@ sed -e "s|@APP_ID@|${APP_ID}|g" \
 
 # ---- 3. Build ----
 echo "[3/4] ll-builder build (base ${LL_BASE} 首次会拉取基础环境，耗时较长)..."
-(cd "${PROJECT_DIR}" && ll-builder build)
+# 优先 docker 构建：宿主 ll-box 在定制内核（如 UOS 5.10-arm64）上起不来
+# 容器时（newuidmap 写 uid_map 被拒），docker 内环境干净可控。
+# 无 docker 或 docker 构建失败时回退宿主 ll-builder。
+LL_CONTAINER_OK=0
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    LL_IMAGE="open-agc-llbuild:bookworm"
+    if ! docker image inspect "${LL_IMAGE}" >/dev/null 2>&1; then
+        echo "  Building llbuild image (debian12 + linglong-builder)..."
+        docker build -t "${LL_IMAGE}" -f scripts/docker/Dockerfile.llbuild .
+    fi
+    docker run --rm --privileged \
+        --add-host mirror-repo-linglong.deepin.com:42.56.65.201 \
+        -v "$PWD:/work" -w /work/dist/linglong \
+        "${LL_IMAGE}" ll-builder build && LL_CONTAINER_OK=1
+    # 容器以 root 运行，产物归 root 所有——归还所有权
+    sudo chown -R "$(id -u):$(id -g)" dist/linglong 2>/dev/null || true
+fi
+if [ "${LL_CONTAINER_OK}" != "1" ]; then
+    echo "  docker 构建不可用或失败，回退宿主 ll-builder..."
+    (cd "${PROJECT_DIR}" && ll-builder build)
+fi
 
 # ---- 4. Export .uab ----
 echo "[4/4] Exporting .uab..."
