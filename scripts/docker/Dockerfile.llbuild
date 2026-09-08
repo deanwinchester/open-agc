@@ -1,0 +1,22 @@
+# 玲珑构建容器：debian 12 + 官方 linglong CI release 源
+# 用于在 ll-box 无法正常工作的宿主（如定制内核的 UOS）上构建玲珑包。
+# 用法见 scripts/build_linglong.sh 的 docker 分支。
+FROM arm64v8/debian:bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg \
+    && echo "deb [trusted=yes] https://ci.deepin.com/repo/obs/linglong:/CI:/release/Debian_12/ ./" \
+        > /etc/apt/sources.list.d/linglong.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        linglong-bin linglong-builder \
+        fuse-overlayfs uidmap squashfs-tools erofs-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# 玲珑镜像源的 IPv6 黑洞问题：固定走可用的 IPv4 边缘（按需覆盖 --add-host）
+RUN echo "42.56.65.201 mirror-repo-linglong.deepin.com" >> /etc/hosts
+
+WORKDIR /work
