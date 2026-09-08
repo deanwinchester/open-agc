@@ -34,7 +34,7 @@ APP_NAME="${APP_NAME:-Open-AGC}"
 LL_BASE="${LL_BASE:-org.deepin.base/23.1.0}"
 
 # 玲珑版本要求四段式：1.0.2rc19 -> 1.0.2.19
-LL_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)rc([0-9]+)$/\1.\4/;t;s/[^0-9.]//g')
+LL_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)rc([0-9]+)$/\1.\2/;t;s/[^0-9.]//g')
 
 case "$(uname -m)" in
     x86_64)  BUILD_ARCH="amd64" ;;
