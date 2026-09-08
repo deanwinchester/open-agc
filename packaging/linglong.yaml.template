@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Open-AGC 玲珑（Linglong）打包清单——由 scripts/build_linglong.sh 渲染生成，
+# 占位符：@APP_ID@ @APP_NAME@ @LL_VERSION@ @LL_BASE@ @DEB_FILE@
+# 字段定义见 https://linyaps.org.cn/guide/1.9.x/ll-builder/manifests.html
+version: "1"
+
+package:
+  id: @APP_ID@
+  name: @APP_NAME@
+  version: @LL_VERSION@
+  kind: app
+  description: |
+    Open-AGC — AI agent desktop application
+
+# 启动入口（与 build 中安装的 $PREFIX/bin/open-agc 一致）
+command: [/opt/apps/@APP_ID@/files/bin/open-agc]
+
+# 基础运行环境：玲珑仓库提供（含新版 GTK/WebKit 栈——宿主 WebKitGTK
+# 太老导致的 WS 卡死/ABI 段错误问题随容器化一并消失）
+base: @LL_BASE@
+
+sources:
+  - kind: file
+    url: @DEB_FILE@
+    name: open-agc.deb
+
+build: |
+  echo 'building open-agc linglong app...'
+
+  rm -rf appdir
+  dpkg-deb -R /project/linglong/sources/open-agc.deb appdir
+
+  # 应用本体（PyInstaller 产物）
+  mkdir -p $PREFIX/opt/open-agc
+  cp -r appdir/opt/open-agc/. $PREFIX/opt/open-agc/
+
+  # 启动包装脚本（command 指向它）
+  mkdir -p $PREFIX/bin
+  cat > $PREFIX/bin/open-agc <<'EOS'
+  #!/bin/sh
+  exec /opt/apps/@APP_ID@/files/opt/open-agc/Open-AGC "$@"
+  EOS
+  chmod +x $PREFIX/bin/open-agc
+
+  # desktop 文件（Exec 与 command 一致）
+  mkdir -p $PREFIX/share/applications
+  cat > $PREFIX/share/applications/@APP_ID@.desktop <<'EOS'
+  [Desktop Entry]
+  Name=Open-AGC
+  Comment=Open-AGC — AI agent desktop application
+  Exec=/opt/apps/@APP_ID@/files/bin/open-agc
+  Icon=open-agc
+  Terminal=false
+  Type=Application
+  Categories=Utility;Development;
+  StartupNotify=true
+  EOS
+
+  # 图标
+  mkdir -p $PREFIX/share/icons/hicolor/256x256/apps
+  if [ -f appdir/usr/share/icons/hicolor/256x256/apps/open-agc.png ]; then
+      cp appdir/usr/share/icons/hicolor/256x256/apps/open-agc.png \
+         $PREFIX/share/icons/hicolor/256x256/apps/open-agc.png
+  fi
+
+  echo 'build done'
+
+buildext:
+  apt:
+    # 运行时依赖（会打进最终应用）：pywebview GTK 原生窗口所需
+    depends:
+      - libwebkit2gtk-4.0-37
+      - gir1.2-webkit2-4.0
+      - libgtk-3-0
+      - libgirepository-1.0-1
