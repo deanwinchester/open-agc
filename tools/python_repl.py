@@ -81,16 +81,99 @@ def _register_surviving_descendants(root_pid: int, task_id, session_id) -> int:
         return 0
 
 
+# 进程级解释器解析缓存（模块级——BaseTool 是 pydantic BaseModel，类属性
+# 缓存会被 ModelMetaclass 处理掉，放类外）
+_PY_CACHE = {}
+
+
 class PythonREPLTool(BaseTool):
     name: str = "execute_python"
     description: str = "执行 Python 代码并返回 stdout/stderr。"
 
+    # ---- 解释器解析（真机优先，嵌入兜底）----
+    # config.python_env：auto（默认，真机>=3.10 优先，无则嵌入）/ system（仅真机）/ embedded（仅嵌入）
+    def _embedded_python(self):
+        import sys
+        import platform
+        ver = platform.python_version()
+        if getattr(sys, 'frozen', False):
+            # 冻结包：--pyrun 内部通道（见 gui_app.main），嵌入解释器 + 打包依赖，
+            # spec 排除了 pip → 不能 pip install
+            return [sys.executable, "--pyrun"], f"嵌入解释器 {ver}（仅打包内依赖，不可 pip 安装新包）"
+        return [sys.executable], f"当前环境 Python {ver}"
+
+    @staticmethod
+    def _find_system_python():
+        """真机 PATH 上第一个 >=3.10 的 python；找不到返回 None。"""
+        import shutil
+        import subprocess
+        for name in ("python3.13", "python3.12", "python3.11", "python3.10", "python3", "python"):
+            exe = shutil.which(name)
+            if not exe:
+                continue
+            try:
+                out = subprocess.run(
+                    [exe, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+                    capture_output=True, text=True, timeout=5)
+                major, minor = out.stdout.strip().split(".")[:2]
+                if (int(major), int(minor)) >= (3, 10):
+                    return [exe]
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _py_version_str(cmd):
+        import subprocess
+        try:
+            out = subprocess.run(cmd + ["--version"], capture_output=True, text=True, timeout=5)
+            return (out.stdout or out.stderr).strip()
+        except Exception:
+            return cmd[0]
+
+    # 进程级解释器解析缓存（模块级——BaseTool 是 pydantic BaseModel，
+    # 类属性缓存会被 ModelMetaclass 吞掉，放类外）
+    def _resolve_python(self):
+        """返回 (cmd_prefix|None, 描述, 来源 system|embedded|missing)。"""
+        cached = _PY_CACHE.get("resolved")
+        if cached is not None:
+            return cached
+        mode = "auto"
+        try:
+            import json
+            from core.paths import get_data_path
+            with open(get_data_path("config.json"), encoding="utf-8") as f:
+                mode = str((json.load(f) or {}).get("python_env") or "auto")
+        except Exception:
+            pass
+
+        if mode != "embedded":
+            sys_cmd = self._find_system_python()
+            if sys_cmd:
+                _PY_CACHE["resolved"] = (
+                    sys_cmd, f"真机 {self._py_version_str(sys_cmd)}（{sys_cmd[0]}）", "system")
+                return _PY_CACHE["resolved"]
+            if mode == "system":
+                _PY_CACHE["resolved"] = (
+                    None, "python_env=system 但真机 PATH 上没有 Python >= 3.10", "missing")
+                return _PY_CACHE["resolved"]
+
+        cmd, desc = self._embedded_python()
+        _PY_CACHE["resolved"] = (cmd, desc, "embedded")
+        return _PY_CACHE["resolved"]
+
     def get_openai_schema(self) -> Dict[str, Any]:
+        desc = self.description
+        try:
+            _, info, _ = self._resolve_python()
+            desc = f"{self.description}运行环境：{info}。"
+        except Exception:
+            pass
         return {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": self.description,
+                "description": desc,
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -198,12 +281,11 @@ class PythonREPLTool(BaseTool):
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
 
-            # frozen（PyInstaller）下 sys.executable 是 Open-AGC 本体而非
-            # python 解释器——必须走 --pyrun 内部通道让嵌入解释器执行脚本，
-            # 否则会把整个 App 再拉起一次（生产实证：多开窗口且代码没跑）。
-            _cmd = ([sys.executable, "--pyrun", temp_path]
-                    if getattr(sys, 'frozen', False)
-                    else [sys.executable, temp_path])
+            # 解释器解析：真机 >=3.10 优先，无则嵌入（--pyrun）；python_env 可配
+            _py_cmd, _py_info, _py_src = self._resolve_python()
+            if _py_src == "missing":
+                return f"Error: {_py_info}"
+            _cmd = list(_py_cmd) + [temp_path]
             proc = subprocess.Popen(
                 _cmd,
                 stdout=subprocess.PIPE,
@@ -225,6 +307,8 @@ class PythonREPLTool(BaseTool):
                 if stderr:
                     output += f"STDERR:\n{stderr}\n"
                 output += f"Exit Code: {proc.returncode}"
+                # 告知 agent 实际运行环境（写代码时按此对齐依赖/语法）
+                output = f"[Python] {_py_info}\n{output}"
 
                 # 脚本已退出——登记它遗留的存活子孙进程（Popen 起的后台
                 # 进程不再失联，可在进程管理中查看/终止）
