@@ -129,91 +129,131 @@ else
     exit 1
 fi
 
-# Python 解析与 start.sh 同一套思路：优先项目本地 .python/（便携 Python，
-# start.sh 在缺 Python 的机器上会自动下载到这里），再按版本找系统
-# python3.13→3.10（UOS 默认 python3 是 3.7，requirements 全部解析失败——
-# 生产实证 zxs 机器 pip 报 Requires-Python >=3.8 整屏跳过）。
-PYTHON_BIN=""
-for cmd in .python/bin/python3 .python/bin/python \
-           python3.13 python3.12 python3.11 python3.10 python3; do
-    if command -v "$cmd" >/dev/null 2>&1 || [ -x "$cmd" ]; then
-        if "$cmd" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
-            PYTHON_BIN="$cmd"
-            break
-        fi
-    fi
-done
-if [ -z "$PYTHON_BIN" ]; then
-    echo "ERROR: 未找到 Python >= 3.10。"
-    echo "       可先运行一次 ./start.sh（会自动下载便携 Python 到 .python/），"
-    echo "       或手动安装：sudo apt install python3.10 python3.10-venv"
-    exit 1
-fi
-echo "  Using Python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
-
-# build_venv 可能是其他平台残留（Windows 的 Scripts/ 布局没有 bin/activate）
-# 或旧 Python 建的——这两种情况都重建，否则 source/pip 在 set -e 下静默失败。
-if [ ! -f "build_venv/bin/activate" ]; then
-    [ -d "build_venv" ] && echo "  build_venv 非本机平台布局，重建..."
-    rm -rf build_venv
-    "$PYTHON_BIN" -m venv build_venv
-elif ! build_venv/bin/python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
-    echo "  build_venv 的 Python 版本过低（$(build_venv/bin/python --version 2>&1)），用 $PYTHON_BIN 重建..."
-    rm -rf build_venv
-    "$PYTHON_BIN" -m venv build_venv
-fi
-source build_venv/bin/activate
-
-# pip 失败原因不能吞（2>/dev/null 会把网络/依赖错误全藏掉，只剩一行号）
-pip install --upgrade pip -q
-pip install pyinstaller -q
-pip install -r requirements.txt -q
-pip install pywebview -q || true
-
-# ---- GTK 原生窗口依赖（与 CI 的 linux-deb job 对齐）----
-# pywebview 的 GTK 后端需要 PyGObject（gi）+ 系统 GIR/WebKit 开发包，
-# 否则 PyInstaller 收集不到 gi，冻结应用 import webview 失败 → 静默回退
-# 浏览器模式（生产实证：zxs 机器全新 venv 打出的包默认进浏览器）。
-# PyGObject 无 wheel 只能源码编译：需要 gcc/make（build-essential）、
-# pkg-config、libgirepository/libffi/libcairo 开发头文件。
-if ! python -c "import gi" 2>/dev/null; then
-    echo "  PyGObject 不可用，准备 GTK 后端依赖..."
-    if ! pkg-config --exists girepository-1.0 2>/dev/null; then
-        echo "  安装系统依赖（需要 sudo）：build-essential libgirepository1.0-dev 等"
-        sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libgirepository1.0-dev \
-            libffi-dev libcairo2-dev \
-            gir1.2-gtk-3.0 gir1.2-webkit2-4.0 || \
-            echo "  [warn] apt 安装失败"
-    fi
-    # 不带 -q：源码编译失败的报错必须可见。
-    # 版本钉 3.42.2：3.46+ 要求 gobject-introspection>=1.64，而 UOS/buster
-    # 只有 1.58；3.40–3.44.x 要求 >=1.56。其中 3.42.2 在 UOS ARM64 +
-    # Python 3.12 上生产实证可用（3.44.1 虽能编译但打出的包白屏）
-    pip install 'PyGObject==3.42.2'
-fi
-# 硬性卡口：gi 不可用的包等于没有原生窗口，直接判构建失败
-if ! python -c "import gi" 2>/dev/null; then
-    echo "ERROR: PyGObject (gi) 仍不可用——打出的包将无法使用原生窗口。"
-    echo "       请把上方 pip install PyGObject 的报错发出来排查。"
-    exit 1
-fi
-
 # ---- 2. Build with PyInstaller ----
-echo "[2/5] Building application with PyInstaller..."
+# 有 docker 时优先在 buster 容器（glibc 2.28 / glib 2.58）内构建二进制：
+# 基线比所有目标发行版都老 → 产物在麒麟 V10(glib 2.64)/UOS(2.66)/新 Ubuntu
+# 上都能跑（向前兼容）。本机直接构建时 PyGObject 按构建机的 glib 解析，
+# 装到 glib 更老的机器上会 GI 解析失败 → ffi 空调用段错误（麒麟生产实证）。
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    echo "[2/5] Building application with PyInstaller (in buster container)..."
+    case "${BUILD_ARCH}" in
+        amd64) PYI_IMAGE="python:3.10-buster" ;;
+        arm64) PYI_IMAGE="arm64v8/python:3.10-buster" ;;
+    esac
+    echo "  Image: ${PYI_IMAGE}"
+    docker run --rm -v "$PWD":/src -w /src "${PYI_IMAGE}" bash -c "
+        set -e
+        echo 'deb http://archive.debian.org/debian buster main' > /etc/apt/sources.list
+        echo 'deb http://archive.debian.org/debian-security buster/updates main' >> /etc/apt/sources.list
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends \
+            pkg-config libgirepository1.0-dev libcairo2-dev \
+            gir1.2-gtk-3.0 gir1.2-webkit2-4.0 libwebkit2gtk-4.0-dev
+        python -m venv /tmp/build_venv
+        source /tmp/build_venv/bin/activate
+        pip install --upgrade pip -q
+        pip install pyinstaller -q
+        pip install -r requirements.txt -q
+        pip install pywebview -q
+        pip install 'PyGObject==3.42.2'
+        python -c 'import gi; gi.require_version(\"WebKit2\", \"4.0\")'
+        export TARGET_ARCH=\"${PYI_ARCH}\"
+        pyinstaller open_agc.spec --clean --noconfirm --distpath dist/linux --workpath build/linux
+    "
+    # 容器以 root 运行，产物归 root 所有——归还所有权给构建用户
+    sudo chown -R "$(id -u):$(id -g)" dist build 2>/dev/null || true
+    if [ ! -f "dist/linux/${APP_NAME}/${APP_NAME}" ]; then
+        echo "  ERROR: 容器内 PyInstaller 构建失败 — dist/linux/${APP_NAME}/${APP_NAME} not found!"
+        exit 1
+    fi
+    echo "  ✅ Build complete (buster container): dist/linux/${APP_NAME}/"
 
-export TARGET_ARCH="${PYI_ARCH}"
+else
+    echo "[2/5] Building application with PyInstaller (host fallback)..."
 
-pyinstaller open_agc.spec --clean --noconfirm \
-    --distpath "dist/linux" \
-    --workpath "build/linux"
+    # Python 解析与 start.sh 同一套思路：优先项目本地 .python/（便携 Python，
+    # start.sh 在缺 Python 的机器上会自动下载到这里），再按版本找系统
+    # python3.13→3.10（UOS 默认 python3 是 3.7，requirements 全部解析失败——
+    # 生产实证 zxs 机器 pip 报 Requires-Python >=3.8 整屏跳过）。
+    PYTHON_BIN=""
+    for cmd in .python/bin/python3 .python/bin/python \
+               python3.13 python3.12 python3.11 python3.10 python3; do
+        if command -v "$cmd" >/dev/null 2>&1 || [ -x "$cmd" ]; then
+            if "$cmd" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+                PYTHON_BIN="$cmd"
+                break
+            fi
+        fi
+    done
+    if [ -z "$PYTHON_BIN" ]; then
+        echo "ERROR: 未找到 Python >= 3.10。"
+        echo "       可先运行一次 ./start.sh（会自动下载便携 Python 到 .python/），"
+        echo "       或手动安装：sudo apt install python3.10 python3.10-venv"
+        exit 1
+    fi
+    echo "  Using Python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
 
-if [ ! -f "dist/linux/${APP_NAME}/${APP_NAME}" ]; then
-    echo "  ERROR: PyInstaller build failed — dist/linux/${APP_NAME}/${APP_NAME} not found!"
-    exit 1
+    # build_venv 可能是其他平台残留（Windows 的 Scripts/ 布局没有 bin/activate）
+    # 或旧 Python 建的——这两种情况都重建，否则 source/pip 在 set -e 下静默失败。
+    if [ ! -f "build_venv/bin/activate" ]; then
+        [ -d "build_venv" ] && echo "  build_venv 非本机平台布局，重建..."
+        rm -rf build_venv
+        "$PYTHON_BIN" -m venv build_venv
+    elif ! build_venv/bin/python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+        echo "  build_venv 的 Python 版本过低（$(build_venv/bin/python --version 2>&1)），用 $PYTHON_BIN 重建..."
+        rm -rf build_venv
+        "$PYTHON_BIN" -m venv build_venv
+    fi
+    source build_venv/bin/activate
+
+    # pip 失败原因不能吞（2>/dev/null 会把网络/依赖错误全藏掉，只剩一行号）
+    pip install --upgrade pip -q
+    pip install pyinstaller -q
+    pip install -r requirements.txt -q
+    pip install pywebview -q || true
+
+    # ---- GTK 原生窗口依赖（与 CI 的 linux-deb job 对齐）----
+    # pywebview 的 GTK 后端需要 PyGObject（gi）+ 系统 GIR/WebKit 开发包，
+    # 否则 PyInstaller 收集不到 gi，冻结应用 import webview 失败 → 静默回退
+    # 浏览器模式（生产实证：zxs 机器全新 venv 打出的包默认进浏览器）。
+    # PyGObject 无 wheel 只能源码编译：需要 gcc/make（build-essential）、
+    # pkg-config、libgirepository/libffi/libcairo 开发头文件。
+    if ! python -c "import gi" 2>/dev/null; then
+        echo "  PyGObject 不可用，准备 GTK 后端依赖..."
+        if ! pkg-config --exists girepository-1.0 2>/dev/null; then
+            echo "  安装系统依赖（需要 sudo）：build-essential libgirepository1.0-dev 等"
+            sudo apt-get install -y --no-install-recommends \
+                build-essential pkg-config libgirepository1.0-dev \
+                libffi-dev libcairo2-dev \
+                gir1.2-gtk-3.0 gir1.2-webkit2-4.0 || \
+                echo "  [warn] apt 安装失败"
+        fi
+        # 不带 -q：源码编译失败的报错必须可见。
+        # 版本钉 3.42.2：3.46+ 要求 gobject-introspection>=1.64，而 UOS/buster
+        # 只有 1.58；3.40–3.44.x 要求 >=1.56。其中 3.42.2 在 UOS ARM64 +
+        # Python 3.12 上生产实证可用（3.44.1 虽能编译但打出的包白屏）
+        pip install 'PyGObject==3.42.2'
+    fi
+    # 硬性卡口：gi 不可用的包等于没有原生窗口，直接判构建失败
+    if ! python -c "import gi" 2>/dev/null; then
+        echo "ERROR: PyGObject (gi) 仍不可用——打出的包将无法使用原生窗口。"
+        echo "       请把上方 pip install PyGObject 的报错发出来排查。"
+        exit 1
+    fi
+
+    export TARGET_ARCH="${PYI_ARCH}"
+
+    pyinstaller open_agc.spec --clean --noconfirm \
+        --distpath "dist/linux" \
+        --workpath "build/linux"
+
+    if [ ! -f "dist/linux/${APP_NAME}/${APP_NAME}" ]; then
+        echo "  ERROR: PyInstaller build failed — dist/linux/${APP_NAME}/${APP_NAME} not found!"
+        exit 1
+    fi
+
+    echo "  ✅ Build complete (host): dist/linux/${APP_NAME}/"
 fi
-
-echo "  ✅ Build complete: dist/linux/${APP_NAME}/"
 
 # ---- 3. Assemble deb staging directory ----
 echo "[3/5] Assembling deb directory structure..."
