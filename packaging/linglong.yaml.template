@@ -22,6 +22,7 @@ base: @LL_BASE@
 sources:
   - kind: file
     url: @DEB_FILE@
+    digest: @DEB_DIGEST@
     name: open-agc.deb
 
 build: |
