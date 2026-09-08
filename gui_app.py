@@ -377,6 +377,19 @@ def _acquire_single_instance_lock():
 
 
 def main():
+    # --pyrun <script.py> [args...]：把嵌入解释器当通用 Python 用。
+    # PyInstaller 冻结后 sys.executable 是 Open-AGC 本体而非 python 解释器，
+    # execute_python 工具直接 Popen([sys.executable, script]) 会把整个 App
+    # 再拉起一次（生产实证：agent 执行 python 代码反复开多个窗口，且代码
+    # 根本没跑）。约定 --pyrun 为内部通道：execute_python 以
+    # [exe, --pyrun, script] 调用，这里 runpy 执行目标脚本后退出，不进 App。
+    if len(sys.argv) >= 3 and sys.argv[1] == "--pyrun":
+        import runpy
+        target = sys.argv[2]
+        sys.argv = [target] + sys.argv[3:]
+        runpy.run_path(target, run_name="__main__")
+        return
+
     # 单实例：已有实例在跑就直接退出，不再开新窗口
     if not _acquire_single_instance_lock():
         print("Open-AGC 已在运行中，不再启动第二个实例。")

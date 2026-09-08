@@ -198,8 +198,14 @@ class PythonREPLTool(BaseTool):
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
 
+            # frozen（PyInstaller）下 sys.executable 是 Open-AGC 本体而非
+            # python 解释器——必须走 --pyrun 内部通道让嵌入解释器执行脚本，
+            # 否则会把整个 App 再拉起一次（生产实证：多开窗口且代码没跑）。
+            _cmd = ([sys.executable, "--pyrun", temp_path]
+                    if getattr(sys, 'frozen', False)
+                    else [sys.executable, temp_path])
             proc = subprocess.Popen(
-                [sys.executable, temp_path],
+                _cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 encoding="utf-8",
