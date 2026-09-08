@@ -346,12 +346,26 @@ StartupNotify=true
 EOF
 
 # Icon (resize to 256x256 so gtk-update-icon-cache picks it up from the hicolor/256x256 dir)
-python -c "
+# 需要 PIL：容器构建模式下宿主 python 可能是系统老版本（无 Pillow），
+# 此时复用构建镜像在容器里跑；本机构建模式下用已装依赖的 venv python。
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    docker run --rm -v "$PWD":/src -w /src "${PYI_IMAGE:-python:3.10-buster}" bash -c "
+        pip install pillow -q &&
+        python -c \"
+from PIL import Image
+img = Image.open('static/icon_rounded.png').convert('RGBA')
+img = img.resize((256, 256), Image.LANCZOS)
+img.save('${STAGING_DIR}/usr/share/icons/hicolor/256x256/apps/${PKG_NAME}.png')
+\""
+    sudo chown -R "$(id -u):$(id -g)" "${STAGING_DIR}" 2>/dev/null || true
+else
+    python -c "
 from PIL import Image
 img = Image.open('static/icon_rounded.png').convert('RGBA')
 img = img.resize((256, 256), Image.LANCZOS)
 img.save('${STAGING_DIR}/usr/share/icons/hicolor/256x256/apps/${PKG_NAME}.png')
 "
+fi
 
 echo "  ✅ Staged at ${STAGING_DIR}"
 
