@@ -19,17 +19,14 @@ command: [/opt/apps/@APP_ID@/files/bin/open-agc]
 # 太老导致的 WS 卡死/ABI 段错误问题随容器化一并消失）
 base: @LL_BASE@
 
-sources:
-  - kind: file
-    url: @DEB_FILE@
-    digest: @DEB_DIGEST@
-    name: open-agc.deb
+# 注意：不配 sources——deb 由脚本复制进工程目录，build 里相对路径直接解包
+# （ll-builder 1.5.x 的 sources 不支持 file:// 协议）
 
 build: |
   echo 'building open-agc linglong app...'
 
   rm -rf appdir
-  dpkg-deb -R /project/linglong/sources/open-agc.deb appdir
+  dpkg-deb -R open-agc.deb appdir
 
   # 应用本体（PyInstaller 产物）
   mkdir -p $PREFIX/opt/open-agc
