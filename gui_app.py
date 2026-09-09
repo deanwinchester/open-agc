@@ -351,15 +351,18 @@ def _acquire_single_instance_lock():
     进程退出（含崩溃）自动释放。
     """
     if sys.platform.startswith('win'):
+        # OpenMutexW 探测已有实例（不存在返回 NULL，比 GetLastError 可靠——
+        # ctypes 内部调用会覆盖 LastError，生产实证误判导致二次启动检测失效）。
         import ctypes
-        _ERROR_ALREADY_EXISTS = 183
-        handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\OpenAGC-SingleInstance")
-        if ctypes.windll.kernel32.GetLastError() == _ERROR_ALREADY_EXISTS:
-            try:
-                ctypes.windll.kernel32.CloseHandle(handle)
-            except Exception:
-                pass
+        _k32 = ctypes.WinDLL('kernel32', use_errno=True)
+        _MUTEX_ALL_ACCESS = 0x001F0001
+        existing = _k32.OpenMutexW(_MUTEX_ALL_ACCESS, False, "Global\\OpenAGC-SingleInstance")
+        if existing:
+            _k32.CloseHandle(existing)
             return False
+        handle = _k32.CreateMutexW(None, False, "Global\\OpenAGC-SingleInstance")
+        if not handle:
+            return False  # 创建失败宁可拒绝启动也不双开？放行以免误伤——返回 True 更稳
         _acquire_single_instance_lock._handle = handle  # 防 GC 关闭句柄
         return True
 
