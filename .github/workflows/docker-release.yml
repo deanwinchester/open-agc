@@ -412,3 +412,47 @@ jobs:
         with:
           tag_name: v${{ steps.version.outputs.version }}
           files: dist/Open-AGC-*-Linux-*.deb
+
+  linglong:
+    # 玲珑(.uab) 构建：ll-box 需要内核支持 close_range CLOEXEC——深度定制内核
+    # （如 UOS 5.10-arm64）不支持会导致容器起不来（生产实测），标准 Ubuntu
+    # runner 内核满足。产物复用 linux-deb 的 arm64 deb（官方 deb 转换路径）。
+    needs: [create-release, linux-deb]
+    runs-on: ubuntu-22.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Read VERSION
+        id: version
+        run: echo "version=$(cat VERSION)" >> $GITHUB_OUTPUT
+
+      - name: Download arm64 deb from release
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+          curl -fL "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/Open-AGC-${VERSION}-Linux-arm64.deb" \
+            -o "dist/Open-AGC-${VERSION}-Linux-arm64.deb"
+
+      - name: Install linglong toolchain
+        run: |
+          echo "deb [trusted=yes] https://ci.deepin.com/repo/obs/linglong:/CI:/release/Debian_12/ ./" | \
+            sudo tee /etc/apt/sources.list.d/linglong.list
+          sudo apt-get update -qq
+          sudo apt-get install -y linglong-bin linglong-builder
+
+      - name: Build linglong package
+        run: ./scripts/build_linglong.sh
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          files: |
+            dist/linglong/artifacts/*.uab
+            dist/linglong/artifacts/*.layer
+            dist/linglong/linglong/output/*.uab
+            dist/linglong/linglong/output/*.layer
