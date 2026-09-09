@@ -56,7 +56,9 @@ if os.path.exists('VERSION'):
 # Windows: 包内嵌 WebView2 fixed-version 运行时（edgechromium 用，支持文件
 # 拖放与 Ctrl+C/V；目标机无需预装 WebView2 运行时）。由 build 脚本先调用
 # scripts/download_webview2_runtime.py 下载解包到 build/webview2_runtime/。
-if os.path.isdir('build/webview2_runtime'):
+# 仅 Windows 打包需要——deb/mac 共用本 spec，必须排除以免把 Windows 运行时
+# 打进 Linux/mac 包。
+if sys.platform == 'win32' and os.path.isdir('build/webview2_runtime'):
     datas.append(('build/webview2_runtime', 'webview2_runtime'))
 
 # Merge package data files
