@@ -174,13 +174,19 @@ def _setup_webview2_runtime():
         candidates.append(os.path.join(sys._MEIPASS, 'webview2_runtime'))
     candidates.append(os.path.abspath(os.path.join('build', 'webview2_runtime')))
     for p in candidates:
-        if os.path.isfile(os.path.join(p, 'msedgewebview2.exe')):
+        # 必须同时存在核心 DLL：NuGet 的 WebView2.Runtime.x64 包解出的运行时
+        # 缺 msedge.dll（浏览器核心），指向它会让 WebView2 初始化报
+        # CO_E_SERVER_EXEC_FAILURE，窗口白屏——此时回退系统运行时更可靠。
+        if (os.path.isfile(os.path.join(p, 'msedgewebview2.exe'))
+                and os.path.isfile(os.path.join(p, 'msedge.dll'))):
             try:
                 webview.settings['WEBVIEW2_RUNTIME_PATH'] = p
                 print(f"[webview2] 使用内嵌运行时: {p}")
                 return p
             except Exception as e:
                 print(f"[webview2] 设置运行时路径失败: {e}")
+        elif os.path.isfile(os.path.join(p, 'msedgewebview2.exe')):
+            print(f"[webview2] 内嵌运行时不完整（缺 msedge.dll），回退系统运行时: {p}")
     return None
 
 
@@ -253,7 +259,8 @@ def create_window(port):
 
     # Windows：优先使用包内嵌的 WebView2 fixed-version 运行时（edgechromium，
     # 支持文件拖放与 Ctrl+C/V）；无内嵌时回退系统 WebView2/IE。
-    _setup_webview2_runtime()
+    if sys.platform == 'win32':
+        _setup_webview2_runtime()
 
     # Linux：pywebview 5.0+ 的 GTK 后端依赖 WebKitGTK 2.40+ API，UOS/deepin
     # 的 2.38 上会 AttributeError 中断 decide-policy 回调导致导航挂起白屏。
