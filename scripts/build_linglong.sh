@@ -37,10 +37,20 @@ LL_BASE="${LL_BASE:-org.deepin.base/23.1.0}"
 LL_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)rc([0-9]+)$/\1.\2/;t;s/[^0-9.]//g')
 
 case "$(uname -m)" in
-    x86_64)  BUILD_ARCH="amd64" ;;
-    aarch64|arm64) BUILD_ARCH="arm64" ;;
+    x86_64)  HOST_ARCH="amd64" ;;
+    aarch64|arm64) HOST_ARCH="arm64" ;;
     *) echo "ERROR: Unsupported architecture: $(uname -m)"; exit 1 ;;
 esac
+
+# 可用 AGC_LL_ARCH 指定目标架构（如 amd64 主机 + QEMU binfmt 构建 arm64 玲珑，
+# GitLab CI 就是这么用的）。此时 deb 必须已存在——本机 build_deb.sh 只能出
+# 宿主架构的包。
+BUILD_ARCH="${AGC_LL_ARCH:-${HOST_ARCH}}"
+if [ "${BUILD_ARCH}" != "${HOST_ARCH}" ] && [ ! -f "dist/Open-AGC-${VERSION}-Linux-${BUILD_ARCH}.deb" ]; then
+    echo "ERROR: 目标架构 ${BUILD_ARCH} 与宿主 ${HOST_ARCH} 不同，且对应 deb 不存在。"
+    echo "       请先把 Open-AGC-*-Linux-${BUILD_ARCH}.deb 放入 dist/。"
+    exit 1
+fi
 
 DEB_NAME="dist/Open-AGC-${VERSION}-Linux-${BUILD_ARCH}.deb"
 PROJECT_DIR="dist/linglong"
@@ -86,12 +96,22 @@ echo "[3/4] ll-builder build (base ${LL_BASE} 首次会拉取基础环境，耗�
 # 无 docker 或 docker 构建失败时回退宿主 ll-builder。
 LL_CONTAINER_OK=0
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    LL_IMAGE="open-agc-llbuild:bookworm"
+    LL_IMAGE="open-agc-llbuild:bookworm-${BUILD_ARCH}"  # 按目标架构分开缓存，避免跨架构复用错镜像
+    # 跨架构（如 amd64 宿主 + QEMU 出 arm64 包）：镜像构建/运行都要显式
+    # --platform，否则 docker build 会按宿主架构拉镜像而 arm64v8/* 没有
+    # amd64 manifest（生产实证：no matching manifest for linux/amd64）
+    LL_PLATFORM_ARGS=()
+    if [ "${BUILD_ARCH}" != "${HOST_ARCH}" ]; then
+        case "${BUILD_ARCH}" in
+            arm64) LL_PLATFORM_ARGS=(--platform linux/arm64) ;;
+            amd64) LL_PLATFORM_ARGS=(--platform linux/amd64) ;;
+        esac
+    fi
     if ! docker image inspect "${LL_IMAGE}" >/dev/null 2>&1; then
         echo "  Building llbuild image (debian12 + linglong-builder)..."
-        docker build -t "${LL_IMAGE}" -f scripts/docker/Dockerfile.llbuild .
+        docker build "${LL_PLATFORM_ARGS[@]}" -t "${LL_IMAGE}" -f scripts/docker/Dockerfile.llbuild .
     fi
-    docker run --rm --privileged \
+    docker run --rm --privileged "${LL_PLATFORM_ARGS[@]}" \
         --add-host mirror-repo-linglong.deepin.com:42.56.65.201 \
         -v "$PWD/dist/linglong:/out" \
         "${LL_IMAGE}" bash -c '
