@@ -1,7 +1,9 @@
 # 玲珑构建容器：debian 12 + 官方 linglong CI release 源
 # 用于在 ll-box 无法正常工作的宿主（如定制内核的 UOS）上构建玲珑包。
 # 用法见 scripts/build_linglong.sh 的 docker 分支。
-FROM arm64v8/debian:bookworm
+# FROM 走 docker.m.daocloud.io 显式加速站前缀——内网/受限网络 Docker Hub
+# 被 DNS 污染直接超时（GitLab CI 生产实证）；daemon 没配 mirror 也能用。
+FROM docker.m.daocloud.io/arm64v8/debian:bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
 
