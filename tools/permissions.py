@@ -35,8 +35,45 @@ DESTRUCTIVE_PATTERNS = [
     (r'\bDROP\s+(?:TABLE|DATABASE)\b', 'DROP TABLE/DATABASE', 'db_destroy'),
     (r'\bTRUNCATE\s+(?:TABLE\s+)?\S+', 'TRUNCATE TABLE', 'db_destroy'),
     # Sudo (privileged execution)
-    (r'(?:^|[|&;]\s*)sudo\s+', 'sudo (需要授权才能执行特权命令)', 'sudo'),
+    (r'__SUDO_PLACEHOLDER__', 'sudo (需要授权才能执行特权命令)', 'sudo'),
 ]
+
+
+def _sudo_at_top_level(command: str) -> bool:
+    """sudo 出现在本机命令位置（行首或 | & ; 之后的命令词）才算本机特权操作。
+
+    引号内的 sudo 属于嵌套上下文——典型是 ssh/sshpass 的远端命令串
+    （sudo 在远端机器执行），不该弹本机授权窗、更不该要本机 sudo 密码
+    （生产实证：sshpass ssh host "...; sudo docker ps" 误弹本机授权）。
+    注：bash -c "sudo ..." 这类引号包裹的本机提权原本就匹配不到正则，
+    本函数不改变该覆盖面。
+    """
+    quote = None        # 当前所在的引号（' 或 "），None 表示顶层
+    cmd_start = True    # 下一个非空白词是否处于命令起始位置
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            if ch == '\\' and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+        elif ch in '|&;':
+            cmd_start = True
+        elif ch.isspace():
+            pass
+        elif cmd_start:
+            if command.startswith('sudo', i) and \
+                    (i + 4 >= n or command[i + 4].isspace()):
+                return True
+            cmd_start = False
+        i += 1
+    return False
 
 
 def check_command_permission(command: str, config: dict = None,
@@ -51,7 +88,10 @@ def check_command_permission(command: str, config: dict = None,
     cmd_lower = command.lower().strip()
 
     for pattern, description, category in DESTRUCTIVE_PATTERNS:
-        if re.search(pattern, cmd_lower, re.IGNORECASE):
+        # sudo 类用引号感知扫描（见 _sudo_at_top_level 注释）
+        matched = (_sudo_at_top_level(command) if category == 'sudo'
+                   else re.search(pattern, cmd_lower, re.IGNORECASE))
+        if matched:
             # Check if already authorized
             if _is_authorized(category, config, session_id, session_whitelist):
                 return (True, "", category, description)
