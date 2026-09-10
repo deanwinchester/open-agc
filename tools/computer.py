@@ -119,7 +119,14 @@ class ComputerTool(BaseTool):
                     return f"Pressed hotkey: {'+'.join(keys)}"
 
                 elif action == 'screenshot':
-                    screenshot_path = os.path.abspath("screenshot.png")
+                    # 存到数据目录的 screenshots/ 下（时间戳命名），不能写 CWD——
+                    # 在源码运行时 CWD 是项目根目录，会污染仓库（生产实证）。
+                    from core.paths import get_data_dir
+                    shots_dir = os.path.join(get_data_dir(), "screenshots")
+                    os.makedirs(shots_dir, exist_ok=True)
+                    import time as _time
+                    screenshot_path = os.path.join(
+                        shots_dir, f"screenshot_{_time.strftime('%Y%m%d_%H%M%S')}.png")
                     pyautogui.screenshot(screenshot_path)
                     import base64
                     try:

@@ -60,6 +60,7 @@ package-lock.json
 .node/
 .pip-cache/
 /packaging/qemu-aarch64-static
+/screenshot.png
 
 # IDE - VSCode
 .vscode/
