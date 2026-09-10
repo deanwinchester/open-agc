@@ -1,4 +1,4 @@
-# 1.98.0 起 litellm 放弃 Python 3.10（typing.NotRequired 仅 3.11+），锁定 <1.98.0
+﻿# 1.98.0 起 litellm 放弃 Python 3.10（typing.NotRequired 仅 3.11+），锁定 <1.98.0
 # 1.97.0 的 types 与 pydantic 2.12+ 不兼容：Message 前向引用解析失败，
 # 所有 LLM 调用报 PydanticUserError "Message is not fully defined"（源码与
 # 冻结包均复现，1.96.2 正常）——上限收紧到 <1.97.0，待上游修复后评估放开

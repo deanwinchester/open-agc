@@ -45,9 +45,27 @@ if not exist "build_venv" (
 )
 call build_venv\Scripts\activate.bat
 
-pip install --upgrade pip -q
+REM pip self-upgrade must go through python -m pip (plain "pip install --upgrade pip"
+REM fails on Windows: running script cannot replace itself). Old bundled pip (22.x)
+REM cannot even parse UTF-8 requirements.txt on GBK locale -- upgrade FIRST.
+python -m pip install --upgrade pip -q
+if errorlevel 1 (
+    echo ERROR: pip self-upgrade failed!
+    exit /b 1
+)
 pip install pyinstaller -q
+if errorlevel 1 (
+    echo ERROR: pyinstaller install failed!
+    exit /b 1
+)
+REM requirements install MUST succeed -- with -q and no check the build would
+REM ship a package missing pywebview/uvicorn etc. (CI produced exactly such a
+REM broken zip: gui_app crash "No module named 'webview'", prod evidence).
 pip install -r requirements.txt -q
+if errorlevel 1 (
+    echo ERROR: requirements install failed -- aborting, do NOT ship a broken package!
+    exit /b 1
+)
 
 REM ---- Download embedded WebView2 fixed-version runtime (for edgechromium:
 REM drag-drop and Ctrl+C/V support; target needs no preinstalled runtime) ----

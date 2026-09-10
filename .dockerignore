@@ -54,3 +54,5 @@ build/
 scratch/
 models/
 .git/
+.pip-cache/
+.node/
