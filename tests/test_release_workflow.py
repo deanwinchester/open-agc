@@ -84,7 +84,9 @@ def test_assemble_step_recovers_ownership_from_root_container():
 
 
 def test_litellm_pinned_below_198_for_python310():
-    """litellm 1.98.0 起放弃 Python 3.10（typing.NotRequired 仅 3.11+）。"""
+    """litellm 双重上限：1.98.0 起放弃 Python 3.10（typing.NotRequired 仅
+    3.11+）；1.97.0 的 types 与 pydantic 2.12+ 不兼容（Message 前向引用
+    解析失败，所有 LLM 调用抛 PydanticUserError）——故锁定 <1.97.0。"""
     req = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "requirements.txt",
@@ -92,4 +94,4 @@ def test_litellm_pinned_below_198_for_python310():
     with open(req, "r", encoding="utf-8") as f:
         content = f.read()
     line = next(l for l in content.splitlines() if l.strip().startswith("litellm"))
-    assert "<1.98.0" in line
+    assert "<1.97.0" in line

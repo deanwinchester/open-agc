@@ -54,6 +54,17 @@ def download_and_extract(out_dir: str = "build/webview2_runtime") -> str:
     import tempfile
 
     version = _resolve_version()
+
+    # 已有完整运行时就直接复用（CI 重复构建时省掉 ~250MB 下载）；
+    # 残缺（校验不过）则重新下载——宁可慢，不出白屏包。
+    if os.path.isdir(out_dir):
+        try:
+            _verify_runtime(out_dir)
+            print(f"[webview2] 已有完整运行时，跳过下载: {out_dir}")
+            return out_dir
+        except RuntimeError as e:
+            print(f"[webview2] 现有运行时不完整（{e}），重新下载")
+
     url = PKG_URL.format(version=version)
 
     parent = os.path.dirname(os.path.abspath(out_dir)) or "."
