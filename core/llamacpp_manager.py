@@ -19,6 +19,25 @@ class LlamaCppManager:
         self.models_dir = get_models_dir()
         self.exe_name = "llama-server.exe" if os.name == 'nt' else "llama-server"
         self.exe_path = os.path.join(self.bin_dir, self.exe_name)
+        # 最近一次下载失败的详细原因（路由层据此给用户更准确的提示）
+        self.last_error: str = ""
+
+    # HuggingFace 官方与镜像（hf-mirror.com，国内 CDN 较慢/受限时的回退）
+    HF_ENDPOINTS = ("https://huggingface.co", "https://hf-mirror.com")
+
+    @staticmethod
+    def _hf_auth_headers(url: str) -> dict:
+        """HF 受限（gated）仓库需要 token。跨主机重定向到 CDN 时不得带出
+        Authorization（CDN 是预签名 URL，泄漏 token 无意义且不安全）。"""
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+        if not token:
+            return {}
+        from urllib.parse import urlparse
+        host = urlparse(url).netloc.lower()
+        if any(host == h or host.endswith("." + h)
+               for h in ("huggingface.co", "hf-mirror.com")):
+            return {"Authorization": f"Bearer {token}"}
+        return {}
 
     def is_binary_installed(self) -> bool:
         """Check if llama-server exists."""
@@ -128,10 +147,12 @@ class LlamaCppManager:
         """
         from urllib.parse import urljoin
         current_url = url
-        request_headers = headers or {}
+        base_headers = dict(headers or {})
         for _ in range(max_redirects):
+            # 每一跳按目标主机重新决定是否带 HF token（跳到 CDN 时自动剥离）
+            hop_headers = {**base_headers, **self._hf_auth_headers(current_url)}
             resp = requests.get(
-                current_url, stream=True, headers=request_headers,
+                current_url, stream=True, headers=hop_headers,
                 allow_redirects=False, timeout=timeout
             )
             if resp.status_code in (301, 302, 303, 307, 308):
@@ -165,6 +186,11 @@ class LlamaCppManager:
 
             print(f"[LlamaCPP] Downloading model to {target_path}...")
             resp = self._get_with_range_redirects(url, headers=headers)
+            if resp.status_code in (401, 403):
+                raise RuntimeError(
+                    f"仓库受限或无权访问（HTTP {resp.status_code}）：请在 HuggingFace 网页"
+                    "申请该模型的访问权限，并在 设置→密钥 中配置 huggingface API Key"
+                )
             resp.raise_for_status()
 
             # Determine total size and whether resume was accepted
@@ -211,6 +237,7 @@ class LlamaCppManager:
             os.rename(partial_path, target_path)
             return True
         except Exception as e:
+            self.last_error = str(e)
             print(f"[LlamaCPP] Model download failed: {e}")
             # Keep .partial file for future resume
             return False
@@ -243,36 +270,64 @@ class LlamaCppManager:
             return []
 
     def get_hf_model_files(self, repo_id: str) -> List[dict]:
-        """List GGUF files in a HuggingFace model repo."""
-        try:
-            url = f"https://huggingface.co/api/models/{repo_id}"
-            resp = requests.get(url, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            files = []
-            for sibling in data.get("siblings", []):
-                fname = sibling.get("rfilename", "")
-                if fname.endswith(".gguf"):
-                    size_bytes = sibling.get("size", 0)
-                    if size_bytes >= 1024**3:
-                        size_str = f"{size_bytes / 1024**3:.2f} GB"
-                    elif size_bytes >= 1024**2:
-                        size_str = f"{size_bytes / 1024**2:.1f} MB"
-                    elif size_bytes >= 1024:
-                        size_str = f"{size_bytes / 1024:.1f} KB"
-                    else:
-                        size_str = f"{size_bytes} B"
-                    files.append({"filename": fname, "size": size_str, "size_bytes": size_bytes})
-            return files
-        except Exception as e:
-            print(f"[LlamaCPP] HF model files failed: {e}")
-            return []
+        """List GGUF files in a HuggingFace model repo.
+
+        siblings 默认不带文件大小，必须加 ?blobs=true（否则前端全显示 0 B）。
+        官方 API 网络失败时回退 hf-mirror.com。"""
+        last_exc = None
+        for endpoint in self.HF_ENDPOINTS:
+            try:
+                url = f"{endpoint}/api/models/{repo_id}?blobs=true"
+                resp = requests.get(url, headers=self._hf_auth_headers(url), timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+                files = []
+                for sibling in data.get("siblings", []):
+                    fname = sibling.get("rfilename", "")
+                    if fname.endswith(".gguf"):
+                        size_bytes = sibling.get("size", 0)
+                        if size_bytes >= 1024**3:
+                            size_str = f"{size_bytes / 1024**3:.2f} GB"
+                        elif size_bytes >= 1024**2:
+                            size_str = f"{size_bytes / 1024**2:.1f} MB"
+                        elif size_bytes >= 1024:
+                            size_str = f"{size_bytes / 1024:.1f} KB"
+                        else:
+                            size_str = f"{size_bytes} B"
+                        files.append({"filename": fname, "size": size_str, "size_bytes": size_bytes})
+                return files
+            except Exception as e:
+                last_exc = e
+                print(f"[LlamaCPP] HF model files via {endpoint} failed: {e}")
+        print(f"[LlamaCPP] HF model files failed: {last_exc}")
+        return []
 
     def download_model_from_hf(self, repo_id: str, filename: str, progress_callback=None, resume: bool = True) -> bool:
-        """Download a GGUF model from HuggingFace by repo_id and filename."""
-        url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
+        """Download a GGUF model from HuggingFace by repo_id and filename.
+
+        官方源网络类错误（连接失败/超时，国内 CDN 常见）自动换 hf-mirror.com
+        重试一次；401/403 等权限错误不重试。"""
         local_name = filename.split("/")[-1]
-        return self.download_model(url, local_name, progress_callback, resume=resume)
+        last_err = ""
+        for endpoint in self.HF_ENDPOINTS:
+            url = f"{endpoint}/{repo_id}/resolve/main/{filename}"
+            ok = self.download_model(url, local_name, progress_callback, resume=resume)
+            if ok:
+                return True
+            last_err = self.last_error
+            # 权限/参数类错误换镜像无意义，直接失败
+            if not self._is_network_error(last_err):
+                return False
+            print(f"[LlamaCPP] {endpoint} 网络错误，尝试镜像源...")
+        self.last_error = last_err
+        return False
+
+    @staticmethod
+    def _is_network_error(err: str) -> bool:
+        return any(k in err for k in (
+            "Connection", "Timeout", "timed out", "Network", "resolve",
+            "Name or service", "Max retries", "chunked", "RemoteDisconnected",
+        ))
 
     # ---- ModelScope (modelscope.cn) integration ----
 

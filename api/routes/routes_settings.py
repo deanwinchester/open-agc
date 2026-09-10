@@ -1262,9 +1262,11 @@ async def setup_llamacpp():
 
             else:
 
-                _llamacpp_download_state.update({"active": False, "stage": "error", "error": "下载失败"})
+                err_detail = getattr(manager, "last_error", "") or ""
+                err_msg = f"下载失败：{err_detail}" if err_detail else "下载失败"
+                _llamacpp_download_state.update({"active": False, "stage": "error", "error": err_msg})
 
-                update_download_progress(dl_id, 0.0, status="failed", error_message="下载失败")
+                update_download_progress(dl_id, 0.0, status="failed", error_message=err_msg)
 
                 _broadcast_to_websockets({
 
@@ -1610,9 +1612,12 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
 
             else:
 
-                _llamacpp_download_state.update({"active": False, "stage": "error", "error": "下载中断，可重新下载自动续传"})
+                err_detail = getattr(manager2, "last_error", "") or ""
+                err_msg = (f"下载中断：{err_detail}（已保存进度，可重新下载续传）" if err_detail
+                           else "下载中断，可重新下载自动续传")
+                _llamacpp_download_state.update({"active": False, "stage": "error", "error": err_msg})
 
-                update_download_progress(dl_id, 0.0, status="failed", error_message="下载中断，可重新下载自动续传")
+                update_download_progress(dl_id, 0.0, status="failed", error_message=err_msg)
 
                 _broadcast_to_websockets({
 
@@ -1626,7 +1631,7 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
 
                     "stage": "error",
 
-                    "error": "下载中断，可重新下载自动续传"
+                    "error": err_msg
 
                 })
 
@@ -1894,9 +1899,11 @@ async def resume_download(download_id: int):
 
             else:
 
-                _llamacpp_download_state.update({"active": False, "stage": "error", "error": "下载失败"})
+                err_detail = getattr(manager, "last_error", "") or ""
+                err_msg = f"下载失败：{err_detail}" if err_detail else "下载失败"
+                _llamacpp_download_state.update({"active": False, "stage": "error", "error": err_msg})
 
-                update_download_progress(dl_id, 0.0, status="failed", error_message="下载失败")
+                update_download_progress(dl_id, 0.0, status="failed", error_message=err_msg)
 
                 _broadcast_to_websockets({
 
