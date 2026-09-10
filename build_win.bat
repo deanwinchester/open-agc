@@ -122,7 +122,11 @@ if %errorlevel% equ 0 (
 
 REM ---- 4. Clean up ----
 echo [4/4] Cleaning up...
-rd /s /q build 2>nul
+REM 只清 PyInstaller 工作目录——build\webview2_runtime 是缓存的完整运行时，
+REM 删掉会导致每次构建重下 ~250MB（download_webview2_runtime.py 有完整性
+REM 校验，完好的会跳过下载）
+rd /s /q build\open_agc 2>nul
+rd /s /q build\Open-AGC 2>nul
 
 echo.
 echo =============================================
@@ -138,4 +142,4 @@ echo.
 echo To install: Run the Setup.exe or extract the ZIP.
 echo To run: Double-click %APP_NAME%.exe
 
-pause
+if not defined CI pause
