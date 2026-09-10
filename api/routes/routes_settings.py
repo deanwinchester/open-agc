@@ -1483,8 +1483,40 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
 
 
     # Create persistent DB record
+    # 去重：同一文件已有 暂停/失败 记录（含启动时从孤儿 .partial 补建的
+    # 「待恢复」记录）时复用它续传，不再新建——否则下载页同一文件出现两条
+    existing_id = None
+    existing_total = 0
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, total_size FROM downloads WHERE partial_path=? "
+            "AND status IN ('paused','failed') ORDER BY created_at DESC LIMIT 1",
+            (partial_path,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            existing_id, existing_total = row[0], row[1] or 0
+    except Exception:
+        pass
 
-    db_download_id = create_download_record(
+    if existing_id is not None:
+        db_download_id = existing_id
+        if total_size == 0:
+            total_size = existing_total
+        initial_progress = (resume_offset / total_size) if total_size > 0 else 0.0
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "UPDATE downloads SET status='downloading', total_size=?, progress=?, "
+            "downloaded_bytes=?, error_message='', label=?, updated_at=CURRENT_TIMESTAMP "
+            "WHERE id=?",
+            (total_size, initial_progress, resume_offset,
+             f"{short_name} ({source_label})", db_download_id))
+        conn.commit()
+        conn.close()
+    else:
+        db_download_id = create_download_record(
 
         type_="model",
 
