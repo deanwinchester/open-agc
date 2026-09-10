@@ -47,3 +47,10 @@ Thumbs.db
 *.log
 test_*.py
 verify_*.py
+
+# ── Build artifacts / local caches (CI llbuild context 1.1GB → MB 级) ──
+dist/
+build/
+scratch/
+models/
+.git/

@@ -49,8 +49,8 @@ pip install --upgrade pip -q
 pip install pyinstaller -q
 pip install -r requirements.txt -q
 
-REM ---- Download embedded WebView2 fixed-version runtime（edgechromium 用，
-REM 支持文件拖放与 Ctrl+C/V；目标机无需预装 WebView2 运行时）----
+REM ---- Download embedded WebView2 fixed-version runtime (for edgechromium:
+REM drag-drop and Ctrl+C/V support; target needs no preinstalled runtime) ----
 echo   Downloading embedded WebView2 runtime...
 python scripts\download_webview2_runtime.py build\webview2_runtime || echo [warn] WebView2 runtime download failed, will use system runtime
 
@@ -122,9 +122,9 @@ if %errorlevel% equ 0 (
 
 REM ---- 4. Clean up ----
 echo [4/4] Cleaning up...
-REM 只清 PyInstaller 工作目录——build\webview2_runtime 是缓存的完整运行时，
-REM 删掉会导致每次构建重下 ~250MB（download_webview2_runtime.py 有完整性
-REM 校验，完好的会跳过下载）
+REM Clean ONLY the PyInstaller work dir -- build\webview2_runtime is the cached
+REM complete runtime; deleting it forces a ~250MB re-download every build
+REM (download_webview2_runtime.py verifies integrity and skips when complete)
 rd /s /q build\open_agc 2>nul
 rd /s /q build\Open-AGC 2>nul
 
