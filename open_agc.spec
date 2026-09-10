@@ -174,7 +174,8 @@ a = Analysis(
         # 注意：opentelemetry 不能排除——chromadb（memory_store/embedding 打分）
         # 的 import 链会 import 它，开发机上它只是 litellm/chromadb 的传递依赖
         # 所以无感，冻结包里一旦排除，全新机器启动即崩（生产实证）。
-        'tkinter',
+        # tkinter 不能排除——Linux 上 pyautogui 的 MouseInfo 依赖它，
+        # 排除后冻结包的 ComputerTool 直接不可用（生产实证 deb 报错）
         'matplotlib', 'mpl_toolkits',
         'scipy',
         'pandas',
