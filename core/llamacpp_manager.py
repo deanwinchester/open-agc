@@ -407,6 +407,29 @@ class LlamaCppManager:
         except Exception:
             return False
 
+    def _find_mmproj(self, model_filename: str) -> Optional[str]:
+        """在 models 目录找与模型匹配的 mmproj 视觉投影文件。
+
+        匹配规则：mmproj 文件名包含模型基名（去掉量化后缀）优先；目录里只有
+        一个 mmproj-*.gguf 时兜底使用。返回完整路径或 None。"""
+        try:
+            import re
+            mmprojs = [f for f in os.listdir(self.models_dir)
+                       if f.lower().startswith("mmproj") and f.endswith(".gguf")]
+        except OSError:
+            return None
+        if not mmprojs:
+            return None
+        # 模型基名：qwen3.8-27b-uncensored-q3_k_m.gguf → qwen3.8-27b-uncensored
+        base = os.path.splitext(model_filename)[0].lower()
+        base = re.sub(r"-(iq|q|f|bf)\d.*$", "", base)  # 去量化后缀
+        for f in mmprojs:
+            if base and base in f.lower():
+                return os.path.join(self.models_dir, f)
+        if len(mmprojs) == 1:
+            return os.path.join(self.models_dir, mmprojs[0])
+        return None
+
     def start(self, model_filename: str) -> bool:
         """Start the llama-server with the specified model. Returns True on success, False on failure."""
         if self.is_running():
@@ -446,6 +469,14 @@ class LlamaCppManager:
             "--n-gpu-layers", "-1",
             "--ctx-size", str(ctx_size)
         ]
+
+        # 视觉支持：模型是 VL 模型时（如 Qwen3.8-27B）需要 mmproj 投影文件，
+        # 否则注入图片会被 llama.cpp 拒绝（InternalServerError）。在 models 目录
+        # 按名字匹配 mmproj（mmproj-<模型基名>*.gguf 优先，唯一 mmproj 兜底）。
+        mmproj = self._find_mmproj(model_filename)
+        if mmproj:
+            cmd += ["--mmproj", mmproj]
+            print(f"[LlamaCPP] 视觉模式: 使用 mmproj {os.path.basename(mmproj)}")
 
         try:
             kwargs = {

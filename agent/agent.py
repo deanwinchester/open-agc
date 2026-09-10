@@ -1021,6 +1021,23 @@ class OpenAGCAgent:
         except Exception:
             return ""
 
+    def _vision_input_supported(self) -> bool:
+        """当前模型部署是否支持图片输入。
+
+        本地 llama.cpp（model 为 llamacpp/...）只有在模型目录存在 mmproj 投影
+        文件时才支持——否则注入图片会被服务端报错/卡死（生产实证）。远程部署
+        无法探测，默认可注入（图片已在 computer 工具侧降采样，体积可控）。
+        """
+        model = (getattr(self, "model", "") or "").lower()
+        if model.startswith("llamacpp/"):
+            try:
+                from core.paths import get_models_dir
+                import glob as _glob
+                return bool(_glob.glob(os.path.join(get_models_dir(), "mmproj*.gguf")))
+            except Exception:
+                return False
+        return True
+
     def _build_system_prompt(self, memory_context: str = "", skill_context: str = "",
                              experience_context: str = "", kg_context: str = "") -> str:
         # Inject current date/time so the LLM knows "today"
@@ -3454,12 +3471,21 @@ class OpenAGCAgent:
                     # short placeholder — otherwise the tool message would
                     # retain a second copy of the base64 blob alongside the
                     # user image message injected below.
+                    _vision_ok = self._vision_input_supported()
                     url = extract_screenshot_data(result_str)
-                    if url:
-                        screenshot_urls.append((url, "[工具执行截图 — 请根据此截图内容继续后续操作]"))
                     img_url = extract_image_data(result_str)
-                    if img_url:
-                        screenshot_urls.append((img_url, "[image_view 读取的本地图片 — 请查看图片内容并继续后续操作]"))
+                    if _vision_ok:
+                        if url:
+                            screenshot_urls.append((url, "[工具执行截图 — 请根据此截图内容继续后续操作]"))
+                        if img_url:
+                            screenshot_urls.append((img_url, "[image_view 读取的本地图片 — 请查看图片内容并继续后续操作]"))
+                    elif url or img_url:
+                        # 当前部署不支持图片输入（如本地 llama.cpp 缺 mmproj）——
+                        # 注入会被服务端拒绝/卡死（生产实证），改以文字说明
+                        result_str = replace_image_markers(result_str)
+                        result_str += ("\n[提示] 当前模型部署不支持图片输入"
+                                       "（本地 llamacpp 需在模型目录放置 mmproj-*.gguf 投影文件），"
+                                       "截图未注入。请凭界面文字信息继续操作。")
                     result_str = replace_image_markers(result_str)
 
                     # Secrets masking BEFORE truncation (single choke point, covers

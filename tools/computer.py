@@ -126,13 +126,21 @@ class ComputerTool(BaseTool):
                     os.makedirs(shots_dir, exist_ok=True)
                     import time as _time
                     screenshot_path = os.path.join(
-                        shots_dir, f"screenshot_{_time.strftime('%Y%m%d_%H%M%S')}.png")
-                    pyautogui.screenshot(screenshot_path)
+                        shots_dir, f"screenshot_{_time.strftime('%Y%m%d_%H%M%S')}.jpg")
+                    # 全分辨率截图（2K/4K PNG 数 MB）注入会把本地模型的上下文和
+                    # 视觉编码打爆（卡死/InternalServerError 实证）——长边压到
+                    # 1280、JPEG q70，体积降到 ~100KB 级，llama.cpp/vLLM 都能秒处。
+                    img = pyautogui.screenshot()
+                    max_edge = 1280
+                    if max(img.size) > max_edge:
+                        _r = max_edge / max(img.size)
+                        img = img.resize((int(img.size[0] * _r), int(img.size[1] * _r)))
+                    img.convert("RGB").save(screenshot_path, "JPEG", quality=70)
                     import base64
                     try:
                         with open(screenshot_path, "rb") as f:
                             b64 = base64.b64encode(f.read()).decode("ascii")
-                        img_url = f"data:image/png;base64,{b64}"
+                        img_url = f"data:image/jpeg;base64,{b64}"
                         return (
                             f"Screenshot saved to {screenshot_path}\n"
                             f"[SCREENSHOT_DATA:{img_url}]"
