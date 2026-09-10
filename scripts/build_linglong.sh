@@ -111,18 +111,24 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         echo "  Building llbuild image (debian12 + linglong-builder)..."
         docker build "${LL_PLATFORM_ARGS[@]}" -t "${LL_IMAGE}" -f scripts/docker/Dockerfile.llbuild .
     fi
+    # QEMU 跨架构时 ll-box 在其下会 "stage build error"（生产实证），跳过
+    # 容器内再套盒——我们已经在 docker 容器里了，直接跑构建脚本即可
+    LL_BUILD_EXTRA=""
+    if [ ${#LL_PLATFORM_ARGS[@]} -gt 0 ]; then
+        LL_BUILD_EXTRA="--skip-run-container"
+    fi
     docker run --rm --privileged "${LL_PLATFORM_ARGS[@]}" \
         --add-host mirror-repo-linglong.deepin.com:42.56.65.201 \
         -v "$PWD/dist/linglong:/out" \
-        "${LL_IMAGE}" bash -c '
+        "${LL_IMAGE}" bash -c "
             set -e
             rm -rf /tmp/llwork && mkdir -p /tmp/llwork
             cp /out/open-agc.deb /out/linglong.yaml /tmp/llwork/
-            cd /tmp/llwork && ll-builder build && ll-builder export
+            cd /tmp/llwork && ll-builder build ${LL_BUILD_EXTRA} && ll-builder export
             mkdir -p /out/artifacts
             cp -r linglong /out/ 2>/dev/null || true
-            find . -maxdepth 2 -name "*.uab" -o -maxdepth 2 -name "*.layer" | while read f; do cp -r "$f" /out/artifacts/; done
-        ' && LL_CONTAINER_OK=1
+            find . -maxdepth 2 -name '*.uab' -o -maxdepth 2 -name '*.layer' | while read f; do cp -r \"\$f\" /out/artifacts/; done
+        " && LL_CONTAINER_OK=1
     # 容器以 root 运行，产物归 root 所有——归还所有权
     sudo chown -R "$(id -u):$(id -g)" dist/linglong 2>/dev/null || true
 fi
@@ -131,6 +137,13 @@ if [ "${LL_CONTAINER_OK}" != "1" ]; then
     (cd "${PROJECT_DIR}" && ll-builder build)
     echo "[4/4] Exporting .uab..."
     (cd "${PROJECT_DIR}" && ll-builder export || echo "[warn] ll-builder export 失败，可检查 ${PROJECT_DIR} 下产物")
+fi
+
+# 硬性卡口：没有产出 .uab/.layer 就是失败——ll-builder 失败时退出码不可信
+# （"stage build error" 后仍 exit 0，生产实证绿job零产物），脚本必须自己验
+if ! find "${PROJECT_DIR}" -name "*.uab" -o -name "*.layer" 2>/dev/null | grep -q .; then
+    echo "ERROR: 玲珑构建未产出任何 .uab/.layer 文件——实际已失败！"
+    exit 1
 fi
 
 echo ""
