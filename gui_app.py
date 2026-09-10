@@ -322,7 +322,9 @@ def create_window(port):
         if sys.platform.startswith('win'):
             window.events.shown += lambda: _enable_context_menu_windows(window)
 
-        import threading
+        # threading 已在模块顶部导入——函数内的局部 import 会让整个函数作用域的
+        # threading 变成局部变量，导致前面的回退路径 UnboundLocalError
+        # （webview 缺失时 _browser_fallback 崩溃，生产实证）
         t = threading.Thread(target=check_server_and_load, args=(window, port), daemon=True)
         t.start()
 
