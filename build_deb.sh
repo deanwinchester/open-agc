@@ -79,21 +79,33 @@ echo ""
 echo "[1/5] Preparing build environment..."
 
 # Build frontend with Vite (required for packaging)
+# CI 场景可在宿主预构建前端（产物与架构无关）后设 AGC_SKIP_FRONTEND=1 跳过——
+# arm64 容器全程 QEMU 模拟，在里面跑 npm/vite 既慢又有兼容风险。
+if [ "${AGC_SKIP_FRONTEND}" = "1" ]; then
+    echo "  AGC_SKIP_FRONTEND=1，跳过前端构建（假定已在宿主完成）"
+else
 echo "  Building frontend with Vite..."
 
 # Resolve Node.js：优先本地便携 .node/bin（与 start.sh 同一套），再查 PATH，
-# 都没有则下载便携 Node.js 到 .node/。此前只查 PATH，本地 .node 被忽略导致
-# 「npm not found」（start.sh 能跑是因为它会用 .node/）。
+# 都没有（或版本 < 18，vite 构建需要）则下载便携 Node.js 到 .node/。
+# 此前只查存在性——GitLab runner 宿主自带 node 16，vite 直接报错（生产实证）。
+_node_ok() {  # $1 = node 二进制路径；可执行且主版本 >= 18
+    [ -x "$1" ] || return 1
+    local major
+    major=$("$1" -e 'process.stdout.write(String(process.versions.node.split(".")[0]))' 2>/dev/null) || return 1
+    [ "${major:-0}" -ge 18 ] 2>/dev/null
+}
 if [ -f ".node/bin/npm" ]; then
-    if .node/bin/node --version &>/dev/null; then
+    if _node_ok .node/bin/node; then
         export PATH="$PWD/.node/bin:$PATH"
     else
-        echo "  Existing .node/ binary not executable (wrong architecture?), re-downloading..."
+        echo "  Existing .node/ unusable (wrong arch or node < 18), re-downloading..."
         rm -rf .node
     fi
 fi
-if ! command -v npm &> /dev/null; then
-    echo "  npm not found. Downloading portable Node.js to .node/..."
+if ! command -v npm &> /dev/null || ! _node_ok "$(command -v node 2>/dev/null)"; then
+    command -v npm &> /dev/null && echo "  PATH node < 18 ($(node --version))，改用便携 Node.js..."
+    [ ! -d .node ] && echo "  Downloading portable Node.js to .node/..."
     mkdir -p .node
     NODE_ARCH="linux-x64"
     case "$(uname -m)" in
@@ -128,6 +140,7 @@ else
     echo "  Please install Node.js from https://nodejs.org/"
     exit 1
 fi
+fi  # AGC_SKIP_FRONTEND
 
 # ---- 2. Build with PyInstaller ----
 # 有 docker 时优先在 buster 容器（glibc 2.28 / glib 2.58）内构建二进制：
@@ -140,8 +153,18 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         amd64) PYI_IMAGE="python:3.10-buster" ;;
         arm64) PYI_IMAGE="arm64v8/python:3.10-buster" ;;
     esac
+    # CI/离线环境可用 AGC_PYI_IMAGE 覆盖构建镜像（如经加速站 retag 的镜像、
+    # 内置 qemu-aarch64-static 的 arm64 镜像）。默认行为不变。
+    PYI_IMAGE="${AGC_PYI_IMAGE:-${PYI_IMAGE}}"
     echo "  Image: ${PYI_IMAGE}"
-    docker run --rm -v "$PWD":/src -w /src "${PYI_IMAGE}" bash -c "
+    # pip 缓存可挂到宿主目录（CI 场景避免每次重下 ~1-2GB 依赖）
+    PIP_CACHE_ARGS=()
+    if [ -n "${AGC_PIP_CACHE_DIR}" ]; then
+        mkdir -p "${AGC_PIP_CACHE_DIR}"
+        PIP_CACHE_ARGS=(-v "${AGC_PIP_CACHE_DIR}":/pipcache -e PIP_CACHE_DIR=/pipcache)
+    fi
+    docker run --rm ${AGC_DOCKER_PLATFORM:+--platform "${AGC_DOCKER_PLATFORM}"} \
+        -v "$PWD":/src -w /src "${PIP_CACHE_ARGS[@]}" "${PYI_IMAGE}" bash -c "
         set -e
         echo 'deb http://archive.debian.org/debian buster main' > /etc/apt/sources.list
         echo 'deb http://archive.debian.org/debian-security buster/updates main' >> /etc/apt/sources.list
@@ -194,15 +217,21 @@ else
     echo "  Using Python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
 
     # build_venv 可能是其他平台残留（Windows 的 Scripts/ 布局没有 bin/activate）
-    # 或旧 Python 建的——这两种情况都重建，否则 source/pip 在 set -e 下静默失败。
+    # 或旧 Python / 其他架构建的——这些情况都重建，否则 source/pip 在 set -e 下
+    # 静默失败。架构对比必须有：QEMU 环境（binfmt F 标志）下异架构 python 也能
+    # 执行，仅靠「能否运行」判断会漏判（GitLab CI amd64/arm64 共用工作区实证）。
     if [ ! -f "build_venv/bin/activate" ]; then
         [ -d "build_venv" ] && echo "  build_venv 非本机平台布局，重建..."
         rm -rf build_venv
         "$PYTHON_BIN" -m venv build_venv
-    elif ! build_venv/bin/python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
-        echo "  build_venv 的 Python 版本过低（$(build_venv/bin/python --version 2>&1)），用 $PYTHON_BIN 重建..."
-        rm -rf build_venv
-        "$PYTHON_BIN" -m venv build_venv
+    else
+        VENV_INFO=$(build_venv/bin/python -c 'import sys, platform; print(sys.version_info >= (3, 10), platform.machine())' 2>/dev/null)
+        HOST_MACHINE=$("$PYTHON_BIN" -c 'import platform; print(platform.machine())' 2>/dev/null)
+        if [ "${VENV_INFO}" != "(True, ${HOST_MACHINE})" ]; then
+            echo "  build_venv 版本/架构不符（${VENV_INFO:-不可执行} vs ${HOST_MACHINE}），用 $PYTHON_BIN 重建..."
+            rm -rf build_venv
+            "$PYTHON_BIN" -m venv build_venv
+        fi
     fi
     source build_venv/bin/activate
 
@@ -236,8 +265,9 @@ else
     fi
     # 硬性卡口：gi 不可用的包等于没有原生窗口，直接判构建失败
     if ! python -c "import gi" 2>/dev/null; then
-        echo "ERROR: PyGObject (gi) 仍不可用——打出的包将无法使用原生窗口。"
-        echo "       请把上方 pip install PyGObject 的报错发出来排查。"
+        echo "ERROR: PyGObject (gi) 仍不可用——打出的包将无法使用原生窗口。真实报错："
+        python -c "import gi" || true
+        echo "       请把上方报错发出来排查。"
         exit 1
     fi
 

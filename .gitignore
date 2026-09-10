@@ -57,6 +57,9 @@ workspace/
 node_modules/
 package-lock.json
 /static/vue/
+.node/
+.pip-cache/
+/packaging/qemu-aarch64-static
 
 # IDE - VSCode
 .vscode/
