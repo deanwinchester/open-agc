@@ -297,11 +297,27 @@ def create_window(port):
     </html>
     """
 
+    # 窗口标题跟随品牌配置（ui_theme.app_name；zxs 定制版为「中新社智能体中心」）
+    # gui 先于 server 启动，冻结包此时已播种 data/config.json，可读。
+    def _window_title():
+        try:
+            import json as _json
+            from core.paths import get_data_path
+            cfg_path = get_data_path("config.json")
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    name = (_json.load(f).get("ui_theme") or {}).get("app_name")
+                    if name:
+                        return f"🐼 {name}"
+        except Exception:
+            pass
+        return "🐼 Open-AGC Panda"
+
     # Create native window — 任一环节失败（GTK 后端缺 gi、WebKit2 typelib
     # 缺失、Python 版本不匹配等）都回退浏览器模式，保证 Web UI 可用。
     try:
         window = webview.create_window(
-            title="🐼 Open-AGC Panda",
+            title=_window_title(),
             html=loading_html,
             width=1200,
             height=800,

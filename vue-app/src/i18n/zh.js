@@ -51,6 +51,11 @@ export default {
     macHint: '升级将下载 macOS 安装包（dmg）到下载目录，完成后请手动拖入「应用程序」替换安装。',
     // docker / 源码部署：在线升级源码，需手动重启
     sourceHint: '升级将在线下载并覆盖源码文件，完成后需重启服务。',
+    // 拆分式升级（desktop）：静默下载完成后再确认安装
+    downloading: '正在后台下载更新包，完成后会提示你确认安装…',
+    downloaded: '新版本已下载完成',
+    installSuffix: '是否现在安装？程序将自动重启完成升级。',
+    installButton: '安装并重启',
     confirmSuffix: '继续？',
     success: '升级完成，请重启服务以生效',
     failed: '升级失败：',

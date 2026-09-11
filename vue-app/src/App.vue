@@ -133,7 +133,8 @@ function upgradeHint() {
   return zh.upgrade.sourceHint;
 }
 
-async function doUpgrade() {
+// source/docker 通道：原有一步到位升级
+async function doUpgradeLegacy() {
   try {
     await ElMessageBox.confirm(
       `${zh.upgrade.foundNew} v${latestVersion.value}，${upgradeHint()}${zh.upgrade.confirmSuffix}`,
@@ -144,13 +145,49 @@ async function doUpgrade() {
   upgrading.value = true;
   try {
     const res = await request('/api/upgrade', { method: 'POST' });
-    // desktop Windows 成功后会自动退出重启；macOS 返回手动安装指引
     ElMessage.success((res && res.message) || zh.upgrade.success);
     if (!(res && res.restart)) updateAvailable.value = false;
   } catch (err) {
     ElMessage.error(zh.upgrade.failed + (err.message || ''));
   } finally {
     upgrading.value = false;
+  }
+}
+
+// desktop 通道拆分式升级：静默下载 → 就绪 → 用户确认 → 安装
+// （清单只含 release 通道确认版本；绝不自动安装）
+async function doUpgrade() {
+  if (channel.value !== 'desktop') { doUpgradeLegacy(); return; }
+  upgrading.value = true;
+  try {
+    await request('/api/upgrade/download', { method: 'POST' });
+    ElMessage.info(zh.upgrade.downloading);
+    const timer = setInterval(async () => {
+      try {
+        const st = await request('/api/upgrade/status');
+        if (st.state === 'ready') {
+          clearInterval(timer);
+          upgrading.value = false;
+          try {
+            await ElMessageBox.confirm(
+              `${zh.upgrade.downloaded} v${st.version || latestVersion.value}。${zh.upgrade.installSuffix}`,
+              zh.upgrade.title,
+              { confirmButtonText: zh.upgrade.installButton, cancelButtonText: zh.upgrade.cancelButton, type: 'warning' },
+            );
+          } catch { return; }
+          const res = await request('/api/upgrade/install', { method: 'POST' });
+          ElMessage.success((res && res.message) || zh.upgrade.success);
+          if (!(res && res.restart)) updateAvailable.value = false;
+        } else if (st.state === 'error') {
+          clearInterval(timer);
+          upgrading.value = false;
+          ElMessage.error(zh.upgrade.failed + (st.message || ''));
+        }
+      } catch { /* 轮询失败忽略，下一轮重试 */ }
+    }, 1500);
+  } catch (err) {
+    upgrading.value = false;
+    ElMessage.error(zh.upgrade.failed + (err.message || ''));
   }
 }
 </script>

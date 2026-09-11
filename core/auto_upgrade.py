@@ -62,6 +62,22 @@ UPGRADE_SOURCES = [
 ]
 
 
+def _get_update_manifest_url() -> Optional[str]:
+    """内网发布通道：config.json 里配了 update_manifest_url 就走它
+    （zxs 定制构建在 build_data/config.json 里指向 81 的 release 清单），
+    否则走 GitHub Releases（main/开源版默认）。"""
+    try:
+        from core.paths import get_data_path
+        cfg_path = get_data_path("config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                url = (json.load(f).get("update_manifest_url") or "").strip()
+                return url or None
+    except Exception:
+        pass
+    return None
+
+
 class AutoUpgrader:
     """Check for and optionally perform source-code upgrades."""
 
@@ -76,8 +92,47 @@ class AutoUpgrader:
         self.last_message: str = ""
         # desktop Windows：已启动 apply_update.bat，主进程即将退出
         self.restart_required: bool = False
+        # 内网清单通道（None = GitHub Releases）
+        self.manifest_url: Optional[str] = _get_update_manifest_url()
+        # 清单里的平台资产映射 {platform_key: filename}
+        self._manifest_assets: dict = {}
+        # 静默下载完成后的安装包路径（install_staged_update 使用）
+        self.staged_installer: Optional[str] = None
 
     def fetch_latest_release(self) -> Optional[str]:
+        """Query the update source for the latest release version.
+
+        内网清单通道只发布测试确认过的版本（release/version.json），
+        中间 dev 构建不会进入升级提示。"""
+        if self.manifest_url:
+            return self._fetch_internal_manifest()
+        return self._fetch_github_release()
+
+    def _fetch_internal_manifest(self) -> Optional[str]:
+        try:
+            resp = requests.get(self.manifest_url, timeout=GITHUB_API_TIMEOUT)
+            if resp.status_code != 200:
+                logger.warning("Internal manifest returned %d", resp.status_code)
+                return None
+            payload = resp.json()
+            version = str(payload.get("version", "")).lstrip("v")
+            if not version:
+                return None
+            base_url = payload.get("base_url", "").rstrip("/") + "/"
+            self._manifest_assets = payload.get("assets", {}) or {}
+            self.latest_version = version
+            self.latest_assets = [
+                {"name": fname, "browser_download_url": base_url + fname}
+                for fname in self._manifest_assets.values()
+            ]
+            return version
+        except requests.RequestException as e:
+            logger.warning("Cannot check internal manifest: %s", e)
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            logger.warning("Failed to parse internal manifest: %s", e)
+        return None
+
+    def _fetch_github_release(self) -> Optional[str]:
         """Query GitHub Releases API for the latest release tag."""
         try:
             resp = requests.get(
@@ -200,19 +255,95 @@ class AutoUpgrader:
         return success
 
     def perform_upgrade(self) -> bool:
-        """按部署形态分派升级策略。Returns True on success."""
+        """按部署形态分派升级策略（下载+安装一步完成，兼容旧 /api/upgrade）。
+        Returns True on success."""
         if self.channel == "desktop":
-            return self._perform_desktop_upgrade()
+            return self.download_update() and self.install_staged_update()
         return self._perform_source_upgrade()
+
+    # ── 拆分：版本检测 → 静默下载 → 用户确认 → 安装（生产需求：中间版本
+    # 可能是坏包，绝不能自动装）──
+
+    def download_update(self, progress_cb=None) -> bool:
+        """检测并静默下载更新包，不做任何安装动作。
+        成功时 staged_installer 就绪，由 install_staged_update 在用户确认后执行。"""
+        if self.channel != "desktop":
+            # source/docker 通道保留原有一步到位语义
+            return self._perform_source_upgrade()
+        if not self.latest_version:
+            if not self.fetch_latest_release():
+                self.last_message = "无法查询最新版本"
+                logger.error("Cannot check for latest release")
+                return False
+        if not self.is_upgrade_available():
+            self.last_message = "已是最新版本"
+            return False
+        if sys.platform == "darwin":
+            return self._download_macos_dmg(progress_cb)
+        if sys.platform == "win32":
+            return self._prepare_windows_update(progress_cb)
+        if sys.platform.startswith("linux"):
+            return self._download_linux_deb(progress_cb)
+        self.last_message = f"不支持的桌面平台: {sys.platform}"
+        logger.error("Unsupported desktop platform: %s", sys.platform)
+        return False
+
+    def install_staged_update(self) -> bool:
+        """用户确认后执行安装。staged_installer 必须是 download_update 准备好的
+        bat（Windows）或 deb（Linux）。"""
+        if not self.staged_installer or not os.path.exists(self.staged_installer):
+            self.last_message = "更新包尚未下载，请先执行下载"
+            return False
+        pkg = self.staged_installer
+        if pkg.endswith(".bat"):
+            self._launch_updater(pkg)
+            self.restart_required = True
+            self.last_message = "更新已就绪，程序即将自动重启"
+            logger.info("Update staged in %s; apply_update.bat launched", pkg)
+            return True
+        if pkg.endswith(".deb"):
+            # pkexec 弹系统级授权框（UOS/deepin 桌面标准方式）；没有 pkexec
+            # 的环境（极简桌面/服务器）给出手动命令
+            try:
+                subprocess.Popen(["pkexec", "dpkg", "-i", pkg])
+                self.last_message = (
+                    f"正在安装 {os.path.basename(pkg)}，请在系统授权框中确认；"
+                    "安装完成后请重启应用"
+                )
+                return True
+            except FileNotFoundError:
+                self.last_message = f"已下载到 {pkg}，请手动执行: sudo dpkg -i {pkg}"
+                return True
+        if pkg.endswith(".dmg"):
+            # macOS dmg 在下载阶段就给了手动指引
+            return True
+        self.last_message = f"未知的更新包类型: {pkg}"
+        return False
 
     # ── desktop 通道：下载打包资产，而非覆盖源码 ──
 
-    @staticmethod
-    def _desktop_asset_name(version: str) -> str:
-        """CI 产出的 release 资产命名（见 .github/workflows/docker-release.yml）。"""
+    def _desktop_asset_name(self, version: str) -> str:
+        """本次升级要用的资产文件名。内网清单通道直接按平台键查清单
+        （版本号已在清单里，不走命名约定）；GitHub 通道按 CI 命名约定。"""
+        if self._manifest_assets:
+            if sys.platform == "darwin":
+                key = "macos"
+            elif sys.platform == "win32":
+                key = "windows"
+            else:
+                import platform as _pf
+                machine = _pf.machine().lower()
+                key = "linux-arm64" if machine in ("aarch64", "arm64") else "linux-amd64"
+            name = self._manifest_assets.get(key)
+            if name:
+                return name
         if sys.platform == "darwin":
             return f"Open-AGC-{version}-macOS-arm64.dmg"
-        return f"Open-AGC-{version}-Windows-x64.zip"
+        if sys.platform == "win32":
+            # 优先 Setup.exe 安装包（有 windows 键时上面已返回；GitHub 通道
+            # 历史上只有 zip）
+            return f"Open-AGC-{version}-Windows-x64.zip"
+        return ""
 
     def _select_asset(self, name: str) -> Optional[dict]:
         for asset in self.latest_assets:
@@ -220,44 +351,30 @@ class AutoUpgrader:
                 return asset
         return None
 
-    def _download_file(self, url: str, dest: str) -> bool:
+    def _download_file(self, url: str, dest: str, progress_cb=None) -> bool:
         logger.info("Downloading %s ...", url)
         try:
             resp = requests.get(url, timeout=300, stream=True)
             if resp.status_code != 200:
                 logger.error("Download failed: HTTP %d", resp.status_code)
                 return False
+            # headers 容忍缺失（测试桩/极简响应没有 headers）
+            total = int(getattr(resp, "headers", {}).get("content-length", 0) or 0)
+            downloaded = 0
             os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
             with open(dest, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=1 << 20):
                     if chunk:
                         f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_cb and total > 0:
+                            progress_cb(downloaded / total)
             return True
         except (requests.RequestException, OSError) as e:
             logger.error("Download failed: %s", e)
             return False
 
-    def _perform_desktop_upgrade(self) -> bool:
-        if not self.latest_version:
-            if not self.fetch_latest_release():
-                self.last_message = "无法查询 GitHub 最新版本"
-                logger.error("Cannot check GitHub for latest release")
-                return False
-
-        if not self.is_upgrade_available():
-            self.last_message = "已是最新版本"
-            return False
-
-        if sys.platform == "darwin":
-            return self._download_macos_dmg()
-        if sys.platform == "win32":
-            return self._stage_windows_update()
-
-        self.last_message = f"不支持的桌面平台: {sys.platform}"
-        logger.error("Unsupported desktop platform: %s", sys.platform)
-        return False
-
-    def _download_macos_dmg(self) -> bool:
+    def _download_macos_dmg(self, progress_cb=None) -> bool:
         """macOS 桌面端：下载 dmg 到 ~/Downloads，指引用户手动拖装。"""
         asset_name = self._desktop_asset_name(self.latest_version)
         asset = self._select_asset(asset_name)
@@ -266,7 +383,7 @@ class AutoUpgrader:
             logger.error("Asset %s not found in latest release", asset_name)
             return False
         dest = os.path.join(os.path.expanduser("~"), "Downloads", asset_name)
-        if not self._download_file(asset["browser_download_url"], dest):
+        if not self._download_file(asset["browser_download_url"], dest, progress_cb):
             self.last_message = f"下载 {asset_name} 失败"
             return False
         self.last_message = (
@@ -276,9 +393,15 @@ class AutoUpgrader:
         logger.info("DMG downloaded to %s", dest)
         return True
 
-    def _stage_windows_update(self) -> bool:
-        """Windows 桌面端：下载 zip 解压到 exe 同级 update_staging/，
-        生成 apply_update.bat（等待主进程退出→覆盖程序文件→重启）并启动它。"""
+    def _prepare_windows_update(self, progress_cb=None) -> bool:
+        """Windows 桌面端静默下载（不安装）。
+
+        两种载荷：
+        - Setup.exe 安装包且当前是「已安装」实例（程序在 Program Files 下）：
+          下载安装包 + 生成 apply_update.bat（等主进程退出→Setup /S→重启）
+        - zip 包或 zip 解压运行的实例：下载解压到 exe 同级 update_staging/
+          + apply_update.bat（覆盖程序文件→重启），沿用旧逻辑
+        """
         asset_name = self._desktop_asset_name(self.latest_version)
         asset = self._select_asset(asset_name)
         if not asset:
@@ -289,9 +412,31 @@ class AutoUpgrader:
         exe_path = os.path.abspath(sys.executable)
         exe_dir = os.path.dirname(exe_path)
         staging = os.path.join(exe_dir, "update_staging")
+
+        if asset_name.lower().endswith("-setup.exe"):
+            # 安装包流程：只对「已安装」实例（Program Files 下）走 Setup /S；
+            # zip 解压运行的实例装了会双开，退回 zip 覆盖流程
+            pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+            if exe_dir.lower().startswith(pf.lower()):
+                return self._prepare_windows_installer(asset, asset_name, exe_path, progress_cb)
+            zip_name = (self._manifest_assets or {}).get("windows_zip")
+            zip_asset = self._select_asset(zip_name) if zip_name else None
+            if not zip_asset:
+                self.last_message = (
+                    f"已下载 {asset_name} 到临时目录。当前是从 zip 解压运行的实例，"
+                    f"请退出程序后手动运行安装包完成安装"
+                )
+                dest = os.path.join(tempfile.gettempdir(), asset_name)
+                if not self._download_file(asset["browser_download_url"], dest, progress_cb):
+                    self.last_message = f"下载 {asset_name} 失败"
+                    return False
+                self.staged_installer = dest  # 仅下载，无 bat；install 时给指引
+                return True
+            asset, asset_name = zip_asset, zip_name
+
         zip_path = os.path.join(tempfile.gettempdir(), asset_name)
         try:
-            if not self._download_file(asset["browser_download_url"], zip_path):
+            if not self._download_file(asset["browser_download_url"], zip_path, progress_cb):
                 self.last_message = f"下载 {asset_name} 失败"
                 return False
             if os.path.exists(staging):
@@ -329,11 +474,84 @@ class AutoUpgrader:
         bat_path = self._write_apply_update_bat(exe_dir, exe_path, staging, payload)
         if not bat_path:
             return False
+        self.staged_installer = bat_path
+        self.last_message = f"v{self.latest_version} 已下载就绪，确认后安装并重启"
+        logger.info("Update downloaded to %s (not installed yet)", staging)
+        return True
 
-        self._launch_updater(bat_path)
-        self.restart_required = True
-        self.last_message = "更新已就绪，程序即将自动重启"
-        logger.info("Update staged in %s; apply_update.bat launched", staging)
+    def _prepare_windows_installer(self, asset: dict, asset_name: str,
+                                   exe_path: str, progress_cb=None) -> bool:
+        """Setup.exe 安装包流程（已安装实例）：下载到临时目录 + 生成
+        apply_update.bat（等主进程退出 → Setup /S 静默安装 → 重启）。
+        全在用户临时目录操作，无 Program Files 写权限问题；NSIS 安装器
+        自身带 UAC 提权（RequestExecutionLevel admin）。"""
+        exe_dir = os.path.dirname(exe_path)
+        setup_path = os.path.join(tempfile.gettempdir(), asset_name)
+        if not self._download_file(asset["browser_download_url"], setup_path, progress_cb):
+            self.last_message = f"下载 {asset_name} 失败"
+            return False
+        target_exe = os.path.join(exe_dir, os.path.basename(exe_path))
+        bat_path = self._write_installer_bat(setup_path, target_exe)
+        if not bat_path:
+            return False
+        self.staged_installer = bat_path
+        self.last_message = f"v{self.latest_version} 安装包已下载，确认后安装并重启"
+        logger.info("Installer %s downloaded; apply bat %s", setup_path, bat_path)
+        return True
+
+    def _write_installer_bat(self, setup_path: str, target_exe: str) -> Optional[str]:
+        bat_path = os.path.join(tempfile.gettempdir(), "open_agc_apply_update.bat")
+        content = (
+            "@echo off\r\n"
+            "setlocal\r\n"
+            f"set \"PID={os.getpid()}\"\r\n"
+            f"set \"SETUP={setup_path}\"\r\n"
+            f"set \"EXE={target_exe}\"\r\n"
+            "rem Wait for the main process to exit, then silent-install and restart\r\n"
+            "timeout /t 3 /nobreak >nul\r\n"
+            ":wait_loop\r\n"
+            "tasklist /FI \"PID eq %PID%\" | find \"%PID%\" >nul\r\n"
+            "if %errorlevel% equ 0 (\r\n"
+            "    timeout /t 1 /nobreak >nul\r\n"
+            "    goto wait_loop\r\n"
+            ")\r\n"
+            "\"%SETUP%\" /S\r\n"
+            "start \"\" \"%EXE%\"\r\n"
+            "del \"%~f0\" >nul 2>&1\r\n"
+        )
+        bat_encoding = "mbcs" if sys.platform == "win32" else "ascii"
+        try:
+            content.encode(bat_encoding)
+        except UnicodeEncodeError:
+            self.last_message = "路径包含当前系统代码页无法表示的字符，无法生成更新脚本"
+            return None
+        try:
+            with open(bat_path, "w", encoding=bat_encoding, newline="") as f:
+                f.write(content)
+            return bat_path
+        except OSError as e:
+            self.last_message = f"无法写入 {bat_path}: {e}"
+            logger.error("Failed to write installer bat: %s", e)
+            return None
+
+    def _download_linux_deb(self, progress_cb=None) -> bool:
+        """Linux 桌面端（内网通道）：下载 deb 到数据目录，确认后 pkexec 安装。"""
+        asset_name = self._desktop_asset_name(self.latest_version)
+        asset = self._select_asset(asset_name)
+        if not asset:
+            self.last_message = f"Release 清单中找不到本机架构的资产（{asset_name or '无'}）"
+            return False
+        try:
+            from core.paths import get_data_dir
+            dest_dir = os.path.join(get_data_dir(), "updates")
+        except Exception:
+            dest_dir = tempfile.gettempdir()
+        dest = os.path.join(dest_dir, asset_name)
+        if not self._download_file(asset["browser_download_url"], dest, progress_cb):
+            self.last_message = f"下载 {asset_name} 失败"
+            return False
+        self.staged_installer = dest
+        self.last_message = f"v{self.latest_version} 已下载，确认后安装（需系统授权）"
         return True
 
     @staticmethod
