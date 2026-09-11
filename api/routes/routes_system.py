@@ -276,6 +276,68 @@ async def upgrade_server():
     }
 
 
+# ── 拆分式升级（desktop）：静默下载 → 用户确认 → 安装 ──
+# 共享同一个 AutoUpgrader 实例：download 准备好的 staged_installer 要由
+# install 接力，拆成两个实例会丢状态。
+_split_upgrader = None
+_upgrade_dl_state = {"state": "idle", "progress": 0.0, "message": "", "version": ""}
+
+
+@router.get("/api/upgrade/status")
+async def upgrade_status():
+    return dict(_upgrade_dl_state)
+
+
+@router.post("/api/upgrade/download")
+async def upgrade_download():
+    """后台静默下载更新包（不安装）。中间版本永不进此流程——清单只含
+    晋升到 release 通道的确认版本。"""
+    global _split_upgrader
+    if _upgrade_dl_state["state"] == "downloading":
+        return {"status": "busy", "message": "下载进行中"}
+
+    from core.auto_upgrade import AutoUpgrader
+    upgrader = AutoUpgrader()
+    _split_upgrader = upgrader
+    _upgrade_dl_state.update({"state": "downloading", "progress": 0.0, "message": ""})
+
+    def _progress(ratio):
+        _upgrade_dl_state["progress"] = round(ratio, 3)
+
+    def _run():
+        ok = upgrader.download_update(progress_cb=_progress)
+        _upgrade_dl_state.update({
+            "state": "ready" if ok else "error",
+            "progress": 1.0 if ok else _upgrade_dl_state["progress"],
+            "message": upgrader.last_message,
+            "version": upgrader.latest_version or "",
+        })
+
+    import threading
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started"}
+
+
+@router.post("/api/upgrade/install")
+async def upgrade_install():
+    """用户确认后安装已下载的更新包。"""
+    import asyncio
+    if _split_upgrader is None or _upgrade_dl_state["state"] != "ready":
+        raise HTTPException(status_code=400, detail="更新包尚未下载完成")
+    upgrader = _split_upgrader
+    success = await asyncio.get_running_loop().run_in_executor(
+        None, upgrader.install_staged_update)
+    if not success:
+        raise HTTPException(status_code=500, detail=upgrader.last_message or "Install failed")
+    _upgrade_dl_state.update({"state": "installing", "message": upgrader.last_message})
+    return {
+        "status": "ok",
+        "message": upgrader.last_message,
+        "restart": upgrader.restart_required,
+        "channel": upgrader.channel,
+    }
+
+
 # ── Logs API ──
 
 @router.get("/api/logs")

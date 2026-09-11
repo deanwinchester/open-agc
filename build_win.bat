@@ -93,41 +93,23 @@ echo [3/4] Creating installer...
 
 where makensis >nul 2>&1
 if %errorlevel% equ 0 (
-    echo   NSIS found — building installer...
-    
-    REM Generate NSIS script
-    (
-        echo !include "MUI2.nsh"
-        echo.
-        echo Name "%APP_NAME%"
-        echo OutFile "dist\%APP_NAME%-%VERSION%-Setup.exe"
-        echo InstallDir "$PROGRAMFILES\%APP_NAME%"
-        echo RequestExecutionLevel admin
-        echo.
-        echo !insertmacro MUI_PAGE_DIRECTORY
-        echo !insertmacro MUI_PAGE_INSTFILES
-        echo !insertmacro MUI_LANGUAGE "SimpChinese"
-        echo.
-        echo Section "Install"
-        echo   SetOutPath "$INSTDIR"
-        echo   File /r "dist\%APP_NAME%\*.*"
-        echo   CreateShortCut "$DESKTOP\%APP_NAME%.lnk" "$INSTDIR\%APP_NAME%.exe"
-        echo   CreateDirectory "$SMPROGRAMS\%APP_NAME%"
-        echo   CreateShortCut "$SMPROGRAMS\%APP_NAME%\%APP_NAME%.lnk" "$INSTDIR\%APP_NAME%.exe"
-        echo   CreateShortCut "$SMPROGRAMS\%APP_NAME%\Uninstall.lnk" "$INSTDIR\uninstall.exe"
-        echo   WriteUninstaller "$INSTDIR\uninstall.exe"
-        echo SectionEnd
-        echo.
-        echo Section "Uninstall"
-        echo   RMDir /r "$INSTDIR"
-        echo   Delete "$DESKTOP\%APP_NAME%.lnk"
-        echo   RMDir /r "$SMPROGRAMS\%APP_NAME%"
-        echo SectionEnd
-    ) > "dist\installer.nsi"
-    
+    echo   NSIS found - building installer...
+
+    REM Render NSIS script from template via python (UTF-8; Chinese display
+    REM name would be mangled by cmd echo + GBK codepage)
+    python scripts\render_installer.py
+    if errorlevel 1 (
+        echo ERROR: installer.nsi render failed!
+        exit /b 1
+    )
+
     makensis "dist\installer.nsi"
+    if errorlevel 1 (
+        echo ERROR: makensis failed!
+        exit /b 1
+    )
     del "dist\installer.nsi"
-    
+
     echo   Installer created: dist\%APP_NAME%-%VERSION%-Setup.exe
 ) else (
     echo   NSIS not found — creating simple ZIP instead...

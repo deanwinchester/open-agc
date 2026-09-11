@@ -328,13 +328,13 @@ class TestDesktopAssetSelection:
         from core.auto_upgrade import AutoUpgrader
 
         monkeypatch.setattr(sys, "platform", "win32")
-        assert AutoUpgrader._desktop_asset_name("1.2.3") == "Open-AGC-1.2.3-Windows-x64.zip"
+        assert AutoUpgrader()._desktop_asset_name("1.2.3") == "Open-AGC-1.2.3-Windows-x64.zip"
 
     def test_asset_name_macos(self, monkeypatch):
         from core.auto_upgrade import AutoUpgrader
 
         monkeypatch.setattr(sys, "platform", "darwin")
-        assert AutoUpgrader._desktop_asset_name("1.2.3") == "Open-AGC-1.2.3-macOS-arm64.dmg"
+        assert AutoUpgrader()._desktop_asset_name("1.2.3") == "Open-AGC-1.2.3-macOS-arm64.dmg"
 
     def _make_upgrader(self, monkeypatch, channel="desktop"):
         import core.auto_upgrade as auto_upgrade
@@ -367,7 +367,7 @@ class TestDesktopAssetSelection:
     def test_missing_asset_returns_false_with_message(self, monkeypatch):
         upgrader = self._make_upgrader(monkeypatch)
         upgrader.latest_assets = [{"name": "unrelated.txt", "browser_download_url": "http://x"}]
-        assert upgrader._stage_windows_update() is False
+        assert upgrader._prepare_windows_update() is False
         assert "Open-AGC-9.9.9-Windows-x64.zip" in upgrader.last_message
 
     def test_windows_staging_and_bat(self, monkeypatch, tmp_path):
@@ -381,7 +381,8 @@ class TestDesktopAssetSelection:
             monkeypatch, tmp_path, upgrader, zip_bytes
         )
 
-        assert upgrader._stage_windows_update() is True
+        assert upgrader._prepare_windows_update() is True
+        assert upgrader.install_staged_update() is True
 
         # staging 解压到 exe 同级 update_staging/
         staging = exe_dir / "update_staging"
@@ -418,7 +419,8 @@ class TestDesktopAssetSelection:
             monkeypatch, tmp_path, upgrader, zip_bytes
         )
 
-        assert upgrader._stage_windows_update() is True
+        assert upgrader._prepare_windows_update() is True
+        assert upgrader.install_staged_update() is True
 
         staging = exe_dir / "update_staging"
         bat_content = (exe_dir / "apply_update.bat").read_text(encoding="ascii")
@@ -435,7 +437,7 @@ class TestDesktopAssetSelection:
             monkeypatch, tmp_path, upgrader, zip_bytes
         )
 
-        assert upgrader._stage_windows_update() is False
+        assert upgrader._prepare_windows_update() is False
         assert "Open-AGC.exe" in upgrader.last_message
         assert not (exe_dir / "update_staging").exists()
         assert not launched
@@ -456,7 +458,7 @@ class TestDesktopAssetSelection:
 
         monkeypatch.setattr(os, "makedirs", _deny_staging)
 
-        assert upgrader._stage_windows_update() is False
+        assert upgrader._prepare_windows_update() is False
         assert "管理员" in upgrader.last_message
         assert upgrader.restart_required is False
 
@@ -515,7 +517,7 @@ class TestDesktopAssetSelection:
             os.path, "expanduser", lambda p: str(home) if p == "~" else p
         )
 
-        assert upgrader._perform_desktop_upgrade() is True
+        assert upgrader.download_update() is True
         assert (home / "Downloads" / asset_name).read_bytes() == b"dmg-bytes"
         # macOS 不自动替换 .app，指引手动安装，不触发自动重启
         assert "手动" in upgrader.last_message
@@ -524,17 +526,19 @@ class TestDesktopAssetSelection:
     def test_perform_upgrade_dispatches_by_channel(self, monkeypatch):
         import core.auto_upgrade as auto_upgrade
 
-        for channel, meth in (("desktop", "_perform_desktop_upgrade"),
-                              ("docker", "_perform_source_upgrade"),
-                              ("source", "_perform_source_upgrade")):
+        for channel, meths in (("desktop", ["download_update", "install_staged_update"]),
+                               ("docker", ["_perform_source_upgrade"]),
+                               ("source", ["_perform_source_upgrade"])):
             monkeypatch.setattr(auto_upgrade, "get_channel", lambda: channel)
             upgrader = auto_upgrade.AutoUpgrader()
             called = []
-            monkeypatch.setattr(
-                type(upgrader), meth, lambda self: called.append(meth) or True
-            )
+            for meth in meths:
+                monkeypatch.setattr(
+                    type(upgrader), meth,
+                    (lambda self, m=meth: called.append(m) or True)
+                )
             assert upgrader.perform_upgrade() is True
-            assert called == [meth]
+            assert called == meths
 
 
 def test_version_endpoint_includes_channel(monkeypatch):
