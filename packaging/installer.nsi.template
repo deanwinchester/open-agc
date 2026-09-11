@@ -6,7 +6,7 @@ Unicode true
 !include "MUI2.nsh"
 
 Name "@DISPLAY_NAME@"
-OutFile "dist\@DISPLAY_NAME@-@VERSION@-Setup.exe"
+OutFile "@OUT_ABS@\@DISPLAY_NAME@-@VERSION@-Setup.exe"
 InstallDir "$PROGRAMFILES\@APP_NAME@"
 RequestExecutionLevel admin
 
