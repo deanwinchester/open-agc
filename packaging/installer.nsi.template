@@ -1,0 +1,32 @@
+; Open-AGC Windows 安装包模板（NSIS 3, Unicode）
+; 由 scripts/render_installer.py 渲染生成 dist/installer.nsi，
+; 占位符：@APP_NAME@（ASCII 目录/文件名）@DISPLAY_NAME@（界面/快捷方式显示名，
+; 支持中文）@VERSION@ @PAYLOAD_DIR@（PyInstaller 产物目录，固定 dist\Open-AGC）
+Unicode true
+!include "MUI2.nsh"
+
+Name "@DISPLAY_NAME@"
+OutFile "dist\@DISPLAY_NAME@-@VERSION@-Setup.exe"
+InstallDir "$PROGRAMFILES\@APP_NAME@"
+RequestExecutionLevel admin
+
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "SimpChinese"
+
+Section "Install"
+  SetOutPath "$INSTDIR"
+  File /r "@PAYLOAD_DIR@\*.*"
+  ; 桌面快捷方式（显示名，支持中文）
+  CreateShortCut "$DESKTOP\@DISPLAY_NAME@.lnk" "$INSTDIR\@EXE_NAME@"
+  CreateDirectory "$SMPROGRAMS\@APP_NAME%"
+  CreateShortCut "$SMPROGRAMS\@APP_NAME@\@DISPLAY_NAME@.lnk" "$INSTDIR\@EXE_NAME@"
+  CreateShortCut "$SMPROGRAMS\@APP_NAME@\Uninstall.lnk" "$INSTDIR\uninstall.exe"
+  WriteUninstaller "$INSTDIR\uninstall.exe"
+SectionEnd
+
+Section "Uninstall"
+  RMDir /r "$INSTDIR"
+  Delete "$DESKTOP\@DISPLAY_NAME@.lnk"
+  RMDir /r "$SMPROGRAMS\@APP_NAME%"
+SectionEnd
