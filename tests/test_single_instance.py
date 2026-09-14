@@ -37,7 +37,10 @@ def _clean_lock():
     _force_release_lock()
 
 
-def test_second_acquire_fails():
+def test_second_acquire_fails(monkeypatch):
+    # 独立互斥体名：本机可能正跑着打包实例（占着默认 Global 锁），
+    # 隔离后测试才不被环境影响（生产实证：打包实例运行时此用例必挂）
+    monkeypatch.setenv("OPEN_AGC_MUTEX_NAME", "Global\\OpenAGC-SingleInstance-Test")
     assert gui_app._acquire_single_instance_lock() is True
     # 同一进程内再次获取必须失败（模拟第二个实例）
     assert gui_app._acquire_single_instance_lock() is False
