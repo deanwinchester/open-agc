@@ -448,7 +448,8 @@ class ShellTool(BaseTool):
                     popen_kwargs["env"] = os.environ.copy()
                 _python_utf8_env(popen_kwargs["env"])
                 if sys.platform == "win32":
-                    popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                    popen_kwargs["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
+                                                        | subprocess.CREATE_NO_WINDOW)
                 proc = subprocess.Popen(exec_command, **popen_kwargs)
                 # Register the background process for monitoring (multi-process
                 # per task: keyed by pid, does not overwrite earlier entries)
@@ -484,7 +485,8 @@ class ShellTool(BaseTool):
                     popen_kwargs["env"] = os.environ.copy()
                 _python_utf8_env(popen_kwargs["env"])
                 if sys.platform == "win32":
-                    popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                    popen_kwargs["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
+                                                        | subprocess.CREATE_NO_WINDOW)
                 _t0 = time.time()
                 proc = subprocess.Popen(exec_command, **popen_kwargs)
 
