@@ -62,6 +62,16 @@ class ComputerTool(BaseTool):
                             "type": "string",
                             "description": "action=type_text/paste_text 时要输入/粘贴的文本。"
                         },
+                        "region": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "description": ("action=screenshot 时的区域裁剪 [x,y,w,h]（全图图像坐标系）。"
+                                            "任务栏/小图标看不清时先全图截图，再对可疑区域放大。")
+                        },
+                        "grid": {
+                            "type": "boolean",
+                            "description": "action=screenshot 时是否叠加坐标网格（默认 true，便于读坐标）。"
+                        },
                         "key": {
                             "type": "string",
                             "description": "action=press_key 时的按键名（如 enter、tab、esc）。"
@@ -194,12 +204,47 @@ class ComputerTool(BaseTool):
                     # 视觉编码打爆（卡死/InternalServerError 实证）——长边压到
                     # 1280、JPEG q70，体积降到 ~100KB 级，llama.cpp/vLLM 都能秒处。
                     img = pyautogui.screenshot()
-                    real_w, real_h = img.size
+                    full_w, full_h = img.size
                     max_edge = 1280
-                    if max(img.size) > max_edge:
+                    full_scale = max_edge / max(full_w, full_h) if max(full_w, full_h) > max_edge else 1.0
+
+                    # 区域放大：region 按全图图像坐标系（缩放视图）给出，换算到
+                    # 真实坐标裁剪，裁剪图不再降采样——任务栏/小图标放大到原生
+                    # 分辨率，模型才能读准（全图视图里 20px 图标根本点不准，生产实证）
+                    region = kwargs.get('region')
+                    region_note = ""
+                    if region and isinstance(region, (list, tuple)) and len(region) == 4:
+                        rx = int(region[0] / full_scale)
+                        ry = int(region[1] / full_scale)
+                        rw = int(region[2] / full_scale)
+                        rh = int(region[3] / full_scale)
+                        img = img.crop((rx, ry, min(rx + rw, full_w), min(ry + rh, full_h)))
+                        region_note = (
+                            f"（区域放大：全图图像坐标 ({region[0]},{region[1]}) 起 "
+                            f"{region[2]}x{region[3]}，原生分辨率；"
+                            "点击请换算回全图坐标：全图 = 区域原点 + 细节坐标）"
+                        )
+
+                    real_w, real_h = img.size
+                    if max(img.size) > max_edge and not region_note:
                         _r = max_edge / max(img.size)
                         img = img.resize((int(img.size[0] * _r), int(img.size[1] * _r)))
                     saved_w, saved_h = img.size
+
+                    # 坐标网格：小模型读绝对坐标全靠猜，网格让它直接读数（可选关闭）
+                    if kwargs.get('grid', True):
+                        try:
+                            from PIL import ImageDraw
+                            d = ImageDraw.Draw(img, 'RGBA')
+                            for gx in range(100, saved_w, 100):
+                                d.line([(gx, 0), (gx, saved_h)], fill=(255, 60, 60, 80), width=1)
+                                d.text((gx + 2, 2), str(gx), fill=(255, 60, 60, 220))
+                            for gy in range(100, saved_h, 100):
+                                d.line([(0, gy), (saved_w, gy)], fill=(255, 60, 60, 80), width=1)
+                                d.text((2, gy + 2), str(gy), fill=(255, 60, 60, 220))
+                        except Exception:
+                            pass
+
                     img.convert("RGB").save(screenshot_path, "JPEG", quality=70)
                     # 记录缩放比：点击坐标按图像坐标系输入，执行时据此换算回
                     # 真实屏幕（模型按看到的图估坐标天然准确，生产实证不记录
@@ -211,7 +256,7 @@ class ComputerTool(BaseTool):
                         "操控电脑工具的坐标按你看到的图像像素坐标输入即可（自动换算）；"
                         "若改用 execute_python+pyautogui 直接点击，"
                         "真实坐标 = 图像坐标 ÷ 缩放比。"
-                    )
+                    ) + region_note
                     import base64
                     try:
                         with open(screenshot_path, "rb") as f:

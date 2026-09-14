@@ -298,9 +298,12 @@ class PythonREPLTool(BaseTool):
                 errors="replace",
                 cwd=cwd,
                 env=env,
+                # Windows: 冻结包是窗口程序，子进程默认会闪黑色控制台窗口
+                # （生产实证，执行任务时终端窗口一闪而过）——CREATE_NO_WINDOW 抑制；
                 # POSIX: detach into its own process group so the timeout
                 # killpg below can't take down the Open-AGC server itself.
-                **({} if sys.platform == "win32" else {"start_new_session": True}),
+                **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32"
+                   else {"start_new_session": True}),
             )
 
             try:
