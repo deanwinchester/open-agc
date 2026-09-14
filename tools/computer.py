@@ -8,7 +8,14 @@ from tools.base import BaseTool
 
 class ComputerTool(BaseTool):
     name: str = "computer_control"
-    description: str = "物理操控本机鼠标和键盘（点击、移动、输入、按键、截图）。browser_automation 等工具无法完成的 GUI 操作才用它。"
+    description: str = ("物理操控本机鼠标和键盘（点击、移动、输入、按键、截图）。"
+                        "browser_automation 等工具无法完成的 GUI 操作才用它。"
+                        "坐标一律按你【看到的截图图像】的像素坐标输入（工具自动按"
+                        "缩放比换算回真实屏幕，无需自己换算）。")
+
+    # 最近一次截图的缩放比（saved_px / real_px）。点击坐标按截图图像坐标系输入，
+    # 换算到真实屏幕坐标 = 输入 / _last_scale。无截图时为 1.0（即按真实坐标）。
+    _last_scale: float = 1.0
     def __init__(self, **data):
         super().__init__(**data)
         # Import pyautogui lazily to avoid issues if not installed or running headlessly
@@ -74,6 +81,11 @@ class ComputerTool(BaseTool):
             ComputerTool.__execute_lock = lock
         return lock
 
+    def _to_real(self, x: float, y: float) -> tuple:
+        """图像坐标系 → 真实屏幕坐标（按最近截图的缩放比换算）。"""
+        s = ComputerTool._last_scale or 1.0
+        return int(round(x / s)), int(round(y / s))
+
     def execute(self, **kwargs) -> str:
         with self._get_lock():
             action = kwargs.get("action")
@@ -84,15 +96,17 @@ class ComputerTool(BaseTool):
                     y = kwargs.get('y')
                     if x is None or y is None:
                         return "Error: x and y coordinates required for mouse_move."
-                    pyautogui.moveTo(x, y, duration=0.5)
-                    return f"Mouse moved to ({x}, {y})"
+                    rx, ry = self._to_real(x, y)
+                    pyautogui.moveTo(rx, ry, duration=0.5)
+                    return f"Mouse moved to image-coords ({x}, {y}) -> screen ({rx}, {ry})"
 
                 elif action == 'mouse_click':
                     x = kwargs.get('x')
                     y = kwargs.get('y')
                     if x is not None and y is not None:
-                        pyautogui.click(x, y)
-                        return f"Clicked at ({x}, {y})"
+                        rx, ry = self._to_real(x, y)
+                        pyautogui.click(rx, ry)
+                        return f"Clicked at image-coords ({x}, {y}) -> screen ({rx}, {ry})"
                     else:
                         pyautogui.click()
                         return "Clicked at current location"
@@ -131,11 +145,24 @@ class ComputerTool(BaseTool):
                     # 视觉编码打爆（卡死/InternalServerError 实证）——长边压到
                     # 1280、JPEG q70，体积降到 ~100KB 级，llama.cpp/vLLM 都能秒处。
                     img = pyautogui.screenshot()
+                    real_w, real_h = img.size
                     max_edge = 1280
                     if max(img.size) > max_edge:
                         _r = max_edge / max(img.size)
                         img = img.resize((int(img.size[0] * _r), int(img.size[1] * _r)))
+                    saved_w, saved_h = img.size
                     img.convert("RGB").save(screenshot_path, "JPEG", quality=70)
+                    # 记录缩放比：点击坐标按图像坐标系输入，执行时据此换算回
+                    # 真实屏幕（模型按看到的图估坐标天然准确，生产实证不记录
+                    # 缩放比时点击系统性偏移到 2/3 处）
+                    ComputerTool._last_scale = saved_w / real_w if real_w else 1.0
+                    scale_note = (
+                        f"真实屏幕 {real_w}x{real_h}，图像 {saved_w}x{saved_h}"
+                        f"（缩放比 {ComputerTool._last_scale:.4f}）。"
+                        "操控电脑工具的坐标按你看到的图像像素坐标输入即可（自动换算）；"
+                        "若改用 execute_python+pyautogui 直接点击，"
+                        "真实坐标 = 图像坐标 ÷ 缩放比。"
+                    )
                     import base64
                     try:
                         with open(screenshot_path, "rb") as f:
@@ -143,6 +170,7 @@ class ComputerTool(BaseTool):
                         img_url = f"data:image/jpeg;base64,{b64}"
                         return (
                             f"Screenshot saved to {screenshot_path}\n"
+                            f"{scale_note}\n"
                             f"[SCREENSHOT_DATA:{img_url}]"
                         )
                     except Exception:

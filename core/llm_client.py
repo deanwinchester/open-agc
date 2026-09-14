@@ -308,6 +308,26 @@ IMAGE_INJECTED_PLACEHOLDER = "[图片已注入]"
 _IMAGE_MARKER_RE = re.compile(r"\[(?:SCREENSHOT_DATA|IMAGE_DATA):[^\]]*\]")
 
 
+def _prune_old_images(messages: list, keep_last: int = 1,
+                      placeholder: str = "[早前图像已省略]") -> int:
+    """把消息历史里更早的图像内容降级为文字占位，只保留最近 keep_last 张。
+
+    电脑操控类任务每轮迭代都注入新截图，旧图像素对下一步决策已无意义，
+    全留在上下文只会线性撑大视觉编码与 token 预算（多轮后本地模型卡死、
+    服务端崩溃——生产实证）。返回降级的图像数量。"""
+    image_parts = []
+    for mi, msg in enumerate(messages):
+        content = (msg or {}).get("content")
+        if isinstance(content, list):
+            for pi, part in enumerate(content):
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    image_parts.append((mi, pi))
+    to_prune = max(0, len(image_parts) - keep_last)
+    for mi, pi in image_parts[:to_prune]:
+        messages[mi]["content"][pi] = {"type": "text", "text": placeholder}
+    return to_prune
+
+
 def replace_image_markers(text: str, placeholder: str = IMAGE_INJECTED_PLACEHOLDER) -> str:
     """Replace [SCREENSHOT_DATA:...] / [IMAGE_DATA:...] payloads with a short
     placeholder. Must be called AFTER extract_screenshot_data/extract_image_data

@@ -313,7 +313,14 @@ class ImageViewTool(BaseTool):
             return f"Error: 无法读取图片 {path}: {e}"
 
         if orig_w is not None:
-            scale_info = f"，已缩放至长边 {max_size}px" if scaled else "，未缩放"
+            if scaled:
+                # 模型按看到的缩放图估坐标，需告诉它换算关系，否则点击系统性
+                # 偏移（生产实证：1920 屏缩到 1280 后点击全偏到 2/3 处）
+                _sc = max_size / float(max(orig_w, orig_h))
+                scale_info = (f"，已缩放至长边 {max_size}px（缩放比 {_sc:.4f}）；"
+                              f"真实屏幕坐标 = 图像坐标 ÷ {_sc:.4f}")
+            else:
+                scale_info = "，未缩放"
             size_info = f"（{orig_w}x{orig_h}{scale_info}）"
         else:
             size_info = ""
