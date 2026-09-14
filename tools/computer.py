@@ -11,7 +11,9 @@ class ComputerTool(BaseTool):
     description: str = ("物理操控本机鼠标和键盘（点击、移动、输入、按键、截图）。"
                         "browser_automation 等工具无法完成的 GUI 操作才用它。"
                         "坐标一律按你【看到的截图图像】的像素坐标输入（工具自动按"
-                        "缩放比换算回真实屏幕，无需自己换算）。")
+                        "缩放比换算回真实屏幕，无需自己换算）。"
+                        "输入中文等非 ASCII 文本用 paste_text（剪贴板粘贴），"
+                        "type_text 仅适合纯 ASCII。")
 
     # 最近一次截图的缩放比（saved_px / real_px）。点击坐标按截图图像坐标系输入，
     # 换算到真实屏幕坐标 = 输入 / _last_scale。无截图时为 1.0（即按真实坐标）。
@@ -44,7 +46,9 @@ class ComputerTool(BaseTool):
                     "properties": {
                         "action": {
                             "type": "string",
-                            "description": "mouse_move/mouse_click/type_text/press_key/hotkey/screenshot"
+                            "description": ("mouse_move/mouse_click/type_text/paste_text/press_key/hotkey/screenshot。"
+                                            "输入中文或非 ASCII 文本必须用 paste_text（剪贴板粘贴），"
+                                            "type_text 仅适合纯 ASCII。")
                         },
                         "x": {
                             "type": "integer",
@@ -56,7 +60,7 @@ class ComputerTool(BaseTool):
                         },
                         "text": {
                             "type": "string",
-                            "description": "action=type_text 时要输入的文本。"
+                            "description": "action=type_text/paste_text 时要输入/粘贴的文本。"
                         },
                         "key": {
                             "type": "string",
@@ -85,6 +89,40 @@ class ComputerTool(BaseTool):
         """图像坐标系 → 真实屏幕坐标（按最近截图的缩放比换算）。"""
         s = ComputerTool._last_scale or 1.0
         return int(round(x / s)), int(round(y / s))
+
+    @staticmethod
+    def _paste_text(text: str) -> str:
+        """经剪贴板粘贴文本（中文/非 ASCII/长文本的可靠输入方式）。"""
+        try:
+            import pyperclip
+            pyperclip.copy(text)
+        except Exception as e:
+            # pyperclip 不可用时按平台兜底
+            import subprocess as _sp
+            import sys as _sys
+            try:
+                if _sys.platform.startswith('win'):
+                    _sp.run(['powershell', '-NoProfile', '-Command',
+                             'Set-Clipboard -Value $input'],
+                            input=text.encode('utf-8'), check=True,
+                            capture_output=True, timeout=10)
+                else:
+                    for cmd in (['xclip', '-selection', 'clipboard'],
+                                ['xsel', '--clipboard', '--input'],
+                                ['wl-copy']):
+                        try:
+                            _sp.run(cmd, input=text.encode('utf-8'), check=True,
+                                    capture_output=True, timeout=10)
+                            break
+                        except (FileNotFoundError, _sp.CalledProcessError):
+                            continue
+                    else:
+                        return (f"Error: 无法写入剪贴板（pyperclip 失败: {e}；"
+                                "xclip/xsel/wl-copy 均不可用）")
+            except Exception as e2:
+                return f"Error: 无法写入剪贴板: {e}; 兜底也失败: {e2}"
+        pyautogui.hotkey('ctrl', 'v')
+        return f"Pasted {len(text)} chars via clipboard"
 
     def execute(self, **kwargs) -> str:
         with self._get_lock():
@@ -115,8 +153,19 @@ class ComputerTool(BaseTool):
                     text = kwargs.get('text')
                     if not text:
                         return "Error: text required for type_text."
+                    if not all(ord(c) < 128 for c in text):
+                        # pyautogui.write 只支持 ASCII——含中文/非 ASCII 自动转剪贴板
+                        # 粘贴（agent 此前每次都手写 python 折腾 pyperclip+Ctrl+V，
+                        # 一个动作替代一整段脚本）
+                        return self._paste_text(text)
                     pyautogui.write(text, interval=0.05)
                     return f"Typed text: {text}"
+
+                elif action == 'paste_text':
+                    text = kwargs.get('text')
+                    if not text:
+                        return "Error: text required for paste_text."
+                    return self._paste_text(text)
 
                 elif action == 'press_key':
                     key = kwargs.get('key')
