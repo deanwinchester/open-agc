@@ -104,6 +104,9 @@ def test_gui_app_frozen_entry_seeds_data(tmp_path, monkeypatch):
     home = _patch_frozen_env(monkeypatch, tmp_path, bundle)
     # 跳过端口探测/服务线程/窗口创建，只跑到播种逻辑
     monkeypatch.setenv("PORT", "8123")
+    # 独立互斥体名：本机若正跑着打包实例（占默认 Global 锁），main() 会因
+    # 「已有实例」提前返回，播种断言全挂（生产实证）
+    monkeypatch.setenv("OPEN_AGC_MUTEX_NAME", "Global\\OpenAGC-SingleInstance-Test")
     monkeypatch.setattr(gui_app, "start_server", lambda port: None)
     monkeypatch.setattr(gui_app, "create_window", lambda port: True)
 

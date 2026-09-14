@@ -3025,6 +3025,9 @@ class OpenAGCAgent:
                 # 一大串技术垃圾（生产实证）——人话上屏，全文进日志。
                 _full_err = str(e)
                 print(f"[Agent] LLM_ERROR detail at iteration {current_iter}: {_full_err[:2000]}")
+                import logging as _lg
+                _lg.getLogger("agent").error(
+                    "LLM_ERROR at iteration %s: %s", current_iter, _full_err[:4000])
                 if ("parse tool call" in _full_err or "Unterminated" in _full_err
                         or "Expecting value" in _full_err):
                     _ehint = "模型连续返回了非法格式的工具调用（已自动重试仍失败）"
