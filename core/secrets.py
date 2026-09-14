@@ -219,6 +219,28 @@ def substitute_refs(text: str) -> str:
         return text
 
 
+def unreplaced_refs_warning(text: str) -> str:
+    """替换后仍残留的 {{secret:...}} 引用生成显式警告。
+
+    名称不存在/字段非法的引用会被静默留在命令里，agent 只能拿
+    getaddrinfo failed 之类的下游错误反推，排查费时（生产实证）。
+    返回 '' 表示无残留；有残留时返回含可用条目清单的警告文本。"""
+    if not text or not has_secret_ref(text):
+        return ""
+    remain = sorted({f"{m.group(1)}.{m.group(2)}"
+                     for m in _REF_RE.finditer(text)})
+    available = ", ".join(
+        f"{e['name']}(type={e['type']}, host={e['host'] or '-'})"
+        for e in list_secrets()
+    ) or "(空)"
+    return (
+        f"[警告] 以下凭证占位符未被替换（凭证名称或字段不存在）: "
+        f"{', '.join(remain)}。有效字段: "
+        f"username/password/host/uri/note/database。"
+        f"凭证库现有条目: {available}"
+    )
+
+
 def mask_secrets(text: str) -> str:
     """Replace known password values and credential-bearing URIs with ***.
 

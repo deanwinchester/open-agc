@@ -245,9 +245,13 @@ class PythonREPLTool(BaseTool):
         # Real values replace {{secret:name.field}} placeholders ONLY in the code
         # written to the temp file for the child process. The placeholder version
         # (`code`) is what appears in logs, context and messages.
+        _secret_warn = ""
         try:
-            from core.secrets import substitute_refs
+            from core.secrets import substitute_refs, unreplaced_refs_warning
             exec_code = substitute_refs(code)
+            # 名称/字段无效的占位符会静默残留（agent 拿下游错误反推很费时），
+            # 显式告警让模型立刻知道该改名称/字段
+            _secret_warn = unreplaced_refs_warning(exec_code)
         except Exception:
             exec_code = code
 
@@ -325,6 +329,8 @@ class PythonREPLTool(BaseTool):
                 if _survivors:
                     output += (f"\n[PROCESS_TRACKED] 已登记 {_survivors} 个存活子进程，"
                                "可在进程管理中查看/终止。")
+                if _secret_warn:
+                    output += "\n" + _secret_warn
                 return _mask(output)
 
             except subprocess.TimeoutExpired:
@@ -353,6 +359,8 @@ class PythonREPLTool(BaseTool):
                 if _survivors:
                     output += (f"\n[PROCESS_TRACKED] 已登记 {_survivors} 个存活子进程，"
                                "可在进程管理中查看/终止。")
+                if _secret_warn:
+                    output += "\n" + _secret_warn
                 return _mask(output)
 
         except Exception as e:
