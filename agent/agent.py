@@ -12,7 +12,7 @@ import queue
 
 from core.paths import get_data_path, get_skills_dir
 
-from core.llm_client import LLMClient, build_user_message, extract_screenshot_data, extract_image_data, replace_image_markers
+from core.llm_client import LLMClient, build_user_message, extract_screenshot_data, extract_image_data, replace_image_markers, _prune_old_images
 from core.logger import SessionLogger
 from core.memory_store import MemoryStore
 from core.skill_store import SkillStore
@@ -3671,6 +3671,11 @@ class OpenAGCAgent:
                             {"type": "image_url", "image_url": {"url": url}}
                         ]
                     })
+                # 旧截图降级为文字占位：电脑操控任务每轮都有新截图，旧图像素
+                # 对下一步决策已无意义，留在上下文只会撑爆视觉编码/token 预算
+                # （多轮后本地模型卡死或服务端崩溃——生产实证）。只保留最近一张。
+                if screenshot_urls:
+                    _prune_old_images(self.messages, keep_last=1)
 
                 # Autocompact: Context window management
                 try:
