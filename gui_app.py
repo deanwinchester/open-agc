@@ -308,10 +308,10 @@ def create_window(port):
                 with open(cfg_path, "r", encoding="utf-8") as f:
                     name = (_json.load(f).get("ui_theme") or {}).get("app_name")
                     if name:
-                        return f"🐼 {name}"
+                        return name
         except Exception:
             pass
-        return "🐼 Open-AGC Panda"
+        return "Open-AGC Panda"
 
     # Create native window — 任一环节失败（GTK 后端缺 gi、WebKit2 typelib
     # 缺失、Python 版本不匹配等）都回退浏览器模式，保证 Web UI 可用。

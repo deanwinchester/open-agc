@@ -146,6 +146,35 @@ init_download_routes(
     load_config=load_config,
 )
 
+def _setup_file_logging():
+    """把运行日志写入 <data>/logs/server.log（调试页「日志」数据源）。
+
+    _AGENT_LOG_FILE 此前从未赋值，调试页日志页签永远空白——生产实证：
+    会话里的 LLM_ERROR 在调试页看不到任何线索。"""
+    import logging
+    from logging.handlers import RotatingFileHandler
+    try:
+        from api import state as _st
+        log_dir = get_data_path("logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "server.log")
+        root = logging.getLogger()
+        if not any(getattr(h, "baseFilename", "") == os.path.abspath(log_path)
+                   for h in root.handlers):
+            handler = RotatingFileHandler(
+                log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+            handler.setFormatter(logging.Formatter(
+                "%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+            root.addHandler(handler)
+            root.setLevel(logging.INFO)
+        _st._AGENT_LOG_FILE = log_path
+    except Exception as e:
+        print(f"[Server] file logging setup failed: {e}")
+
+
+_setup_file_logging()
+
+
 @app.on_event("startup")
 async def _capture_event_loop():
     loop = asyncio.get_running_loop()

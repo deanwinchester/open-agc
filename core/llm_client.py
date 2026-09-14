@@ -1030,6 +1030,9 @@ class LLMClient:
 
         except Exception as e:
             print(f"Error calling LLM stream ({target_model}): {str(e)}")
+            import logging
+            logging.getLogger("llm_client").error(
+                "LLM stream failed (%s): %s", target_model, e, exc_info=True)
             raise
 
 
