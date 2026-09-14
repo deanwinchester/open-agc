@@ -381,11 +381,14 @@ def _acquire_single_instance_lock():
         import ctypes
         _k32 = ctypes.WinDLL('kernel32', use_errno=True)
         _MUTEX_ALL_ACCESS = 0x001F0001
-        existing = _k32.OpenMutexW(_MUTEX_ALL_ACCESS, False, "Global\\OpenAGC-SingleInstance")
+        # 互斥体名可用环境变量覆盖：测试/调试隔离，避免与本机正在运行的
+        # 实例撞锁（生产实证：打包实例运行时，测试的假第二实例拿不到锁）
+        _name = os.environ.get("OPEN_AGC_MUTEX_NAME", "Global\\OpenAGC-SingleInstance")
+        existing = _k32.OpenMutexW(_MUTEX_ALL_ACCESS, False, _name)
         if existing:
             _k32.CloseHandle(existing)
             return False
-        handle = _k32.CreateMutexW(None, False, "Global\\OpenAGC-SingleInstance")
+        handle = _k32.CreateMutexW(None, False, _name)
         if not handle:
             return False  # 创建失败宁可拒绝启动也不双开？放行以免误伤——返回 True 更稳
         _acquire_single_instance_lock._handle = handle  # 防 GC 关闭句柄
@@ -471,6 +474,14 @@ def main():
         # （播种目标与 get_data_dir() 对齐：data/* → <data>/，skills/* → <data>/skills/）
         from core.paths import seed_frozen_data
         seed_frozen_data(base_dir)
+
+        # 旧包升级时已有 config.json 不会进新键——先触发一次合并
+        # （品牌名/升级清单地址等部署属性），再读窗口标题
+        try:
+            from api.config import load_config as _load_and_merge_config
+            _load_and_merge_config()
+        except Exception:
+            pass
 
     def safe_print(msg):
         try:

@@ -58,6 +58,43 @@ def _seed_default_config() -> None:
         pass
 
 
+def _merge_build_defaults(cfg: dict) -> bool:
+    """把打包模板里的「部署属性」新键合并进已有配置（升级旧包时，
+    播种逻辑只补缺文件不更新已有 config.json，新键永远不会进来——
+    生产实证：zxs 品牌的 app_name / update_manifest_url 不生效）。
+
+    规则：
+    - update_manifest_url：升级通道是构建属性而非用户偏好——模板有就跟随
+    - ui_theme.app_name：仅在用户未设置（空/缺）时填充，尊重用户自定义
+
+    返回是否有变更（有则调用方落盘）。
+    """
+    if not _is_default_config_path():
+        return False
+    template = _find_template_config()
+    if not template:
+        return False
+    try:
+        with open(template, "r", encoding="utf-8") as f:
+            defaults = json.load(f)
+    except Exception:
+        return False
+
+    changed = False
+    tmpl_url = (defaults.get("update_manifest_url") or "").strip()
+    if tmpl_url and cfg.get("update_manifest_url") != tmpl_url:
+        cfg["update_manifest_url"] = tmpl_url
+        changed = True
+
+    tmpl_name = ((defaults.get("ui_theme") or {}).get("app_name") or "").strip()
+    if tmpl_name:
+        ui = cfg.setdefault("ui_theme", {})
+        if isinstance(ui, dict) and not (ui.get("app_name") or "").strip():
+            ui["app_name"] = tmpl_name
+            changed = True
+    return changed
+
+
 def load_config() -> dict:
     """Load configuration from config.json."""
     with _config_lock:
@@ -66,7 +103,7 @@ def load_config() -> dict:
         if os.path.exists(CONFIG_PATH):
             try:
                 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    cfg = json.load(f)
             except Exception as e:
                 # Don't silently discard: back up the corrupt file for inspection
                 backup = f"{CONFIG_PATH}.corrupt-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -76,6 +113,15 @@ def load_config() -> dict:
                 except Exception as be:
                     print(f"[Config] WARNING: config.json corrupt ({e}); backup failed: {be}")
                 return {}
+            # 合并打包模板的新部署键（品牌名、升级清单地址等），有变更才落盘
+            try:
+                if _merge_build_defaults(cfg):
+                    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                        json.dump(cfg, f, ensure_ascii=False, indent=2)
+                    print("[Config] merged build defaults (update_manifest_url/ui_theme.app_name)")
+            except Exception as e:
+                print(f"[Config] build defaults merge failed: {e}")
+            return cfg
         return {}
 
 
