@@ -422,9 +422,12 @@ class ShellTool(BaseTool):
         # command handed to the child process. `command` (with placeholders) is
         # what gets logged, tracked, shown in popups and returned — credentials
         # never leave this process in any message or output.
+        _secret_warn = ""
         try:
-            from core.secrets import substitute_refs
+            from core.secrets import substitute_refs, unreplaced_refs_warning
             exec_command = substitute_refs(command)
+            # 名称/字段无效的占位符会静默残留，显式告警让模型立刻纠正
+            _secret_warn = unreplaced_refs_warning(exec_command)
         except Exception:
             exec_command = command
 
@@ -680,6 +683,8 @@ class ShellTool(BaseTool):
                     result += f"[Sandbox: {cwd}]\n"
                 result += full_output
                 result += f"\nExit Code: {proc.returncode}  |  Time: {elapsed}s"
+                if _secret_warn:
+                    result += f"\n{_secret_warn}"
 
                 # -- Sudo failure detection --
                 # sudo -n was used (no cached password) and failed: trigger the
