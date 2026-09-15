@@ -262,17 +262,30 @@ class ComputerTool(BaseTool):
                         img = img.resize((int(img.size[0] * _r), int(img.size[1] * _r)))
                     saved_w, saved_h = img.size
 
-                    # 坐标网格：小模型读绝对坐标全靠猜，网格让它直接读数（可选关闭）
+                    # 坐标网格：小模型读绝对坐标全靠猜，网格让它直接读数。
+                    # 四边都标注（任务栏在底部，光有顶边标注它得从 y=700 往下
+                    # 脑补——生产实证）；字体随分辨率放大（1920 下 ~24px 才读得清）
                     if kwargs.get('grid', True):
                         try:
-                            from PIL import ImageDraw
+                            from PIL import ImageDraw, ImageFont
+                            font_size = max(14, saved_h // 45)
+                            try:
+                                font = ImageFont.truetype("arial.ttf", font_size)
+                            except Exception:
+                                try:
+                                    font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+                                except Exception:
+                                    font = ImageFont.load_default()
                             d = ImageDraw.Draw(img, 'RGBA')
                             for gx in range(100, saved_w, 100):
                                 d.line([(gx, 0), (gx, saved_h)], fill=(255, 60, 60, 80), width=1)
-                                d.text((gx + 2, 2), str(gx), fill=(255, 60, 60, 220))
+                                d.text((gx + 3, 3), str(gx), fill=(255, 60, 60, 230), font=font)
+                                d.text((gx + 3, saved_h - font_size - 4), str(gx), fill=(255, 60, 60, 230), font=font)
                             for gy in range(100, saved_h, 100):
                                 d.line([(0, gy), (saved_w, gy)], fill=(255, 60, 60, 80), width=1)
-                                d.text((2, gy + 2), str(gy), fill=(255, 60, 60, 220))
+                                d.text((3, gy + 3), str(gy), fill=(255, 60, 60, 230), font=font)
+                                _tw = d.textlength(str(gy), font=font)
+                                d.text((saved_w - _tw - 4, gy + 3), str(gy), fill=(255, 60, 60, 230), font=font)
                         except Exception:
                             pass
 
