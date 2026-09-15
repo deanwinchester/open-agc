@@ -231,4 +231,13 @@ class ToolDiscoveryTool(BaseTool):
         for _, name, desc in top_tools:
             result_lines.append(f"- {name}: {desc[:100]}...")
 
+        # computer_control 被唤醒时附带坐标定位规程——弱 grounding 模型自由
+        # 发挥估像素会偏差数百像素（生产实证），规程把定位变成读数题
+        if 'computer_control' in tool_names_to_enable:
+            try:
+                from tools.computer import GROUNDING_GUIDE
+                result_lines.append(GROUNDING_GUIDE)
+            except Exception:
+                pass
+
         return "\n".join(result_lines)
