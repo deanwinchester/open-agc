@@ -15,8 +15,8 @@ GROUNDING_GUIDE = """
 1. 先全图截图，看清红色网格：四条边上的红色数字就是坐标刻度。
 2. 定位目标在图上位于【哪两条竖线】与【哪两条横线】之间，先回答这个问题。
 3. 再按格内比例读出坐标（如目标在 x=400 与 x=500 线之间偏右约 60%，则 x≈460）。
-4. 目标小于 60px（任务栏图标/小按钮）时：先 region 放大该区域确认，再把
-   细节坐标换算回全图坐标（全图 = 区域原点 + 放大图内坐标）后点击。
+4. 目标小于 60px（任务栏图标/小按钮）时：先 region 放大该区域确认，放大图
+   里的网格数字直接就是全图坐标，读数点击即可（无需手动换算）。
 5. 点击后必须重新截图验证状态变化；没有变化就重新读网格定位，禁止原坐标
    重复盲试。
 6. 多窗口重叠时先看截图结果里的「当前前台窗口」——目标不在前台就先
@@ -272,7 +272,7 @@ class ComputerTool(BaseTool):
                         region_note = (
                             f"（区域放大：全图图像坐标 ({region[0]},{region[1]}) 起 "
                             f"{region[2]}x{region[3]}，原生分辨率；"
-                            "点击请换算回【全图坐标】：全图 = 区域原点 + 细节坐标）"
+                            "放大图里的网格数字就是全图坐标，直接读数点击）"
                         )
 
                     real_w, real_h = img.size
@@ -283,10 +283,19 @@ class ComputerTool(BaseTool):
 
                     # 坐标网格：小模型读绝对坐标全靠猜，网格让它直接读数。
                     # 四边都标注（任务栏在底部，光有顶边标注它得从 y=700 往下
-                    # 脑补——生产实证）；字体随分辨率放大（1920 下 ~24px 才读得清）
+                    # 脑补——生产实证）；字体随分辨率放大（1920 下 ~24px 才读得清）。
+                    # region 放大图：标注直接显示【全图坐标】，模型读数即可点击，
+                    # 免去「区域原点+细节坐标」的手动换算（k3 实测这一步会漂移
+                    # ~20px，足以点错相邻图标）
                     if kwargs.get('grid', True):
                         try:
                             from PIL import ImageDraw, ImageFont
+                            # 网格标注用的坐标系：全图视图=图像坐标恒等；
+                            # region 放大图=全图坐标（crop 内位置按缩放比换算）
+                            if region_note:
+                                g_ox, g_oy, g_vs = float(region[0]), float(region[1]), full_scale
+                            else:
+                                g_ox, g_oy, g_vs = 0.0, 0.0, 1.0
                             font_size = max(14, saved_h // 45)
                             try:
                                 font = ImageFont.truetype("arial.ttf", font_size)
@@ -296,15 +305,22 @@ class ComputerTool(BaseTool):
                                 except Exception:
                                     font = ImageFont.load_default()
                             d = ImageDraw.Draw(img, 'RGBA')
-                            for gx in range(100, saved_w, 100):
-                                d.line([(gx, 0), (gx, saved_h)], fill=(255, 60, 60, 80), width=1)
-                                d.text((gx + 3, 3), str(gx), fill=(255, 60, 60, 230), font=font)
-                                d.text((gx + 3, saved_h - font_size - 4), str(gx), fill=(255, 60, 60, 230), font=font)
-                            for gy in range(100, saved_h, 100):
-                                d.line([(0, gy), (saved_w, gy)], fill=(255, 60, 60, 80), width=1)
-                                d.text((3, gy + 3), str(gy), fill=(255, 60, 60, 230), font=font)
-                                _tw = d.textlength(str(gy), font=font)
-                                d.text((saved_w - _tw - 4, gy + 3), str(gy), fill=(255, 60, 60, 230), font=font)
+                            import math as _math
+                            _span_x = saved_w * g_vs
+                            _start_x = _math.ceil(g_ox / 100) * 100
+                            for gv in range(_start_x, int(g_ox + _span_x), 100):
+                                px = (gv - g_ox) / g_vs
+                                d.line([(px, 0), (px, saved_h)], fill=(255, 60, 60, 80), width=1)
+                                d.text((px + 3, 3), str(gv), fill=(255, 60, 60, 230), font=font)
+                                d.text((px + 3, saved_h - font_size - 4), str(gv), fill=(255, 60, 60, 230), font=font)
+                            _span_y = saved_h * g_vs
+                            _start_y = _math.ceil(g_oy / 100) * 100
+                            for gv in range(_start_y, int(g_oy + _span_y), 100):
+                                py = (gv - g_oy) / g_vs
+                                d.line([(0, py), (saved_w, py)], fill=(255, 60, 60, 80), width=1)
+                                d.text((3, py + 3), str(gv), fill=(255, 60, 60, 230), font=font)
+                                _tw = d.textlength(str(gv), font=font)
+                                d.text((saved_w - _tw - 4, py + 3), str(gv), fill=(255, 60, 60, 230), font=font)
                         except Exception:
                             pass
 
