@@ -10,8 +10,9 @@ class ComputerTool(BaseTool):
     name: str = "computer_control"
     description: str = ("物理操控本机鼠标和键盘（点击、移动、输入、按键、截图）。"
                         "browser_automation 等工具无法完成的 GUI 操作才用它。"
-                        "坐标一律按你【看到的截图图像】的像素坐标输入（工具自动按"
-                        "缩放比换算回真实屏幕，无需自己换算）。"
+                        "坐标一律按最近一张【全图截图】的像素坐标输入（工具自动按"
+                        "缩放比换算回真实屏幕，无需自己换算）；region 放大截图仅"
+                        "用于观察细节，不改变点击坐标系。"
                         "输入中文等非 ASCII 文本用 paste_text（剪贴板粘贴），"
                         "type_text 仅适合纯 ASCII。")
 
@@ -222,7 +223,7 @@ class ComputerTool(BaseTool):
                         region_note = (
                             f"（区域放大：全图图像坐标 ({region[0]},{region[1]}) 起 "
                             f"{region[2]}x{region[3]}，原生分辨率；"
-                            "点击请换算回全图坐标：全图 = 区域原点 + 细节坐标）"
+                            "点击请换算回【全图坐标】：全图 = 区域原点 + 细节坐标）"
                         )
 
                     real_w, real_h = img.size
@@ -246,17 +247,28 @@ class ComputerTool(BaseTool):
                             pass
 
                     img.convert("RGB").save(screenshot_path, "JPEG", quality=70)
-                    # 记录缩放比：点击坐标按图像坐标系输入，执行时据此换算回
-                    # 真实屏幕（模型按看到的图估坐标天然准确，生产实证不记录
-                    # 缩放比时点击系统性偏移到 2/3 处）
-                    ComputerTool._last_scale = saved_w / real_w if real_w else 1.0
-                    scale_note = (
-                        f"真实屏幕 {real_w}x{real_h}，图像 {saved_w}x{saved_h}"
-                        f"（缩放比 {ComputerTool._last_scale:.4f}）。"
-                        "操控电脑工具的坐标按你看到的图像像素坐标输入即可（自动换算）；"
-                        "若改用 execute_python+pyautogui 直接点击，"
-                        "真实坐标 = 图像坐标 ÷ 缩放比。"
-                    ) + region_note
+                    # 点击坐标系锚定最近一张【全图】截图：region 放大仅用于观察，
+                    # 不更新缩放比——否则 region（原生分辨率，scale=1.0）会把后续
+                    # 全图坐标的换算废掉，点偏半个屏幕（生产实证：region 任务栏
+                    # 条带后 click(325,705) 被按 1:1 点到了屏幕中部）
+                    if not region_note:
+                        ComputerTool._last_scale = saved_w / real_w if real_w else 1.0
+                    cur_scale = ComputerTool._last_scale or 1.0
+                    if region_note:
+                        scale_note = (
+                            f"真实屏幕 {real_w}x{real_h}，图像 {saved_w}x{saved_h}"
+                            f"（缩放比 {cur_scale:.4f}）。"
+                            "点击坐标一律按最近一张【全图截图】的坐标系输入"
+                            "（本放大图只用于观察细节）；"
+                        ) + region_note
+                    else:
+                        scale_note = (
+                            f"真实屏幕 {real_w}x{real_h}，图像 {saved_w}x{saved_h}"
+                            f"（缩放比 {cur_scale:.4f}）。"
+                            "操控电脑工具的坐标按你看到的图像像素坐标输入即可（自动换算）；"
+                            "若改用 execute_python+pyautogui 直接点击，"
+                            "真实坐标 = 图像坐标 ÷ 缩放比。"
+                        )
                     import base64
                     try:
                         with open(screenshot_path, "rb") as f:
