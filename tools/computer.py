@@ -17,11 +17,14 @@ GROUNDING_GUIDE = """
 3. 再按格内比例读出坐标（如目标在 x=400 与 x=500 线之间偏右约 60%，则 x≈460）。
 4. 目标小于 60px（任务栏图标/小按钮）时：先 region 放大该区域确认，放大图
    里的网格数字直接就是全图坐标，读数点击即可（无需手动换算）。
-5. 点击后必须重新截图验证状态变化；没有变化就重新读网格定位，禁止原坐标
+5. 精准点击流程（推荐）：mouse_move 移到目标 → 截图看红点（鼠标标记，
+   标注数字是全图坐标）是否对准目标 → 对准了才 mouse_click；没对准就按
+   差值再移一次再验证。
+6. 点击后必须重新截图验证状态变化；没有变化就重新读网格定位，禁止原坐标
    重复盲试。
-6. 多窗口重叠时先看截图结果里的「当前前台窗口」——目标不在前台就先
+7. 多窗口重叠时先看截图结果里的「当前前台窗口」——目标不在前台就先
    alt+tab 或点任务栏图标激活，再截图定位。
-7. 检查应用是否在运行：Windows 进程名常与品牌名不同（微信=WeChat.exe），
+8. 检查应用是否在运行：Windows 进程名常与品牌名不同（微信=WeChat.exe），
    tasklist 后用 findstr 过滤（cmd 没有 grep）。
 """
 
@@ -324,6 +327,43 @@ class ComputerTool(BaseTool):
                         except Exception:
                             pass
 
+                    # 鼠标光标标记：移动后截图确认对准了再点击（hover-verify 范式）。
+                    # 红点+十字标在光标处，标注数字是【全图坐标】——模型对比
+                    # 目标坐标与光标坐标，对准了才 click。
+                    try:
+                        from PIL import ImageDraw, ImageFont
+                        mx_real, my_real = pyautogui.position()
+                        if region_note:
+                            cmx = mx_real - rx
+                            cmy = my_real - ry
+                        else:
+                            cmx = mx_real * full_scale
+                            cmy = my_real * full_scale
+                        # 只画在可视范围内
+                        if 0 <= cmx < saved_w and 0 <= cmy < saved_h:
+                            d2 = ImageDraw.Draw(img, 'RGBA')
+                            mfx = int(round(mx_real * full_scale))
+                            mfy = int(round(my_real * full_scale))
+                            fs2 = max(12, saved_h // 55)
+                            try:
+                                f2 = ImageFont.truetype("arial.ttf", fs2)
+                            except Exception:
+                                try:
+                                    f2 = ImageFont.truetype("DejaVuSans.ttf", fs2)
+                                except Exception:
+                                    f2 = ImageFont.load_default()
+                            r_m = max(8, fs2 // 2)
+                            d2.ellipse([cmx - r_m, cmy - r_m, cmx + r_m, cmy + r_m],
+                                       outline=(255, 0, 0, 255), width=3)
+                            d2.line([(cmx - r_m, cmy), (cmx + r_m, cmy)], fill=(255, 0, 0, 255), width=2)
+                            d2.line([(cmx, cmy - r_m), (cmx, cmy + r_m)], fill=(255, 0, 0, 255), width=2)
+                            # 标注只写坐标数字（"鼠标"等中文在 arial 下渲染成
+                            # 方框，纯数字哪都能显示）
+                            d2.text((cmx + r_m + 4, cmy - fs2 - 2),
+                                    f"({mfx},{mfy})", fill=(255, 0, 0, 255), font=f2)
+                    except Exception:
+                        pass
+
                     img.convert("RGB").save(screenshot_path, "JPEG", quality=80)
 
                     # 前台窗口标题：多窗口重叠时模型经常搞混「当前谁在前面」
@@ -357,6 +397,14 @@ class ComputerTool(BaseTool):
                             "若改用 execute_python+pyautogui 直接点击，"
                             "真实坐标 = 图像坐标 ÷ 缩放比。"
                         )
+                    # 鼠标位置的文本注记（与图上红点标记一致，全图坐标）
+                    try:
+                        _mx, _my = pyautogui.position()
+                        _mvx = int(round(_mx * full_scale))
+                        _mvy = int(round(_my * full_scale))
+                        fg_note += f"；当前鼠标位置(全图坐标): ({_mvx}, {_mvy})"
+                    except Exception:
+                        pass
                     import base64
                     try:
                         with open(screenshot_path, "rb") as f:
@@ -364,6 +412,7 @@ class ComputerTool(BaseTool):
                         img_url = f"data:image/jpeg;base64,{b64}"
                         return (
                             f"Screenshot saved to {screenshot_path}\n"
+                            f"{fg_note}\n"
                             f"{scale_note}\n"
                             f"[SCREENSHOT_DATA:{img_url}]"
                         )
