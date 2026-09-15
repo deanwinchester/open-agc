@@ -201,7 +201,7 @@ class ImageViewTool(BaseTool):
     name: str = "image_view"
     description: str = (
         "读取本地图片并让模型直接看到图像内容（需视觉模型）。"
-        "查看截图、照片、图表、UI 界面时用；max_size 控制长边缩放（默认 1024，省 token）。"
+        "查看截图、照片、图表、UI 界面时用；max_size 控制长边缩放（默认 1920，1080p 不缩放）。"
         "受沙箱限制。"
     )
 
@@ -220,7 +220,7 @@ class ImageViewTool(BaseTool):
                         },
                         "max_size": {
                             "type": "integer",
-                            "description": "长边缩放上限（像素），默认 1024。传 0 表示不缩放。"
+                            "description": "长边缩放上限（像素），默认 1920。传 0 表示不缩放。"
                         }
                     },
                     "required": ["path"]
@@ -236,9 +236,9 @@ class ImageViewTool(BaseTool):
         if not path:
             return "Error: No file path provided."
 
-        raw_max = kwargs.get("max_size", 1024)
+        raw_max = kwargs.get("max_size", 1920)
         if raw_max is None:
-            raw_max = 1024
+            raw_max = 1920
         try:
             max_size = int(raw_max)
         except (TypeError, ValueError):

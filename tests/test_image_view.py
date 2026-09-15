@@ -109,12 +109,14 @@ class TestSandbox:
 
 class TestScaling:
     def test_long_edge_scaled_to_default_1024(self, tmp_path, monkeypatch):
+        """默认长边 1920（图像剪枝保证上下文只有一张图，1080p 原生不缩放，
+        省 token 与点击失真都靠剪枝解决，不再压默认尺寸）。"""
         img = _make_image(tmp_path / "big.png", size=(2000, 1000))
         _write_config(tmp_path, monkeypatch)
 
         result = ImageViewTool().execute(path=img, _agent_context=_vision_agent())
         decoded = _decode_data_url(result)
-        assert decoded.size == (1024, 512)
+        assert decoded.size == (1920, 960)
         assert "2000x1000" in result
         assert "已缩放" in result
 

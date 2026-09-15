@@ -201,7 +201,9 @@ class _LineBuffer:
 
 class ShellTool(BaseTool):
     name: str = "execute_shell"
-    description: str = ("在本机执行 bash 命令。sudo 弹密码框（密码不入会话，失败提示需要密码时重试一次即可触发）；"
+    description: str = ("在本机执行 shell 命令（Windows 上是 cmd——没有 grep/ls/sed，"
+                        "搜索文本用 findstr，列目录用 dir；POSIX 上是 bash）。"
+                        "sudo 弹密码框（密码不入会话，失败提示需要密码时重试一次即可触发）；"
                         "交互程序用 shell_send 续聊。")
 
     def get_openai_schema(self) -> Dict[str, Any]:

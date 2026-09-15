@@ -229,10 +229,14 @@ class ComputerTool(BaseTool):
                         shots_dir, f"screenshot_{_time.strftime('%Y%m%d_%H%M%S')}.jpg")
                     # 全分辨率截图（2K/4K PNG 数 MB）注入会把本地模型的上下文和
                     # 视觉编码打爆（卡死/InternalServerError 实证）——长边压到
-                    # 1280、JPEG q70，体积降到 ~100KB 级，llama.cpp/vLLM 都能秒处。
+                    # 1080p 按 1:1 原生注入（坐标零失真）；JPEG q80 控制体积（~300KB）。
                     img = pyautogui.screenshot()
                     full_w, full_h = img.size
-                    max_edge = 1280
+                    # 仅超大屏（>1920，如 4K）才降采样：图像剪枝已保证上下文只
+                    # 保留最近一张，单张全尺寸不再撑爆上下文；1920x1080 按 1:1
+                    # 原生分辨率注入，坐标零失真、图标清晰（压缩图导致模型
+                    # grounding 不可靠——生产实证）
+                    max_edge = 1920
                     full_scale = max_edge / max(full_w, full_h) if max(full_w, full_h) > max_edge else 1.0
 
                     # 区域放大：region 按全图图像坐标系（缩放视图）给出，换算到
@@ -272,7 +276,16 @@ class ComputerTool(BaseTool):
                         except Exception:
                             pass
 
-                    img.convert("RGB").save(screenshot_path, "JPEG", quality=70)
+                    img.convert("RGB").save(screenshot_path, "JPEG", quality=80)
+
+                    # 前台窗口标题：多窗口重叠时模型经常搞混「当前谁在前面」
+                    # （生产实证：微信窗口被 WPS 盖住后，模型对着 WPS 的搜索框
+                    # 连点三次当微信搜索框）——截图结果里直接告诉它
+                    try:
+                        fg_title = pyautogui.getActiveWindowTitle() or "(无)"
+                    except Exception:
+                        fg_title = "(未知)"
+                    fg_note = f"当前前台窗口: {fg_title}"
                     # 点击坐标系锚定最近一张【全图】截图：region 放大仅用于观察，
                     # 不更新缩放比——否则 region（原生分辨率，scale=1.0）会把后续
                     # 全图坐标的换算废掉，点偏半个屏幕（生产实证：region 任务栏
