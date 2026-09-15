@@ -3037,18 +3037,41 @@ class OpenAGCAgent:
                 import logging as _lg
                 _lg.getLogger("agent").error(
                     "LLM_ERROR at iteration %s: %s", current_iter, _full_err[:4000])
-                if ("parse tool call" in _full_err or "Unterminated" in _full_err
+                # 错误类型 → 人话指引（含可操作的下一步；权限类给设置页链接）。
+                # 前端 MarkdownView 会渲染 markdown 链接，点击直达设置页。
+                _et = type(e).__name__.lower()
+                _em = _full_err.lower()
+                if "authentication" in _et or "permissiondenied" in _et or \
+                        " 401" in _em or "invalid api key" in _em or "invalid_api_key" in _em:
+                    _ehint = ("模型服务拒绝了 API Key（未配置、无效或已过期）。"
+                              "请到 [「设置 → 模型服务」](/app/settings/models) 检查对应厂商的密钥；"
+                              "本地/自部署服务（llamacpp/vLLM 等）一般不校验 Key，随便填个占位值即可")
+                elif "notfound" in _et or "does not exist" in _em:
+                    _ehint = ("模型名不存在或未部署。请到 [「设置 → 模型服务」](/app/settings/models) "
+                              "核对模型名是否与服务商/本地服务一致")
+                elif "ratelimit" in _et or ("rate" in _em and "limit" in _em) or " 429" in _em:
+                    _ehint = ("模型服务限流中（请求过频或配额用尽）。稍等片刻点「继续」重试，"
+                              "或临时切换到其它模型")
+                elif "context" in _em and ("length" in _em or "window" in _em or "exceed" in _em):
+                    _ehint = ("对话超出模型上下文窗口。建议「新建对话」重来，"
+                              "或在设置里调大上下文/换长上下文模型")
+                elif "internalserver" in _et or " 500" in _em:
+                    _ehint = ("模型服务端内部错误（本地服务多为显存不足或推理崩溃）。"
+                              "点「继续」重试；频繁出现请检查模型服务状态或更换模型")
+                elif "apiconnection" in _et or "connection" in _et and "error" in _et:
+                    _ehint = ("连不上模型服务。检查服务地址是否正确、本地模型服务"
+                              "（llamacpp/ollama 等）是否已启动")
+                elif "timeout" in _et or "timeout" in _em:
+                    _ehint = ("模型服务响应超时。本地大模型长上下文推理可能较慢，"
+                              "稍候点「继续」重试；反复超时请检查模型服务负载")
+                elif ("parse tool call" in _full_err or "Unterminated" in _full_err
                         or "Expecting value" in _full_err):
                     _ehint = "模型连续返回了非法格式的工具调用（已自动重试仍失败）"
-                elif "timeout" in _full_err.lower():
-                    _ehint = "模型服务响应超时"
-                elif "rate" in _full_err.lower() and "limit" in _full_err.lower():
-                    _ehint = "模型服务限流"
                 else:
                     _ehint = "模型服务调用失败"
                 error_text = (f"[LLM_ERROR] {_ehint}"
                               f"（{type(e).__name__}，第 {current_iter} 轮）。"
-                              f"点「继续」可重试；反复失败请检查模型配置或更换模型。")
+                              f"点「继续」可重试。")
                 if verbose:
                     print(f"[Agent] {error_text}")
                 # messages 里同样只留净化版：完整 dump 会浪费恢复后的上下文
