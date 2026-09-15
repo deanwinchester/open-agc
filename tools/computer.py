@@ -19,6 +19,8 @@ class ComputerTool(BaseTool):
     # 最近一次截图的缩放比（saved_px / real_px）。点击坐标按截图图像坐标系输入，
     # 换算到真实屏幕坐标 = 输入 / _last_scale。无截图时为 1.0（即按真实坐标）。
     _last_scale: float = 1.0
+    # 最近一张全图截图的视图尺寸（点击越界检查用；region 放大不更新它）
+    _last_view_size: tuple = (0, 0)
     def __init__(self, **data):
         super().__init__(**data)
         # Import pyautogui lazily to avoid issues if not installed or running headlessly
@@ -101,6 +103,24 @@ class ComputerTool(BaseTool):
         s = ComputerTool._last_scale or 1.0
         return int(round(x / s)), int(round(y / s))
 
+    def _check_view_bounds(self, x, y):
+        """点击坐标越界检查（相对最近全图视图）。越界点击比不点更糟——
+        会误关/误操作窗口（生产实证：模型从放大图读了 775 > 720 的 y 值，
+        换算后飞出屏幕触发 fail-safe）。返回 None=合法，否则返回错误文本。"""
+        vw, vh = ComputerTool._last_view_size
+        if not vw or not vh:
+            return None
+        try:
+            fx, fy = float(x), float(y)
+        except (TypeError, ValueError):
+            return f"Error: 坐标必须是数字（收到 {x!r}, {y!r}）"
+        if fx < 0 or fy < 0 or fx > vw or fy > vh:
+            return (f"Error: 坐标 ({x}, {y}) 超出全图视图范围 {vw}x{vh}。"
+                    "若坐标读自 region 放大图，请先换算回全图坐标系："
+                    "全图 = 放大区域原点 + 放大图内坐标；"
+                    "或直接重新截一张全图再点。")
+        return None
+
     @staticmethod
     def _paste_text(text: str) -> str:
         """经剪贴板粘贴文本（中文/非 ASCII/长文本的可靠输入方式）。"""
@@ -145,6 +165,9 @@ class ComputerTool(BaseTool):
                     y = kwargs.get('y')
                     if x is None or y is None:
                         return "Error: x and y coordinates required for mouse_move."
+                    bad = self._check_view_bounds(x, y)
+                    if bad:
+                        return bad
                     rx, ry = self._to_real(x, y)
                     pyautogui.moveTo(rx, ry, duration=0.5)
                     return f"Mouse moved to image-coords ({x}, {y}) -> screen ({rx}, {ry})"
@@ -153,6 +176,9 @@ class ComputerTool(BaseTool):
                     x = kwargs.get('x')
                     y = kwargs.get('y')
                     if x is not None and y is not None:
+                        bad = self._check_view_bounds(x, y)
+                        if bad:
+                            return bad
                         rx, ry = self._to_real(x, y)
                         pyautogui.click(rx, ry)
                         return f"Clicked at image-coords ({x}, {y}) -> screen ({rx}, {ry})"
@@ -253,6 +279,7 @@ class ComputerTool(BaseTool):
                     # 条带后 click(325,705) 被按 1:1 点到了屏幕中部）
                     if not region_note:
                         ComputerTool._last_scale = saved_w / real_w if real_w else 1.0
+                        ComputerTool._last_view_size = (saved_w, saved_h)
                     cur_scale = ComputerTool._last_scale or 1.0
                     if region_note:
                         scale_note = (
