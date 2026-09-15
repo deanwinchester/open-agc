@@ -1080,6 +1080,15 @@ class OpenAGCAgent:
         if hasattr(self, 'full_available_tools'):
             prompt += self._build_tool_list_section()
 
+        # computer_control 已就位时注入坐标定位规程（随 search_available_tools
+        # 唤醒的路径在 discovery.py 也有一份，这里是预启用/分身等直启场景）
+        try:
+            if 'computer_control' in (getattr(self, 'active_tool_names', None) or set()):
+                from tools.computer import GROUNDING_GUIDE
+                prompt += "\n" + GROUNDING_GUIDE
+        except Exception:
+            pass
+
         # 调度者角色提示已在 system_prompt_base 组装阶段按模式注入（见 __init__），
         # 此处不再追加，避免角色指令重复稀释。
 
