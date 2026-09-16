@@ -222,10 +222,17 @@ class TokenBudget:
         if len(rounds) <= self.min_keep_rounds:
             return messages
 
+        # 首个 user 消息（原始任务描述）是任务锚点，任何预算下都不得剪——
+        # 剪掉后恢复出来的上下文没有 user 消息，服务端直接报
+        # "No user query found in messages"（生产实证：长会话恢复链全灭）
+        anchor = next((m for m in messages if m.get("role") == "user"), None)
+
         keep = rounds[-self.min_keep_rounds:]
         kept = [m for r in keep for m in r]
 
         # Flatten the kept rounds back to a message list
+        if anchor is not None and anchor not in kept:
+            kept.insert(0, anchor)
         return kept
 
     def _emergency_prune(self, messages: List[Dict]) -> List[Dict]:
