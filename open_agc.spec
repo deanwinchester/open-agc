@@ -189,7 +189,10 @@ a = Analysis(
         'sklearn', 'scikit-learn',
         # Not needed for packaging
         'pip',
-        'unittest', 'pytest', 'nose', 'doctest',
+        # doctest 不能排除——pygetwindow（前台窗口标题，computer_control 截图
+        # 的「当前前台窗口」标注依赖它）的依赖链 import 它，排除后打包版
+        # 标注恒为「未知」（生产实证）
+        'unittest', 'pytest', 'nose',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
