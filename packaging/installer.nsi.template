@@ -15,11 +15,27 @@ RequestExecutionLevel admin
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
 Section "Install"
+
+  ; ── 运行中检测：安装目录下有进程在跑（主程序或内嵌 WebView2 子进程）时，
+  ; 提示用户并自动关闭，否则 File 覆写会报「无法打开要写入的文件」（生产实证）
+  nsExec::ExecToStack 'powershell -NoProfile -Command "if (Get-Process | Where-Object { $$_.Path -like ''$INSTDIR\*'' }) { exit 1 } else { exit 0 }"'
+  Pop $0
+  ${If} $0 == 1
+    MessageBox MB_ICONEXCLAMATION|MB_YESNO \
+      "检测到 @DISPLAY_NAME@ 正在运行。$\n$\n点「是」自动关闭并继续安装，点「否」中止安装。" \
+      /SD IDYES IDYES +2
+      Abort
+    ; 关闭安装目录下所有进程（含内嵌 WebView2 子进程），等锁释放
+    nsExec::ExecToLog 'powershell -NoProfile -Command "Get-Process | Where-Object { $$_.Path -like ''$INSTDIR\*'' } | Stop-Process -Force"'
+    Sleep 2500
+  ${EndIf}
+
   SetOutPath "$INSTDIR"
   File /r "@PAYLOAD_DIR@\*.*"
   ; 桌面快捷方式（显示名，支持中文）
   CreateShortCut "$DESKTOP\@DISPLAY_NAME@.lnk" "$INSTDIR\@EXE_NAME@"
-  CreateDirectory "$SMPROGRAMS\@APP_NAME%"
+  ; 开始菜单：应用入口（打开方式）+ 卸载
+  CreateDirectory "$SMPROGRAMS\@APP_NAME@"
   CreateShortCut "$SMPROGRAMS\@APP_NAME@\@DISPLAY_NAME@.lnk" "$INSTDIR\@EXE_NAME@"
   CreateShortCut "$SMPROGRAMS\@APP_NAME@\Uninstall.lnk" "$INSTDIR\uninstall.exe"
   WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -28,5 +44,5 @@ SectionEnd
 Section "Uninstall"
   RMDir /r "$INSTDIR"
   Delete "$DESKTOP\@DISPLAY_NAME@.lnk"
-  RMDir /r "$SMPROGRAMS\@APP_NAME%"
+  RMDir /r "$SMPROGRAMS\@APP_NAME@"
 SectionEnd
