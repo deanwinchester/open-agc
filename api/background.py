@@ -1277,6 +1277,20 @@ def _guardian_resume_task(task_id: int) -> None:
                 agent.messages.extend(ctx)
             else:
                 print(f"[Guardian] Resume #{task_id}: no context found")
+            # 用户锚点兜底：恢复出的上下文必须至少含一条 user 消息——
+            # 否则服务端直接报 "No user query found in messages"（生产实证：
+            # 历史快照被预算剪枝吃掉首问后，恢复链整链报这个错）
+            if not any(m.get("role") == "user" for m in agent.messages[1:]):
+                _uq = ""
+                try:
+                    _c = db_connect()
+                    _r = _c.execute("SELECT user_query FROM tasks WHERE id=?", (task_id,)).fetchone()
+                    _uq = (_r[0] if _r else "") or ""
+                    _c.close()
+                except Exception:
+                    pass
+                agent.messages.insert(1, {"role": "user", "content": _uq or "（继续之前的任务）"})
+                print(f"[Guardian] Resume #{task_id}: injected missing user anchor")
         except Exception as e:
             print(f"[Guardian] Resume #{task_id}: context error: {e}")
         update_task_status(task_id, "running")
