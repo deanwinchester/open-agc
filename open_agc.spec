@@ -66,6 +66,12 @@ datas += litellm_datas
 datas += openai_datas
 datas += tiktoken_datas
 
+# rapidocr（截图文字锚点）：.onnx 模型文件在包内，需作为数据文件收集；
+# onnxruntime 的 DLL 由 PyInstaller 官方 hook 处理
+rapidocr_datas = collect_data_files('rapidocr_onnxruntime')
+rapidocr_submodules = collect_submodules('rapidocr_onnxruntime')
+datas += rapidocr_datas
+
 # ---- Linux: pywebview GTK backend (WebKit2 / JavaScriptCore typelibs) ----
 # PyInstaller 自带 hook-gi.repository.Gtk 收集 Gtk/Gdk/Gio/GLib/GObject，
 # 但没有 WebKit2/JavaScriptCore 的 hook，这里用 GiModuleInfo 手动收集。
@@ -142,7 +148,7 @@ a = Analysis(
         'webview.platforms.winforms',
         # Linux GTK 后端（此前缺失，Linux 下 pywebview 找不到 GTK 后端）
         'webview.platforms.gtk',
-    ] + litellm_submodules + tiktoken_submodules + httpx_submodules + httpcore_submodules + anyio_submodules + aiohttp_submodules + gi_hiddenimports + ['tiktoken_ext.openai_public'],
+    ] + litellm_submodules + tiktoken_submodules + httpx_submodules + httpcore_submodules + anyio_submodules + aiohttp_submodules + gi_hiddenimports + rapidocr_submodules + ['tiktoken_ext.openai_public'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
