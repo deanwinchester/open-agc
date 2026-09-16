@@ -165,7 +165,11 @@ a = Analysis(
         'modelscope', 'vllm',
         'gradio', 'spaces',
         'moviepy', 'imageio', 'imageio_ffmpeg',
-        'onnxruntime', 'cpuinfo',
+        # onnxruntime 不能排除——rapidocr（截图文字锚点）的运行时后端，
+        # 排除后收集的 data files 只剩空命名空间包，import 即崩
+        # 「cannot import name GraphOptimizationLevel (unknown location)」
+        #（748 构建实证）。
+        'cpuinfo',
         'numba', 'llvmlite',
         'librosa', 'audioread', 'soxr', 'pooch',
         'kaldiio',
