@@ -16,19 +16,22 @@ RequestExecutionLevel admin
 
 Section "Install"
 
-  ; ── 运行中检测：安装目录下有进程在跑（主程序或内嵌 WebView2 子进程）时，
-  ; 提示用户并自动关闭，否则 File 覆写会报「无法打开要写入的文件」（生产实证）
-  nsExec::ExecToStack 'powershell -NoProfile -Command "if (Get-Process | Where-Object { $$_.Path -like ''$INSTDIR\*'' }) { exit 1 } else { exit 0 }"'
+  ; ── 运行中检测：主程序在跑（用户可见的实例）→ 提示并自动关闭；
+  ; 崩溃残留的 WebView2 僵尸子进程（无窗口但锁文件）→ 静默清理。
+  ; 此前一刀切全报「正在运行」，僵尸进程也触发误报（生产实证）。
+  ; 检测主程序（Open-AGC.exe，不含子进程）
+  nsExec::ExecToStack 'powershell -NoProfile -Command "if (Get-Process -Name ''Open-AGC'' -ErrorAction SilentlyContinue | Where-Object { $$_.Path -like ''$INSTDIR\*'' }) { exit 1 } else { exit 0 }"'
   Pop $0
   ${If} $0 == 1
     MessageBox MB_ICONEXCLAMATION|MB_YESNO \
       "检测到 @DISPLAY_NAME@ 正在运行。$\n$\n点「是」自动关闭并继续安装，点「否」中止安装。" \
       /SD IDYES IDYES +2
       Abort
-    ; 关闭安装目录下所有进程（含内嵌 WebView2 子进程），等锁释放
-    nsExec::ExecToLog 'powershell -NoProfile -Command "Get-Process | Where-Object { $$_.Path -like ''$INSTDIR\*'' } | Stop-Process -Force"'
-    Sleep 2500
   ${EndIf}
+  ; 静默清理安装目录下的所有相关进程（含旧实例崩溃残留的 WebView2 子进程），
+  ; 等文件锁释放
+  nsExec::ExecToLog 'powershell -NoProfile -Command "Get-Process | Where-Object { $$_.Path -like ''$INSTDIR\*'' } | Stop-Process -Force"'
+  Sleep 2000
 
   SetOutPath "$INSTDIR"
   File /r "@PAYLOAD_DIR@\*.*"
