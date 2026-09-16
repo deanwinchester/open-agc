@@ -17,9 +17,10 @@ GROUNDING_GUIDE = """
 3. 再按格内比例读出坐标（如目标在 x=400 与 x=500 线之间偏右约 60%，则 x≈460）。
 4. 目标小于 60px（任务栏图标/小按钮）时：先 region 放大该区域确认，放大图
    里的网格数字直接就是全图坐标，读数点击即可（无需手动换算）。
-5. 精准点击流程（必须执行）：mouse_move 移到目标 → 截图看红点（鼠标标记，
-   标注数字是全图坐标）是否对准目标 → 对准了才 mouse_click；没对准就按
-   差值再移一次再验证。不允许跳过悬停验证直接点击。
+5. 精准点击流程（弱模型为系统强制，禁止跳步）：mouse_move 移到目标 →
+   截图看红点（鼠标标记，标注数字是全图坐标）是否对准目标 → 对准了才
+   mouse_click；没对准就按差值再移一次再验证。悬停验证模式下直接点击
+   会被工具拒绝并提示该流程。
 6. 点击后必须重新截图验证状态变化；没有变化就重新读网格定位，禁止原坐标
    重复盲试。
 7. 多窗口重叠时先看截图结果里的「当前前台窗口」——目标不在前台就先
@@ -35,7 +36,41 @@ _STATE = {
     "scale": 1.0,          # 缩放比（saved_px / real_px）
     "view_size": (0, 0),   # 最近全图视图尺寸（点击越界检查；region 不更新）
     "action": "",          # 最近一次动作（mouse_move/mouse_click）
+    "moved": False,        # 本次点击前是否已 mouse_move（严格模式用）
+    "seen": False,         # mouse_move 后是否已截图确认（严格模式用）
 }
+
+
+def _strict_mode(agent) -> bool:
+    """弱模型强制悬停验证模式。
+
+    config.json:
+      computer_strict_mode: "auto"(默认) | "always" | "never"
+      computer_strict_models: 弱模型名关键词列表（auto 时按包含匹配，
+        默认 ["qwen", "llamacpp/", "ollama/"]）——k3/GPT-4o 等强模型
+        不在列表内，自由操作不受限。
+    """
+    try:
+        import json as _json
+        from core.paths import get_data_path
+        cfg_path = get_data_path("config.json")
+        cfg = {}
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = _json.load(f)
+        mode = str(cfg.get("computer_strict_mode", "auto")).lower()
+        if mode == "always":
+            return True
+        if mode == "never":
+            return False
+        # auto：按模型名匹配弱模型列表
+        model = (getattr(agent, "model", "") or "").lower() if agent else ""
+        if not model:
+            return False
+        keys = cfg.get("computer_strict_models") or ["qwen", "llamacpp/", "ollama/"]
+        return any(str(k).lower() in model for k in keys)
+    except Exception:
+        return False
 
 
 class ComputerTool(BaseTool):
@@ -198,6 +233,8 @@ class ComputerTool(BaseTool):
                     rx, ry = self._to_real(x, y)
                     pyautogui.moveTo(rx, ry, duration=0.5)
                     _STATE["action"] = 'mouse_move'
+                    _STATE["moved"] = True
+                    _STATE["seen"] = False
                     return f"Mouse moved to image-coords ({x}, {y}) -> screen ({rx}, {ry})"
 
                 elif action == 'mouse_click':
@@ -207,6 +244,15 @@ class ComputerTool(BaseTool):
                         bad = self._check_view_bounds(x, y)
                         if bad:
                             return bad
+                        # 严格模式（弱模型）：强制 hover-verify——必须
+                        # mouse_move → screenshot（看到光标位置）→ 才能点击，
+                        # 否则模型直接开点命中率极低（生产实证连点四五个不中）
+                        _agent = kwargs.get('_agent_context')
+                        if _strict_mode(_agent) and not (_STATE["moved"] and _STATE["seen"]):
+                            return ("Error: 当前模型处于悬停验证模式，禁止直接点击。必须按序执行：\n"
+                                    "1. mouse_move 移到目标位置\n"
+                                    "2. screenshot 确认图上红点（光标标记）对准了目标\n"
+                                    "3. 对准后才允许 mouse_click；没对准就再 mouse_move 修正后重复第 2 步")
                         rx, ry = self._to_real(x, y)
                         pyautogui.click(rx, ry)
                         hint = ""
@@ -216,6 +262,8 @@ class ComputerTool(BaseTool):
                             hint = ("（提示：重要目标建议先 mouse_move→截图确认红点对准→"
                                     "再 mouse_click，命中率明显更高）")
                         _STATE["action"] = 'mouse_click'
+                        _STATE["moved"] = False
+                        _STATE["seen"] = False
                         return f"Clicked at image-coords ({x}, {y}) -> screen ({rx}, {ry}){hint}"
                     else:
                         pyautogui.click()
@@ -255,6 +303,10 @@ class ComputerTool(BaseTool):
                     return f"Pressed hotkey: {'+'.join(keys)}"
 
                 elif action == 'screenshot':
+                    # 悬停验证状态：mouse_move 后截图即视为「已确认光标位置」，
+                    # 严格模式下此后才放行 mouse_click
+                    if _STATE["moved"]:
+                        _STATE["seen"] = True
                     # 存到数据目录的 screenshots/ 下（时间戳命名），不能写 CWD——
                     # 在源码运行时 CWD 是项目根目录，会污染仓库（生产实证）。
                     from core.paths import get_data_dir
