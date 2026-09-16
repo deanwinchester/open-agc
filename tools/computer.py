@@ -88,6 +88,15 @@ class ComputerTool(BaseTool):
         # Import pyautogui lazily to avoid issues if not installed or running headlessly
         global pyautogui
         try:
+            # Linux 下 mouseinfo 在 import 时即连接 X（os.environ['DISPLAY']，
+            # 缺失直接 KeyError 崩掉 import）——先探测可用的 display 再导入。
+            # UOS 桌面 X 常在 :1 而非 :0（生产实证）。
+            import sys as _sys
+            if _sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+                try:
+                    os.environ["DISPLAY"] = ComputerTool._pick_linux_display()
+                except Exception:
+                    pass
             import pyautogui
             # Failsafe: moving mouse to corner will abort
             pyautogui.FAILSAFE = True
@@ -217,6 +226,51 @@ class ComputerTool(BaseTool):
         pyautogui.hotkey('ctrl', 'v')
         return f"Pasted {len(text)} chars via clipboard"
 
+    @staticmethod
+    def _pick_linux_display() -> str:
+        """探测可用的 X display。UOS 等桌面 X 可能在 :1 而非 :0（多席位/
+        X 重启过），DISPLAY 缺失或错指时 pyautogui 截图必崩（生产实证：
+        KeyError 'DISPLAY' / DisplayConnectionError Permission denied）。
+        用 python-xlib 逐个试连 :0/:1/:2，第一个通的为准。"""
+        cands = []
+        cur = os.environ.get("DISPLAY")
+        if cur:
+            cands.append(cur)
+        for d in (":0", ":1", ":2"):
+            if d not in cands:
+                cands.append(d)
+        for d in cands:
+            try:
+                from Xlib import display as _xd
+                _xd.Display(d).close()
+                return d
+            except Exception:
+                continue
+        return cur or ":0"
+
+    @staticmethod
+    def _grab_screen():
+        """截图主入口。Linux 上先选对 DISPLAY 再截（见 _pick_linux_display）；
+        pyautogui 失败时兜底 gnome-screenshot 子进程。"""
+        import sys as _sys
+        if not _sys.platform.startswith("linux"):
+            return pyautogui.screenshot()
+        os.environ["DISPLAY"] = ComputerTool._pick_linux_display()
+        try:
+            return pyautogui.screenshot()
+        except Exception as e:
+            import subprocess
+            import tempfile
+            try:
+                from PIL import Image
+                tmp = tempfile.mktemp(suffix=".png")
+                subprocess.run(["gnome-screenshot", "-f", tmp],
+                               check=True, capture_output=True, timeout=15)
+                return Image.open(tmp)
+            except Exception as e2:
+                raise RuntimeError(
+                    f"pyautogui 截图失败（{e}）；gnome-screenshot 兜底也失败（{e2}）")
+
     def execute(self, **kwargs) -> str:
         with self._get_lock():
             action = kwargs.get("action")
@@ -318,7 +372,8 @@ class ComputerTool(BaseTool):
                     # 全分辨率截图（2K/4K PNG 数 MB）注入会把本地模型的上下文和
                     # 视觉编码打爆（卡死/InternalServerError 实证）——长边压到
                     # 1080p 按 1:1 原生注入（坐标零失真）；JPEG q80 控制体积（~300KB）。
-                    img = pyautogui.screenshot()
+                    # Linux 多 display 环境（UOS X 常在 :1）先 _grab_screen 探测再截。
+                    img = self._grab_screen()
                     full_w, full_h = img.size
                     # 仅超大屏（>1920，如 4K）才降采样：图像剪枝已保证上下文只
                     # 保留最近一张，单张全尺寸不再撑爆上下文；1920x1080 按 1:1
