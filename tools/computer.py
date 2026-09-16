@@ -26,9 +26,14 @@ GROUNDING_GUIDE = """
    会被工具拒绝并提示该流程。
 6. 点击后必须重新截图验证状态变化；没有变化就重新读网格定位，禁止原坐标
    重复盲试。
-7. 多窗口重叠时先看截图结果里的「当前前台窗口」——目标不在前台就先
-   alt+tab 或点任务栏图标激活，再截图定位。
-8. 检查应用是否在运行：Windows 进程名常与品牌名不同（微信=WeChat.exe），
+7. 多窗口重叠时先看截图结果里的「当前前台窗口」——目标不在前台就用
+   activate_window 切换（窗口标题关键词，如「微信」），系统直接把它带到
+   前台，比点任务栏图标可靠得多（不需要像素定位）。不知道有哪些窗口时
+   先 list_windows。
+8. 操作特定应用时：activate_window 切到前台后，用 screenshot+window 参数
+   只截该窗口（目标在画面里占比更大、定位更准）；找任务栏图标用
+   screenshot+window="taskbar" 只截任务栏条带。
+9. 检查应用是否在运行：Windows 进程名常与品牌名不同（微信=WeChat.exe），
    tasklist 后用 findstr 过滤（cmd 没有 grep）。
 """
 
@@ -78,10 +83,13 @@ def _strict_mode(agent) -> bool:
 
 class ComputerTool(BaseTool):
     name: str = "computer_control"
-    description: str = ("物理操控本机鼠标和键盘（点击、移动、输入、按键、截图）。"
-                        "browser_automation 等工具无法完成的 GUI 操作才用它。"
+    description: str = ("物理操控本机鼠标和键盘（点击、移动、输入、按键、截图、"
+                        "窗口切换）。browser_automation 等工具无法完成的 GUI 操作才用它。"
+                        "切换窗口用 activate_window（标题关键词直达前台，比点任务栏"
+                        "图标可靠）；操作特定应用时 screenshot+window 只截该窗口，"
+                        "找任务栏图标用 screenshot+window=\"taskbar\"。"
                         "坐标一律按最近一张【全图截图】的像素坐标输入（工具自动按"
-                        "缩放比换算回真实屏幕，无需自己换算）；region 放大截图仅"
+                        "缩放比换算回真实屏幕，无需自己换算）；region/window 放大截图仅"
                         "用于观察细节，不改变点击坐标系。"
                         "输入中文等非 ASCII 文本用 paste_text（剪贴板粘贴），"
                         "type_text 仅适合纯 ASCII。")
@@ -123,7 +131,9 @@ class ComputerTool(BaseTool):
                     "properties": {
                         "action": {
                             "type": "string",
-                            "description": ("mouse_move/mouse_click/type_text/paste_text/press_key/hotkey/screenshot。"
+                            "description": ("mouse_move/mouse_click/type_text/paste_text/press_key/hotkey/"
+                                            "screenshot/list_windows/activate_window。"
+                                            "activate_window 把指定窗口切到前台（比点任务栏图标可靠）；"
                                             "输入中文或非 ASCII 文本必须用 paste_text（剪贴板粘贴），"
                                             "type_text 仅适合纯 ASCII。")
                         },
@@ -144,6 +154,13 @@ class ComputerTool(BaseTool):
                             "items": {"type": "integer"},
                             "description": ("action=screenshot 时的区域裁剪 [x,y,w,h]（全图图像坐标系）。"
                                             "任务栏/小图标看不清时先全图截图，再对可疑区域放大。")
+                        },
+                        "window": {
+                            "type": "string",
+                            "description": ("窗口标题关键词（大小写不敏感的子串匹配，如「微信」）。"
+                                            "action=activate_window 时指定要切到前台的窗口；"
+                                            "action=screenshot 时先把它激活到前台再只截该窗口区域。"
+                                            "特殊值：taskbar=只截任务栏条带（找任务栏图标用）。")
                         },
                         "grid": {
                             "type": "boolean",
@@ -274,6 +291,228 @@ class ComputerTool(BaseTool):
                 raise RuntimeError(
                     f"pyautogui 截图失败（{e}）；gnome-screenshot 兜底也失败（{e2}）")
 
+    @staticmethod
+    def _enum_windows() -> list:
+        """枚举可见顶层窗口。返回 [{hwnd, title, rect=(l,t,r,b), minimized, exe}]，
+        按 Z-order 自上而下（Windows EnumWindows 顺序）。Linux 走 wmctrl -lG。"""
+        import sys as _sys
+        wins = []
+        if _sys.platform.startswith("win"):
+            import win32gui
+            try:
+                import win32process
+                import psutil
+            except Exception:
+                win32process = None
+
+            def _cb(hwnd, acc):
+                try:
+                    if not win32gui.IsWindowVisible(hwnd):
+                        return
+                    t = (win32gui.GetWindowText(hwnd) or "").strip()
+                    if not t:
+                        return
+                    rect = win32gui.GetWindowRect(hwnd)
+                    exe = ""
+                    if win32process:
+                        try:
+                            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                            exe = psutil.Process(pid).name()
+                        except Exception:
+                            pass
+                    acc.append({"hwnd": hwnd, "title": t, "rect": rect,
+                                "minimized": bool(win32gui.IsIconic(hwnd)),
+                                "exe": exe})
+                except Exception:
+                    return
+            win32gui.EnumWindows(_cb, wins)
+        elif _sys.platform.startswith("linux"):
+            wins = ComputerTool._enum_windows_x11()
+        return wins
+
+    @staticmethod
+    def _enum_windows_x11() -> list:
+        """Linux 窗口枚举：优先 wmctrl（解析简单），未安装则 python-xlib 直连
+        X 协议枚举（纯 Python 无额外依赖，UOS 默认不带 wmctrl 也能用）。"""
+        import subprocess
+        try:
+            out = subprocess.run(["wmctrl", "-lG"], capture_output=True,
+                                 timeout=10, text=True)
+            if out.returncode == 0 and out.stdout.strip():
+                wins = []
+                for line in out.stdout.splitlines():
+                    # 格式: 0x03e00003  0  x  y  w  h  host  标题（标题可含空格）
+                    parts = line.split(None, 7)
+                    if len(parts) < 8:
+                        continue
+                    wid, x, y, w, h = parts[0], int(parts[2]), int(parts[3]), \
+                        int(parts[4]), int(parts[5])
+                    wins.append({"hwnd": wid, "title": parts[7].strip(),
+                                 "rect": (x, y, x + w, y + h),
+                                 "minimized": False, "exe": ""})
+                return wins
+        except FileNotFoundError:
+            pass  # wmctrl 未安装，走 xlib
+        return ComputerTool._enum_windows_xlib()
+
+    @staticmethod
+    def _xlib_display():
+        from Xlib import display as _xd
+        os.environ.setdefault("DISPLAY", ComputerTool._pick_linux_display())
+        return _xd.Display(os.environ["DISPLAY"])
+
+    @staticmethod
+    def _enum_windows_xlib() -> list:
+        """python-xlib 枚举 _NET_CLIENT_LIST 里的顶层窗口（标题/几何/隐藏态）。"""
+        from Xlib import X as _X
+        from Xlib import Xatom as _Xatom
+        disp = ComputerTool._xlib_display()
+        root = disp.screen().root
+        a_client = disp.intern_atom("_NET_CLIENT_LIST")
+        a_name = disp.intern_atom("_NET_WM_NAME")
+        a_state = disp.intern_atom("_NET_WM_STATE")
+        a_hidden = disp.intern_atom("_NET_WM_STATE_HIDDEN")
+        prop = root.get_full_property(a_client, _X.AnyPropertyType)
+        wins = []
+        for wid in (prop.value if prop else []):
+            try:
+                w = disp.create_resource_object("window", wid)
+                name = ""
+                p = w.get_full_property(a_name, _X.AnyPropertyType)
+                if p and p.value:
+                    name = p.value.decode("utf-8", "replace") \
+                        if isinstance(p.value, bytes) else str(p.value)
+                if not name:
+                    p2 = w.get_full_property(_Xatom.WM_NAME, _X.AnyPropertyType)
+                    if p2 and p2.value:
+                        name = p2.value.decode("utf-8", "replace") \
+                            if isinstance(p2.value, bytes) else str(p2.value)
+                name = name.strip()
+                if not name:
+                    continue
+                geom = w.get_geometry()
+                top = w.translate_coords(root, 0, 0)
+                states = w.get_full_property(a_state, _X.AnyPropertyType)
+                hidden = bool(states and a_hidden in states.value)
+                x, y = top.x, top.y
+                wins.append({"hwnd": wid, "title": name,
+                             "rect": (x, y, x + geom.width, y + geom.height),
+                             "minimized": hidden, "exe": ""})
+            except Exception:
+                continue
+        disp.close()
+        return wins
+
+    @staticmethod
+    def _match_window(wins: list, query: str):
+        """按标题匹配窗口。优先级：完全相同 > 前缀 > 子串；同级取列表靠前
+        （Windows 枚举按 Z-order，最前的最可能是用户正在用的）。"""
+        q = (query or "").strip().lower()
+        if not q:
+            return None
+        for pred in (lambda t: t == q,
+                     lambda t: t.startswith(q),
+                     lambda t: q in t):
+            for w in wins:
+                if pred(w["title"].lower()):
+                    return w
+        return None
+
+    @staticmethod
+    def _activate_win(w: dict):
+        """把窗口带到前台（最小化先还原）。SetForegroundWindow 有前台锁，
+        经典解法：先送一次 Alt 按下/松开拿到前台权限再调用。"""
+        import sys as _sys
+        if _sys.platform.startswith("win"):
+            import ctypes
+            import win32con
+            import win32gui
+            hwnd = w["hwnd"]
+            if w.get("minimized"):
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                time.sleep(0.3)
+            try:
+                ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)  # ALT down
+                win32gui.SetForegroundWindow(hwnd)
+            finally:
+                ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)  # KEYUP
+        else:
+            ComputerTool._activate_win_x11(w)
+        time.sleep(0.4)  # 等窗口重绘，紧跟的截图才不会截到残影
+
+    @staticmethod
+    def _activate_win_x11(w: dict):
+        """Linux 窗口激活：优先 wmctrl，未安装则 python-xlib 发
+        _NET_ACTIVE_WINDOW 客户端消息（EWMH 标准，KDE/GNOME/深度 DDE 都认），
+        最小化窗口由窗口管理器自动还原，再 raise 到顶层。"""
+        import subprocess
+        try:
+            out = subprocess.run(["wmctrl", "-i", "-a", str(w["hwnd"])],
+                                 capture_output=True, timeout=10)
+            if out.returncode == 0:
+                return
+        except FileNotFoundError:
+            pass  # wmctrl 未安装，走 xlib
+        from Xlib import X as _X
+        from Xlib import protocol as _proto
+        disp = ComputerTool._xlib_display()
+        root = disp.screen().root
+        win = disp.create_resource_object("window", w["hwnd"])
+        a_active = disp.intern_atom("_NET_ACTIVE_WINDOW")
+        data = [2, _X.CurrentTime, 0, 0, 0]  # source=2 表示直接用户请求
+        ev = _proto.event.ClientMessage(window=win, client_type=a_active,
+                                        data=(32, data))
+        mask = _X.SubstructureRedirectMask | _X.SubstructureNotifyMask
+        root.send_event(ev, event_mask=mask)
+        try:
+            win.configure(stack_mode=_X.Above)
+        except Exception:
+            pass
+        disp.flush()
+        disp.close()
+
+    @staticmethod
+    def _taskbar_rect():
+        """Windows 任务栏矩形（真实屏幕坐标）。失败返回 None。"""
+        import sys as _sys
+        if not _sys.platform.startswith("win"):
+            return None
+        try:
+            import win32gui
+            hwnd = win32gui.FindWindow("Shell_TrayWnd", None)
+            return win32gui.GetWindowRect(hwnd) if hwnd else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_window_list(wins: list, limit: int = 30) -> str:
+        lines = []
+        for w in wins[:limit]:
+            l, t, r, b = w["rect"]
+            flag = "(最小化)" if w.get("minimized") else ""
+            exe = f" [{w['exe']}]" if w.get("exe") else ""
+            lines.append(f"- {w['title']}{exe} 位置({l},{t}) "
+                         f"尺寸({r - l}x{b - t}){flag}")
+        if len(wins) > limit:
+            lines.append(f"... 共 {len(wins)} 个，仅列前 {limit} 个")
+        return "\n".join(lines) if lines else "(无可见窗口)"
+
+    def _find_and_activate(self, query: str):
+        """找窗口并切前台，返回激活后的最新窗口信息（rect 可能变化，重新枚举）。
+        找不到返回错误文本（字符串）。"""
+        wins = self._enum_windows()
+        w = self._match_window(wins, query)
+        if not w:
+            return (f"Error: 没找到标题包含「{query}」的窗口。当前可见窗口：\n"
+                    + self._format_window_list(wins))
+        self._activate_win(w)
+        # 最小化还原/尺寸变化后 rect 会变，重新枚举拿最新位置
+        for w2 in self._enum_windows():
+            if w2["hwnd"] == w["hwnd"]:
+                return w2
+        return w
+
+
     def execute(self, **kwargs) -> str:
         with self._get_lock():
             action = kwargs.get("action")
@@ -359,6 +598,26 @@ class ComputerTool(BaseTool):
                     pyautogui.hotkey(*keys)
                     return f"Pressed hotkey: {'+'.join(keys)}"
 
+                elif action == 'list_windows':
+                    wins = self._enum_windows()
+                    return ("可见窗口列表（Z-order 自上而下）：\n"
+                            + self._format_window_list(wins))
+
+                elif action == 'activate_window':
+                    q = kwargs.get('window') or kwargs.get('text')
+                    if not q:
+                        return "Error: activate_window 需要 window 参数（窗口标题关键词，如「微信」）。"
+                    res = self._find_and_activate(str(q))
+                    if isinstance(res, str):
+                        return res
+                    l, t, r, b = res["rect"]
+                    # 切了窗口，之前的悬停验证上下文作废（画面已变）
+                    _STATE["moved"] = False
+                    _STATE["seen"] = False
+                    return (f"已切换到前台: {res['title']} "
+                            f"位置({l},{t}) 尺寸({r - l}x{b - t})。"
+                            "请重新截图确认窗口状态后再操作。")
+
                 elif action == 'screenshot':
                     # 悬停验证状态：mouse_move 后截图即视为「已确认光标位置」，
                     # 严格模式下此后才放行 mouse_click
@@ -385,14 +644,37 @@ class ComputerTool(BaseTool):
                     max_edge = 1920
                     full_scale = max_edge / max(full_w, full_h) if max(full_w, full_h) > max_edge else 1.0
 
+                    # window 参数：只截指定窗口（先激活到前台，否则截到的是
+                    # 上层遮挡窗口的内容）；window="taskbar" 只截任务栏条带。
+                    # 内部转成 region 走同一套放大/标注逻辑（标注仍显示全图
+                    # 坐标，点击坐标系不变）
+                    win_query = kwargs.get('window')
+                    win_region = None
+                    if win_query:
+                        q = str(win_query).strip()
+                        if q.lower() == "taskbar":
+                            tb = self._taskbar_rect()
+                            if not tb:
+                                return "Error: 获取任务栏位置失败（仅 Windows 支持 window=\"taskbar\"）"
+                            win_region = tb
+                        else:
+                            res = self._find_and_activate(q)
+                            if isinstance(res, str):
+                                return res
+                            win_region = res["rect"]
+
                     # 区域放大：region 按全图图像坐标系（缩放视图）给出，换算到
                     # 真实坐标裁剪，裁剪图不再降采样——任务栏/小图标放大到原生
                     # 分辨率，模型才能读准（全图视图里 20px 图标根本点不准，生产实证）
                     region = kwargs.get('region')
+                    if win_region and not region:
+                        l, t, r, b = win_region
+                        region = [int(l * full_scale), int(t * full_scale),
+                                  int((r - l) * full_scale), int((b - t) * full_scale)]
                     region_note = ""
                     if region and isinstance(region, (list, tuple)) and len(region) == 4:
-                        rx = int(region[0] / full_scale)
-                        ry = int(region[1] / full_scale)
+                        rx = max(0, int(region[0] / full_scale))
+                        ry = max(0, int(region[1] / full_scale))
                         rw = int(region[2] / full_scale)
                         rh = int(region[3] / full_scale)
                         img = img.crop((rx, ry, min(rx + rw, full_w), min(ry + rh, full_h)))
