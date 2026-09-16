@@ -11,7 +11,10 @@ from tools.base import BaseTool
 # 自由发挥估像素会偏差数百像素（生产实证），显式规程把它变成读数题。
 GROUNDING_GUIDE = """
 --- 电脑操控坐标定位规程（必读，按此执行）---
-点击坐标禁止凭感觉估计，必须走以下流程：
+点击坐标禁止凭感觉估计，优先用【文字锚点】定位：
+0. 截图结果里有「文字锚点(全图坐标)」清单（OCR 给出的文字+精确坐标）——
+   要找按钮/输入框/联系人时，先从锚点里找它的文字，直接用锚点坐标点击，
+   这比看图像估像素可靠得多。
 1. 先全图截图，看清红色网格：四条边上的红色数字就是坐标刻度。
 2. 定位目标在图上位于【哪两条竖线】与【哪两条横线】之间，先回答这个问题。
 3. 再按格内比例读出坐标（如目标在 x=400 与 x=500 线之间偏右约 60%，则 x≈460）。
@@ -526,6 +529,35 @@ class ComputerTool(BaseTool):
                         fg_note += f"；当前鼠标位置(全图坐标): ({_mvx}, {_mvy})"
                     except Exception:
                         pass
+                    # OCR 文字锚点：弱视觉模型按文字找目标（坐标由 OCR 精确
+                    # 给出，与模型 grounding 能力脱钩——qwen3.8 实测视觉定位
+                    # 偏差数百像素，OCR 锚点偏差 <10px）。坐标换算到点击用的
+                    # 全图坐标系（region 放大图：全图=区域原点+图内坐标×缩放比）。
+                    # 性能：CPU 上每次 ~9s，默认只在悬停验证模式（弱模型）下跑；
+                    # config computer_ocr_anchors = strict(默认)/always/never。
+                    ocr_note = ""
+                    try:
+                        import json as _json
+                        from core.paths import get_data_path as _gdp
+                        _ocr_mode = "strict"
+                        try:
+                            _c = _json.load(open(_gdp("config.json"), encoding="utf-8"))
+                            _ocr_mode = str(_c.get("computer_ocr_anchors", "strict")).lower()
+                        except Exception:
+                            pass
+                        _run_ocr = (_ocr_mode == "always") or (
+                            _ocr_mode != "never" and _strict_mode(kwargs.get('_agent_context')))
+                        if _run_ocr:
+                            from tools.screen_ocr import ocr_anchors, format_anchors
+                            _anchors = ocr_anchors(screenshot_path)
+                            if region_note:
+                                ocr_note = format_anchors(
+                                    _anchors, view_scale=full_scale,
+                                    offset=(region[0], region[1]))
+                            else:
+                                ocr_note = format_anchors(_anchors, view_scale=1.0)
+                    except Exception as _ocr_e:
+                        print(f"[ComputerTool] OCR anchors failed: {_ocr_e}")
                     import base64
                     try:
                         with open(screenshot_path, "rb") as f:
@@ -535,7 +567,8 @@ class ComputerTool(BaseTool):
                             f"Screenshot saved to {screenshot_path}\n"
                             f"{fg_note}\n"
                             f"{scale_note}\n"
-                            f"[SCREENSHOT_DATA:{img_url}]"
+                            + (f"{ocr_note}\n" if ocr_note else "")
+                            + f"[SCREENSHOT_DATA:{img_url}]"
                         )
                     except Exception:
                         return f"Screenshot saved to {screenshot_path}"
