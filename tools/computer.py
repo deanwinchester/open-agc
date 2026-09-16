@@ -17,9 +17,9 @@ GROUNDING_GUIDE = """
 3. 再按格内比例读出坐标（如目标在 x=400 与 x=500 线之间偏右约 60%，则 x≈460）。
 4. 目标小于 60px（任务栏图标/小按钮）时：先 region 放大该区域确认，放大图
    里的网格数字直接就是全图坐标，读数点击即可（无需手动换算）。
-5. 精准点击流程（推荐）：mouse_move 移到目标 → 截图看红点（鼠标标记，
+5. 精准点击流程（必须执行）：mouse_move 移到目标 → 截图看红点（鼠标标记，
    标注数字是全图坐标）是否对准目标 → 对准了才 mouse_click；没对准就按
-   差值再移一次再验证。
+   差值再移一次再验证。不允许跳过悬停验证直接点击。
 6. 点击后必须重新截图验证状态变化；没有变化就重新读网格定位，禁止原坐标
    重复盲试。
 7. 多窗口重叠时先看截图结果里的「当前前台窗口」——目标不在前台就先
@@ -27,6 +27,16 @@ GROUNDING_GUIDE = """
 8. 检查应用是否在运行：Windows 进程名常与品牌名不同（微信=WeChat.exe），
    tasklist 后用 findstr 过滤（cmd 没有 grep）。
 """
+
+# 工具共享状态（模块级——绝不能放 BaseModel 类属性：pydantic v2 会把
+# 下划线开头的类属性全部转成 ModelPrivateAttr 描述符，未赋值首次使用即崩
+# 「cannot unpack ModelPrivateAttr」，生产实证）
+_STATE = {
+    "scale": 1.0,          # 缩放比（saved_px / real_px）
+    "view_size": (0, 0),   # 最近全图视图尺寸（点击越界检查；region 不更新）
+    "action": "",          # 最近一次动作（mouse_move/mouse_click）
+}
+
 
 class ComputerTool(BaseTool):
     name: str = "computer_control"
@@ -38,11 +48,6 @@ class ComputerTool(BaseTool):
                         "输入中文等非 ASCII 文本用 paste_text（剪贴板粘贴），"
                         "type_text 仅适合纯 ASCII。")
 
-    # 最近一次截图的缩放比（saved_px / real_px）。点击坐标按截图图像坐标系输入，
-    # 换算到真实屏幕坐标 = 输入 / _last_scale。无截图时为 1.0（即按真实坐标）。
-    _last_scale: float = 1.0
-    # 最近一张全图截图的视图尺寸（点击越界检查用；region 放大不更新它）
-    _last_view_size: tuple = (0, 0)
     def __init__(self, **data):
         super().__init__(**data)
         # Import pyautogui lazily to avoid issues if not installed or running headlessly
@@ -122,14 +127,14 @@ class ComputerTool(BaseTool):
 
     def _to_real(self, x: float, y: float) -> tuple:
         """图像坐标系 → 真实屏幕坐标（按最近截图的缩放比换算）。"""
-        s = ComputerTool._last_scale or 1.0
+        s = _STATE["scale"] or 1.0
         return int(round(x / s)), int(round(y / s))
 
     def _check_view_bounds(self, x, y):
         """点击坐标越界检查（相对最近全图视图）。越界点击比不点更糟——
         会误关/误操作窗口（生产实证：模型从放大图读了 775 > 720 的 y 值，
         换算后飞出屏幕触发 fail-safe）。返回 None=合法，否则返回错误文本。"""
-        vw, vh = ComputerTool._last_view_size
+        vw, vh = _STATE["view_size"]
         if not vw or not vh:
             return None
         try:
@@ -192,6 +197,7 @@ class ComputerTool(BaseTool):
                         return bad
                     rx, ry = self._to_real(x, y)
                     pyautogui.moveTo(rx, ry, duration=0.5)
+                    _STATE["action"] = 'mouse_move'
                     return f"Mouse moved to image-coords ({x}, {y}) -> screen ({rx}, {ry})"
 
                 elif action == 'mouse_click':
@@ -203,9 +209,17 @@ class ComputerTool(BaseTool):
                             return bad
                         rx, ry = self._to_real(x, y)
                         pyautogui.click(rx, ry)
-                        return f"Clicked at image-coords ({x}, {y}) -> screen ({rx}, {ry})"
+                        hint = ""
+                        if _STATE["action"] != 'mouse_move':
+                            # 没有悬停验证就点——弱模型容易直接开点打偏（生产实证），
+                            # 结果里轻推一下 hover-verify 流程
+                            hint = ("（提示：重要目标建议先 mouse_move→截图确认红点对准→"
+                                    "再 mouse_click，命中率明显更高）")
+                        _STATE["action"] = 'mouse_click'
+                        return f"Clicked at image-coords ({x}, {y}) -> screen ({rx}, {ry}){hint}"
                     else:
                         pyautogui.click()
+                        _STATE["action"] = 'mouse_click'
                         return "Clicked at current location"
 
                 elif action == 'type_text':
@@ -379,9 +393,9 @@ class ComputerTool(BaseTool):
                     # 全图坐标的换算废掉，点偏半个屏幕（生产实证：region 任务栏
                     # 条带后 click(325,705) 被按 1:1 点到了屏幕中部）
                     if not region_note:
-                        ComputerTool._last_scale = saved_w / real_w if real_w else 1.0
-                        ComputerTool._last_view_size = (saved_w, saved_h)
-                    cur_scale = ComputerTool._last_scale or 1.0
+                        _STATE["scale"] = saved_w / real_w if real_w else 1.0
+                        _STATE["view_size"] = (saved_w, saved_h)
+                    cur_scale = _STATE["scale"] or 1.0
                     if region_note:
                         scale_note = (
                             f"真实屏幕 {real_w}x{real_h}，图像 {saved_w}x{saved_h}"
