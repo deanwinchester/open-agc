@@ -70,7 +70,11 @@ datas += tiktoken_datas
 # onnxruntime 的 DLL 由 PyInstaller 官方 hook 处理
 rapidocr_datas = collect_data_files('rapidocr_onnxruntime')
 rapidocr_submodules = collect_submodules('rapidocr_onnxruntime')
-datas += rapidocr_datas
+# onnxruntime 本体（DLL 在包目录内，官方 hook 版本不定——数据文件形式全量
+# 收集最稳；生产实证打包版 ModuleNotFoundError: onnxruntime）
+onnxrt_datas = collect_data_files('onnxruntime')
+onnxrt_submodules = collect_submodules('onnxruntime')
+datas += rapidocr_datas + onnxrt_datas
 
 # ---- Linux: pywebview GTK backend (WebKit2 / JavaScriptCore typelibs) ----
 # PyInstaller 自带 hook-gi.repository.Gtk 收集 Gtk/Gdk/Gio/GLib/GObject，
@@ -148,7 +152,7 @@ a = Analysis(
         'webview.platforms.winforms',
         # Linux GTK 后端（此前缺失，Linux 下 pywebview 找不到 GTK 后端）
         'webview.platforms.gtk',
-    ] + litellm_submodules + tiktoken_submodules + httpx_submodules + httpcore_submodules + anyio_submodules + aiohttp_submodules + gi_hiddenimports + rapidocr_submodules + ['tiktoken_ext.openai_public'],
+    ] + litellm_submodules + tiktoken_submodules + httpx_submodules + httpcore_submodules + anyio_submodules + aiohttp_submodules + gi_hiddenimports + rapidocr_submodules + onnxrt_submodules + ['tiktoken_ext.openai_public'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
