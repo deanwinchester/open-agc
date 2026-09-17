@@ -14,9 +14,7 @@ GROUNDING_GUIDE = """
 点击坐标禁止凭感觉估计，按以下优先级定位：
 0a. 【文字锚点】：截图结果里的「文字锚点(全图坐标)」清单（OCR 精确坐标）——
     目标带文字（按钮/输入框/联系人名）时直接从中取坐标点击，最可靠。
-0b. 【locate 定位服务】：无文字的图标/图形目标，用 locate 动作（target 描述 +
-    click=true）让专用定位模型给坐标并直接点击，一次完成。
-0c. 都没有再读网格估坐标。
+{locate_item}0c. 都没有再读网格估坐标。
 1. 先全图截图，看清红色网格：四条边上的红色数字就是坐标刻度。
 2. 定位目标在图上位于【哪两条竖线】与【哪两条横线】之间，先回答这个问题。
 3. 再按格内比例读出坐标（如目标在 x=400 与 x=500 线之间偏右约 60%，则 x≈460）。
@@ -38,6 +36,23 @@ GROUNDING_GUIDE = """
 9. 检查应用是否在运行：Windows 进程名常与品牌名不同（微信=WeChat.exe），
    tasklist 后用 findstr 过滤（cmd 没有 grep）。
 """
+
+_LOCATE_ITEM = """0b. 【locate 定位服务】：无文字的图标/图形目标，用 locate 动作（target 描述 +
+    click=true）让专用定位模型给坐标并直接点击，一次完成。目标在某应用
+    窗口内时带 window 参数（如 window="微信"）——裁剪后小目标定位明显更准。
+"""
+
+
+def get_grounding_guide() -> str:
+    """定位规程按定位服务配置动态生成——未配置 grounder 时不提 locate
+    （提了模型就会去调，得到一个「未配置」错误，纯干扰）。"""
+    try:
+        from tools.screen_grounder import grounder_ready
+        ready = grounder_ready()
+    except Exception:
+        ready = False
+    return GROUNDING_GUIDE.replace("{locate_item}", _LOCATE_ITEM if ready else "")
+
 
 # 工具共享状态（模块级——绝不能放 BaseModel 类属性：pydantic v2 会把
 # 下划线开头的类属性全部转成 ModelPrivateAttr 描述符，未赋值首次使用即崩
@@ -123,6 +138,81 @@ class ComputerTool(BaseTool):
                   "Install python3-tk or disable computer_control tool.")
 
     def get_openai_schema(self) -> Dict[str, Any]:
+        # 定位服务（grounder）未配置时 locate 不注入 schema——模型看不到
+        # 就不会去调，避免换来一个「未配置」错误（用户明确要求不注入）
+        try:
+            from tools.screen_grounder import grounder_ready
+            grounder_on = grounder_ready()
+        except Exception:
+            grounder_on = False
+        action_desc = ("mouse_move/mouse_click/type_text/paste_text/press_key/hotkey/"
+                       "screenshot/list_windows/activate_window")
+        if grounder_on:
+            action_desc += ("/locate。"
+                            "locate 用专用定位模型把自然语言目标（target 参数）翻译成"
+                            "坐标（配 click=true 直接点击），找图标/按钮优先用它；")
+        else:
+            action_desc += "。"
+        action_desc += ("activate_window 把指定窗口切到前台（比点任务栏图标可靠）；"
+                        "输入中文或非 ASCII 文本必须用 paste_text（剪贴板粘贴），"
+                        "type_text 仅适合纯 ASCII。")
+        props = {
+            "action": {
+                "type": "string",
+                "description": action_desc,
+            },
+            "x": {
+                "type": "integer",
+                "description": "鼠标操作的 X 坐标。"
+            },
+            "y": {
+                "type": "integer",
+                "description": "鼠标操作的 Y 坐标。"
+            },
+            "text": {
+                "type": "string",
+                "description": "action=type_text/paste_text 时要输入/粘贴的文本。"
+            },
+            "region": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": ("action=screenshot 时的区域裁剪 [x,y,w,h]（全图图像坐标系）。"
+                                "任务栏/小图标看不清时先全图截图，再对可疑区域放大。")
+            },
+            "window": {
+                "type": "string",
+                "description": ("窗口标题关键词（大小写不敏感的子串匹配，如「微信」）。"
+                                "action=activate_window 时指定要切到前台的窗口；"
+                                "action=screenshot 时先把它激活到前台再只截该窗口区域"
+                                + ("；action=locate 时先激活并裁剪该窗口再定位（密集界面里"
+                                   "小目标明显更准）" if grounder_on else "")
+                                + "。特殊值：taskbar=只截任务栏条带（找任务栏图标用）。")
+            },
+            "grid": {
+                "type": "boolean",
+                "description": "action=screenshot 时是否叠加坐标网格（默认 true，便于读坐标）。"
+            },
+            "key": {
+                "type": "string",
+                "description": "action=press_key 时的按键名（如 enter、tab、esc）。"
+            },
+            "keys": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "action=hotkey 时的组合键列表（如 ['command', 'c']）。"
+            }
+        }
+        if grounder_on:
+            props["target"] = {
+                "type": "string",
+                "description": ("action=locate 时的目标描述，越具体越准，如"
+                                "「微信聊天列表里的搜索框」「任务栏绿色的微信图标」。")
+            }
+            props["click"] = {
+                "type": "boolean",
+                "description": ("action=locate 时是否定位后直接点击（默认 false，"
+                                "只返回坐标）。已信任定位结果时设 true 一步完成。")
+            }
         return {
             "type": "function",
             "function": {
@@ -130,66 +220,7 @@ class ComputerTool(BaseTool):
                 "description": self.description,
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "description": ("mouse_move/mouse_click/type_text/paste_text/press_key/hotkey/"
-                                            "screenshot/list_windows/activate_window/locate。"
-                                            "locate 用专用定位模型把自然语言目标（target 参数）翻译成"
-                                            "坐标（配 click=true 直接点击），找图标/按钮优先用它；"
-                                            "activate_window 把指定窗口切到前台（比点任务栏图标可靠）；"
-                                            "输入中文或非 ASCII 文本必须用 paste_text（剪贴板粘贴），"
-                                            "type_text 仅适合纯 ASCII。")
-                        },
-                        "x": {
-                            "type": "integer",
-                            "description": "鼠标操作的 X 坐标。"
-                        },
-                        "y": {
-                            "type": "integer",
-                            "description": "鼠标操作的 Y 坐标。"
-                        },
-                        "text": {
-                            "type": "string",
-                            "description": "action=type_text/paste_text 时要输入/粘贴的文本。"
-                        },
-                        "region": {
-                            "type": "array",
-                            "items": {"type": "integer"},
-                            "description": ("action=screenshot 时的区域裁剪 [x,y,w,h]（全图图像坐标系）。"
-                                            "任务栏/小图标看不清时先全图截图，再对可疑区域放大。")
-                        },
-                        "window": {
-                            "type": "string",
-                            "description": ("窗口标题关键词（大小写不敏感的子串匹配，如「微信」）。"
-                                            "action=activate_window 时指定要切到前台的窗口；"
-                                            "action=screenshot 时先把它激活到前台再只截该窗口区域。"
-                                            "特殊值：taskbar=只截任务栏条带（找任务栏图标用）。")
-                        },
-                        "target": {
-                            "type": "string",
-                            "description": ("action=locate 时的目标描述，越具体越准，如"
-                                            "「微信聊天列表里的搜索框」「任务栏绿色的微信图标」。")
-                        },
-                        "click": {
-                            "type": "boolean",
-                            "description": ("action=locate 时是否定位后直接点击（默认 false，"
-                                            "只返回坐标）。已信任定位结果时设 true 一步完成。")
-                        },
-                        "grid": {
-                            "type": "boolean",
-                            "description": "action=screenshot 时是否叠加坐标网格（默认 true，便于读坐标）。"
-                        },
-                        "key": {
-                            "type": "string",
-                            "description": "action=press_key 时的按键名（如 enter、tab、esc）。"
-                        },
-                        "keys": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "action=hotkey 时的组合键列表（如 ['command', 'c']）。"
-                        }
-                    },
+                    "properties": props,
                     "required": ["action"]
                 }
             }
@@ -639,18 +670,38 @@ class ComputerTool(BaseTool):
                                 "（目标的自然语言描述，如「搜索框」「微信图标」）。")
                     # 专用定位模型（UI-TARS 等）把文字描述翻译成坐标——弱模型
                     # 自己估像素偏差数百像素（生产实证），定位服务是系统级精度。
+                    # window 参数：先激活目标窗口再截图裁剪——顺序不能反，
+                    # 先截后激活会截到上层遮挡窗口的内容（密集全屏里小元素
+                    # 定位会漂移/认错，实证：微信搜索框在全屏里被认成浏览器
+                    # 的搜索框，裁剪后全中）；裁剪坐标加偏移换算回全图
+                    crop_ox = crop_oy = 0
+                    win_rect = None
+                    win_query = kwargs.get('window')
+                    if win_query:
+                        res_w = self._find_and_activate(str(win_query))
+                        if isinstance(res_w, str):
+                            return res_w
+                        win_rect = res_w["rect"]
                     img = self._grab_screen()
                     full_w, full_h = img.size
                     ratio = 1.0
                     if max(full_w, full_h) > 1920:
                         ratio = 1920 / max(full_w, full_h)
                         img = img.resize((int(full_w * ratio), int(full_h * ratio)))
+                    if win_rect:
+                        l, t, r_, b_ = win_rect
+                        crop_ox = max(0, int(l * ratio))
+                        crop_oy = max(0, int(t * ratio))
+                        img = img.crop((crop_ox, crop_oy,
+                                        min(int(r_ * ratio), img.size[0]),
+                                        min(int(b_ * ratio), img.size[1])))
                     from tools.screen_grounder import locate_element
                     res = locate_element(img, str(target))
                     if isinstance(res, str):
                         return res
-                    # 图像像素 → 真实屏幕 → 全图视图坐标（与点击坐标系一致）
-                    rx, ry = int(res[0] / ratio), int(res[1] / ratio)
+                    # 裁剪内坐标 → 全图图像像素 → 真实屏幕 → 全图视图坐标
+                    px, py = res[0] + crop_ox, res[1] + crop_oy
+                    rx, ry = int(px / ratio), int(py / ratio)
                     cur_scale = _STATE["scale"] or 1.0
                     vx, vy = int(round(rx * cur_scale)), int(round(ry * cur_scale))
                     bad = self._check_view_bounds(vx, vy)

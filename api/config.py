@@ -66,6 +66,8 @@ def _merge_build_defaults(cfg: dict) -> bool:
     规则：
     - update_manifest_url：升级通道是构建属性而非用户偏好——模板有就跟随
     - ui_theme.app_name：仅在用户未设置（空/缺）时填充，尊重用户自定义
+    - computer_grounder：定位服务端点是构建预置（zxs 线默认指向内网 P800），
+      仅在用户未设置（空/缺）时填充，尊重用户通过设置页的修改
 
     返回是否有变更（有则调用方落盘）。
     """
@@ -92,6 +94,12 @@ def _merge_build_defaults(cfg: dict) -> bool:
         if isinstance(ui, dict) and not (ui.get("app_name") or "").strip():
             ui["app_name"] = tmpl_name
             changed = True
+
+    tmpl_grounder = defaults.get("computer_grounder") or {}
+    if isinstance(tmpl_grounder, dict) and tmpl_grounder.get("base_url") \
+            and tmpl_grounder.get("model") and not cfg.get("computer_grounder"):
+        cfg["computer_grounder"] = dict(tmpl_grounder)
+        changed = True
     return changed
 
 
@@ -118,7 +126,7 @@ def load_config() -> dict:
                 if _merge_build_defaults(cfg):
                     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                         json.dump(cfg, f, ensure_ascii=False, indent=2)
-                    print("[Config] merged build defaults (update_manifest_url/ui_theme.app_name)")
+                    print("[Config] merged build defaults (update_manifest_url/ui_theme.app_name/computer_grounder)")
             except Exception as e:
                 print(f"[Config] build defaults merge failed: {e}")
             return cfg

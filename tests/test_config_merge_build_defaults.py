@@ -59,6 +59,27 @@ class TestMergeBuildDefaults:
         cfg = cfgmod.load_config()
         assert cfg["update_manifest_url"] == "http://172.16.100.81:8080/release/version.json"
 
+    def test_grounder_filled_when_missing(self, merge_env):
+        """computer_grounder 是构建预置（zxs 线指向内网定位服务），
+        用户未配置时从模板填充。"""
+        cfg_path, tmpl_path = merge_env
+        _write(cfg_path, {"api_keys": {}})
+        _write(tmpl_path, {"computer_grounder": {
+            "base_url": "http://192.168.148.200:8003/v1",
+            "api_key": "", "model": "UI-TARS-1.5-7B", "coord_mode": "abs"}})
+        cfg = cfgmod.load_config()
+        assert cfg["computer_grounder"]["model"] == "UI-TARS-1.5-7B"
+
+    def test_grounder_user_config_preserved(self, merge_env):
+        """用户已通过设置页配置过 grounder 时不被模板覆盖。"""
+        cfg_path, tmpl_path = merge_env
+        _write(cfg_path, {"computer_grounder": {
+            "base_url": "http://my-host:9000/v1", "api_key": "k", "model": "M"}})
+        _write(tmpl_path, {"computer_grounder": {
+            "base_url": "http://192.168.148.200:8003/v1", "model": "UI-TARS-1.5-7B"}})
+        cfg = cfgmod.load_config()
+        assert cfg["computer_grounder"]["base_url"] == "http://my-host:9000/v1"
+
     def test_no_template_no_change(self, merge_env, monkeypatch):
         cfg_path, _ = merge_env
         monkeypatch.setattr(cfgmod, "_TEMPLATE_CONFIG", str(cfg_path.parent / "nonexistent.json"))
