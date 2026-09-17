@@ -217,7 +217,15 @@ class ShellTool(BaseTool):
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "bash 命令，如 'ls -la'。"
+                            # 按平台生成——写死「bash 命令如 ls -la」会抵消工具
+                            # 描述里的 Windows 说明，模型照抄 Linux 命令打 cmd
+                            # （生产实证：nvidia-smi/ps -ef/ss -tlnp 全军覆没）
+                            "description": (
+                                "bash 命令，如 'ls -la'。"
+                                if not sys.platform.startswith("win") else
+                                "cmd 命令（本机是 Windows，没有 grep/ls/ps/ss/bash 语法），"
+                                "如 'dir'、'tasklist | findstr python'、'ipconfig'。"
+                            )
                         },
                         "timeout": {
                             "type": "integer",

@@ -2216,6 +2216,9 @@ class OpenAGCAgent:
 要求：
 - 每个子任务应独立、可完成
 - 子任务必须基于以上会话上下文中提到的项目路径直接执行，不得安排"寻找/定位代码仓库"之类的子任务（除非上下文中确实没有可用路径）
+- 若任务涉及远程服务器/其他主机：相关子任务描述必须写明目标主机（IP/主机名）、
+  访问方式（execute_python+paramiko 建立 SSH）与凭据引用（如 {{secret:aiserver.*}}）——
+  子代理看不到主对话，不知道目标是远程也拿不到凭据，简报不写清楚它只会在本机执行
 - 为每个子任务标注需要的工具类型（可选：filesystem, code, web, analysis, deploy, monitor, research）
 - 标注子任务间的依赖关系（depends_on 为依赖的子任务 id 列表）
 

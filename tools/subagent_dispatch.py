@@ -38,6 +38,9 @@ class DispatchSubagentTool(BaseTool):
                             "description": (
                                 "子任务的完整描述。子代理看不到主对话，"
                                 "描述必须自包含（背景、目标、产出要求）。"
+                                "涉及远程服务器时必须写明目标主机（IP/主机名）、"
+                                "访问方式（execute_python+paramiko SSH）与凭据引用"
+                                "（如 {{secret:aiserver.*}}）——否则子代理只会在本机执行。"
                             ),
                         },
                         "tool_set": {

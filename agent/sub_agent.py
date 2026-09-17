@@ -237,6 +237,24 @@ class SubAgent:
             f"\n\n## 会话上下文（参考）\n{self.context_brief}"
             if self.context_brief else ""
         )
+        # 分身看不到主 agent 的系统环境段（那只在主提示词里）——不注入的话，
+        # 简报里全是 /home/xxx 路径时分身会以为自己在 Linux 上，拿着
+        # ps/ss/bash 命令打本地 Windows cmd 沙箱（生产实证：远程部署任务
+        # 全部在本地执行失败）。同时明确远程操作的既定模式：paramiko+凭据库。
+        try:
+            from prompt_builder import detect_system_env
+            _os_line = next((l for l in detect_system_env().splitlines()
+                             if l.startswith("- 操作系统")), "")
+        except Exception:
+            _os_line = ""
+        env_section = (
+            f"\n\n## 运行环境\n{_os_line}\n"
+            f"- execute_shell/execute_python 都在**本机**沙箱执行（本机≠任务目标机）。"
+            f"简报涉及远程服务器（IP/主机名/POSIX 路径）时，必须用 "
+            f"execute_python+paramiko 建立 SSH 连接后在远程执行，凭据用 "
+            f"{{{{secret:名称.字段}}}} 引用（如 {{{{secret:aiserver.password}}}}）；"
+            f"禁止把远程命令直接打进本机 shell。"
+        )
         self.messages = [
             {
                 "role": "system",
@@ -266,6 +284,7 @@ class SubAgent:
                     f"必须把**关键内容本身**写进汇报——调度者与用户都看不到你的上下文，"
                     f"只有汇报会回流；「已读取/已生成」不是交付，内容才是"
                     f"（长内容给要点摘要 + 完整文件路径）"
+                    f"{env_section}"
                     f"{brief_section}"
                 )
             }
