@@ -1,0 +1,218 @@
+# GitLab CI —— dev/release 分支流水线
+# 推送 dev：pytest → amd64 deb → arm64 deb（QEMU 模拟）→ 发布 dev 通道；
+# 推送 release：同上但直发 release 通道（=对内发版，更新清单随之重建）。
+# main 分支只跑 test，不触发任何打包。产物为 artifacts。
+# Windows 包与玲珑包走 GitHub CI（本 runner 无 Windows 环境；宿主内核 3.10
+# 不支持 close_range，ll-box 无法运行）。
+#
+# 环境要点（jsb-runner, shell 执行器, CentOS 7，已探测确认）：
+# - Docker Hub 被 DNS 污染 → 镜像一律走 docker.m.daocloud.io 加速站
+# - pypi 官方源极慢 → pip 一律用清华镜像（PIP_INDEX_URL）
+# - pip 缓存目录必须 root 属主（pip 按 st_uid==euid 判定，777 无效），
+#   且只能放工作区内（容器写工作区已验证可用）→ 用 docker 以 root 创建
+# - 容器跑 pytest 会留下 root 属主的 __pycache__ → 下个 job 的 git clean
+#   删不动直接失败 → 每个 job 的 after_script 用容器清理
+# - 宿主 node 16 太老 → 用便携 Node 22（.node/）构建前端
+# - 内核 3.10 不支持 binfmt F 标志 → arm64 镜像内置 qemu-aarch64-static
+
+stages:
+  - test
+  - build
+
+variables:
+  AMD64_BASE: docker.m.daocloud.io/library/python:3.10-buster
+  ARM64_BASE: docker.m.daocloud.io/arm64v8/python:3.10-buster
+  QEMU_IMAGE: docker.m.daocloud.io/multiarch/qemu-user-static
+  PIP_INDEX_URL: "https://mirrors.aliyun.com/pypi/simple/"
+  # 不带 -x：保留 .gitignore 里的 node_modules/.node/build_venv/.pip-cache
+  # 等缓存目录；缓存目录已由 .gitignore 排除，git clean 不会碰
+  GIT_CLEAN_FLAGS: "-ffd"
+  PIP_CACHE_HOST: "$CI_PROJECT_DIR/.pip-cache"
+
+# 宿主侧准备便携 Node（x64）并构建前端——前端产物与架构无关，
+# arm64 容器内不再跑 npm（QEMU 下又慢又易崩）
+.prepare-frontend: &prepare-frontend |
+  if ! .node/bin/node -v 2>/dev/null | grep -qE '^v(1[89]|[2-9][0-9])'; then
+    echo "[ci] downloading portable Node.js 22 (x64)..."
+    rm -rf .node && mkdir -p .node
+    curl -fL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz -o /tmp/node-agc.tar.xz
+    tar -xf /tmp/node-agc.tar.xz -C .node --strip-components=1 && rm -f /tmp/node-agc.tar.xz
+  fi
+  export PATH="$PWD/.node/bin:$PATH"
+  node --version
+  [ ! -d "node_modules/@vitejs/plugin-vue" ] && npm install
+  npm run build
+
+# pip 缓存目录必须 root 属主（pip 按属主判定是否启用缓存，chmod 777 无效），
+# 用容器以 root 创建/修正
+.prepare-pip-cache: &prepare-pip-cache |
+  docker pull "$AMD64_BASE"
+  docker run --rm -v "$CI_PROJECT_DIR":/src "$AMD64_BASE" \
+    bash -c "mkdir -p /src/.pip-cache && chown 0:0 /src/.pip-cache"
+
+# 容器（root）在工作区留下的缓存/产物文件会让下个 job 的 git clean 失败，
+# 统一用容器清理并归还属主
+.cleanup-workspace: &cleanup-workspace |
+  docker run --rm -v "$CI_PROJECT_DIR":/src -w /src "$AMD64_BASE" \
+    bash -c "find /src -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null; rm -rf /src/.pytest_cache; chown -R $(id -u):$(id -g) /src 2>/dev/null; true" || true
+  docker system prune -f 2>/dev/null || true
+
+test:
+  tags: [oe-builder]
+  stage: test
+  script:
+    - *prepare-pip-cache
+    - >
+      docker run --rm -v "$CI_PROJECT_DIR":/src -w /src
+      -v "$PIP_CACHE_HOST":/pipcache
+      -e PIP_CACHE_DIR=/pipcache -e PIP_INDEX_URL
+      "$AMD64_BASE" bash -c "
+        set -e
+        echo 'deb http://archive.debian.org/debian buster main' > /etc/apt/sources.list
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends xvfb
+        python -m venv /tmp/venv
+        . /tmp/venv/bin/activate
+        pip install -q pytest
+        pip install -q -r requirements.txt
+        set +e
+        # xvfb-run 在容器里会挂起（Xvfb 已就绪但 pytest 永不启动，实测），
+        # 直接拉 Xvfb 更可靠；tests/test_tools.py 的 pyautogui 需要 DISPLAY
+        Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp &
+        export DISPLAY=:99
+        sleep 2
+        python -m pytest tests/ -q
+        RC=$?
+        pkill Xvfb
+        exit $RC"
+  after_script:
+    - *cleanup-workspace
+  timeout: 2h
+
+# dev/release 分支才打包；main 只跑 test
+.build-rules: &build-rules
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "release"'
+
+deb:amd64:
+  tags: [oe-builder]
+  stage: build
+  needs: ["test"]
+  <<: *build-rules
+  script:
+    - *prepare-frontend
+    - *prepare-pip-cache
+    # 上次构建产物归 root 所有（容器内构建），清理也走容器
+    - docker run --rm -v "$CI_PROJECT_DIR":/src -w /src "$AMD64_BASE" bash -c "rm -f dist/*.deb; rm -rf build_venv"
+    # 抠 qemu-aarch64-static 到构建上下文（Dockerfile.ci-deb 会 COPY 进镜像）
+    - docker create --name agc-qtmp "$QEMU_IMAGE"
+    - docker cp agc-qtmp:/usr/bin/qemu-aarch64-static packaging/qemu-aarch64-static
+    - docker rm agc-qtmp
+    - >
+      docker build -t agc/ci-deb:amd64
+      --build-arg BASE_IMAGE="$AMD64_BASE"
+      -f packaging/Dockerfile.ci-deb packaging
+    - >
+      docker run --rm -v "$CI_PROJECT_DIR":/src -w /src
+      -v "$PIP_CACHE_HOST":/pipcache
+      -e PIP_CACHE_DIR=/pipcache -e PIP_INDEX_URL -e AGC_SKIP_FRONTEND=1
+      agc/ci-deb:amd64 ./build_deb.sh amd64
+    - ls -la dist/*.deb
+    # 发布到 81 下载页对应通道：dev 分支 → dev 通道（同版本覆盖）；
+    # release 分支 → release 通道并重建更新清单（=对内发版）
+    - VER=$(cat VERSION | tr -d '[:space:]')
+    - CHAN=dev; if [ "$CI_COMMIT_BRANCH" = "release" ]; then CHAN=release; fi
+    - mkdir -p /opt/agc-artifacts/$CHAN/v$VER
+    - cp -f dist/*.deb /opt/agc-artifacts/$CHAN/v$VER/
+    - if [ "$CHAN" = "dev" ]; then ln -sfn dev/v$VER /opt/agc-artifacts/latest; else ln -sfn v$VER /opt/agc-artifacts/release/latest && python3 scripts/make_release_manifest.py $VER; fi
+  after_script:
+    - *cleanup-workspace
+  timeout: 2h
+
+deb:arm64:
+  tags: [oe-builder]
+  stage: build
+  needs: ["test"]
+  <<: *build-rules
+  script:
+    - *prepare-frontend
+    - *prepare-pip-cache
+    - docker run --rm -v "$CI_PROJECT_DIR":/src -w /src "$AMD64_BASE" bash -c "rm -f dist/*.deb; rm -rf build_venv"
+    # 注册 qemu binfmt（非持久；内核 3.10 不支持 -p 持久模式）
+    - docker run --rm --privileged "$QEMU_IMAGE" --reset
+    # 抠 qemu-aarch64-static 到构建上下文（Dockerfile.ci-deb 会 COPY 进镜像）
+    - docker create --name agc-qtmp "$QEMU_IMAGE"
+    - docker cp agc-qtmp:/usr/bin/qemu-aarch64-static packaging/qemu-aarch64-static
+    - docker rm agc-qtmp
+    - >
+      docker build --platform linux/arm64 -t agc/ci-deb:arm64
+      --build-arg BASE_IMAGE="$ARM64_BASE"
+      -f packaging/Dockerfile.ci-deb packaging
+    - >
+      docker run --rm --platform linux/arm64
+      -v "$CI_PROJECT_DIR":/src -w /src
+      -v "$PIP_CACHE_HOST":/pipcache
+      -e PIP_CACHE_DIR=/pipcache -e PIP_INDEX_URL -e AGC_SKIP_FRONTEND=1
+      agc/ci-deb:arm64 ./build_deb.sh arm64
+    - ls -la dist/*.deb
+    # 发布到 81 下载页对应通道（规则同 deb:amd64）
+    - VER=$(cat VERSION | tr -d '[:space:]')
+    - CHAN=dev; if [ "$CI_COMMIT_BRANCH" = "release" ]; then CHAN=release; fi
+    - mkdir -p /opt/agc-artifacts/$CHAN/v$VER
+    - cp -f dist/*.deb /opt/agc-artifacts/$CHAN/v$VER/
+    - if [ "$CHAN" = "dev" ]; then ln -sfn dev/v$VER /opt/agc-artifacts/latest; else ln -sfn v$VER /opt/agc-artifacts/release/latest && python3 scripts/make_release_manifest.py $VER; fi
+  after_script:
+    - *cleanup-workspace
+  timeout: 4h
+
+# Windows zip 包——手动触发。PyInstaller 无法跨平台编译，必须 Windows runner
+# （win-builder-83，Server 2012R2 专用机）。产物 scp 到 81 的 nginx 下载页
+# （SYSTEM 账户的 SSH key 已加入 81 的 authorized_keys）。
+win:zip:
+  stage: build
+  tags: [win-builder]
+  <<: *build-rules
+  # 自动构建（83 专用机常开）；机器不在线时 job 挂起不阻塞，
+  # allow_failure 保证失败不拖垮整条流水线
+  allow_failure: true
+  script:
+    - call build_win.bat
+    - if errorlevel 1 exit /b 1
+    - set /p VER=<VERSION
+    - set CHAN=dev
+    - if "%CI_COMMIT_BRANCH%"=="release" set CHAN=release
+    - ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new root@10.0.0.1 "mkdir -p /opt/agc-artifacts/%CHAN%/v%VER%"
+    - for %%f in (dist\*-Setup.exe dist\*-Windows.zip) do if exist %%f scp -o BatchMode=yes %%f root@10.0.0.1:/opt/agc-artifacts/%CHAN%/v%VER%/
+    - if "%CHAN%"=="dev" ssh -o BatchMode=yes root@10.0.0.1 "ln -sfn dev/v%VER% /opt/agc-artifacts/latest"
+    # release 分支：scp 上传后重建更新清单（脚本在 runner 工作区，先送到 81
+    # 再远端执行；deb job 也会各自重建一次，最后完成者的清单最全）
+    - if "%CHAN%"=="release" scp -o BatchMode=yes scripts\make_release_manifest.py root@10.0.0.1:/tmp/
+    - if "%CHAN%"=="release" ssh -o BatchMode=yes root@10.0.0.1 "python3 /tmp/make_release_manifest.py %VER% && ln -sfn v%VER% /opt/agc-artifacts/release/latest"
+  timeout: 45m
+
+# 玲珑（.uab）说明：QEMU 路线已验证不可行——ll-builder 的 build 阶段必须经
+# ll-box（OCI runtime），而 qemu-user 对 seccomp/namespace 组合支持差，
+# "stage build error" 无解；--skip-run-container 会空跑（不执行构建脚本）。
+# 玲珑包继续走 GitHub CI（ubuntu-22.04-arm 原生机构建，已验证）。
+# 若将来有标准内核（5.11+）的 arm64 机器，从 git 历史恢复 linglong job 即可。
+
+# 晋升 dev 通道的当前版本到 release 通道（dev 流水线手动触发，不重构建）：
+# 把 dev/v<VERSION> 复制到 release/v<VERSION> 并重新生成 version.json 清单。
+# 应用的升级检测只读 release 清单——未经测试确认的中间版本不会推给用户。
+# （release 分支推送则直接构建进 release 通道，无需经过本 job。）
+release:promote:
+  stage: build
+  tags: [oe-builder]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      when: manual
+  allow_failure: true
+  needs: []
+  script:
+    - VER=$(cat VERSION | tr -d '[:space:]')
+    - test -d /opt/agc-artifacts/dev/v$VER || { echo "dev/v$VER 不存在——先让 deb/win 构建完成"; exit 1; }
+    - mkdir -p /opt/agc-artifacts/release/v$VER
+    - cp -f /opt/agc-artifacts/dev/v$VER/* /opt/agc-artifacts/release/v$VER/
+    - python3 scripts/make_release_manifest.py $VER
+    - ln -sfn v$VER /opt/agc-artifacts/release/latest
+  timeout: 10m
