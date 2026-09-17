@@ -1084,8 +1084,8 @@ class OpenAGCAgent:
         # 唤醒的路径在 discovery.py 也有一份，这里是预启用/分身等直启场景）
         try:
             if 'computer_control' in (getattr(self, 'active_tool_names', None) or set()):
-                from tools.computer import GROUNDING_GUIDE
-                prompt += "\n" + GROUNDING_GUIDE
+                from tools.computer import get_grounding_guide
+                prompt += "\n" + get_grounding_guide()
         except Exception:
             pass
 

@@ -40,3 +40,39 @@ class TestParsePoint:
     def test_first_point_wins(self):
         # UI-TARS 有时输出多组坐标（如 start_box + end_box），取第一组
         assert parse_point("(100, 200) to (300, 400)", self.W, self.H) == (100, 200)
+
+
+class TestGrounderGating:
+    """未配置 grounder 时 locate 不注入（schema/定位规程都不出现）——
+    用户明确要求：没配置就不生效、不注入，避免模型调到「未配置」错误。"""
+
+    def _set_ready(self, monkeypatch, ready):
+        import tools.screen_grounder as sg
+        monkeypatch.setattr(sg, "grounder_ready", lambda: ready)
+        # computer.py 在函数内 from import，patch 模块属性即可生效
+        return sg
+
+    def test_schema_omits_locate_when_unconfigured(self, monkeypatch):
+        self._set_ready(monkeypatch, False)
+        from tools.computer import ComputerTool
+        schema = ComputerTool().get_openai_schema()["function"]
+        assert "locate" not in schema["parameters"]["properties"]["action"]["description"]
+        assert "target" not in schema["parameters"]["properties"]
+        assert "click" not in schema["parameters"]["properties"]
+
+    def test_schema_includes_locate_when_configured(self, monkeypatch):
+        self._set_ready(monkeypatch, True)
+        from tools.computer import ComputerTool
+        schema = ComputerTool().get_openai_schema()["function"]
+        assert "locate" in schema["parameters"]["properties"]["action"]["description"]
+        assert "target" in schema["parameters"]["properties"]
+
+    def test_guide_omits_locate_when_unconfigured(self, monkeypatch):
+        self._set_ready(monkeypatch, False)
+        from tools.computer import get_grounding_guide
+        assert "locate" not in get_grounding_guide()
+
+    def test_guide_includes_locate_when_configured(self, monkeypatch):
+        self._set_ready(monkeypatch, True)
+        from tools.computer import get_grounding_guide
+        assert "locate" in get_grounding_guide()
