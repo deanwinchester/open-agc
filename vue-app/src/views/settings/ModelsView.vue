@@ -116,6 +116,12 @@ const form = reactive({
   llamacppCtxSize: 32768,
 });
 
+// ── GUI 定位服务（computer_grounder）──
+// computer_control 的 locate 动作用的专用视觉定位模型（如 P800 上的 UI-TARS）。
+// 增量保存语义：与初始快照不同时整体回传；base_url/model 任一留空 = 关闭。
+const grounder = reactive({ base_url: '', api_key: '', model: '', coord_mode: 'abs' });
+const initialGrounder = ref({ base_url: '', api_key: '', model: '', coord_mode: 'abs' });
+
 // 初始值快照（来自 GET 响应），保存时逐字段对比得出 dirty 集合
 const initial = ref(null);
 
@@ -168,6 +174,14 @@ function applySettings(data) {
     llamacpp_ctx_size: data.llamacpp_ctx_size ?? 32768,
   };
   initial.value = init;
+
+  // GUI 定位服务
+  const cg = data.computer_grounder || {};
+  grounder.base_url = cg.base_url || '';
+  grounder.api_key = cg.api_key || '';
+  grounder.model = cg.model || '';
+  grounder.coord_mode = cg.coord_mode || 'abs';
+  initialGrounder.value = { ...grounder };
 
   form.fallbackModels = init.fallback_models.join(', ');
   form.visionModels = init.vision_models.join(', ');
@@ -258,6 +272,16 @@ function buildPayload() {
 
   if (form.llamacppCtxSize != null && form.llamacppCtxSize !== init.llamacpp_ctx_size) {
     payload.llamacpp_ctx_size = form.llamacppCtxSize;
+  }
+
+  // GUI 定位服务：与初始快照不同时整体回传（api_key 掩码值原样回传=不修改，后端保留旧值）
+  if (JSON.stringify(grounder) !== JSON.stringify(initialGrounder.value)) {
+    payload.computer_grounder = {
+      base_url: grounder.base_url.trim(),
+      api_key: grounder.api_key.trim(),
+      model: grounder.model.trim(),
+      coord_mode: grounder.coord_mode || 'abs',
+    };
   }
 
   return payload;
@@ -566,6 +590,40 @@ onUnmounted(() => {
         </div>
         <el-button type="primary" plain :loading="cpSaving" @click="addCustomProvider">{{ t.customProviders.add }}</el-button>
         <div class="field-hint">{{ t.customProviders.saveHint }}</div>
+      </el-form>
+    </el-card>
+
+    <!-- GUI 定位服务 -->
+    <el-card class="settings-card" shadow="never">
+      <template #header>
+        <div class="card-header">
+          <span class="card-title">{{ t.grounder.title }}</span>
+          <p class="card-desc">{{ t.grounder.desc }}</p>
+        </div>
+      </template>
+      <el-form label-position="top">
+        <div class="cp-form-grid">
+          <el-form-item :label="t.grounder.baseUrl">
+            <el-input v-model="grounder.base_url" :placeholder="t.grounder.baseUrlPlaceholder" />
+          </el-form-item>
+          <el-form-item :label="t.grounder.apiKey">
+            <el-input v-model="grounder.api_key" :placeholder="t.grounder.apiKeyPlaceholder" show-password />
+          </el-form-item>
+          <el-form-item :label="t.grounder.model">
+            <el-input v-model="grounder.model" :placeholder="t.grounder.modelPlaceholder" />
+          </el-form-item>
+          <el-form-item :label="t.grounder.coordMode">
+            <el-select v-model="grounder.coord_mode">
+              <el-option value="abs" :label="t.grounder.coordModeAbs" />
+              <el-option value="norm1" :label="t.grounder.coordModeNorm1" />
+              <el-option value="norm1000" :label="t.grounder.coordModeNorm1000" />
+            </el-select>
+          </el-form-item>
+        </div>
+        <div class="field-hint">
+          {{ grounder.base_url && grounder.model ? t.grounder.enabled : t.grounder.disabled }}
+          · {{ t.grounder.saveHint }}
+        </div>
       </el-form>
     </el-card>
 

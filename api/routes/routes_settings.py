@@ -413,6 +413,9 @@ class ConfigUpdate(BaseModel):
     access_password: Optional[str] = None
     # 自定义厂商（OpenAI 兼容端点）：[{name, base_url, api_key, models[]}]
     custom_providers: Optional[List[Dict[str, Any]]] = None
+    # GUI 定位服务（grounder，如 P800 上的 UI-TARS）：
+    # {base_url, api_key, model, coord_mode}；base_url/model 任一为空 = 关闭
+    computer_grounder: Optional[Dict[str, Any]] = None
     # 调度者（分身）模式开关与分身叫法
     dispatcher_mode: Optional[bool] = None
     agent_worker_name: Optional[str] = None
@@ -563,6 +566,13 @@ async def get_settings(session_id: int = None):
         "dispatcher_mode": bool(config.get("dispatcher_mode", False)),
         "agent_worker_name": config.get("agent_worker_name", "分身"),
 
+        # GUI 定位服务（grounder）：api_key 掩码回传，前端留空即不修改
+        "computer_grounder": {
+            **(config.get("computer_grounder") or {}),
+            "api_key": (lambda k: (f"{k[:3]}...{k[-3:]}" if len(k) > 6 else ("***" if k else "")))(
+                str((config.get("computer_grounder") or {}).get("api_key", ""))),
+        },
+
     }
 
 
@@ -710,6 +720,26 @@ async def update_settings(config_update: ConfigUpdate):
                 except Exception:
                     continue
             config["custom_providers"] = _clean
+
+        # GUI 定位服务（grounder）：整体替换；base_url/model 任一为空即关闭
+        # （未配置时 locate 动作不出现在工具 schema 与定位规程里）
+        if config_update.computer_grounder is not None:
+            cg = config_update.computer_grounder
+            base_url = str(cg.get("base_url", "") or "").strip()
+            model = str(cg.get("model", "") or "").strip()
+            if base_url and model:
+                in_key = str(cg.get("api_key", "") or "").strip()
+                if "..." in in_key or in_key == "***":
+                    # 掩码原样回传 = 不修改，保留已存 key
+                    in_key = str((config.get("computer_grounder") or {}).get("api_key", ""))
+                config["computer_grounder"] = {
+                    "base_url": base_url,
+                    "api_key": in_key,
+                    "model": model,
+                    "coord_mode": str(cg.get("coord_mode", "") or "abs").strip(),
+                }
+            else:
+                config.pop("computer_grounder", None)
 
         # 调度者（分身）模式与叫法
         if config_update.dispatcher_mode is not None:
