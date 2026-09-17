@@ -11,10 +11,12 @@ from tools.base import BaseTool
 # 自由发挥估像素会偏差数百像素（生产实证），显式规程把它变成读数题。
 GROUNDING_GUIDE = """
 --- 电脑操控坐标定位规程（必读，按此执行）---
-点击坐标禁止凭感觉估计，优先用【文字锚点】定位：
-0. 截图结果里有「文字锚点(全图坐标)」清单（OCR 给出的文字+精确坐标）——
-   要找按钮/输入框/联系人时，先从锚点里找它的文字，直接用锚点坐标点击，
-   这比看图像估像素可靠得多。
+点击坐标禁止凭感觉估计，按以下优先级定位：
+0a. 【文字锚点】：截图结果里的「文字锚点(全图坐标)」清单（OCR 精确坐标）——
+    目标带文字（按钮/输入框/联系人名）时直接从中取坐标点击，最可靠。
+0b. 【locate 定位服务】：无文字的图标/图形目标，用 locate 动作（target 描述 +
+    click=true）让专用定位模型给坐标并直接点击，一次完成。
+0c. 都没有再读网格估坐标。
 1. 先全图截图，看清红色网格：四条边上的红色数字就是坐标刻度。
 2. 定位目标在图上位于【哪两条竖线】与【哪两条横线】之间，先回答这个问题。
 3. 再按格内比例读出坐标（如目标在 x=400 与 x=500 线之间偏右约 60%，则 x≈460）。
@@ -132,7 +134,9 @@ class ComputerTool(BaseTool):
                         "action": {
                             "type": "string",
                             "description": ("mouse_move/mouse_click/type_text/paste_text/press_key/hotkey/"
-                                            "screenshot/list_windows/activate_window。"
+                                            "screenshot/list_windows/activate_window/locate。"
+                                            "locate 用专用定位模型把自然语言目标（target 参数）翻译成"
+                                            "坐标（配 click=true 直接点击），找图标/按钮优先用它；"
                                             "activate_window 把指定窗口切到前台（比点任务栏图标可靠）；"
                                             "输入中文或非 ASCII 文本必须用 paste_text（剪贴板粘贴），"
                                             "type_text 仅适合纯 ASCII。")
@@ -161,6 +165,16 @@ class ComputerTool(BaseTool):
                                             "action=activate_window 时指定要切到前台的窗口；"
                                             "action=screenshot 时先把它激活到前台再只截该窗口区域。"
                                             "特殊值：taskbar=只截任务栏条带（找任务栏图标用）。")
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": ("action=locate 时的目标描述，越具体越准，如"
+                                            "「微信聊天列表里的搜索框」「任务栏绿色的微信图标」。")
+                        },
+                        "click": {
+                            "type": "boolean",
+                            "description": ("action=locate 时是否定位后直接点击（默认 false，"
+                                            "只返回坐标）。已信任定位结果时设 true 一步完成。")
                         },
                         "grid": {
                             "type": "boolean",
@@ -617,6 +631,43 @@ class ComputerTool(BaseTool):
                     return (f"已切换到前台: {res['title']} "
                             f"位置({l},{t}) 尺寸({r - l}x{b - t})。"
                             "请重新截图确认窗口状态后再操作。")
+
+                elif action == 'locate':
+                    target = kwargs.get('target') or kwargs.get('text')
+                    if not target:
+                        return ("Error: locate 需要 target 参数"
+                                "（目标的自然语言描述，如「搜索框」「微信图标」）。")
+                    # 专用定位模型（UI-TARS 等）把文字描述翻译成坐标——弱模型
+                    # 自己估像素偏差数百像素（生产实证），定位服务是系统级精度。
+                    img = self._grab_screen()
+                    full_w, full_h = img.size
+                    ratio = 1.0
+                    if max(full_w, full_h) > 1920:
+                        ratio = 1920 / max(full_w, full_h)
+                        img = img.resize((int(full_w * ratio), int(full_h * ratio)))
+                    from tools.screen_grounder import locate_element
+                    res = locate_element(img, str(target))
+                    if isinstance(res, str):
+                        return res
+                    # 图像像素 → 真实屏幕 → 全图视图坐标（与点击坐标系一致）
+                    rx, ry = int(res[0] / ratio), int(res[1] / ratio)
+                    cur_scale = _STATE["scale"] or 1.0
+                    vx, vy = int(round(rx * cur_scale)), int(round(ry * cur_scale))
+                    bad = self._check_view_bounds(vx, vy)
+                    if bad:
+                        return (f"Error: 定位服务返回的点换算后越界（{rx},{ry}），"
+                                "结果不可信，请改用截图+网格/OCR 锚点手动定位。")
+                    if kwargs.get('click'):
+                        pyautogui.moveTo(rx, ry, duration=0.3)
+                        pyautogui.click(rx, ry)
+                        _STATE["action"] = 'mouse_click'
+                        _STATE["moved"] = False
+                        _STATE["seen"] = False
+                        return (f"Located+clicked 「{target}」view ({vx},{vy}) -> "
+                                f"screen ({rx},{ry})。请截图验证是否达到预期状态。")
+                    return (f"定位结果：「{target}」中心点全图坐标 ({vx}, {vy})。"
+                            "可 mouse_move 到该坐标截图确认后再点击，"
+                            "或下次 locate 时带 click=true 一步完成。")
 
                 elif action == 'screenshot':
                     # 悬停验证状态：mouse_move 后截图即视为「已确认光标位置」，
