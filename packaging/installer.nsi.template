@@ -42,10 +42,24 @@ Section "Install"
   CreateShortCut "$SMPROGRAMS\@APP_NAME@\@DISPLAY_NAME@.lnk" "$INSTDIR\@EXE_NAME@"
   CreateShortCut "$SMPROGRAMS\@APP_NAME@\Uninstall.lnk" "$INSTDIR\uninstall.exe"
   WriteUninstaller "$INSTDIR\uninstall.exe"
+  ; 注册「设置-应用-安装的应用」卸载入口（此前只有开始菜单快捷方式，
+  ; 系统卸载列表里找不到——生产实证）
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\@APP_NAME@" "DisplayName" "@DISPLAY_NAME@"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\@APP_NAME@" "DisplayVersion" "@VERSION@"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\@APP_NAME@" "Publisher" "@DISPLAY_NAME@"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\@APP_NAME@" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\@APP_NAME@" "DisplayIcon" "$INSTDIR\@EXE_NAME@"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\@APP_NAME@" "UninstallString" '"$INSTDIR\uninstall.exe"'
+  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\@APP_NAME@" "NoModify" 1
+  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\@APP_NAME@" "NoRepair" 1
 SectionEnd
 
 Section "Uninstall"
+  ; 卸载前结束运行中的实例（主程序/WebView2 子进程的文件锁会让 RMDir 失败）
+  nsExec::ExecToLog 'powershell -NoProfile -Command "Get-Process | Where-Object { $$_.Path -like ''$INSTDIR\*'' } | Stop-Process -Force"'
+  Sleep 1500
   RMDir /r "$INSTDIR"
   Delete "$DESKTOP\@DISPLAY_NAME@.lnk"
   RMDir /r "$SMPROGRAMS\@APP_NAME@"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\@APP_NAME@"
 SectionEnd
