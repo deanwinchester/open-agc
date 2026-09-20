@@ -73,7 +73,7 @@ def _detect_system_env() -> str:
 # common POSIX roots). Used to build the context brief handed to sub-agents
 # and to detect topic overlap between a pasted error and recent turns.
 # Segment charset excludes whitespace and sentence punctuation but keeps CJK
-# (paths like D:\某机构\...). Space-containing paths (D:\My Documents\proj)
+# (paths with non-ASCII like D:\项目\...). Space-containing paths (D:\My Documents\proj)
 # are matched via continuation segments that must contain a separator and
 # must not themselves be a new drive path (so "D:\a D:\b" stays two paths).
 # The drive branch requires a non-letter left boundary and rejects "://" so
