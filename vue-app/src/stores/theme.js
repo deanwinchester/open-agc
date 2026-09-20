@@ -20,7 +20,7 @@ export const themeState = reactive({
   decor: 'none',
 });
 
-// 助手叫法（ui_theme.assistant_name，默认「熊猫」；zxs 定制线为「小助手」）——
+// 助手叫法（ui_theme.assistant_name，默认「熊猫」；定制线配各自品牌叫法）——
 // 品牌相关文案统一从这里取，前端代码不再写死「熊猫」
 export function personaName() {
   return themeState.assistantName || '熊猫';

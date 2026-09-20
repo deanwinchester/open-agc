@@ -52,7 +52,7 @@ class TestMatchWindow:
         assert ComputerTool._match_window(wins, "微信")["hwnd"] == 2
 
     def test_substring_match(self):
-        wins = [_w("GitLab - Pipelines", 1), _w("某品牌助手", 2)]
+        wins = [_w("GitLab - Pipelines", 1), _w("某品牌窗口", 2)]
         assert ComputerTool._match_window(wins, "pipeline")["hwnd"] == 1
 
     def test_case_insensitive(self):

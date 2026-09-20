@@ -1,7 +1,7 @@
 """build 默认配置合并测试：旧包升级后，模板里的新部署键必须合并进已有 config。
 
 背景：播种逻辑只补缺文件，已有 config.json 永远拿不到新键（生产实证：
-zxs 包的 ui_theme.app_name / update_manifest_url 在老用户机器上不生效）。
+定制包的 ui_theme.app_name / update_manifest_url 在老用户机器上不生效）。
 """
 import json
 import os
@@ -60,7 +60,7 @@ class TestMergeBuildDefaults:
         assert cfg["update_manifest_url"] == "http://10.0.0.1:8080/release/version.json"
 
     def test_grounder_filled_when_missing(self, merge_env):
-        """computer_grounder 是构建预置（zxs 线指向内网定位服务），
+        """computer_grounder 是构建预置（定制线可预置内网定位服务），
         用户未配置时从模板填充。"""
         cfg_path, tmpl_path = merge_env
         _write(cfg_path, {"api_keys": {}})

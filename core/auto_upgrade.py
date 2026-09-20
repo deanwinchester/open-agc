@@ -64,7 +64,7 @@ UPGRADE_SOURCES = [
 
 def _get_update_manifest_url() -> Optional[str]:
     """内网发布通道：config.json 里配了 update_manifest_url 就走它
-    （zxs 定制构建在 build_data/config.json 里指向 81 的 release 清单），
+    （定制构建在 build_data/config.json 里预置内网 release 清单地址），
     否则走 GitHub Releases（main/开源版默认）。"""
     try:
         from core.paths import get_data_path

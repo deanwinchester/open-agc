@@ -23,7 +23,7 @@ from agent.agent import OpenAGCAgent, _session_paths, _topic_tokens  # noqa: E40
 from agent.sub_agent import SubAgent, TOOL_SETS  # noqa: E402
 from tools.subagent_dispatch import DispatchSubagentTool  # noqa: E402
 
-ZXSAI = "D:\\某机构\\gitlab\\demoai"
+ZXSAI = "D:\\项目\\gitlab\\demoai"
 
 
 def _bare_agent(messages=None, llm=None):

@@ -3,7 +3,7 @@
 """渲染 NSIS 安装包脚本（packaging/installer.nsi.template → dist/installer.nsi）。
 
 品牌解析优先级：命令行参数 > build_data/brand.json > 默认值。
-zxs 定制版在 build_data/brand.json 里配显示名（如「某品牌助手」）与安装目录名；
+定制版在 build_data/brand.json 里配显示名（如「某某助手」）与安装目录名；
 main/开源版没这个文件，一切照旧（Open-AGC）。
 
 为什么不直接在 bat 里 echo 生成 nsi：cmd 按 GBK 读 bat，中文显示名会乱码；

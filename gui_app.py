@@ -297,7 +297,7 @@ def create_window(port):
     </html>
     """
 
-    # 窗口标题跟随品牌配置（ui_theme.app_name；zxs 定制版为「某品牌智能体」）
+    # 窗口标题跟随品牌配置（ui_theme.app_name；定制版在构建配置中预置品牌名）
     # gui 先于 server 启动，冻结包此时已播种 data/config.json，可读。
     def _window_title():
         try:

@@ -19,7 +19,7 @@ APP_NAME="Open-AGC"   # PyInstaller 产物目录/二进制名（spec 决定，�
 # Navigate to project root
 cd "$(dirname "$0")"
 
-# 品牌定制：build_data/brand.json（zxs 定制线预置中文显示名/描述；
+# 品牌定制：build_data/brand.json（定制线预置中文显示名/描述；
 # 开源线无此文件或用默认值）。控制安装器界面/桌面入口/包名/安装路径的
 # 显示与命名；PyInstaller 二进制名（APP_NAME）不变。
 BRAND_APP=$(python3 -c "
@@ -40,7 +40,7 @@ print(json.load(open(p, encoding='utf-8')).get('description', '') if os.path.exi
 BRAND_APP=${BRAND_APP:-Open-AGC}
 BRAND_DISPLAY=${BRAND_DISPLAY:-Open-AGC}
 BRAND_DESC=${BRAND_DESC:-"Open-AGC — AI agent desktop application"}
-# 包名/安装目录/命令名走品牌 app_name（小写）；zxs 线改名后通过
+# 包名/安装目录/命令名走品牌 app_name（小写）；定制线改名后通过
 # Conflicts/Replaces 替换旧 open-agc 包，避免双包并存
 PKG_NAME=$(echo "${BRAND_APP}" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9+.-')
 PKG_NAME=${PKG_NAME:-open-agc}
@@ -227,7 +227,7 @@ else
     # Python 解析与 start.sh 同一套思路：优先项目本地 .python/（便携 Python，
     # start.sh 在缺 Python 的机器上会自动下载到这里），再按版本找系统
     # python3.13→3.10（UOS 默认 python3 是 3.7，requirements 全部解析失败——
-    # 生产实证 zxs 机器 pip 报 Requires-Python >=3.8 整屏跳过）。
+    # 生产实证目标机器 pip 报 Requires-Python >=3.8 整屏跳过）。
     PYTHON_BIN=""
     for cmd in .python/bin/python3 .python/bin/python \
                python3.13 python3.12 python3.11 python3.10 python3; do
@@ -274,7 +274,7 @@ else
     # ---- GTK 原生窗口依赖（与 CI 的 linux-deb job 对齐）----
     # pywebview 的 GTK 后端需要 PyGObject（gi）+ 系统 GIR/WebKit 开发包，
     # 否则 PyInstaller 收集不到 gi，冻结应用 import webview 失败 → 静默回退
-    # 浏览器模式（生产实证：zxs 机器全新 venv 打出的包默认进浏览器）。
+    # 浏览器模式（生产实证：目标机器全新 venv 打出的包默认进浏览器）。
     # PyGObject 无 wheel 只能源码编译：需要 gcc/make（build-essential）、
     # pkg-config、libgirepository/libffi/libcairo 开发头文件。
     if ! python -c "import gi" 2>/dev/null; then

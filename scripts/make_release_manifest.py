@@ -10,7 +10,7 @@ CI 的 release:promote job 在 81（制品服务器）上执行：
 环境变量：
     AGC_ARTIFACTS_ROOT  制品根目录（默认 /opt/agc-artifacts）
     AGC_RELEASE_BASE_URL 清单里资产 URL 的基址
-        （默认 http://10.0.0.1:8080/release）
+        （默认 http://127.0.0.1:8080/release）
 """
 import json
 import os
@@ -25,7 +25,7 @@ def main() -> int:
     version = sys.argv[1].strip().lstrip("v")
     root = os.environ.get("AGC_ARTIFACTS_ROOT", "/opt/agc-artifacts")
     base_url = os.environ.get(
-        "AGC_RELEASE_BASE_URL", "http://10.0.0.1:8080/release").rstrip("/")
+        "AGC_RELEASE_BASE_URL", "http://127.0.0.1:8080/release").rstrip("/")
 
     release_dir = os.path.join(root, "release", f"v{version}")
     if not os.path.isdir(release_dir):

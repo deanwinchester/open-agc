@@ -61,13 +61,13 @@ def _seed_default_config() -> None:
 def _merge_build_defaults(cfg: dict) -> bool:
     """把打包模板里的「部署属性」新键合并进已有配置（升级旧包时，
     播种逻辑只补缺文件不更新已有 config.json，新键永远不会进来——
-    生产实证：zxs 品牌的 app_name / update_manifest_url 不生效）。
+    生产实证：定制品牌的 app_name / update_manifest_url 不生效）。
 
     规则：
     - update_manifest_url：升级通道是构建属性而非用户偏好——模板有就跟随
     - ui_theme.app_name/assistant_name/splash_title/splash_subtitle：仅在用户未设置
       （空/缺）时填充，尊重用户自定义
-    - computer_grounder：定位服务端点是构建预置（zxs 线默认指向内网 P800），
+    - computer_grounder：定位服务端点是构建预置（定制线可预置内网定位服务），
       仅在用户未设置（空/缺）时填充，尊重用户通过设置页的修改
 
     返回是否有变更（有则调用方落盘）。
