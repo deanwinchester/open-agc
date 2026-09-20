@@ -6,6 +6,7 @@
 // 气泡下方显示消息时间（DB UTC 时间戳或本地 ISO）；有 DB id 的消息悬停出现删除按钮。
 // agent 消息（有 DB id）附 👍/👎 反馈按钮（M3 好评率采集，/api/feedback）。
 import { computed, ref, watch } from 'vue';
+import { ElMessage } from 'element-plus';
 import MarkdownView from '../MarkdownView.vue';
 import { request } from '../../api/client';
 import zh from '../../i18n/zh';
@@ -81,6 +82,43 @@ function formatSize(size) {
 function dlHref(name) {
   return '/api/upload/' + encodeURIComponent(name);
 }
+
+// ── 产物路径一键打开 ──
+// agent 回复里的绝对路径（Windows D:\... / POSIX /home/... 等）提取为
+// 可点击 chips，点击调 /api/sandbox/open_folder 用系统默认应用打开。
+// 保守匹配：排除 URL（含 ://）、末尾标点、明显非路径文本。
+const PATH_RE = /([A-Za-z]:\\(?:[^\s\\/:*?"<>|，。；、）】」']+\\?)+)|(\/(?:home|Users|opt|srv|var|tmp|mnt|data|workspace|root)(?:\/[^\s，。；、）】」']+)+)/g;
+
+const deliverablePaths = computed(() => {
+  if (props.item.role !== 'agent') return [];
+  const found = new Set();
+  for (const m of String(props.item.content || '').matchAll(PATH_RE)) {
+    let p = m[0].replace(/[\\/.:，,;]+$/, '');
+    if (!p || p.includes('://')) continue;
+    // 至少两级目录才算路径，避免误命中 /home 这类短词
+    if ((p.match(/[\\/]/g) || []).length < 2) continue;
+    found.add(p);
+    if (found.size >= 6) break;
+  }
+  return [...found];
+});
+
+function baseName(p) {
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || p;
+}
+
+async function openPath(p) {
+  try {
+    await request('/api/sandbox/open_folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: p }),
+    });
+  } catch (err) {
+    ElMessage.error(`${t.openPathFailed}: ${err.message}`);
+  }
+}
 </script>
 
 <template>
@@ -120,6 +158,15 @@ function dlHref(name) {
         <button v-if="canDelete" class="msg-del" :title="t.deleteMessage" @click="onDelete">×</button>
         <MarkdownView :content="item.content" />
         <router-link v-if="item.taskId" class="task-link" :to="`/tasks/${item.taskId}`">#{{ item.taskId }}</router-link>
+        <div v-if="deliverablePaths.length" class="msg-deliv">
+          <button
+            v-for="p in deliverablePaths"
+            :key="p"
+            class="deliv-chip"
+            :title="p"
+            @click="openPath(p)"
+          >📄 {{ baseName(p) }}</button>
+        </div>
       </div>
       <div class="msg-foot">
         <div v-if="timeText" class="msg-time">{{ timeText }}</div>
@@ -379,6 +426,28 @@ function dlHref(name) {
 
 .task-link:hover {
   text-decoration: underline;
+}
+
+.msg-deliv {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.deliv-chip {
+  border: 1px solid var(--el-color-primary-light-7, #c6e2ff);
+  background: var(--el-color-primary-light-9, #ecf5ff);
+  color: var(--el-color-primary);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.deliv-chip:hover {
+  background: var(--el-color-primary-light-8, #d9ecff);
 }
 
 @media (max-width: 768px) {

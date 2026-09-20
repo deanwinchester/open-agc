@@ -19,7 +19,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Refresh, Delete } from '@element-plus/icons-vue';
+import { Refresh, Delete, FolderOpened } from '@element-plus/icons-vue';
 import { request } from '../api/client';
 import zh from '../i18n/zh';
 
@@ -175,6 +175,35 @@ async function browseTo(path) {
 function openBrowse() {
   browseVisible.value = true;
   browseTo(sandboxDir.value || '');
+}
+
+// 在系统文件管理器中打开沙箱目录
+async function openSandboxFolder() {
+  if (!sandboxDir.value) return;
+  try {
+    await request('/api/sandbox/open_folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: sandboxDir.value }),
+    });
+  } catch (err) {
+    ElMessage.error(`${t.openFolderFailed}: ${err.message}`);
+  }
+}
+
+// 在系统文件管理器/默认应用中打开条目（row.path 为沙箱相对路径）
+async function openEntry(row) {
+  const base = (sandboxDir.value || '').replace(/[\\/]+$/, '');
+  if (!base || !row.path) return;
+  try {
+    await request('/api/sandbox/open_folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: `${base}/${row.path}` }),
+    });
+  } catch (err) {
+    ElMessage.error(`${t.openFolderFailed}: ${err.message}`);
+  }
 }
 
 async function pickBrowseDir() {
@@ -372,9 +401,14 @@ function resultTagType(result) {
             <code>{{ sandboxDir || '…' }}</code>
           </div>
         </div>
-        <el-button size="small" type="primary" plain @click="openBrowse">
-          {{ t.changeDir }}
-        </el-button>
+        <div class="intro-actions">
+          <el-button size="small" plain :disabled="!sandboxDir" @click="openSandboxFolder">
+            {{ t.openFolder }}
+          </el-button>
+          <el-button size="small" type="primary" plain @click="openBrowse">
+            {{ t.changeDir }}
+          </el-button>
+        </div>
       </div>
     </el-card>
 
@@ -516,6 +550,15 @@ function resultTagType(result) {
         </el-table-column>
         <el-table-column :label="t.columns.actions" width="200">
           <template #default="{ row }">
+            <el-button
+              text
+              type="primary"
+              class="open-btn"
+              :title="t.actions.open"
+              @click="openEntry(row)"
+            >
+              <el-icon><FolderOpened /></el-icon>
+            </el-button>
             <template v-if="canOperate(row)">
               <el-select
                 size="small"
@@ -607,6 +650,12 @@ function resultTagType(result) {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+}
+
+.intro-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .intro-title {
