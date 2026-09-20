@@ -171,18 +171,35 @@ function onImagePicked(e) {
   e.target.value = '';
 }
 
-function onPaste(e) {
+async function onPaste(e) {
   const items = e.clipboardData && e.clipboardData.items;
-  if (!items) return;
-  for (const item of items) {
-    if (item.type.startsWith('image/')) {
-      e.preventDefault();
-      const file = item.getAsFile();
-      if (!file) continue;
-      const reader = new FileReader();
-      reader.onload = () => addPendingImage(reader.result);
-      reader.readAsDataURL(file);
+  if (items) {
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (!file) continue;
+        const reader = new FileReader();
+        reader.onload = () => addPendingImage(reader.result);
+        reader.readAsDataURL(file);
+        return;
+      }
     }
+    // Linux WebKitGTK(≤2.38) 的 paste 事件 DataTransfer 只暴露文本类目标，
+    // 图片根本不进 items（Windows/Chromium 正常）——无文本项且非文本类型时
+    // 走后端剪贴板通道兜底（xclip/GTK 读图，见 /api/system/clipboard-image）。
+    // 有文本项说明用户复制的是文字，不打额外请求。
+    const hasStringItem = [...items].some((i) => i.kind === 'string');
+    if (hasStringItem) return;
+  }
+  try {
+    const res = await request('/api/system/clipboard-image');
+    if (res && res.image) {
+      e.preventDefault();
+      addPendingImage(res.image);
+    }
+  } catch {
+    // 404=剪贴板无图片/非 Linux 桌面——静默，走 textarea 默认粘贴
   }
 }
 

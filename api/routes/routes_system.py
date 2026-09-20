@@ -38,6 +38,65 @@ async def get_theme():
     }
 
 
+def _gtk_clipboard_png(timeout: float = 5.0):
+    """GTK 主线程读剪贴板图片（PyGObject 是 pywebview GTK 后端依赖，必在）。
+
+    桌面模式下 webview 的 GTK 主循环常驻，GLib.idle_add 能调度上；浏览器
+    模式无 GTK 循环，idle_add 永不触发——超时返回 None（浏览器前端走自身
+    clipboardData，不需要本通道）。"""
+    import threading
+    result = {"data": None}
+    done = threading.Event()
+
+    def _grab():
+        try:
+            from gi.repository import Gdk, Gtk
+            pixbuf = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_image()
+            if pixbuf is not None:
+                ok, buf = pixbuf.save_to_bufferv("png")
+                if ok:
+                    result["data"] = bytes(buf)
+        except Exception:
+            pass
+        done.set()
+        return False
+
+    try:
+        from gi.repository import GLib
+        GLib.idle_add(_grab)
+    except Exception:
+        return None
+    done.wait(timeout)
+    return result["data"]
+
+
+@router.get("/api/system/clipboard-image")
+async def clipboard_image():
+    """读系统剪贴板里的图片（dataURL）。
+
+    Linux WebKitGTK(≤2.38) 的 paste 事件 DataTransfer 只暴露文本类目标，
+    图片根本不给 JS（Windows/Chromium 正常）——UOS deb 上 Ctrl+V 图片
+    粘贴失效（生产实证），前端无图片项时调本接口兜底。xclip 优先
+    （无 GTK 主线程约束），GTK 剪贴板兜底。"""
+    import base64
+    import shutil
+    import subprocess
+    if shutil.which("xclip"):
+        try:
+            out = subprocess.run(
+                ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+                capture_output=True, timeout=5)
+            if out.returncode == 0 and out.stdout:
+                return {"image": "data:image/png;base64,"
+                        + base64.b64encode(out.stdout).decode("ascii")}
+        except Exception:
+            pass
+    png = _gtk_clipboard_png()
+    if png:
+        return {"image": "data:image/png;base64," + base64.b64encode(png).decode("ascii")}
+    raise HTTPException(status_code=404, detail="剪贴板中没有图片")
+
+
 def _read_upload_b64(name: str):
     """读 uploads/ 下的文件为 (data_url, None) 或 (None, 原因)。限图片、5MB。"""
     import base64
@@ -136,7 +195,11 @@ async def save_theme(body: dict):
         _THEME_FIELDS) | {"logo_data", "chat_bg_data"}
 
     existing = (load_config() or {}).get("ui_theme") or {}
-    out = dict(existing) if mode == "merge" else {}
+    # replace 模式保留品牌构建键（assistant_name/splash_* 是构建预置而非
+    # 用户审美配置，「恢复默认」不该抹掉——否则定制线品牌被清空）
+    out = dict(existing) if mode == "merge" else {
+        k: existing[k] for k in ("assistant_name", "splash_title", "splash_subtitle")
+        if k in existing}
     for key in ("primary_color", "sidebar_color", "page_color"):
         if key not in provided:
             continue
