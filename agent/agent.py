@@ -1443,12 +1443,30 @@ class OpenAGCAgent:
         # instead of sleeping through the full 120s timeout.
         responded = False
         deadline = _time.time() + 120
+        # 周期重播：重播此前只在「新连接建立瞬间」做一次——客户端在等待
+        # 期间才连接/重连/刷新时就永远收不到（生产实证 UOS 无弹窗超时）。
+        # 每 15s 向所有活连接补发一次，弹窗按 request_id 幂等。
+        _next_rebroadcast = _time.time() + 15
         while _time.time() < deadline:
             if wait_event.wait(timeout=1):
                 responded = True
                 break
             if self.is_interrupted:
                 break
+            if _time.time() >= _next_rebroadcast:
+                _next_rebroadcast = _time.time() + 15
+                try:
+                    from api.state import _broadcast_to_websockets
+                    _broadcast_to_websockets({"type": "progress", **{
+                        "event": "sandbox_blocked", "path": sb.path,
+                        "tool_name": tool_name,
+                        "session_id": self.session_id,
+                        "request_id": request_id,
+                        "block_type": block_type,
+                        "description": desc_text,
+                        "category": category_text}})
+                except Exception:
+                    pass
 
         if not responded:
             _clear_wait_entry()

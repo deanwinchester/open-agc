@@ -391,6 +391,20 @@ async def websocket_endpoint(websocket: WebSocket):
                         print(f"[Sandbox] Persisted approval: {_path} for session {_sid}")
                     return  # Don't queue this event to frontend
 
+                # 授权请求（sandbox_blocked）必须广播：前台单播路径在连接假死
+                # （UOS libsoup2 网络进程卡死不发 onclose，不重连不重播）/用户
+                # 切页断连时事件蒸发，用户永远看不到弹窗直到超时（生产实证
+                # UOS sudo 授权）。广播后所有活连接都能弹授权窗；本连接仍经
+                # 队列收一份（前端按 request_id 复用同一弹窗，无害）。
+                if event.get("event") == "sandbox_blocked":
+                    try:
+                        from api.state import _broadcast_to_websockets
+                        _evt = dict(event)
+                        _evt["session_id"] = ws_session_id
+                        _broadcast_to_websockets({"type": "progress", **_evt})
+                    except Exception as _bc_e:
+                        print(f"[WS] sandbox_blocked broadcast failed: {_bc_e}")
+
                 if event.get("event") == "thinking" and event.get("content"):
                     _pending_thinking["content"] = event["content"]
 

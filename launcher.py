@@ -81,6 +81,10 @@ def main():
         host=host,
         port=port,
         log_level="info",
+        # UOS/deepin WebKitGTK 2.38 + libsoup2 对 WS ping 帧有缺陷（网络进程
+        # 卡死 100% CPU）——与 gui_app.py 对齐，关闭 uvicorn 层 ping
+        ws_ping_interval=None,
+        ws_ping_timeout=None,
         # 访问控制按 scope["client"] 分类，必须关掉 uvicorn 默认的
         # proxy_headers（默认信任 127.0.0.1 的 XFF 并改写 client，
         # 同机透传式反代下可伪造 127.0.0.1 免密绕过）。本应用面向直连，
