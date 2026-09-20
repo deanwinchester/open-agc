@@ -252,8 +252,9 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                     "action": "approve_dir", "path": _path
                 })
             return
-        # Suppress all progress broadcasts for heartbeat tasks
-        if _is_heartbeat:
+        # Suppress all progress broadcasts for heartbeat tasks——但授权请求
+        # （sandbox_blocked）例外：它需要弹窗给人看，抑制掉用户永远收不到
+        if _is_heartbeat and event.get("event") != "sandbox_blocked":
             return
         if event.get("event") == "tool_start":
             step_counter += 1
