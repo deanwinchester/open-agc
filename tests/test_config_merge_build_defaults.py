@@ -80,6 +80,21 @@ class TestMergeBuildDefaults:
         cfg = cfgmod.load_config()
         assert cfg["computer_grounder"]["base_url"] == "http://my-host:9000/v1"
 
+    def test_splash_keys_filled_when_missing(self, merge_env):
+        """启动页文案（splash_title/splash_subtitle）随 ui_theme 一并补缺。"""
+        cfg_path, tmpl_path = merge_env
+        _write(cfg_path, {"ui_theme": {"app_name": "用户自定义名"}})
+        _write(tmpl_path, {"ui_theme": {
+            "app_name": "某品牌智能体",
+            "assistant_name": "小助手",
+            "splash_title": "正在启动某品牌智能体",
+            "splash_subtitle": "组件加载中……"}})
+        cfg = cfgmod.load_config()
+        assert cfg["ui_theme"]["app_name"] == "用户自定义名"  # 已设的不覆盖
+        assert cfg["ui_theme"]["assistant_name"] == "小助手"
+        assert cfg["ui_theme"]["splash_title"] == "正在启动某品牌智能体"
+        assert cfg["ui_theme"]["splash_subtitle"] == "组件加载中……"
+
     def test_no_template_no_change(self, merge_env, monkeypatch):
         cfg_path, _ = merge_env
         monkeypatch.setattr(cfgmod, "_TEMPLATE_CONFIG", str(cfg_path.parent / "nonexistent.json"))

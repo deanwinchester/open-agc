@@ -36,7 +36,7 @@ import time as _time
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel
 
 from api.config import load_config
@@ -46,6 +46,24 @@ from core import sandbox_janitor as _janitor
 from core.paths import resolve_sandbox_dir
 
 router = APIRouter()
+
+
+@router.post("/api/sandbox/open_folder")
+async def open_folder(path: str = Body(..., embed=True)):
+    """在系统文件管理器中打开指定路径（沙箱页/会话产物「打开」按钮）。
+    目录直接打开，文件用系统默认应用打开。"""
+    import subprocess
+    import sys as _sys
+    real = os.path.realpath(os.path.abspath(os.path.expanduser((path or "").strip())))
+    if not (os.path.isdir(real) or os.path.isfile(real)):
+        raise HTTPException(status_code=400, detail=f"路径不存在: {real}")
+    if _sys.platform.startswith("win"):
+        os.startfile(real)
+    elif _sys.platform == "darwin":
+        subprocess.Popen(["open", real])
+    else:
+        subprocess.Popen(["xdg-open", real])
+    return {"status": "success", "path": real}
 
 
 @router.get("/api/sandbox/browse_dirs")

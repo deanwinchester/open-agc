@@ -16,6 +16,7 @@ import { ElMessage } from 'element-plus';
 import { Picture, Paperclip, Microphone, Promotion } from '@element-plus/icons-vue';
 import zh from '../../i18n/zh';
 import { request } from '../../api/client';
+import { personaText } from '../../stores/theme';
 import SecretConfirmModal from './SecretConfirmModal.vue';
 import { detectSecrets, describeHit, suggestName, buildOutTexts } from '../../utils/secretDetect';
 
@@ -361,7 +362,7 @@ onUnmounted(() => {
         v-model="text"
         type="textarea"
         :autosize="{ minRows: 1, maxRows: 6 }"
-        :placeholder="listening ? t.voiceListening : (running ? t.inputPlaceholderRunning : t.inputPlaceholder)"
+        :placeholder="listening ? t.voiceListening : (running ? t.inputPlaceholderRunning : personaText(t.inputPlaceholder))"
         @keydown="onKeydown"
         @paste="onPaste"
       />

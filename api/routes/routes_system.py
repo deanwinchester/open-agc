@@ -28,6 +28,7 @@ async def get_theme():
         "logo_url": _img_url(theme.get("logo_file")),
         "chat_bg_url": _img_url(theme.get("chat_bg_image")),
         "app_name": theme.get("app_name") or "",
+        "assistant_name": theme.get("assistant_name") or "",
         "glass": bool(theme.get("glass")),
         "bordered": bool(theme.get("bordered")),
         "animations": bool(theme.get("animations")),

@@ -14,11 +14,41 @@ set -e
 # 实际是后续某步失败但无任何提示）
 trap 'echo "ERROR: build failed at line $LINENO (exit $?)" >&2' ERR
 
-APP_NAME="Open-AGC"
-PKG_NAME="open-agc"
+APP_NAME="Open-AGC"   # PyInstaller 产物目录/二进制名（spec 决定，不随品牌变）
 
 # Navigate to project root
 cd "$(dirname "$0")"
+
+# 品牌定制：build_data/brand.json（zxs 定制线预置中文显示名/描述；
+# 开源线无此文件或用默认值）。控制安装器界面/桌面入口/包名/安装路径的
+# 显示与命名；PyInstaller 二进制名（APP_NAME）不变。
+BRAND_APP=$(python3 -c "
+import json, os
+p = 'build_data/brand.json'
+print(json.load(open(p, encoding='utf-8')).get('app_name', '') if os.path.exists(p) else '')
+" 2>/dev/null)
+BRAND_DISPLAY=$(python3 -c "
+import json, os
+p = 'build_data/brand.json'
+print(json.load(open(p, encoding='utf-8')).get('display_name', '') if os.path.exists(p) else '')
+" 2>/dev/null)
+BRAND_DESC=$(python3 -c "
+import json, os
+p = 'build_data/brand.json'
+print(json.load(open(p, encoding='utf-8')).get('description', '') if os.path.exists(p) else '')
+" 2>/dev/null)
+BRAND_APP=${BRAND_APP:-Open-AGC}
+BRAND_DISPLAY=${BRAND_DISPLAY:-Open-AGC}
+BRAND_DESC=${BRAND_DESC:-"Open-AGC — AI agent desktop application"}
+# 包名/安装目录/命令名走品牌 app_name（小写）；zxs 线改名后通过
+# Conflicts/Replaces 替换旧 open-agc 包，避免双包并存
+PKG_NAME=$(echo "${BRAND_APP}" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9+.-')
+PKG_NAME=${PKG_NAME:-open-agc}
+DEB_EXTRA_FIELDS=""
+if [ "${PKG_NAME}" != "open-agc" ]; then
+    DEB_EXTRA_FIELDS="Conflicts: open-agc
+Replaces: open-agc"
+fi
 
 # Read VERSION from file
 if [ -f VERSION ]; then
@@ -59,7 +89,7 @@ if [ "${BUILD_ARCH}" != "$(host_arch)" ]; then
     exit 1
 fi
 
-DEB_NAME="${APP_NAME}-${VERSION}-Linux-${BUILD_ARCH}.deb"
+DEB_NAME="${BRAND_APP}-${VERSION}-Linux-${BUILD_ARCH}.deb"
 STAGING_ROOT="dist/deb_staging"
 STAGING_DIR="${STAGING_ROOT}/${PKG_NAME}_${VERSION}_${BUILD_ARCH}"
 
@@ -310,18 +340,21 @@ Section: utils
 Priority: optional
 Architecture: ${BUILD_ARCH}
 Depends: libwebkit2gtk-4.0-37, libgtk-3-0, libgirepository-1.0-1, gir1.2-webkit2-4.0, gir1.2-gtk-3.0
-Maintainer: Open-AGC Team <noreply@open-agc.local>
-Description: Open-AGC — AI agent desktop application
- Open-AGC is a local AI agent desktop app with a web-based UI,
- bundled Python backend and LLM integration.
+Maintainer: ${BRAND_DISPLAY} <noreply@open-agc.local>
+Description: ${BRAND_DISPLAY} — ${BRAND_DESC}
 EOF
+# 品牌改包名时追加 Conflicts/Replaces 替换旧 open-agc 包（空行会截断
+# control 段落，只能在非空时追加，不能直接内联变量）
+if [ -n "${DEB_EXTRA_FIELDS}" ]; then
+    printf '%s\n' "${DEB_EXTRA_FIELDS}" >> "${STAGING_DIR}/DEBIAN/control"
+fi
 
-# DEBIAN/postinst
-cat > "${STAGING_DIR}/DEBIAN/postinst" <<'EOF'
+# DEBIAN/postinst（不引用 EOF：需要展开 ${PKG_NAME}/${APP_NAME} 品牌路径）
+cat > "${STAGING_DIR}/DEBIAN/postinst" <<EOF
 #!/bin/bash
 set -e
 
-chmod +x /opt/open-agc/Open-AGC
+chmod +x /opt/${PKG_NAME}/${APP_NAME}
 
 if command -v update-desktop-database > /dev/null 2>&1; then
     update-desktop-database /usr/share/applications > /dev/null 2>&1 || true
@@ -335,11 +368,11 @@ EOF
 chmod 755 "${STAGING_DIR}/DEBIAN/postinst"
 
 # DEBIAN/prerm
-cat > "${STAGING_DIR}/DEBIAN/prerm" <<'EOF'
+cat > "${STAGING_DIR}/DEBIAN/prerm" <<EOF
 #!/bin/bash
 set -e
 
-pkill -f "/opt/open-agc/Open-AGC" > /dev/null 2>&1 || true
+pkill -f "/opt/${PKG_NAME}/${APP_NAME}" > /dev/null 2>&1 || true
 
 exit 0
 EOF
@@ -365,8 +398,8 @@ chmod 755 "${STAGING_DIR}/DEBIAN/postrm"
 # Desktop entry
 cat > "${STAGING_DIR}/usr/share/applications/${PKG_NAME}.desktop" <<EOF
 [Desktop Entry]
-Name=Open-AGC
-Comment=Open-AGC — AI agent desktop application
+Name=${BRAND_DISPLAY}
+Comment=${BRAND_DESC}
 Exec=/opt/${PKG_NAME}/${APP_NAME}
 Icon=${PKG_NAME}
 Terminal=false
@@ -422,4 +455,4 @@ echo "============================================="
 echo ""
 echo "To install:  sudo dpkg -i dist/${DEB_NAME}"
 echo "             (or: sudo apt install ./dist/${DEB_NAME})"
-echo "To run:      open-agc  (or find Open-AGC in the app menu)"
+echo "To run:      ${PKG_NAME}  (or find ${BRAND_DISPLAY} in the app menu)"

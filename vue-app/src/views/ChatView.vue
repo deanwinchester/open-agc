@@ -22,6 +22,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Collection, RefreshRight, VideoPlay } from '@element-plus/icons-vue';
 import { useWsStore } from '../stores/ws';
+import { personaText } from '../stores/theme';
 import { request, cachedFetch } from '../api/client';
 import zh from '../i18n/zh';
 import SessionRail from '../components/chat/SessionRail.vue';
@@ -317,7 +318,7 @@ function renderHistorySteps(data) {
 // ── WS 事件处理 ──
 function onStatus(data) {
   if (!isForCurrent(data) || data.background) return;
-  thinking.text = t.thinking;
+  thinking.text = personaText(t.thinking);
   thinking.visible = true;
   scrollToBottom();
 }
@@ -357,7 +358,7 @@ function onProgress(data) {
         if (existing) existing.content = data.stream ? (existing.content + data.content) : data.content;
         else card.entries.push({ kind: 'thinking', ekey, content: data.content });
       } else {
-        thinking.text = t.thinking;
+        thinking.text = personaText(t.thinking);
         thinking.visible = true;
       }
       break;
@@ -769,7 +770,7 @@ async function loadHistory(sid, { beforeId = 0 } = {}) {
     } else {
       items.value = msgs.length
         ? msgs
-        : [{ kind: 'msg', key: nextKey(), role: 'system', content: t.welcome }];
+        : [{ kind: 'msg', key: nextKey(), role: 'system', content: personaText(t.welcome) }];
       historyLoadedAt.value = Date.now();
       scrollToBottom(true, true);
     }

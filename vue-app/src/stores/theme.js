@@ -12,12 +12,30 @@ export const themeState = reactive({
   logoUrl: DEFAULT_LOGO,
   chatBgUrl: '',
   appName: '',
+  assistantName: '',
   dark: false,
   glass: false,
   bordered: false,
   animations: false,
   decor: 'none',
 });
+
+// 助手叫法（ui_theme.assistant_name，默认「熊猫」；zxs 定制线为「小助手」）——
+// 品牌相关文案统一从这里取，前端代码不再写死「熊猫」
+export function personaName() {
+  return themeState.assistantName || '熊猫';
+}
+
+// 把默认文案里的「熊猫」替换为当前叫法（默认叫法时原样返回）
+export function personaText(s) {
+  const n = personaName();
+  return n === '熊猫' ? (s || '') : String(s || '').replaceAll('熊猫', n);
+}
+
+// 步骤/占位图标：熊猫叫法才用 🐼（定制品牌不再出现熊猫 emoji）
+export function personaEmoji() {
+  return personaName() === '熊猫' ? '🐼' : '';
+}
 
 function _shade(hex, ratio) {
   // ratio>0 向白混合，<0 向黑混合（Element Plus 档位色生成）
@@ -70,6 +88,7 @@ export function applyTheme(theme) {
   themeState.logoUrl = t.logo_url || DEFAULT_LOGO;
   themeState.chatBgUrl = t.chat_bg_url || '';
   themeState.appName = t.app_name || '';
+  themeState.assistantName = t.assistant_name || '';
   themeState.pageColor = t.page_color || '';
   // 暗色判定：dark 开关 或 深色页面底色（亮度派生，告别二元）
   const pcLum = /^#[0-9a-fA-F]{6}$/.test(themeState.pageColor)

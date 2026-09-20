@@ -65,7 +65,8 @@ def _merge_build_defaults(cfg: dict) -> bool:
 
     规则：
     - update_manifest_url：升级通道是构建属性而非用户偏好——模板有就跟随
-    - ui_theme.app_name：仅在用户未设置（空/缺）时填充，尊重用户自定义
+    - ui_theme.app_name/assistant_name/splash_title/splash_subtitle：仅在用户未设置
+      （空/缺）时填充，尊重用户自定义
     - computer_grounder：定位服务端点是构建预置（zxs 线默认指向内网 P800），
       仅在用户未设置（空/缺）时填充，尊重用户通过设置页的修改
 
@@ -88,12 +89,17 @@ def _merge_build_defaults(cfg: dict) -> bool:
         cfg["update_manifest_url"] = tmpl_url
         changed = True
 
-    tmpl_name = ((defaults.get("ui_theme") or {}).get("app_name") or "").strip()
-    if tmpl_name:
+    tmpl_ui = defaults.get("ui_theme") or {}
+    if isinstance(tmpl_ui, dict) and any(
+            (tmpl_ui.get(k) or "").strip()
+            for k in ("app_name", "assistant_name", "splash_title", "splash_subtitle")):
         ui = cfg.setdefault("ui_theme", {})
-        if isinstance(ui, dict) and not (ui.get("app_name") or "").strip():
-            ui["app_name"] = tmpl_name
-            changed = True
+        if isinstance(ui, dict):
+            for _k in ("app_name", "assistant_name", "splash_title", "splash_subtitle"):
+                _v = (tmpl_ui.get(_k) or "").strip()
+                if _v and not (ui.get(_k) or "").strip():
+                    ui[_k] = _v
+                    changed = True
 
     tmpl_grounder = defaults.get("computer_grounder") or {}
     if isinstance(tmpl_grounder, dict) and tmpl_grounder.get("base_url") \

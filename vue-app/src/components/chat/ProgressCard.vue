@@ -5,6 +5,7 @@
 import { computed, ref } from 'vue';
 import zh from '../../i18n/zh';
 import { request } from '../../api/client';
+import { personaEmoji } from '../../stores/theme';
 import AskUserForm from './AskUserForm.vue';
 import MarkdownView from '../MarkdownView.vue';
 
@@ -60,7 +61,7 @@ const currentStepLabel = computed(() => {
 
 const title = computed(() => {
   const n = stepCount.value;
-  if (props.card.live) return `🐼 ${t.working} · ${n}${t.stepsSuffix}`;
+  if (props.card.live) { const pe = personaEmoji(); return `${pe ? pe + ' ' : ''}${t.working} · ${n}${t.stepsSuffix}`; }
   if (props.card.history) return `⚡ ${t.lastRun} · ${n}${t.stepsSuffix}`;
   return `✨ ${t.done} · ${n}${t.stepsSuffix}`;
 });
