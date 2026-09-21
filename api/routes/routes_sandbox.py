@@ -56,7 +56,15 @@ async def open_folder(path: str = Body(..., embed=True)):
     import sys as _sys
     real = os.path.realpath(os.path.abspath(os.path.expanduser((path or "").strip())))
     if not (os.path.isdir(real) or os.path.isfile(real)):
-        raise HTTPException(status_code=400, detail=f"路径不存在: {real}")
+        # 给出最近的已存在祖先目录——区分「路径写错/提取带了尾字符」和
+        # 「文件根本没生成」，用户也能直接去该目录确认
+        ancestor = os.path.dirname(real)
+        while ancestor and ancestor != os.path.dirname(ancestor):
+            if os.path.isdir(ancestor):
+                break
+            ancestor = os.path.dirname(ancestor)
+        hint = f"（最近的已存在目录: {ancestor}）" if ancestor and os.path.isdir(ancestor) else ""
+        raise HTTPException(status_code=400, detail=f"路径不存在: {real}{hint}")
     if _sys.platform.startswith("win"):
         os.startfile(real)
     elif _sys.platform == "darwin":
