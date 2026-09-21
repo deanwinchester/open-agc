@@ -86,14 +86,14 @@ function dlHref(name) {
 // ── 产物路径一键打开 ──
 // agent 回复里的绝对路径（Windows D:\... / POSIX /home/... 等）提取为
 // 可点击 chips，点击调 /api/sandbox/open_folder 用系统默认应用打开。
-// 保守匹配：排除 URL（含 ://）、末尾标点、明显非路径文本。
-const PATH_RE = /([A-Za-z]:\\(?:[^\s\\/:*?"<>|，。；、）】」']+\\?)+)|(\/(?:home|Users|opt|srv|var|tmp|mnt|data|workspace|root)(?:\/[^\s，。；、）】」']+)+)/g;
+// 保守匹配：排除 URL（含 ://）、Markdown 反引号/引号包裹、末尾标点。
+const PATH_RE = /([A-Za-z]:\\(?:[^\s\\/:*?"<>|，。；、）】」'"`]+\\?)+)|(\/(?:home|Users|opt|srv|var|tmp|mnt|data|workspace|root)(?:\/[^\s，。；、）】」'"`]+)+)/g;
 
 const deliverablePaths = computed(() => {
   if (props.item.role !== 'agent') return [];
   const found = new Set();
   for (const m of String(props.item.content || '').matchAll(PATH_RE)) {
-    let p = m[0].replace(/[\\/.:，,;]+$/, '');
+    let p = m[0].replace(/[\\/.:，,;`"']+$/, '');
     if (!p || p.includes('://')) continue;
     // 至少两级目录才算路径，避免误命中 /home 这类短词
     if ((p.match(/[\\/]/g) || []).length < 2) continue;
