@@ -21,11 +21,14 @@ UninstallIcon "@ICON_ABS@"
 Section "Install"
 
   ; ── 运行中检测：主程序有【可见窗口】才提示（用户视角的「正在运行」）；
-  ; 无窗口的后台残留（托盘驻留/崩溃残留的 WebView2 僵尸子进程）→ 静默清理。
-  ; 此前只按进程名+路径判断：应用关窗驻留后台时进程还在，用户认为
-  ; 「并未运行」却吃到提示（生产实证）。
+  ; 无窗口残留（旧实例崩溃残留的 WebView2 僵尸子进程）→ 静默清理。
+  ; ⚠ 引号教训（生产实证：每台机器都误报「正在运行」）：NSIS 单引号字符串
+  ; 不支持 '' 转义——内嵌的单引号在展开时丢失，PowerShell 收到的是不带
+  ; 引号的 C:\Program Files (x86)\... 路径（括号变表达式 → 解析错误 →
+  ; 退出码 1 → 误判为「正在运行」）。必须用 NSIS 双引号字符串 + $\" 转义
+  ; 内层双引号；PowerShell 字符串一律用单引号（不能再出现 ''）。
   ; 检测有可见窗口的主程序（MainWindowHandle ≠ 0）
-  nsExec::ExecToStack 'powershell -NoProfile -Command "if (Get-Process -Name ''Open-AGC'' -ErrorAction SilentlyContinue | Where-Object { $$_.Path -like ''$INSTDIR\*'' -and $$_.MainWindowHandle -ne 0 }) { exit 1 } else { exit 0 }"'
+  nsExec::ExecToStack "powershell -NoProfile -Command $\"if (Get-Process -Name 'Open-AGC' -ErrorAction SilentlyContinue | Where-Object { $$_.Path -like '$INSTDIR\*' -and $$_.MainWindowHandle -ne 0 }) { exit 1 } else { exit 0 }$\""
   Pop $0
   ${If} $0 == 1
     MessageBox MB_ICONEXCLAMATION|MB_YESNO \
@@ -35,7 +38,7 @@ Section "Install"
   ${EndIf}
   ; 静默清理安装目录下的所有相关进程（含旧实例崩溃残留的 WebView2 子进程），
   ; 等文件锁释放
-  nsExec::ExecToLog 'powershell -NoProfile -Command "Get-Process | Where-Object { $$_.Path -like ''$INSTDIR\*'' } | Stop-Process -Force"'
+  nsExec::ExecToLog "powershell -NoProfile -Command $\"Get-Process | Where-Object { $$_.Path -like '$INSTDIR\*' } | Stop-Process -Force$\""
   Sleep 2000
 
   SetOutPath "$INSTDIR"
@@ -61,7 +64,7 @@ SectionEnd
 
 Section "Uninstall"
   ; 卸载前结束运行中的实例（主程序/WebView2 子进程的文件锁会让 RMDir 失败）
-  nsExec::ExecToLog 'powershell -NoProfile -Command "Get-Process | Where-Object { $$_.Path -like ''$INSTDIR\*'' } | Stop-Process -Force"'
+  nsExec::ExecToLog "powershell -NoProfile -Command $\"Get-Process | Where-Object { $$_.Path -like '$INSTDIR\*' } | Stop-Process -Force$\""
   Sleep 1500
   RMDir /r "$INSTDIR"
   Delete "$DESKTOP\@DISPLAY_NAME@.lnk"
