@@ -54,12 +54,14 @@ def main() -> int:
     # （生产实证：相对路径 dist\Open-AGC 在 runner 工作目录下 "no files found"）
     payload_abs = os.path.join(os.getcwd(), "dist", "Open-AGC")
     out_abs = os.path.join(os.getcwd(), "dist")
+    icon_abs = os.path.join(ROOT, "static", "icon.ico")
     content = (content
                .replace("@APP_NAME@", app_name)
                .replace("@DISPLAY_NAME@", display_name)
                .replace("@VERSION@", version)
                .replace("@PAYLOAD_DIR@", payload_abs)
                .replace("@OUT_ABS@", out_abs)
+               .replace("@ICON_ABS@", icon_abs)
                .replace("@EXE_NAME@", "Open-AGC.exe"))
     os.makedirs("dist", exist_ok=True)
     out = os.path.join("dist", "installer.nsi")

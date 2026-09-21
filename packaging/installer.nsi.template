@@ -9,6 +9,10 @@ Name "@DISPLAY_NAME@"
 OutFile "@OUT_ABS@\@DISPLAY_NAME@-@VERSION@-Setup.exe"
 InstallDir "$PROGRAMFILES\@APP_NAME@"
 RequestExecutionLevel admin
+; 品牌定制：左下角文字与安装/卸载图标（替换 Nullsoft 默认）
+BrandingText "@DISPLAY_NAME@"
+Icon "@ICON_ABS@"
+UninstallIcon "@ICON_ABS@"
 
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
@@ -16,11 +20,12 @@ RequestExecutionLevel admin
 
 Section "Install"
 
-  ; ── 运行中检测：主程序在跑（用户可见的实例）→ 提示并自动关闭；
-  ; 崩溃残留的 WebView2 僵尸子进程（无窗口但锁文件）→ 静默清理。
-  ; 此前一刀切全报「正在运行」，僵尸进程也触发误报（生产实证）。
-  ; 检测主程序（Open-AGC.exe，不含子进程）
-  nsExec::ExecToStack 'powershell -NoProfile -Command "if (Get-Process -Name ''Open-AGC'' -ErrorAction SilentlyContinue | Where-Object { $$_.Path -like ''$INSTDIR\*'' }) { exit 1 } else { exit 0 }"'
+  ; ── 运行中检测：主程序有【可见窗口】才提示（用户视角的「正在运行」）；
+  ; 无窗口的后台残留（托盘驻留/崩溃残留的 WebView2 僵尸子进程）→ 静默清理。
+  ; 此前只按进程名+路径判断：应用关窗驻留后台时进程还在，用户认为
+  ; 「并未运行」却吃到提示（生产实证）。
+  ; 检测有可见窗口的主程序（MainWindowHandle ≠ 0）
+  nsExec::ExecToStack 'powershell -NoProfile -Command "if (Get-Process -Name ''Open-AGC'' -ErrorAction SilentlyContinue | Where-Object { $$_.Path -like ''$INSTDIR\*'' -and $$_.MainWindowHandle -ne 0 }) { exit 1 } else { exit 0 }"'
   Pop $0
   ${If} $0 == 1
     MessageBox MB_ICONEXCLAMATION|MB_YESNO \
