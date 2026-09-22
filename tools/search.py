@@ -206,7 +206,8 @@ class GrepSearchTool(BaseTool):
                 cmd.extend(["-g", include])
             cmd.extend(["--", pattern, target_path])
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                from core.process import NO_WINDOW_KW
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, **NO_WINDOW_KW)
                 if result.returncode == 0:
                     return _cap_lines(result.stdout.splitlines(), head_limit)
                 elif result.returncode == 1:
