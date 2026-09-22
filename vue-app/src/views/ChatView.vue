@@ -38,8 +38,10 @@ const HISTORY_PAGE_SIZE = 100;
 // 历史加载完成后的短时间窗内，WS 推来的消息若与历史条目重复则丢弃
 //（服务端 _pending_final_responses 重投与 REST 历史存在竞态，见 api/ws.py:63-77）
 const DEDUP_WINDOW_MS = 3000;
-// history_steps 卡片可显示「继续」按钮的任务状态（对齐旧 renderHistorySteps）
-const RESUMABLE_STATUSES = ['interrupted', 'backgrounded', 'background_failed', 'completed'];
+// history_steps 卡片可显示「继续」按钮的任务状态（对齐旧 renderHistorySteps）：
+// 含 failed——LLM_ERROR 任务即 failed 态，后端恢复链路（resume CAS 状态集）
+// 本就支持 failed，前端漏列导致「点继续可重试」没有按钮（生产实证）
+const RESUMABLE_STATUSES = ['interrupted', 'backgrounded', 'background_failed', 'failed', 'completed'];
 // 进入会话时值得用 REST 补一张进度卡片的任务状态（对齐旧 _loadRecentTaskProgress）
 const RECENT_CARD_STATUSES = ['running', 'interrupted', 'backgrounded', 'background_failed', 'failed'];
 
