@@ -905,6 +905,8 @@ class OpenAGCAgent:
                 config_data = json.load(f)
                 mcp_config = config_data.get("mcp_servers", {})
                 if mcp_config:
+                    from tools.mcp_tool import resolve_mcp_config
+                    mcp_config = resolve_mcp_config(mcp_config)
                     mcp_manager = get_mcp_manager()
                     mcp_tools = mcp_manager.load_servers(mcp_config)
                     for name, tool_instance in mcp_tools.items():
