@@ -54,6 +54,11 @@ DEFAULT_GUIDES = [
                  "稍候点「继续」重试；反复超时请检查模型服务负载"),
     },
     {
+        "match": "midstream,err:remotedisconnected,err:connection reset",
+        "hint": ("模型服务在流式输出中途断开了连接（服务端重启/过载/迁移中）。"
+                 "通常稍候点「继续」重试即可恢复；频繁出现请检查模型服务状态"),
+    },
+    {
         "match": "err:parse tool call,err:unterminated,err:expecting value",
         "hint": "模型连续返回了非法格式的工具调用（已自动重试仍失败）",
     },
