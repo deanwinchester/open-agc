@@ -112,9 +112,10 @@ class PythonREPLTool(BaseTool):
             if not exe:
                 continue
             try:
+                from core.process import NO_WINDOW_KW
                 out = subprocess.run(
                     [exe, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
-                    capture_output=True, text=True, timeout=5)
+                    capture_output=True, text=True, timeout=5, **NO_WINDOW_KW)
                 major, minor = out.stdout.strip().split(".")[:2]
                 if (int(major), int(minor)) >= (3, 10):
                     return [exe]
@@ -126,7 +127,8 @@ class PythonREPLTool(BaseTool):
     def _py_version_str(cmd):
         import subprocess
         try:
-            out = subprocess.run(cmd + ["--version"], capture_output=True, text=True, timeout=5)
+            from core.process import NO_WINDOW_KW
+            out = subprocess.run(cmd + ["--version"], capture_output=True, text=True, timeout=5, **NO_WINDOW_KW)
             return (out.stdout or out.stderr).strip()
         except Exception:
             return cmd[0]
@@ -340,8 +342,9 @@ class PythonREPLTool(BaseTool):
                 # Kill the entire process tree (avoids orphan ffmpeg etc.)
                 try:
                     if sys.platform == "win32":
+                        from core.process import NO_WINDOW_KW
                         subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                                       capture_output=True, timeout=5)
+                                       capture_output=True, timeout=5, **NO_WINDOW_KW)
                     else:
                         import signal
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)

@@ -269,10 +269,11 @@ class ComputerTool(BaseTool):
             import sys as _sys
             try:
                 if _sys.platform.startswith('win'):
+                    from core.process import NO_WINDOW_KW
                     _sp.run(['powershell', '-NoProfile', '-Command',
                              'Set-Clipboard -Value $input'],
                             input=text.encode('utf-8'), check=True,
-                            capture_output=True, timeout=10)
+                            capture_output=True, timeout=10, **NO_WINDOW_KW)
                 else:
                     for cmd in (['xclip', '-selection', 'clipboard'],
                                 ['xsel', '--clipboard', '--input'],

@@ -12,6 +12,12 @@ import sys
 
 import psutil
 
+# Windows GUI（windowed）程序 fork 的 console 子进程默认新建可见控制台——
+# 黑色终端窗口一闪（生产实证：安装版执行任务反复闪）。统一在 Windows 上
+# 加 CREATE_NO_WINDOW；POSIX 为空 dict，调用方 **NO_WINDOW_KW 即可。
+NO_WINDOW_KW = ({"creationflags": subprocess.CREATE_NO_WINDOW}
+                if sys.platform == "win32" else {})
+
 
 def pid_alive(pid: int) -> bool:
     """Return True if a process with `pid` exists and is not a zombie."""
@@ -51,7 +57,7 @@ def kill_tree(pid: int) -> None:
     if sys.platform == "win32":
         try:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                           capture_output=True, timeout=10)
+                           capture_output=True, timeout=10, **NO_WINDOW_KW)
         except Exception:
             pass
         return
