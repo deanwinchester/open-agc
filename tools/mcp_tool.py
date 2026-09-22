@@ -37,7 +37,14 @@ class MCPToolWrapper(BaseTool):
         }
         
     def execute(self, **kwargs) -> Any:
-        return self.mcp_manager.call_tool_sync(self.mcp_server_name, self.tool_name, kwargs)
+        # 框架会给 VAR_KEYWORD 工具注入 interrupt_check（函数）与
+        # _agent_context（agent 实例）——原样转发会被 MCP SDK 序列化成
+        # PydanticSerializationError（生产实证：所有 MCP 工具调用报
+        # "Unable to serialize unknown type: <class 'function'>"）。
+        # 只转发模型实际给出的参数：去下划线前缀键与可调用对象。
+        args = {k: v for k, v in kwargs.items()
+                if not k.startswith("_") and not callable(v)}
+        return self.mcp_manager.call_tool_sync(self.mcp_server_name, self.tool_name, args)
 
 class MCPClientManager:
     """

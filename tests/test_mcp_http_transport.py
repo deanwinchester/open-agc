@@ -56,3 +56,30 @@ def test_url_config_survives_resolve():
     out = resolve_mcp_config(cfg)
     assert out["zxs_es"]["url"] == "http://127.0.0.1:8080/mcp"
     assert out["zxs_es"]["headers"] == {"X-Key": "k"}
+
+
+class _RecordingManager:
+    def __init__(self):
+        self.received = None
+
+    def call_tool_sync(self, server_name, tool_name, arguments, **kw):
+        self.received = arguments
+        return "ok"
+
+
+def test_wrapper_strips_framework_injected_kwargs():
+    """框架注入的 interrupt_check（函数）/_agent_context 不得转发给 MCP
+    server——否则 MCP SDK 序列化报 Unable to serialize unknown type
+    （生产实证）。"""
+    from tools.mcp_tool import MCPToolWrapper
+    mgr = _RecordingManager()
+    w = MCPToolWrapper(mcp_server_name="s", tool_name="t", description="d",
+                       input_schema={}, mcp_manager=mgr)
+
+    class FakeAgent:
+        pass
+
+    out = w.execute(query="a", interrupt_check=lambda: False,
+                    _agent_context=FakeAgent(), _sudo_password="x")
+    assert out == "ok"
+    assert mgr.received == {"query": "a"}
