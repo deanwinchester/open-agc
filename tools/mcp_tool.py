@@ -216,6 +216,38 @@ class MCPClientManager:
 
 _global_mcp_manager = None
 
+
+def resolve_mcp_config(cfg: dict) -> dict:
+    """替换 mcp_servers 配置里的占位符，使同一份配置在源码/打包版通用：
+
+    - {app_exe} → 当前解释器/应用可执行文件（frozen 时是 Open-AGC.exe，
+      源码时是 python.exe）
+    - {pyrun}   → frozen 时展开为 --pyrun（嵌入解释器跑脚本的内部通道，
+      见 gui_app.main），源码时丢弃该 token（python 直接跑脚本）
+    - {app_dir} → frozen 时 sys._MEIPASS（bundle 内目录），源码时仓库根
+    """
+    import sys as _sys
+    exe = _sys.executable
+    app_dir = getattr(_sys, "_MEIPASS", None) or os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))
+    frozen = bool(getattr(_sys, "frozen", False))
+    out = {}
+    for name, sc in (cfg or {}).items():
+        c = dict(sc or {})
+        c["command"] = str(c.get("command", "")).replace("{app_exe}", exe)
+        args = []
+        for a in c.get("args", []):
+            a = str(a).replace("{app_dir}", app_dir)
+            if a == "{pyrun}":
+                if frozen:
+                    args.append("--pyrun")
+                continue
+            args.append(a)
+        c["args"] = args
+        out[name] = c
+    return out
+
+
 def get_mcp_manager() -> MCPClientManager:
     global _global_mcp_manager
     if _global_mcp_manager is None:
