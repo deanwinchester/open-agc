@@ -46,6 +46,7 @@ from tools.sandbox import EnterWorktreeTool, ExitWorktreeTool
 from tools.self_review import SelfReviewTool
 from tools.task_plan import TaskPlanTool, format_plan_for_prompt, load_plan
 from tools.task_manager import TaskManagerTool
+from tools.schedule_task import ScheduleTaskTool
 from tools.system_config import ConfigureSystemTool
 from tools.plugin_dev import DevelopPluginTool
 from tools.install_skill import InstallSkillTool
@@ -477,6 +478,13 @@ class OpenAGCAgent:
             f"当执行耗时操作（下载模型/安装依赖/训练等），shell 返回 [Still Running] 时，"
             f"应立即调用 pause_and_wait 工具（扩展工具，未启用时先 search_available_tools）暂停自己。系统会保存上下文，后台任务完成后自动恢复执行。"
             f"不要让用户干等着，也不要反复重试。\n"
+            f"\n## 定时/周期任务\n"
+            f"用户要求「每隔 N 分钟/每天 X 点/定期」做某事（如定时提醒、周期汇报）时，"
+            f"用 schedule_task 工具创建 cron 周期任务（title/query/cron 三参数；"
+            f"系统自带调度器会到期自动执行并把结果发到会话）。cron 按 UTC 解析——"
+            f"北京时间需先换算（UTC = 北京 - 8 小时，如「每天 9 点」= 0 1 * * *）。"
+            f"禁止用 pause_and_wait 自循环模拟周期任务（会耗尽任务恢复次数后停摆）。"
+            f"已有周期任务用 schedule_task list 查看、toggle 启停，不要重复创建。\n"
             f"\n## 大任务检查点\n"
             f"执行大批量/长耗时任务（大规模数据导出、批量处理、分批抓取等）时，"
             f"必须在沙箱工作目录下维护进度检查点文件（确切路径见「当前任务检查点」段，"
@@ -504,9 +512,12 @@ class OpenAGCAgent:
             f"\n## Python 后台进程\n"
             f"如果使用 execute_python 启动长期运行的进程（如 ffmpeg 录屏、服务器等），"
             f"必须将 stdout/stderr 重定向到 subprocess.DEVNULL 或文件，否则父进程会"
-            f"因管道阻塞而超时：\n"
+            f"因管道阻塞而超时；Windows 安装版下还必须加 CREATE_NO_WINDOW——"
+            f"否则每启一个孙进程就闪一个黑色终端窗口（生产实证）：\n"
             f"```python\n"
-            f"subprocess.Popen([\"ffmpeg\", \"...\"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            f"import sys, subprocess\n"
+            f"_NW = subprocess.CREATE_NO_WINDOW if sys.platform == \"win32\" else 0\n"
+            f"subprocess.Popen([\"ffmpeg\", \"...\"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=_NW)\n"
             f"```\n"
             f"用 subprocess 捕获子进程输出时必须显式指定 encoding=\"utf-8\", errors=\"replace\"——"
             f"Windows 上文本模式默认编码是 cp936，依赖默认编码会把 UTF-8 输出解码成乱码并写进文件。\n"
@@ -789,6 +800,7 @@ class OpenAGCAgent:
             "shell_send": ShellSendTool(),
             "manage_task_plan": TaskPlanTool(),
             "manage_task": TaskManagerTool(),
+            "schedule_task": ScheduleTaskTool(),
             "compact_context": CompactContextTool(),
             "dispatch_subagent": DispatchSubagentTool(),
             "request_secret": RequestSecretTool(),
@@ -834,6 +846,7 @@ class OpenAGCAgent:
             "shell_send": "交互命令输入",
             "manage_task_plan": "管理任务计划",
             "manage_task": "查看和管理任务",
+            "schedule_task": "定时任务管理",
             "dispatch_subagent": "分派子代理",
             "request_secret": "向用户收集凭据",
             "customize_theme": "界面风格定制",
