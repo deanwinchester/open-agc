@@ -115,24 +115,34 @@ class MCPClientManager:
                 print(f"[MCPClientManager] Error closing session '{name}': {e}")
 
     async def _connect_one(self, name: str, server_cfg: dict):
-        """Start one MCP server, create its session and wrap its tools."""
-        command = server_cfg.get("command")
-        args = server_cfg.get("args", [])
-        env = server_cfg.get("env")
+        """Start one MCP server, create its session and wrap its tools.
 
-        if not command:
+        两种形态：
+        - {"command", "args", "env"}：stdio 子进程（本地脚本服务器）
+        - {"url", "headers"?}：Streamable HTTP 远端服务器（如 zxs_es 的 /mcp）
+        """
+        url = server_cfg.get("url")
+        command = server_cfg.get("command")
+
+        if not url and not command:
             return
 
-        server_params = StdioServerParameters(
-            command=command,
-            args=args,
-            env={**os.environ, **env} if env else None
-        )
-
-        print(f"[MCPClientManager] Starting MCP server '{name}' via command: {command} {' '.join(args)}")
+        print(f"[MCPClientManager] Connecting MCP server '{name}' via "
+              f"{url or (command + ' ' + ' '.join(server_cfg.get('args', [])))}")
         try:
             stack = AsyncExitStack()
-            read, write = await stack.enter_async_context(stdio_client(server_params))
+            if url:
+                from mcp.client.streamable_http import streamablehttp_client
+                read, write, _sid = await stack.enter_async_context(
+                    streamablehttp_client(
+                        url, headers=server_cfg.get("headers") or None))
+            else:
+                server_params = StdioServerParameters(
+                    command=command,
+                    args=server_cfg.get("args", []),
+                    env={**os.environ, **server_cfg["env"]} if server_cfg.get("env") else None
+                )
+                read, write = await stack.enter_async_context(stdio_client(server_params))
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
 
