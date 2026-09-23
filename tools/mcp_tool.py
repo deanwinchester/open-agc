@@ -139,18 +139,19 @@ class MCPClientManager:
         try:
             stack = AsyncExitStack()
             if url:
-                # mcp SDK 改名史：新版为 streamable_http_client（下划线），
-                # 旧版为 streamablehttp_client——打包 CI 与开发环境的 mcp
-                # 版本不同会踩到不同名字（生产实证：打包版只有下划线版，
-                # cannot import name 'streamablehttp_client'）
+                # mcp SDK 改名又改签名：新版 streamable_http_client(url, *,
+                # http_client=...)，旧版 streamablehttp_client(url, headers=
+                # ...)——按真实签名分派（打包版与开发环境版本不同，生产实证：
+                # got an unexpected keyword argument 'headers'）
                 try:
                     from mcp.client.streamable_http import streamablehttp_client
                 except ImportError:
                     from mcp.client.streamable_http import (
                         streamable_http_client as streamablehttp_client)
+                conn_kwargs = _http_connect_kwargs(
+                    server_cfg.get("headers"), streamablehttp_client)
                 read, write, _sid = await stack.enter_async_context(
-                    streamablehttp_client(
-                        url, headers=server_cfg.get("headers") or None))
+                    streamablehttp_client(url, **conn_kwargs))
             else:
                 server_params = StdioServerParameters(
                     command=command,
@@ -240,6 +241,22 @@ class MCPClientManager:
             return f"Error executing tool '{tool_name}' on server '{server_name}': {str(e)}"
 
 _global_mcp_manager = None
+
+
+def _http_connect_kwargs(headers: dict, client_fn) -> dict:
+    """按 streamable_http 客户端的真实签名组装连接参数：
+    旧签名 (url, headers=...) 直接传；新签名 (url, http_client=...) 时
+    用带自定义头的 httpx.AsyncClient。headers 为空时一律不传。"""
+    import inspect
+    params = inspect.signature(client_fn).parameters
+    if not headers:
+        return {}
+    if "headers" in params:
+        return {"headers": headers}
+    if "http_client" in params:
+        import httpx
+        return {"http_client": httpx.AsyncClient(headers=headers)}
+    return {}
 
 
 def resolve_mcp_config(cfg: dict) -> dict:
