@@ -509,7 +509,12 @@ class SubAgent:
                     except Exception:
                         result = str(result)
                     if len(result) > 15000:
-                        result = result[:15000] + "\n...[truncated]"
+                        # 与主 agent 一致：JSON 结果先走结构化压缩（保留元信息 +
+                        # 明确「非工具故障」说明），避免子代理误判截断为工具故障
+                        from agent.context_manager import compress_json_result
+                        compressed = compress_json_result(result, 15000)
+                        result = compressed if compressed is not None \
+                            else result[:15000] + "\n...[truncated]"
 
                     self.messages.append({
                         "role": "tool",

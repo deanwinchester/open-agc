@@ -130,7 +130,12 @@ class TestToolResultWriteTruncation:
     """写入 messages 的单条工具结果不得超过按工具类型的 cap。"""
 
     def _agent(self):
-        return OpenAGCAgent.__new__(OpenAGCAgent)
+        import tempfile
+        agent = OpenAGCAgent.__new__(OpenAGCAgent)
+        # 截断时会把完整结果溢出到 sandbox 的 tool_results/，指到临时目录
+        # 避免测试向仓库工作目录落文件
+        agent.sandbox_dir = tempfile.mkdtemp()
+        return agent
 
     def test_under_cap_returned_unchanged(self):
         agent = self._agent()

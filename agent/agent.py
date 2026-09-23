@@ -2375,8 +2375,8 @@ class OpenAGCAgent:
     @staticmethod
     def _compress_shell_output(result: str, tool_name: str) -> str:
         return compress_shell_output(result, tool_name)
-    def _compress_tool_result(self, result: str, tool_name: str) -> str:
-        return compress_tool_result(result, tool_name)
+    def _compress_tool_result(self, result: str, tool_name: str, max_total: int = 4000) -> str:
+        return compress_tool_result(result, tool_name, max_total)
 
     # 写入侧截断上限（字符数，按工具类型）：写入 self.messages 的单条工具
     # 结果不得超过该 cap，保证上下文窗口不被单条巨型结果挤爆。
@@ -2391,8 +2391,11 @@ class OpenAGCAgent:
     def _truncate_tool_result_for_context(self, result: str, tool_name: str) -> str:
         """工具结果写入 messages 前的上下文截断（写入侧防线）。
 
-        超出按工具类型的 cap 时先走 compress_tool_result（头 + 评分中段 + 尾），
-        仍超 cap 时硬截断兜底，保证写入结果不超 cap。
+        超出按工具类型的 cap 时先走 compress_tool_result（JSON 结构化压缩 /
+        头+评分中段+尾），仍超 cap 时硬截断兜底，保证写入结果不超 cap。
+        发生截断时把完整结果溢出到 sandbox 的 tool_results/ 文件，并在尾部
+        附明确指引——避免模型把截断误判为工具故障、绕过 MCP 用 Python
+        直接请求接口（生产实证）。
 
         与进度事件里的 _full_cap 分工：本方法只裁写入 self.messages 的上下文
         内容；_full_cap 只裁 full_result（前端展示 / 落库 task_steps），不影响
@@ -2402,13 +2405,43 @@ class OpenAGCAgent:
             tool_name, self._TOOL_RESULT_WRITE_CAP_DEFAULT)
         if len(result) <= cap:
             return result
-        compressed = self._compress_tool_result(result, tool_name)
-        if len(compressed) <= cap:
-            return compressed
-        # 硬截断兜底（压缩器对单行超长等极端输入可能不缩反胀）：
-        # 后缀计入 cap，保证总长度不超 cap。
-        suffix = "\n...(truncated)"
-        return compressed[:cap - len(suffix)] + suffix
+        original_len = len(result)
+        # 先落盘拿指引后缀，再把正文预算减去后缀长度——写入结果（含指引）
+        # 总长仍 ≤ cap，守住「单条工具结果不超 cap」的契约。
+        spill_note = self._spill_tool_result(result, tool_name, original_len)
+        budget = cap - len(spill_note)
+        compressed = self._compress_tool_result(result, tool_name, budget)
+        if len(compressed) > budget:
+            # 硬截断兜底（压缩器对单行超长等极端输入可能不缩反胀）：
+            # 后缀计入预算，保证总长度不超。
+            suffix = "\n...(truncated)"
+            compressed = compressed[:budget - len(suffix)] + suffix
+        return compressed + spill_note
+
+    def _spill_tool_result(self, result: str, tool_name: str, original_len: int) -> str:
+        """超长工具结果完整落盘到 sandbox，返回给模型的指引后缀（失败则静默）。"""
+        import re as _re
+        import time as _time
+        try:
+            base = getattr(self, "sandbox_dir", None) or os.getcwd()
+            out_dir = os.path.join(base, "tool_results")
+            os.makedirs(out_dir, exist_ok=True)
+            safe_name = _re.sub(r"[^A-Za-z0-9_-]", "_", tool_name)[:40]
+            fname = f"{safe_name}_{_time.strftime('%H%M%S')}.txt"
+            fpath = os.path.join(out_dir, fname)
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(result)
+            rel = f"tool_results/{fname}"
+            return (
+                f"\n[截断说明] 工具完整返回 {original_len} 字符，为节省上下文"
+                f"上方内容已压缩。数据在服务端是完整的，这不是工具故障——"
+                f"不要改用 execute_python/execute_shell 直接请求该接口重试。"
+                f"如需完整数据：用 execute_python 读取沙箱文件 `{rel}` 做统计/"
+                f"筛选/分页查看；或用更精确的查询参数（更小 size、分页、字段"
+                f"过滤、更窄关键词）重新调用本工具。"
+            )
+        except Exception:
+            return ""
 
     def _fold_tool_calls(self, messages: List[Dict], force: bool = False) -> List[Dict]:
         return fold_tool_calls(messages, force=force)
