@@ -133,10 +133,13 @@ class ToolDiscoveryTool(BaseTool):
         "检索并启用扩展工具。需要当前没有的能力（浏览器、邮件等）时先搜后用。"
     )
 
-    def __init__(self, full_tools: Dict[str, BaseTool], enable_callback: Callable[[List[str]], None], **kwargs):
+    def __init__(self, full_tools: Dict[str, BaseTool], enable_callback: Callable[[List[str]], None],
+                 before_search: Callable[[], None] = None, **kwargs):
         super().__init__(**kwargs)
         self.full_tools = full_tools
         self.enable_callback = enable_callback
+        # 检索前钩子（如 MCP 懒重连——init 时不可达的 server 在此重试）
+        self.before_search = before_search
 
     def get_openai_schema(self) -> Dict[str, Any]:
         return {
@@ -158,6 +161,11 @@ class ToolDiscoveryTool(BaseTool):
         }
 
     def execute(self, query: str, **kwargs) -> str:
+        if self.before_search:
+            try:
+                self.before_search()
+            except Exception:
+                pass
         # ── Expand Chinese terms to English equivalents ──
         expanded_query = _translate_cjk(query)
         query_lower = query.lower()

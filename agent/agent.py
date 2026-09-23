@@ -976,9 +976,34 @@ class OpenAGCAgent:
             if added:
                 self.tool_schemas = [tool.get_openai_schema() for tool in self.available_tools.values() if tool is not None]
                 
+        # MCP 懒重连：agent 创建时 MCP server 不可达（重启期/配置未就绪）会
+        # 导致本会话永远没有这批工具（生产实证：模型转而自己用 urllib 直连
+        # MCP 端点）。每次工具检索前重试加载失败/缺失的 server，并把新加载
+        # 的工具并入可检索集合。
+        def _retry_mcp_servers():
+            try:
+                with open(get_data_path("config.json"), "r", encoding="utf-8") as f:
+                    mcp_config = json.load(f).get("mcp_servers", {})
+                if not mcp_config:
+                    return
+                from tools.mcp_tool import get_mcp_manager, resolve_mcp_config
+                mgr = get_mcp_manager()
+                missing = {n: c for n, c in mcp_config.items()
+                           if n not in mgr._sessions}
+                if not missing:
+                    return
+                new_tools = mgr.load_servers(resolve_mcp_config(missing))
+                for name, ti in new_tools.items():
+                    if name not in self.full_available_tools:
+                        self.full_available_tools[name] = ti
+                        self.tool_display_names[name] = f"[MCP] {name}"
+            except Exception:
+                pass
+
         self.full_available_tools["search_available_tools"] = ToolDiscoveryTool(
             full_tools=self.full_available_tools, 
-            enable_callback=_enable_tools_callback
+            enable_callback=_enable_tools_callback,
+            before_search=_retry_mcp_servers,
         )
         
         self.available_tools = {name: self.full_available_tools[name] for name in self.active_tool_names if name in self.full_available_tools}
