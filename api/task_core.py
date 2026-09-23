@@ -560,6 +560,40 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
         update_task_status(task_id, "failed", summary, interruption_reason="error")
         return 'failed'
 
+    # -- 中间交付自动续跑（确定性兜底，不依赖 agent 自觉） --
+    # 回复承诺「稍后检查/就绪后自动继续」却走到收官——生产实证 #529：
+    # grafana「让后台继续拉，我每隔一会儿检查一次」后任务直接 completed，
+    # 无人再来部署。此类回复一律按 backgrounded 处理 + 定时唤醒，
+    # 把「中间交付 → 后续继续」变成系统机制而非空头承诺。
+    _promise = re.search(
+        r"(我(将|会|来|再|稍后|随后|每隔)[^。！？\n]{0,24}"
+        r"(检查|查看|确认|跟进|关注|继续|自动跑|自动继续|自动部署)"
+        r"|一就绪就[^。！？\n]{0,16}(跑|继续|部署|跟进)"
+        r"|就绪后[^。！？\n]{0,16}(自动|再|继续|部署|跟进))", response or "")
+    if _promise:
+        save_task_context(task_id, agent_messages)
+        wake_minutes = 5
+        wake_dt = (datetime.utcnow() + timedelta(minutes=wake_minutes)).strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            conn = db_connect()
+            conn.execute("UPDATE tasks SET wake_at=? WHERE id=?", (wake_dt, task_id))
+            conn.commit()
+            conn.close()
+        except Exception as _wk_e:
+            print(f"[TaskCore] Failed to set auto-promise wake: {_wk_e}")
+        update_task_status(task_id, "backgrounded",
+                           f"中间交付已挂起（{wake_minutes} 分钟后自动继续）",
+                           interruption_reason="promise_auto")
+        try:
+            save_message("system",
+                         f"⏰ 任务已自动挂起：检测到后续跟进承诺，"
+                         f"{wake_minutes} 分钟后系统将自动唤醒继续。",
+                         session_id, task_id=task_id)
+        except Exception:
+            pass
+        print(f"[TaskCore] promise-auto: task #{task_id} backgrounded with wake in {wake_minutes}min")
+        return 'backgrounded'
+
     # -- Normal completion --
     save_task_context(task_id, agent_messages)
     _record_task_deliverables(task_id)
