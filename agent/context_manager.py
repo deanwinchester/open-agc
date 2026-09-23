@@ -142,8 +142,74 @@ def compress_shell_output(result: str, tool_name: str) -> str:
             f"original tool: {tool_name}]\n{compressed}")
 
 
-def compress_tool_result(result: str, tool_name: str) -> str:
+def compress_json_result(result: str, max_total: int = 4000) -> str:
+    """JSON 感知的结构化压缩：保留全部标量元信息，数组只留前 N 条且逐条裁字段。
+
+    MCP 工具（如 es_search）返回的是 JSON，不是 web 搜索的「1. Title/URL/Snippet」
+    文本格式——走错压缩器会把整个 JSON 当成单条条目裁到 400 字符，模型看到
+    残片会误判「工具输出被截断」而绕过 MCP 直接用 Python 请求接口（生产实证）。
+    非 JSON 输入返回 None，由调用方回退到其他压缩器。
+    """
+    text = result.strip()
+    if not text or text[0] not in "{[":
+        return None
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+
+    MAX_ITEM_CHARS = 600   # 单条命中保留上限
+    MAX_STR_FIELD = 300    # 字符串字段保留上限
+    total_chars = len(result)
+
+    def _trim(obj, depth=0):
+        if isinstance(obj, str):
+            return obj if len(obj) <= MAX_STR_FIELD else obj[:MAX_STR_FIELD] + "…"
+        if isinstance(obj, dict):
+            return {k: _trim(v, depth + 1) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_trim(v, depth + 1) for v in obj]
+        return obj
+
+    def _shrink_arrays(obj, keep, counter):
+        """把遇到的数组裁到前 keep 条，被裁掉的条数累加进 counter。"""
+        if isinstance(obj, dict):
+            return {k: _shrink_arrays(v, keep, counter) for k, v in obj.items()}
+        if isinstance(obj, list):
+            if len(obj) > keep:
+                counter[0] += len(obj) - keep
+                obj = obj[:keep]
+            return [_shrink_arrays(v, keep, counter) for v in obj]
+        return obj
+
+    note = (f"[JSON 结果已压缩：原始 {total_chars} 字符，数组仅保留前 "
+            f"{{keep}} 条（省略 {{omitted}} 条），长字段逐条裁至 "
+            f"{MAX_STR_FIELD} 字符。数据在服务端是完整的，这不是工具故障]")
+    budget = max_total - 220  # 给 note 与换行预留，保证总长 ≤ max_total
+
+    trimmed = _trim(data)
+    omitted_total = 0
+    keep = 0
+    out = ""
+    # 逐级收紧数组保留条数，直到塞进预算
+    for keep in (10, 5, 3, 1):
+        counter = [0]
+        candidate = _shrink_arrays(trimmed, keep, counter)
+        out = json.dumps(candidate, ensure_ascii=False, indent=1)
+        omitted_total = counter[0]
+        if len(out) <= budget:
+            break
+
+    return note.format(keep=keep, omitted=omitted_total) + "\n" + out
+
+
+def compress_tool_result(result: str, tool_name: str, max_total: int = 4000) -> str:
     """Route tool result compression based on tool name."""
+    # JSON 优先：MCP 工具名五花八门（es_search/xx_query），按名字路由会
+    # 误判格式；能解析成 JSON 的一律走结构化压缩。
+    json_compressed = compress_json_result(result, max_total)
+    if json_compressed is not None:
+        return json_compressed
     if "search" in tool_name:
         return compress_search_results(result)
     if "read_file" in tool_name:
