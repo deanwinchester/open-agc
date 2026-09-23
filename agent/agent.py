@@ -478,6 +478,9 @@ class OpenAGCAgent:
             f"当执行耗时操作（下载模型/安装依赖/训练等），shell 返回 [Still Running] 时，"
             f"应立即调用 pause_and_wait 工具（扩展工具，未启用时先 search_available_tools）暂停自己。系统会保存上下文，后台任务完成后自动恢复执行。"
             f"不要让用户干等着，也不要反复重试。\n"
+            f"【禁止空头承诺】凡是在回复中承诺「稍后检查/定期检查/就绪后自动继续」的，"
+            f"必须立刻调用 pause_and_wait(wake_in_minutes=N) 把承诺落地——回合一旦结束，"
+            f"不会有人替你跟进。未落地的承诺会被系统拦截退回（生产实证）。\n"
             f"\n## 定时/周期任务\n"
             f"用户要求「每隔 N 分钟/每天 X 点/定期」做某事（如定时提醒、周期汇报）时，"
             f"用 schedule_task 工具创建 cron 周期任务（title/query/cron 三参数；"
@@ -2546,6 +2549,11 @@ class OpenAGCAgent:
         # 生产实证：主 agent 零工具调用虚构「编译完成/验收通过」报告）
         self._tool_msg_baseline = sum(1 for m in self.messages if m.get("role") == "tool")
         self._fabrication_retries = 0
+        # 空头承诺拦截（生产实证 #529：「让后台继续拉，我每隔一会儿检查一次，
+        # 一就绪就自动跑」后任务直接 completed——没有 pause_and_wait 就没有人
+        # 会来跟进）。本轮是否已调 pause_and_wait 落地承诺 + 拦截重跑计数
+        self._called_pause_wait_this_turn = False
+        self._promise_retries = 0
         # 工具调用 JSON 格式漂移纠错重试计数（上限 2 次/轮次）
         self._format_drift_retries = 0
         # 调用日志归属本会话/本任务（SubAgent 共享 self.llm，日志随主任务）
@@ -3273,6 +3281,8 @@ class OpenAGCAgent:
                 screenshot_urls = []
                 for tool_call in tool_calls:
                     function_name = tool_call.function.name
+                    if function_name == 'pause_and_wait':
+                        self._called_pause_wait_this_turn = True
                     raw_args = tool_call.function.arguments
                     try:
                         function_args = json.loads(raw_args)
@@ -3807,6 +3817,30 @@ class OpenAGCAgent:
                     continue
 
                 final_answer = message.content
+
+                # ── 空头承诺拦截：回复承诺「稍后/定期检查/自动继续」，
+                # 但本轮没有 pause_and_wait 落地——回合结束承诺必然落空
+                # （生产实证 #529 grafana：「让后台继续拉，我每隔一会儿检查
+                # 一次，一就绪就自动跑」后任务直接 completed，无人再来部署）。
+                # 与虚构交付拦截同理：注入纠错，要求落地承诺或如实告知结束。
+                if self._promise_retries < 1 and len(final_answer or "") > 80 \
+                        and not self._called_pause_wait_this_turn:
+                    _promise = re.search(
+                        r"(我(将|会|来|再|稍后|随后|每隔)[^。！？\n]{0,24}"
+                        r"(检查|查看|确认|跟进|关注|继续|自动跑|自动继续|自动部署)"
+                        r"|一就绪就[^。！？\n]{0,16}(跑|继续|部署|跟进)"
+                        r"|就绪后[^。！？\n]{0,16}(自动|再|继续|部署|跟进))", final_answer)
+                    if _promise:
+                        self._promise_retries += 1
+                        print("[Agent] ⚠️ 空头承诺拦截：承诺跟进但未调 pause_and_wait，注入纠错")
+                        self.messages.append({"role": "system", "content": (
+                            "⚠️ 系统检测：你刚才承诺了「稍后检查/自动继续」，但没有调用 "
+                            "pause_and_wait——回合结束后不会有人替你跟进，承诺必然落空。"
+                            "二选一立即执行：a) 调 pause_and_wait(wake_in_minutes=N) "
+                            "把承诺落地（到期系统会自动唤醒你继续）；"
+                            "b) 修改回复，如实告诉用户任务到此结束、需手动点「继续」。"
+                            "禁止空头承诺。")})
+                        continue
 
                 # ── 虚构交付拦截（dispatcher_mode）：回复声明了交付/验收，
                 # 但本轮零工具执行 → 判定幻觉，注入纠错消息重跑一轮（一次为限）。
