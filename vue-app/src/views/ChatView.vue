@@ -51,6 +51,8 @@ const ws = useWsStore();
 
 const sessions = ref([]);
 const currentSessionId = ref(null);
+// 会话未读计数 {sessionId: n}：后台/定时任务推来的新消息在侧栏显示红点
+const unread = ref({});
 const items = ref([]); // {kind:'msg'|'progress'|'ask', ...} 渲染顺序即对话顺序
 
 // 系统通知折叠分组：连续 ≥2 条 system 消息合并为一个可展开组，避免大量
@@ -453,6 +455,12 @@ function handleAskUser(data) {
 }
 
 function onMessage(data) {
+  // 非当前会话的 agent 消息：只累计未读徽标，不进入渲染流程
+  if (data.session_id && data.session_id !== currentSessionId.value
+    && (data.role || 'agent') !== 'system' && data.content && String(data.content).trim()) {
+    unread.value = { ...unread.value, [data.session_id]: (unread.value[data.session_id] || 0) + 1 };
+    return;
+  }
   if (!isForCurrent(data)) return;
   const role = data.role || 'agent';
   if (role === 'tool_step') return; // 步骤消息由进度卡片呈现
@@ -845,6 +853,12 @@ async function enterSession(sid) {
   if (!Number.isFinite(sid) || sid <= 0) sid = 1;
   if (sid === currentSessionId.value) return; // 同步赋值在 await 之前，重入安全
   currentSessionId.value = sid;
+  // 进入会话即清除其未读徽标
+  if (unread.value[sid]) {
+    const next = { ...unread.value };
+    delete next[sid];
+    unread.value = next;
+  }
   localStorage.setItem('lastSessionId', String(sid));
   // 重置上一会话的全部状态
   items.value = [];
@@ -928,6 +942,12 @@ async function onClearSession(id) {
   }
 }
 
+function onSessionUpdated(data) {
+  // 自动命名等场景下服务端推送的会话元数据变更
+  const s = sessions.value.find((x) => x.id === (data.session && data.session.id));
+  if (s && data.session.name) s.name = data.session.name;
+}
+
 // ── 生命周期 ──
 watch(
   () => route.params.sessionId,
@@ -952,6 +972,7 @@ onMounted(async () => {
     ws.on('llamacpp_download', onLlamaDownload),
     ws.on('download_success', onDownloadSuccess),
     ws.on('download_failed', onDownloadFailed),
+    ws.on('session_updated', onSessionUpdated),
   );
   await loadSessions();
   loadHeaderMeta(); // 不阻塞会话进入：agent 下拉 / 模型 badge 异步到位
@@ -978,6 +999,7 @@ onUnmounted(() => {
     <SessionRail
       :sessions="sessions"
       :current-id="currentSessionId"
+      :unread="unread"
       @select="onSelectSession"
       @create="onCreateSession"
       @rename="onRenameSession"

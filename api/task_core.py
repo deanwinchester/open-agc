@@ -618,7 +618,61 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
     except Exception:
         pass
     _check_goal_completeness(task_id)
+    _maybe_auto_title(session_id, task_id)
     return 'completed'
+
+
+def _maybe_auto_title(session_id: int, task_id: int):
+    """首个任务完成后自动命名会话（后台线程，不阻塞收官）。
+
+    触发条件：会话仍是默认名（默认会话/会话 N）且本会话还没有过 agent 回复。
+    标题由默认模型概括（≤16 字），失败/超时回退为用户请求截断。"""
+    import re as _re
+    import threading as _th
+
+    def _work():
+        try:
+            conn = db_connect()
+            row = conn.execute(
+                "SELECT s.name, "
+                "(SELECT COUNT(*) FROM messages WHERE session_id=s.id AND role='agent') AS agent_msgs "
+                "FROM sessions s WHERE s.id=?", (session_id,)).fetchone()
+            if not row:
+                conn.close()
+                return
+            name, agent_msgs = row[0] or "", row[1] or 0
+            if agent_msgs > 1:
+                conn.close()
+                return
+            if not (name == "默认会话" or _re.fullmatch(r"会话\s*\d+", name)):
+                conn.close()
+                return
+            task = conn.execute("SELECT user_query FROM tasks WHERE id=?", (task_id,)).fetchone()
+            conn.close()
+            user_query = (task[0] if task else "") or ""
+            title = ""
+            try:
+                from core.llm_client import LLMClient
+                resp, _ = LLMClient().chat(messages=[{
+                    "role": "user",
+                    "content": ("用不超过12个字概括以下用户请求的主题，输出纯标题"
+                                "（不要标点、引号、解释或前缀）：\n" + user_query[:500])}])
+                title = (resp.choices[0].message.content or "").strip().strip("\"'「」『』")[:16]
+            except Exception as _e:
+                print(f"[TaskCore] auto-title llm failed: {_e}")
+            if not title:
+                title = (user_query or "新会话").strip().replace("\n", " ")[:16]
+            conn = db_connect()
+            conn.execute("UPDATE sessions SET name=? WHERE id=?", (title, session_id))
+            conn.commit()
+            conn.close()
+            from api.state import _broadcast_to_websockets
+            _broadcast_to_websockets({"type": "session_updated",
+                                      "session": {"id": session_id, "name": title}})
+        except Exception as _e:
+            print(f"[TaskCore] auto-title error: {_e}")
+
+    _th.Thread(target=_work, daemon=True).start()
 
 
 def save_message(role: str, content: str, session_id: int = 1, task_id: int = None,

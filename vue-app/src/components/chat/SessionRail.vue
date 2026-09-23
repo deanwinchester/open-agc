@@ -1,7 +1,9 @@
 <script setup>
 // 会话侧栏：列表 / 新建 / 重命名 / 删除（id=1 为清空，对齐旧 static/js/sessions.js 规则）。
-// 确认弹窗在本组件内完成，REST 调用由父组件（ChatView）执行。
+// 确认弹窗在本组件内完成，REST 调用由父组件（ChatView）执行；搜索直接调 REST。
+import { ref, watch } from 'vue';
 import { ElMessageBox } from 'element-plus';
+import { request } from '../../api/client';
 import zh from '../../i18n/zh';
 
 const t = zh.chat;
@@ -9,8 +11,32 @@ const t = zh.chat;
 defineProps({
   sessions: { type: Array, default: () => [] },
   currentId: { type: Number, default: null },
+  unread: { type: Object, default: () => ({}) },
 });
 const emit = defineEmits(['select', 'create', 'rename', 'remove', 'clear']);
+
+// ── 会话搜索（全文检索聊天记录）──
+const query = ref('');
+const results = ref(null); // null = 未搜索；数组 = 搜索结果
+let searchTimer = null;
+
+watch(query, (q) => {
+  clearTimeout(searchTimer);
+  const kw = (q || '').trim();
+  if (!kw) { results.value = null; return; }
+  searchTimer = setTimeout(async () => {
+    try {
+      const data = await request(`/api/sessions/search?q=${encodeURIComponent(kw)}`);
+      results.value = (data && data.results) || [];
+    } catch {
+      results.value = [];
+    }
+  }, 300);
+});
+
+function onPickResult(r) {
+  emit('select', r.id);
+}
 
 async function onRename(session) {
   try {
@@ -59,7 +85,32 @@ async function onClear(session) {
       <span class="rail-title">{{ t.sessionsTitle }}</span>
       <el-button size="small" type="primary" plain @click="emit('create')">+ {{ t.newSession }}</el-button>
     </div>
-    <div class="rail-list">
+    <div class="rail-search">
+      <input
+        v-model="query"
+        class="search-input"
+        type="text"
+        :placeholder="t.searchSessions"
+        clearable
+      />
+    </div>
+    <div v-if="results !== null" class="rail-list">
+      <div v-if="!results.length" class="search-empty">{{ t.searchNoResult }}</div>
+      <div
+        v-for="r in results"
+        :key="r.id"
+        class="session-item search-hit"
+        :class="{ active: r.id === currentId }"
+        @click="onPickResult(r)"
+      >
+        <div class="hit-body">
+          <span class="session-name" :title="r.name">{{ r.name }}</span>
+          <span v-if="r.snippet" class="hit-snippet" :title="r.snippet">{{ r.snippet }}</span>
+        </div>
+        <span v-if="unread[r.id]" class="unread-badge">{{ unread[r.id] > 99 ? '99+' : unread[r.id] }}</span>
+      </div>
+    </div>
+    <div v-else class="rail-list">
       <div
         v-for="s in sessions"
         :key="s.id"
@@ -68,6 +119,7 @@ async function onClear(session) {
         @click="emit('select', s.id)"
       >
         <span class="session-name" :title="s.name">{{ s.name }}</span>
+        <span v-if="unread[s.id]" class="unread-badge">{{ unread[s.id] > 99 ? '99+' : unread[s.id] }}</span>
         <span class="session-actions" @click.stop>
           <button class="icon-btn" :title="t.rename" @click="onRename(s)">✎</button>
           <button
@@ -118,6 +170,67 @@ async function onClear(session) {
   flex: 1;
   overflow-y: auto;
   padding: 8px;
+}
+
+.rail-search {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  font-size: 12px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-primary);
+  outline: none;
+  transition: border-color var(--panda-transition);
+}
+
+.search-input:focus {
+  border-color: var(--el-color-primary);
+  background: var(--el-bg-color);
+}
+
+.search-empty {
+  padding: 16px 8px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.hit-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hit-snippet {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--el-text-color-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unread-badge {
+  flex-shrink: 0;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--el-color-danger);
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+  font-weight: 600;
 }
 
 .session-item {
