@@ -467,11 +467,23 @@ function onMessage(data) {
   if (isDupMessage(role, data.content, data.message_id)) return;
   // 后台任务的完成广播（background:true）不得清前台的运行态——否则前台
   // 任务还在跑时，一个后台任务完结就把「停止」按钮弄没了（生产实证：
-  // 中断按钮时有时无、点了无效）
+  // 中断按钮时有时无、点了无效）。但后台任务自身的进度在当前会话渲染时
+  // 同样会置 thinking/running（loadRecentTaskCard isLive 分支、tool_start），
+  // 其收官消息必须复位这些状态，否则「思考中」残留到切换会话才消失。
   if (data.background) {
     if (data.content && String(data.content).trim()) {
       appendItem({ kind: 'msg', key: nextKey(), role, content: data.content, taskId: data.task_id || null, id: data.message_id || null });
       scrollToBottom();
+    }
+    const isOwnRun = data.task_id && currentTaskId.value === data.task_id;
+    if (isOwnRun) {
+      thinking.visible = false;
+      finishLiveCard();
+      running.value = false;
+      currentTaskId.value = null;
+    } else if (!running.value) {
+      // 无前台任务在跑：思考指示器只可能来自这个后台任务，一并清除
+      thinking.visible = false;
     }
     return;
   }
