@@ -884,6 +884,8 @@ export default {
   chat: {
     sessionsTitle: '对话',
     newSession: '新建对话',
+    searchSessions: '搜索会话或聊天记录…',
+    searchNoResult: '没有匹配的会话',
     rename: '重命名',
     renamePrompt: '请输入新的会话名称',
     delete: '删除',

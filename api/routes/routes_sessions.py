@@ -31,6 +31,42 @@ async def get_sessions():
     return {"sessions": sessions}
 
 
+@router.get("/api/sessions/search")
+async def search_sessions(q: str = ""):
+    """按聊天记录全文检索会话（消息内容 LIKE 匹配 + 命中片段）。
+    返回 [{id, name, snippet, message_count}]，按最近活跃排序。"""
+    q = (q or "").strip()
+    if not q:
+        return {"results": []}
+    like = f"%{q}%"
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT s.id, s.name, "
+        "(SELECT content FROM messages WHERE session_id=s.id AND content LIKE ? LIMIT 1) AS hit_content, "
+        "(SELECT COUNT(*) FROM messages WHERE session_id=s.id) AS message_count "
+        "FROM sessions s "
+        "WHERE s.name LIKE ? OR EXISTS (SELECT 1 FROM messages WHERE session_id=s.id AND content LIKE ?) "
+        "ORDER BY s.updated_at DESC LIMIT 30",
+        (like, like, like),
+    ).fetchall()
+    conn.close()
+    results = []
+    for r in rows:
+        content = r["hit_content"] or ""
+        snippet = ""
+        if content:
+            idx = content.find(q)
+            if idx < 0:
+                idx = content.lower().find(q.lower())
+            if idx >= 0:
+                start = max(0, idx - 30)
+                snippet = ("…" if start > 0 else "") + content[start:idx + len(q) + 40] + "…"
+        results.append({"id": r["id"], "name": r["name"],
+                        "snippet": snippet, "message_count": r["message_count"]})
+    return {"results": results}
+
+
 @router.post("/api/sessions")
 async def create_session(body: dict = {}):
     """Create a new session, optionally with email config."""
