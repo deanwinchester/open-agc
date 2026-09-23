@@ -413,6 +413,7 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                 "role": "agent",
                 "background": True,
                 "session_id": bg_session_id,
+                "task_id": task_id,
                 "content": f"**{'🔄 自动恢复' if is_resume else '⏰ 定时'}任务完成**: {user_query[:40]}...\n\n{response}"
             })
 
@@ -1385,7 +1386,9 @@ def _guardian_resume_task(task_id: int) -> None:
                 _broadcast_to_websockets({
                     "type": "message",
                     "role": "agent",
+                    "background": True,
                     "session_id": _hb_session,
+                    "task_id": task_id,
                     "content": f"**🔄 自动恢复任务完成**\n\n{resp}"
                 })
             except Exception as _bc_e:
