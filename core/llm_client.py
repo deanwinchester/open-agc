@@ -5,12 +5,37 @@ import uuid
 import base64
 import time
 import contextlib
-import litellm
-from litellm.exceptions import ContextWindowExceededError
-# Fix for PyInstaller bundling issue with tiktoken
-litellm.num_tokens_logging = False
-litellm.supports_token_counter = False
 from typing import List, Dict, Any, Optional, Tuple
+
+# litellm 懒加载代理：顶层真导入实测 ~4.4s（冻结包更重），曾压在启动
+# splash 关键路径上。首次属性访问时惰性导入；启动期由预热线程并发触发
+# （gui_app/launcher）。函数体内的裸名 litellm.xxx 不受影响（代理对象
+# 拦截属性访问）；ContextWindowExceededError 在 except 求值前已被调用点
+# 触发替换为真实类（占位 Exception 只在异常早于导入时兜底）。
+class _LazyLitellm:
+    _mod = None
+
+    def _load(self):
+        global ContextWindowExceededError
+        if self._mod is None:
+            import litellm as _lt
+            _lt.num_tokens_logging = False
+            _lt.supports_token_counter = False
+            self._mod = _lt
+            ContextWindowExceededError = _lt.exceptions.ContextWindowExceededError
+        return self._mod
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+
+litellm = _LazyLitellm()
+ContextWindowExceededError = Exception  # 占位，litellm 加载后被替换为真实类
+
+
+def _llm():
+    """显式取 litellm 模块（启动预热线程用；返回已缓存的真实模块）。"""
+    return litellm._load()
 
 from core.model_pricing import calculate_cost
 from api.db import db_connect

@@ -99,10 +99,12 @@ def wait_for_server_ready(port, timeout=60):
 
     浏览器回退与原生窗口都必须等服务起来再打开页面——否则浏览器会在
     服务监听前就发起请求，显示「localhost 拒绝了我们的连接请求」。
+    前 3s 每 0.1s 一探（多数启动在此区间，省平均 ~0.3s），之后 0.5s。
     """
     import requests
     import time
-    deadline = time.time() + timeout
+    t0 = time.time()
+    deadline = t0 + timeout
     while time.time() < deadline:
         try:
             resp = requests.get(f"http://localhost:{port}/static/icon_rounded.png", timeout=1)
@@ -110,7 +112,7 @@ def wait_for_server_ready(port, timeout=60):
                 return True
         except Exception:
             pass
-        time.sleep(0.5)
+        time.sleep(0.1 if time.time() - t0 < 3 else 0.5)
     return False
 
 
@@ -141,12 +143,38 @@ def _gtk_diag_dump(window, tag, delay):
 
 
 def check_server_and_load(window, port):
-    if wait_for_server_ready(port, timeout=60):
-        window.load_url(f"http://localhost:{port}")
-        if os.environ.get('OPEN_AGC_GTK_DIAG') == '1':
-            for tag, delay in (('t+4s', 4), ('t+10s', 10)):
-                threading.Thread(target=_gtk_diag_dump, args=(window, tag, delay), daemon=True).start()
-        return
+    """等待后端就绪后加载正式界面；期间按阶段更新 splash 文案
+    （真实阶段提示，非假进度条）。就绪轮询前 3s 提速到 0.1s。"""
+    import requests
+    t0 = time.time()
+
+    def _phase(txt):
+        try:
+            window.evaluate_js(
+                "var p=document.querySelector('p');if(p){p.innerText='" + txt + "';}")
+        except Exception:
+            pass
+
+    deadline = t0 + 60
+    while time.time() < deadline:
+        el = time.time() - t0
+        if el < 2:
+            _phase("正在初始化服务……")
+        elif el < 5:
+            _phase("正在加载模型服务……")
+        else:
+            _phase("即将完成……")
+        try:
+            resp = requests.get(f"http://localhost:{port}/static/icon_rounded.png", timeout=1)
+            if resp.status_code == 200:
+                window.load_url(f"http://localhost:{port}")
+                if os.environ.get('OPEN_AGC_GTK_DIAG') == '1':
+                    for tag, delay in (('t+4s', 4), ('t+10s', 10)):
+                        threading.Thread(target=_gtk_diag_dump, args=(window, tag, delay), daemon=True).start()
+                return
+        except Exception:
+            pass
+        time.sleep(0.1 if el < 3 else 0.5)
 
     # Timeout reached without success
     try:
@@ -499,6 +527,18 @@ def main():
     # Start server in background thread
     server_thread = threading.Thread(target=start_server, args=(port,), daemon=True)
     server_thread.start()
+
+    # litellm 启动预热：顶层导入实测 ~4.4s——与用户看界面/敲字的时间重叠，
+    # 首条对话直接命中缓存模块。静默兜底：预热失败时首次调用走惰性导入
+    #（行为=现状）。必须在服务线程启动后立刻并发开跑才有意义。
+    def _warm_litellm():
+        try:
+            from core.llm_client import _llm
+            _llm()
+            print("[warmup] litellm 预热完成")
+        except Exception as _we:
+            print(f"[warmup] litellm 预热失败（首次调用时再惰性加载）: {_we}")
+    threading.Thread(target=_warm_litellm, daemon=True).start()
 
     # Try to create native window, fallback to browser
     if not create_window(port):

@@ -142,10 +142,12 @@ def cleanup_stale_kg_data(days: int = 90) -> dict:
     return result
 
 
-def cleanup_old_data(days: int = 30, min_cost: float = 0.0) -> dict:
+def cleanup_old_data(days: int = 30, min_cost: float = 0.0, vacuum: bool = True) -> dict:
     """Run all cleanup tasks and return a summary.
 
     Call this on server startup or via a periodic timer.
+    vacuum=False 跳过 VACUUM（大库实测 ~3.3s）——启动路径上由调用方
+    按周另行调度（api/server.py 的周节流逻辑），不在每次启动都跑。
     """
     results = {}
 
@@ -156,14 +158,15 @@ def cleanup_old_data(days: int = 30, min_cost: float = 0.0) -> dict:
         print(f"[DB] Cleaned {log_result['deleted_rows']} old model call logs")
 
     # 2. Vacuum
-    try:
-        vac_result = vacuum_database()
-        results["vacuum"] = vac_result
-        if vac_result["bytes_freed"] > 0:
-            mb = vac_result["bytes_freed"] / 1024 / 1024
-            print(f"[DB] Vacuum freed {mb:.1f} MB")
-    except Exception as e:
-        print(f"[DB] Vacuum failed: {e}")
+    if vacuum:
+        try:
+            vac_result = vacuum_database()
+            results["vacuum"] = vac_result
+            if vac_result["bytes_freed"] > 0:
+                mb = vac_result["bytes_freed"] / 1024 / 1024
+                print(f"[DB] Vacuum freed {mb:.1f} MB")
+        except Exception as e:
+            print(f"[DB] Vacuum failed: {e}")
 
     # 3. Stale KG / reflections cleanup (agent.db)
     try:
