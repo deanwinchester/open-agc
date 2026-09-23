@@ -52,7 +52,11 @@ class RequestSecretTool(BaseTool):
                         },
                         "host": {
                             "type": "string",
-                            "description": "主机/服务地址（可选）。",
+                            "description": "主机/服务地址（可选）。该主机已有凭据时直接提示引用，不弹窗。",
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "确认已有凭据不适用、坚持弹窗收集新凭据时设 true。",
                         },
                     },
                     "required": ["purpose"],
@@ -85,6 +89,25 @@ class RequestSecretTool(BaseTool):
                 entry = None
             if entry:
                 return confirmation_text(name, entry.get("type"), entry.get("host"))
+
+        # Vault fallback by host：同主机的凭据已存在时先提示使用——生产实证：
+        # 库里有 aiserver（host 192.168.148.200），agent 却起名 cns_ssh 弹窗
+        # 向用户再要了一遍密码。force=true 可绕过（确实要换新凭据时）。
+        if host and not kwargs.get("force"):
+            try:
+                from core.secrets import list_secrets
+                matches = [s for s in (list_secrets() or [])
+                           if (s.get("host") or "") == host]
+            except Exception:
+                matches = []
+            if matches:
+                lines = [f"- {s['name']}（{s.get('type', 'generic')}@{host}，"
+                         f"用户 {s.get('username_masked') or '-'}）" for s in matches]
+                return ("凭证库中已有该主机的凭据，请优先引用（勿再向用户索取）：\n"
+                        + "\n".join(lines)
+                        + "\n用法：{{secret:名称.username}} / {{secret:名称.password}}"
+                        " / {{secret:名称.uri}}（执行时自动替换为真实值）。"
+                        "确认这些凭据不适用时，带 force=true 重新调用本工具再弹窗收集。")
 
         if not (purpose or "").strip():
             return "Error: purpose 必填——请在弹窗中告诉用户该凭据的用途。"
