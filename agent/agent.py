@@ -1043,6 +1043,34 @@ class OpenAGCAgent:
         if ext_items:
             lines.append("扩展工具（需通过 search_available_tools 唤醒）：")
             lines.extend(ext_items)
+        return "\n".join(lines) + self._build_mcp_section()
+
+    def _build_mcp_section(self) -> str:
+        """已连接 MCP 服务的专属提示区：带工具描述与优先使用规则。
+
+        通用扩展工具列表只有裸名字（生产实证：模型看到 `zxs_es_es_search`
+        完全不知道用途，从不主动唤醒，用户每次都要手动提醒；被唤醒前甚至
+        会用 Python 手写 HTTP 直连 MCP 端点）。MCP 服务数量少、领域明确，
+        值得把描述写全并声明优先级。"""
+        mcp = {}
+        for name, tool in self.full_available_tools.items():
+            server = getattr(tool, 'mcp_server_name', None)
+            if server:
+                mcp.setdefault(server, []).append(tool)
+        if not mcp:
+            return ""
+        lines = ["\n### 已连接 MCP 服务（对应领域的优先通道）"]
+        for server, tools in sorted(mcp.items()):
+            lines.append(f"- **{server}**：")
+            for t in sorted(tools, key=lambda x: x.name):
+                desc = (getattr(t, 'description', '') or '').strip()[:60]
+                suffix = f" — {desc}" if desc else ""
+                lines.append(f"  - `{t.name}`{suffix}")
+        lines.append(
+            "任务涉及以上服务覆盖的领域（按工具描述判断，如检索该服务的"
+            "数据）时，**必须优先用 search_available_tools 唤醒并调用对应"
+            " MCP 工具**——这是直连该服务的正式通道；禁止用 execute_python/"
+            "execute_shell 手写 HTTP 请求绕过。")
         return "\n".join(lines)
 
     def _installed_skills_line(self) -> str:
