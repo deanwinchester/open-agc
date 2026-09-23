@@ -393,22 +393,28 @@ async function toggleSchedule(task) {
 const scheduleDialog = ref(false);
 const scheduleSaving = ref(false);
 const scheduleEditId = ref(null); // null=创建
-const scheduleForm = ref({ title: '', query: '', cron: '' });
+const DEFAULT_FREQ = { mode: 'interval_min', every: 10, hour: 9, minute: 0, weekday: 1, monthDay: 1, raw: '' };
+const scheduleForm = ref({ title: '', query: '', freq: { ...DEFAULT_FREQ } });
+
+import { formToCron, cronToForm, describeCron, utcToLocalShort } from '../utils/schedule';
 
 const CRON_RE = /^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/;
 
 function openScheduleCreate() {
   scheduleEditId.value = null;
-  scheduleForm.value = { title: '', query: '', cron: '' };
+  scheduleForm.value = { title: '', query: '', freq: { ...DEFAULT_FREQ } };
   scheduleDialog.value = true;
 }
 
 function openScheduleEdit(task) {
   scheduleEditId.value = task.id;
+  // 认识的表达式反解成友好表单；不认识的（复杂 cron）进高级模式保留原文
+  const parsed = cronToForm(task.schedule_cron);
+  const freq = parsed || { ...DEFAULT_FREQ, mode: 'advanced', raw: task.schedule_cron || '' };
   scheduleForm.value = {
     title: task.title || '',
     query: task.user_query || '',
-    cron: task.schedule_cron || '',
+    freq,
   };
   scheduleDialog.value = true;
 }
@@ -417,7 +423,7 @@ async function saveSchedule() {
   const form = scheduleForm.value;
   const title = form.title.trim();
   const query = form.query.trim();
-  const cron = form.cron.trim();
+  const cron = formToCron(form.freq);
   if (!title) return ElMessage.error(t.schedule.titleRequired);
   if (!query) return ElMessage.error(t.schedule.queryRequired);
   if (!cron) return ElMessage.error(t.schedule.cronRequired);
@@ -660,8 +666,8 @@ onUnmounted(() => {
               ⚙ {{ t.processes.badge }} PID {{ aliveProcess(task).pid }}<template v-if="aliveCount(task) > 1"> ×{{ aliveCount(task) }}</template>
             </span>
             <span v-if="isScheduled(task) && task.schedule_cron" class="schedule-info">
-              {{ task.schedule_enabled ? t.schedule.enabled : t.schedule.disabled }} | <code>{{ task.schedule_cron }}</code>
-              <template v-if="task.next_run_at"> | {{ t.schedule.nextRun }}: {{ task.next_run_at }}</template>
+              {{ task.schedule_enabled ? t.schedule.enabled : t.schedule.disabled }} | {{ describeCron(task.schedule_cron) }}
+              <template v-if="task.next_run_at"> | {{ t.schedule.nextRun }}: {{ utcToLocalShort(task.next_run_at) }}</template>
             </span>
             <span v-if="task.task_type === 'longrun' && task.resume_count > 0" class="schedule-info">
               🔄 {{ t.resumedPrefix }}{{ task.resume_count }}{{ t.resumedSuffix }}
@@ -700,9 +706,52 @@ onUnmounted(() => {
             :placeholder="t.schedule.queryPlaceholder"
           />
         </el-form-item>
-        <el-form-item :label="t.schedule.cronLabel">
-          <el-input v-model="scheduleForm.cron" :placeholder="t.schedule.cronPlaceholder" />
+        <el-form-item :label="t.schedule.freqLabel">
+          <el-select v-model="scheduleForm.freq.mode" style="width: 100%">
+            <el-option :label="t.schedule.freqIntervalMin" value="interval_min" />
+            <el-option :label="t.schedule.freqIntervalHour" value="interval_hour" />
+            <el-option :label="t.schedule.freqDaily" value="daily" />
+            <el-option :label="t.schedule.freqWeekly" value="weekly" />
+            <el-option :label="t.schedule.freqMonthly" value="monthly" />
+            <el-option :label="t.schedule.freqAdvanced" value="advanced" />
+          </el-select>
         </el-form-item>
+        <el-form-item v-if="scheduleForm.freq.mode === 'interval_min'" :label="t.schedule.everyMin">
+          <el-input-number v-model="scheduleForm.freq.every" :min="1" :max="1440" />
+        </el-form-item>
+        <el-form-item v-else-if="scheduleForm.freq.mode === 'interval_hour'" :label="t.schedule.everyHour">
+          <el-input-number v-model="scheduleForm.freq.every" :min="1" :max="168" />
+        </el-form-item>
+        <el-form-item v-else-if="scheduleForm.freq.mode === 'daily'" :label="t.schedule.atTime">
+          <el-input-number v-model="scheduleForm.freq.hour" :min="0" :max="23" />
+          <span class="freq-sep">{{ t.schedule.hour }}</span>
+          <el-input-number v-model="scheduleForm.freq.minute" :min="0" :max="59" />
+          <span class="freq-sep">{{ t.schedule.minute }}</span>
+        </el-form-item>
+        <el-form-item v-else-if="scheduleForm.freq.mode === 'weekly'" :label="t.schedule.weekDay + ' / ' + t.schedule.atTime">
+          <el-select v-model="scheduleForm.freq.weekday" style="width: 120px">
+            <el-option v-for="(d, i) in t.schedule.weekDays" :key="i" :label="d" :value="i" />
+          </el-select>
+          <el-input-number v-model="scheduleForm.freq.hour" :min="0" :max="23" style="margin-left:8px" />
+          <span class="freq-sep">{{ t.schedule.hour }}</span>
+          <el-input-number v-model="scheduleForm.freq.minute" :min="0" :max="59" />
+          <span class="freq-sep">{{ t.schedule.minute }}</span>
+        </el-form-item>
+        <el-form-item v-else-if="scheduleForm.freq.mode === 'monthly'" :label="t.schedule.monthDay + ' / ' + t.schedule.atTime">
+          <el-input-number v-model="scheduleForm.freq.monthDay" :min="1" :max="31" />
+          <span class="freq-sep">{{ t.schedule.monthDay }}</span>
+          <el-input-number v-model="scheduleForm.freq.hour" :min="0" :max="23" style="margin-left:8px" />
+          <span class="freq-sep">{{ t.schedule.hour }}</span>
+          <el-input-number v-model="scheduleForm.freq.minute" :min="0" :max="59" />
+          <span class="freq-sep">{{ t.schedule.minute }}</span>
+        </el-form-item>
+        <el-form-item v-else :label="t.schedule.cronLabel">
+          <el-input v-model="scheduleForm.freq.raw" :placeholder="t.schedule.cronPlaceholder" />
+        </el-form-item>
+        <div v-if="scheduleForm.freq.mode !== 'advanced'" class="freq-preview">
+          {{ describeCron(formToCron(scheduleForm.freq)) }}
+          <span class="freq-tz">{{ t.schedule.localTimeHint }}</span>
+        </div>
       </el-form>
       <template #footer>
         <el-button @click="scheduleDialog = false">{{ t.schedule.cancel }}</el-button>
@@ -916,4 +965,12 @@ onUnmounted(() => {
     row-gap: 4px;
   }
 }
+
+.freq-sep { margin: 0 8px; color: var(--el-text-color-secondary); }
+.freq-preview {
+  margin: -6px 0 14px;
+  font-size: 13px;
+  color: var(--el-color-primary);
+}
+.freq-preview .freq-tz { color: var(--el-text-color-secondary); font-size: 12px; margin-left: 8px; }
 </style>

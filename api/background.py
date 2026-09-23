@@ -590,6 +590,17 @@ def start_task_scheduler():
     def scheduler_loop():
         print("[TaskScheduler] Started")
         _normalize_next_run_at_utc()
+        # 存量修正：早期实现把新建定时任务落成默认的 'running'——调度器只点火
+        # 终态，这类任务永远不执行（生产实证）。启动时归一一次；
+        # 此刻服务刚起，'running' 的定时任务必然不是真在跑。
+        try:
+            conn = db_connect()
+            conn.execute("UPDATE tasks SET status='scheduled' "
+                         "WHERE task_type='scheduled' AND status='running'")
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[TaskScheduler] normalize scheduled status failed: {e}")
         while True:
             try:
                 conn = db_connect()
@@ -599,9 +610,10 @@ def start_task_scheduler():
                 
                 # 1. Check scheduled tasks due for execution.
                 # 只点火终态任务：interrupted 让位 Guardian、backgrounded 让位
-                # BgMonitor，避免与恢复链路重复拉起同一任务。
+                # BgMonitor，避免与恢复链路重复拉起同一任务；'scheduled' 是新建
+                # 定时任务的初始态（create_task 已修正，存量走下方归一化）。
                 cursor.execute(
-                    "SELECT * FROM tasks WHERE task_type='scheduled' AND schedule_enabled=1 AND next_run_at <= ? AND status IN ('completed','failed')",
+                    "SELECT * FROM tasks WHERE task_type='scheduled' AND schedule_enabled=1 AND next_run_at <= ? AND status IN ('completed','failed','scheduled')",
                     (now_utc,)
                 )
                 due_tasks = cursor.fetchall()
@@ -628,7 +640,7 @@ def start_task_scheduler():
                     
                     # CAS: 认领即 running。并发恢复路径（WS 手动恢复等）抢先认领时
                     # 不重复点火；认领失败直接跳过（schedule 已推进，不会滞留 due）。
-                    if not claim_task_for_resume(task_id, ('completed', 'failed')):
+                    if not claim_task_for_resume(task_id, ('completed', 'failed', 'scheduled')):
                         print(f"[TaskScheduler] Task #{task_id}: fire claim failed (claimed by another path), skipping")
                         continue
                     

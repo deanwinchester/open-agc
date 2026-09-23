@@ -168,9 +168,21 @@ class TestSchedulerFireSemantics:
 
     def test_scheduler_source_tightened_and_claims_before_spawn(self):
         src = _BG_SRC.read_text(encoding="utf-8")
-        assert "next_run_at <= ? AND status IN ('completed','failed')" in src
+        assert "next_run_at <= ? AND status IN ('completed','failed','scheduled')" in src
         assert "next_run_at <= ? AND status != 'running'" not in src
-        assert "claim_task_for_resume(task_id, ('completed', 'failed'))" in src
+        assert "claim_task_for_resume(task_id, ('completed', 'failed', 'scheduled'))" in src
+
+    def test_scheduled_task_created_with_scheduled_status(self, tmp_db):
+        """新建定时任务必须是 'scheduled' 终态——默认 'running' 会让调度器
+        永不点火（生产实证：每10分钟新闻任务从未执行）。"""
+        import api.task_core as tc
+        tid = tc.create_task("定时测试", "q", task_type="scheduled",
+                             schedule_cron="*/10 * * * *", schedule_enabled=True)
+        row = _task_state(tmp_db, tid)
+        assert row["status"] == "scheduled"
+        # 普通任务不受影响
+        tid2 = tc.create_task("普通任务", "q")
+        assert _task_state(tmp_db, tid2)["status"] == "running"
 
 
 # ---------- 退避 ----------

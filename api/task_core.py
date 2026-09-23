@@ -89,13 +89,19 @@ def _extract_task_title(response: str) -> str:
 def create_task(title: str, user_query: str, task_type: str = 'oneshot',
                 schedule_cron: str = None, schedule_enabled: bool = False,
                 session_id: int = 1) -> int:
-    """Insert a new task row and return its ID."""
+    """Insert a new task row and return its ID.
+
+    定时任务的初始状态必须是 'scheduled'（终态的一种）：tasks.status 默认
+    'running' 会让新建定时任务永远不在调度器点火范围（调度器只点火
+    completed/failed/scheduled——生产实证：新建的每10分钟任务从未执行）。
+    """
     conn = db_connect()
     cursor = conn.cursor()
+    status = 'scheduled' if task_type == 'scheduled' else 'running'
     cursor.execute(
-        "INSERT INTO tasks (title, user_query, task_type, schedule_cron, schedule_enabled, session_id) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (title[:200], user_query, task_type, schedule_cron,
+        "INSERT INTO tasks (title, user_query, status, task_type, schedule_cron, schedule_enabled, session_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (title[:200], user_query, status, task_type, schedule_cron,
          1 if schedule_enabled else 0, session_id)
     )
     task_id = cursor.lastrowid
