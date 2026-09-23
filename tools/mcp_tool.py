@@ -139,7 +139,15 @@ class MCPClientManager:
         try:
             stack = AsyncExitStack()
             if url:
-                from mcp.client.streamable_http import streamablehttp_client
+                # mcp SDK 改名史：新版为 streamable_http_client（下划线），
+                # 旧版为 streamablehttp_client——打包 CI 与开发环境的 mcp
+                # 版本不同会踩到不同名字（生产实证：打包版只有下划线版，
+                # cannot import name 'streamablehttp_client'）
+                try:
+                    from mcp.client.streamable_http import streamablehttp_client
+                except ImportError:
+                    from mcp.client.streamable_http import (
+                        streamable_http_client as streamablehttp_client)
                 read, write, _sid = await stack.enter_async_context(
                     streamablehttp_client(
                         url, headers=server_cfg.get("headers") or None))
