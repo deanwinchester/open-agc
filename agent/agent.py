@@ -3842,55 +3842,61 @@ class OpenAGCAgent:
                             "禁止空头承诺。")})
                         continue
 
-                # ── 虚构交付拦截（dispatcher_mode）：回复声明了交付/验收，
+                # ── 虚构交付拦截（全模式）：回复声明了交付/验收，
                 # 但本轮零工具执行 → 判定幻觉，注入纠错消息重跑一轮（一次为限）。
-                # 模式刻意保守（强交付信号组合），纯问答/讨论不触发。
-                # 扩展（生产实证 eval R12/R13）：零工具回复里带 ``` 代码块/文件
-                # 内容引用 = 疑似编造文件/命令输出内容——「读取后告知」类请求的
-                # 幻觉形态（没有交付声明词，但内容必须来自真实工具读取）。
-                if (self._dispatcher_mode_enabled()
-                        and self._fabrication_retries < 1
+                # 此前仅 dispatcher_mode 启用——生产实证 #530：普通模式下 agent
+                # 零工具调用编造「Grafana+Prometheus 大屏部署完毕、全部在线」，
+                # 防线形同虚设。模式刻意保守（强交付信号组合），纯问答/讨论不触发；
+                # 裸 ``` 代码块信号仅 dispatcher 模式启用（普通模式的合法代码
+                # 回答太多，误伤不起）。
+                if (self._fabrication_retries < 1
                         and len(final_answer or "") > 150):
                     _tools_used = (sum(1 for m in self.messages if m.get("role") == "tool")
                                    - self._tool_msg_baseline)
                     _declared_delivery = re.search(
-                        r"(验收通过|已跑通|链路已跑通|编译完成|部署完成|识别验证|"
+                        r"(验收通过|已跑通|链路已跑通|编译完成|部署完成|部署完毕|部署成功|识别验证|"
                         r"性能实测|交付物|文件位置[:：]|已下载.{0,12}模型|"
                         r"已读完|已创建|已写入|已生成|已完成|已部署|已搞定|"
                         r"已开工|已重新开工|已派出|已派发|已安排执行者|"
+                        r"最终状态[^。\n]{0,12}(全部)?在线|全部在线|运行正常|"
                         r"✅\s*(编译|验证|部署|识别|跑通))", final_answer)
-                    _fabricated_content = ("```" in final_answer)  # 外层已 len>150
-                    # 「派发：」声明但零工具 = 声明与行动不符（生产实证 #411：
-                    # 新形态空话——不说「我做了」说「我会催办/在做」，词表拦不住；
-                    # 但它自己按提示词写的分流声明是可靠信号）
-                    _declared_dispatch = final_answer.lstrip().startswith("派发：")
-                    # 声称分身活跃 vs 系统事实无分身（确定性判据，生产实证 #416：
-                    # 主 agent 无视动态段的「无活跃分身」，顺着历史谎言说
-                    # 「确认还在跑」——声称进行时 vs 客观状态，零工具即拦截）
-                    _claims_alive = bool(re.search(
-                        r"(还在跑|仍在执行|正在执行中|正在后台运行|正在运行中|"
-                        r"确认还在跑|worker正在|分身正在)", final_answer))
-                    _no_running = False
-                    if _claims_alive and _tools_used == 0:
-                        try:
-                            from agent.dispatcher import get_running_dispatches_for_session as _grds2
-                            _no_running = not bool(_grds2(self.session_id))
-                        except Exception:
-                            _no_running = False
-                    if _tools_used == 0 and (_declared_delivery or _fabricated_content
-                                             or _declared_dispatch
-                                             or (_claims_alive and _no_running)):
+                    if self._dispatcher_mode_enabled():
+                        _fabricated_content = ("```" in final_answer)  # 外层已 len>150
+                        # 「派发：」声明但零工具 = 声明与行动不符（生产实证 #411：
+                        # 新形态空话——不说「我做了」说「我会催办/在做」，词表拦不住；
+                        # 但它自己按提示词写的分流声明是可靠信号）
+                        _declared_dispatch = final_answer.lstrip().startswith("派发：")
+                        # 声称分身活跃 vs 系统事实无分身（确定性判据，生产实证 #416：
+                        # 主 agent 无视动态段的「无活跃分身」，顺着历史谎言说
+                        # 「确认还在跑」——声称进行时 vs 客观状态，零工具即拦截）
+                        _claims_alive = bool(re.search(
+                            r"(还在跑|仍在执行|正在执行中|正在后台运行|正在运行中|"
+                            r"确认还在跑|worker正在|分身正在)", final_answer))
+                        _no_running = False
+                        if _claims_alive and _tools_used == 0:
+                            try:
+                                from agent.dispatcher import get_running_dispatches_for_session as _grds2
+                                _no_running = not bool(_grds2(self.session_id))
+                            except Exception:
+                                _no_running = False
+                        _hit = (_declared_delivery or _fabricated_content
+                                or _declared_dispatch or (_claims_alive and _no_running))
+                    else:
+                        _hit = _declared_delivery
+                    if _tools_used == 0 and _hit:
                         self._fabrication_retries += 1
-                        _why = ("声称分身正在执行，但系统事实是**当前会话没有任何运行中的"
-                                "分身**（历史上「已开工/已派发」的说法从未真实发生或早已结束）"
-                                if (_claims_alive and _no_running and not (
-                                    _declared_delivery or _fabricated_content or _declared_dispatch))
-                                else "回复给出了任务交付/文件内容，但本轮没有任何工具执行记录")
-                        print("[Agent] ⚠️ 虚构交付拦截：零工具调用却声明交付/在跑，注入纠错重跑")
+                        if self._dispatcher_mode_enabled():
+                            _why = "回复给出了任务交付/文件内容，但本轮没有任何工具执行记录"
+                            _how = ("作为调度者，立即调用 dispatch_worker 派发分身去"
+                                    "真实执行（读取/生成/验证），或如实告诉用户当前没有任务在执行")
+                        else:
+                            _why = "回复声明了部署/交付完成，但本轮没有任何工具执行记录"
+                            _how = ("立即用工具真实执行/验证（确认状态后再汇报），"
+                                    "或如实告诉用户该任务尚未执行/状态未确认")
+                        print("[Agent] ⚠️ 虚构交付拦截：零工具调用却声明交付，注入纠错重跑")
                         self.messages.append({"role": "system", "content": (
                             f"⚠️ 系统检测：你刚才的回复{_why}——这属于虚构内容（幻觉），已被拦截。"
-                            "正确做法：作为调度者，立即调用 dispatch_worker 派发分身去"
-                            "真实执行（读取/生成/验证），或如实告诉用户当前没有任务在执行；"
+                            f"正确做法：{_how}；"
                             "汇报必须基于真实产出与系统状态，不得凭对话历史脑补。现在请重新行动。")})
                         continue
 

@@ -770,6 +770,46 @@ class TestFabricationGuard:
         assert not any(m.get("role") == "system" and "虚构" in str(m.get("content", ""))
                        for m in agent.messages)
 
+    # ── 普通模式（dispatcher_mode=False）——生产实证 #530：
+    # 零工具调用编造「Grafana+Prometheus 大屏部署完毕、全部在线」 ──
+
+    _FAB530 = ("搞定喵~ 🎉 Grafana + Prometheus 大屏部署完毕！\n\n"
+               "✅ 最终状态（全部在线）\n\n"
+               "| 服务 | 地址 | 状态 |\n|---|---|---|\n"
+               "| SMG 网关 | http://192.168.148.200:9000 | ✅ 3 个模型健康 |\n"
+               "| Grafana 大屏 | http://192.168.148.200:3000 | ✅ 已登录验证 |")
+
+    def _make_agent_plain(self, monkeypatch, tmp_path, script):
+        from tests.test_agent_reliability import _bare_agent
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"dispatcher_mode": False}), encoding="utf-8")
+        monkeypatch.setattr("agent.agent.get_data_path",
+                            lambda name: str(tmp_path / name))
+        agent = _bare_agent()
+        agent.session_id = 1
+        agent.llm = _ScriptLLM(script)
+        return agent
+
+    def test_plain_mode_fabricated_deploy_blocked(self, monkeypatch, tmp_path):
+        agent = self._make_agent_plain(monkeypatch, tmp_path, [
+            (self._FAB530, None),                       # 零工具虚构「部署完毕」→ 拦截
+            ("抱歉，我还没有真正部署，现在去执行。", None),
+        ])
+        out = agent.run_turn("不是，我说grafana用这个密码", verbose=False, skip_rag=True)
+        assert len(agent.llm.seen_messages) == 2  # 拦截后重跑了一轮
+        second_call_msgs = agent.llm.seen_messages[1]
+        assert any(m.get("role") == "system" and "虚构" in str(m.get("content", ""))
+                   for m in second_call_msgs)
+
+    def test_plain_mode_normal_code_answer_not_blocked(self, monkeypatch, tmp_path):
+        # 普通模式的合法代码回答（含 ``` 代码块、无交付声明词）不应被拦
+        answer = ("可以用 paramiko 这样连：\n```python\nimport paramiko\n"
+                  "c = paramiko.SSHClient()\nc.connect(host, username=u)\n```\n"
+                  "核心是 SSHClient + AutoAddPolicy。" + "说明" * 40)
+        agent = self._make_agent_plain(monkeypatch, tmp_path, [(answer, None)])
+        out = agent.run_turn("怎么用 python 连 ssh", verbose=False, skip_rag=True)
+        assert len(agent.llm.seen_messages) == 1  # 无重跑
+
 
 # ────────────────────────── M2：异步派发与插话分类 ──────────────────────────
 
