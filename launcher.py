@@ -74,6 +74,17 @@ def main():
     # Auto-open browser
     open_browser_delayed(port)
     
+    # litellm 启动预热（与 gui_app 一致）：顶层导入实测 ~4.4s，后台并发
+    # 加载隐藏首条对话延迟；静默兜底，失败时首次调用惰性导入
+    import threading
+    def _warm_litellm():
+        try:
+            from core.llm_client import _llm
+            _llm()
+        except Exception:
+            pass
+    threading.Thread(target=_warm_litellm, daemon=True).start()
+
     # Start the server
     import uvicorn
     uvicorn.run(

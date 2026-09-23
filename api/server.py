@@ -68,10 +68,8 @@ env_file = get_data_path(".env")
 load_dotenv(env_file)
 
 from agent.agent import OpenAGCAgent
-import litellm
-# Fix for PyInstaller bundling issue with tiktoken
-litellm.num_tokens_logging = False 
-litellm.supports_token_counter = False
+# litellm 不再顶层导入（实测顶层导入 ~4.4s，压 splash 关键路径）——
+# 惰性化与 num_tokens_logging 等属性设置统一由 core.llm_client._llm 处理。
 # LiteLLM debug logging — uncomment to debug model/pricing issues
 # litellm._turn_on_debug()
 # litellm.set_verbose = True
@@ -208,15 +206,22 @@ if os.path.isdir(_builtin_plugins_dir):
             except Exception as e:
                 print(f"[Server] Failed to copy plugin {_entry}: {e}")
 
-_plugins = discover_plugins(plugins_dir=_user_plugins_dir, broadcast_fn=_plugin_broadcast,
-                  server_config=load_config() if "load_config" in dir() else {})
-
 # _mount_plugins 的实现移到 api/plugin_mount.py（import-light，幽灵路由剪除可单测）；
 # 此处保留原名以兼容 routes_plugins.py 的 _srv._mount_plugins 调用。
 from api.plugin_mount import mount_plugins as _mount_plugins
 
-_mount_plugins(app, _plugins)
-print(f"[Server] Loaded {len(_plugins)} plugin(s)")
+# 插件发现/挂载异步化：discover_plugins 会导入插件模块（open-agc-train 拉
+# torch/transformers，实测 ~3.5s），是除 litellm 外第二个启动热点。服务先
+# 就绪、插件并行挂载（Starlette 支持运行中追加路由）；插件列表/导航在挂载
+# 完成前短暂为空，属可接受的启动期过渡态。
+def _load_plugins_async():
+    try:
+        _plugins = discover_plugins(plugins_dir=_user_plugins_dir, broadcast_fn=_plugin_broadcast,
+                                    server_config=load_config() if "load_config" in dir() else {})
+        _mount_plugins(app, _plugins)
+        print(f"[Server] Loaded {len(_plugins)} plugin(s)")
+    except Exception as _pl_e:
+        print(f"[Server] Plugin load error: {_pl_e}")
 
 init_db()
 
@@ -637,14 +642,39 @@ try:
 except Exception as _audit_e:
     print(f"[Server] Config audit error: {_audit_e}")
 
-# Run database maintenance (cleanup old logs, vacuum)
-try:
-    from core.db_maintenance import cleanup_old_data
-    result = cleanup_old_data(days=30, min_cost=0.0)
-    if result.get("model_logs", {}).get("deleted_rows", 0) > 0:
-        print(f"[Server] DB cleanup: removed {result['model_logs']['deleted_rows']} old log entries")
-    if result.get("vacuum", {}).get("bytes_freed", 0) > 0:
-        mb = result["vacuum"]["bytes_freed"] / 1024 / 1024
-        print(f"[Server] DB vacuum: freed {mb:.1f} MB")
-except Exception as _db_e:
-    print(f"[Server] DB maintenance error: {_db_e}")
+# 数据库维护异步化 + VACUUM 周节流：cleanup+VACUUM 曾在每次启动同步跑，
+# 大库 VACUUM 实测 ~3.3s（cProfile 实证），是 litellm/插件之后的第三个
+# 启动热点。清理（轻量）每次启动后台跑；VACUUM 每周一次。
+def _db_maintenance_async():
+    try:
+        from core.db_maintenance import cleanup_old_data, vacuum_database
+        from core.paths import get_data_path as _gdp
+        result = cleanup_old_data(days=30, min_cost=0.0, vacuum=False)
+        if result.get("model_logs", {}).get("deleted_rows", 0) > 0:
+            print(f"[Server] DB cleanup: removed {result['model_logs']['deleted_rows']} old log entries")
+        marker = _gdp("maintenance_last_vacuum.txt")
+        need_vac = True
+        try:
+            if os.path.exists(marker):
+                need_vac = (time.time() - os.path.getmtime(marker)) > 7 * 86400
+        except Exception:
+            pass
+        if need_vac:
+            vr = vacuum_database()
+            if vr.get("bytes_freed", 0) > 0:
+                print(f"[Server] DB vacuum: freed {vr['bytes_freed'] / 1024 / 1024:.1f} MB")
+            try:
+                with open(marker, "w", encoding="utf-8") as _mf:
+                    _mf.write(str(time.time()))
+            except Exception:
+                pass
+    except Exception as _db_e:
+        print(f"[Server] DB maintenance error: {_db_e}")
+
+import threading as _dbm_threading
+_dbm_threading.Thread(target=_db_maintenance_async, daemon=True).start()
+
+# 插件异步加载放模块末尾启动：避免其导入线程（torch 等重依赖持 import
+# 锁）与主导入链竞争——先让 api.server 完整就绪，再并行挂载插件。
+import threading as _pl_threading
+_pl_threading.Thread(target=_load_plugins_async, daemon=True).start()
