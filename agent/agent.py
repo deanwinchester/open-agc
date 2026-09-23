@@ -2087,19 +2087,9 @@ class OpenAGCAgent:
         return None
 
     def _notify_tool_gen_failed(self, reason: str):
-        """自动工具生成失败时通知用户（此前静默丢弃，用户找不到工具也不知道原因）。"""
+        """自动工具生成失败：仅记日志。用户反馈这类内部机制提示是噪音——
+        当时执行本身已成功，沉淀失败不影响任务，不需要上屏打扰。"""
         print(f"[Agent] Auto-tool generation failed: {reason}")
-        try:
-            from api.ws import save_message
-            from api.state import _broadcast_to_websockets
-            text = f"⚠️ 自动工具生成未通过：{reason}。本次不会生成可复用工具。"
-            save_message("system", text, self.session_id)
-            _broadcast_to_websockets({
-                "type": "system_message", "content": text,
-                "session_id": self.session_id,
-            })
-        except Exception as e:
-            print(f"[Agent] Tool-gen notify error: {e}")
 
     def _build_context_brief(self) -> str:
         """Build a short delegation brief from conversation history.
