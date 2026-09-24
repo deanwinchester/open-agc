@@ -69,6 +69,19 @@ def _detect_system_env() -> str:
     return detect_system_env()
 
 
+def _local_time_text() -> str:
+    """系统提示用本地时间：分钟精度 + 明确时区文字。
+
+    只写 +0800 时模型时常按 UTC 表述/换算出错（用户实证：回复里的时间
+    明显不是本时区）；补上 UTC+8 与「本地时区」字样，显著降低误读。"""
+    from datetime import datetime
+    now = datetime.now().astimezone()
+    off = now.utcoffset()
+    hours = off.total_seconds() / 3600 if off else 0
+    tz_text = f"UTC{hours:+g}"
+    return now.strftime("%Y-%m-%d %H:%M") + f"（{tz_text}，本机本地时区）"
+
+
 # ── Delegation context-isolation fix (debugging-continuation gate) ──
 # Absolute paths mentioned in the conversation (Windows D:\... / D:/... and
 # common POSIX roots). Used to build the context brief handed to sub-agents
@@ -339,7 +352,7 @@ class OpenAGCAgent:
         # Inject current date/time so the LLM knows "today"（分钟精度——秒级
         # 时间戳会破坏前缀缓存，见 _build_system_prompt 同注）
         from datetime import datetime
-        current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %z")
+        current_time = _local_time_text()
         current_date = datetime.now().strftime("%Y年%m月%d日")
 
         # Store config for later use
@@ -1119,7 +1132,7 @@ class OpenAGCAgent:
         # 前缀缓存从 messages[0] 起全部失效——跨任务/化身/呈现轮全灭，
         # 首轮命中率 50-70% 而不是 98%）。分钟精度对 agent 足够。
         from datetime import datetime
-        current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %z")
+        current_time = _local_time_text()
         current_date = datetime.now().strftime("%Y年%m月%d日")
         
         prompt = self.system_prompt_base.replace("{current_time}", current_time).replace("{current_date}", current_date)
@@ -2763,9 +2776,12 @@ class OpenAGCAgent:
         # 末尾段不参与前缀——前缀完全静态，跨分钟/跨化身缓存全命中）
         try:
             from datetime import datetime as _dt
+            _now = _dt.now().astimezone()
+            _off = _now.utcoffset()
+            _hours = _off.total_seconds() / 3600 if _off else 0
             _dyn_parts.append(
-                f"## 当前时间\n{_dt.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')}"
-                f"（本地，含时区偏移）；今天：{_dt.now().strftime('%Y年%m月%d日')}。")
+                f"## 当前时间\n{_now.strftime('%Y-%m-%d %H:%M:%S')}"
+                f"（UTC{_hours:+g}，本机本地时区）；今天：{_dt.now().strftime('%Y年%m月%d日')}。")
         except Exception:
             pass
         if memory_context:
