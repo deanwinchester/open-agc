@@ -12,6 +12,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Refresh, Delete } from '@element-plus/icons-vue';
 import { request } from '../api/client';
+import { formatDbTime } from '../utils/time';
 import zh from '../i18n/zh';
 
 const t = zh.downloads;
@@ -156,7 +157,7 @@ async function openEvents(dl) {
 function eventText(ev) {
   if (typeof ev === 'string') return ev;
   // 事件行结构（download_events 表）：{id, download_id, event_type, message, details, created_at}
-  const parts = [ev.created_at, ev.event_type, ev.message, ev.details].filter(Boolean);
+  const parts = [formatDbTime(ev.created_at), ev.event_type, ev.message, ev.details].filter(Boolean);
   return parts.join(' | ') || JSON.stringify(ev);
 }
 </script>
@@ -217,7 +218,7 @@ function eventText(ev) {
           <div class="row-card-meta">
             <span v-if="progressText(dl)">{{ progressText(dl) }}</span>
             <span v-if="dl.source">{{ t.source }}: {{ dl.source }}</span>
-            <span>{{ dl.created_at }}</span>
+            <span>{{ formatDbTime(dl.created_at) }}</span>
           </div>
           <el-progress
             v-if="showProgress(dl)"
