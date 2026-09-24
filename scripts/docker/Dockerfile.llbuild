@@ -18,7 +18,10 @@ RUN apt-get update \
         fuse-overlayfs uidmap squashfs-tools erofs-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# 玲珑镜像源的 IPv6 黑洞问题：固定走可用的 IPv4 边缘（按需覆盖 --add-host）
-RUN echo "42.56.65.201 mirror-repo-linglong.deepin.com" >> /etc/hosts
+# 玲珑镜像源的 IPv6 黑洞问题：固定走可用的 IPv4 边缘。
+# 注意：docker run 路径已由 --add-host 注入（build_linglong.sh），此行仅兜底
+# 直接 docker build 使用的场景——BuildKit 下 /etc/hosts 可能只读挂载，
+# 写失败不应让构建挂掉（GitHub Actions 生产实证 exit 2）。
+RUN echo "42.56.65.201 mirror-repo-linglong.deepin.com" >> /etc/hosts || true
 
 WORKDIR /work
