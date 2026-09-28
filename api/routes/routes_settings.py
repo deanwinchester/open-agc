@@ -704,7 +704,11 @@ async def update_settings(config_update: ConfigUpdate):
 
         # 自定义厂商（OpenAI 兼容端点）：整体替换（前端管理的就是完整列表）
         if config_update.custom_providers is not None:
-
+            # 掩码 key 还原：GET 回传的是 sk-...xxx 掩码，整体替换语义下若直接
+            # 落库会把掩码当真 key 写坏（生产实证隐患）；同名厂商的掩码/空 key
+            # 一律还原为已存 key（与 grounder 的 732 行同款处理）。
+            _old_keys = {str(cp.get("name", "")).strip(): str(cp.get("api_key", "") or "")
+                         for cp in (config.get("custom_providers") or [])}
             _clean = []
             for cp in config_update.custom_providers:
                 try:
@@ -712,9 +716,12 @@ async def update_settings(config_update: ConfigUpdate):
                     base_url = str(cp.get("base_url", "")).strip()
                     if not (name and base_url):
                         continue
+                    api_key = str(cp.get("api_key", "") or "").strip()
+                    if "..." in api_key or api_key == "***" or not api_key:
+                        api_key = _old_keys.get(name, "")
                     _clean.append({
                         "name": name, "base_url": base_url,
-                        "api_key": str(cp.get("api_key", "") or "").strip(),
+                        "api_key": api_key,
                         "models": [str(m).strip() for m in (cp.get("models") or []) if str(m).strip()],
                     })
                 except Exception:

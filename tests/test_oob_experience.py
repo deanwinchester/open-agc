@@ -507,6 +507,10 @@ class TestDesktopAssetSelection:
     def test_macos_dmg_download_only(self, monkeypatch, tmp_path):
         upgrader = self._make_upgrader(monkeypatch)
         monkeypatch.setattr(sys, "platform", "darwin")
+        # 资产名按宿主架构推导（_desktop_asset_name 读 platform.machine）——
+        # 打桩为 arm64，否则 x86_64 宿主上推导出的资产名与用例不符
+        import platform as _pf
+        monkeypatch.setattr(_pf, "machine", lambda: "arm64")
         asset_name = "Open-AGC-9.9.9-macOS-arm64.dmg"
         upgrader.latest_assets = [
             {"name": asset_name, "browser_download_url": "http://example/x.dmg"}
