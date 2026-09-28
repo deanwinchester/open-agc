@@ -625,10 +625,18 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
 def _maybe_auto_title(session_id: int, task_id: int):
     """首个任务完成后自动命名会话（后台线程，不阻塞收官）。
 
-    触发条件：会话仍是默认名（默认会话/会话 N）且本会话还没有过 agent 回复。
-    标题由默认模型概括（≤16 字），失败/超时回退为用户请求截断。"""
+    触发条件：非主会话（id=1 永不自动改名——用户实证主会话被误改）、
+    会话仍是默认名（默认会话/会话 N）且本会话还没有过 agent 回复。
+    标题由默认模型概括（few-shot 引导，≤16 字），产出是「概括/主题」类
+    元描述（小模型常见毛病）时丢弃，回退为用户请求截断。"""
     import re as _re
     import threading as _th
+
+    if session_id == 1:
+        return
+
+    # 元描述/套话标题：模型复述指令而非概括主题（实证："原始查询主题概括"）
+    _META_TITLE_RE = _re.compile(r"概括|主题|标题|总结|请求|会话|生成|如下|内容")
 
     def _work():
         try:
@@ -655,11 +663,22 @@ def _maybe_auto_title(session_id: int, task_id: int):
                 from core.llm_client import LLMClient
                 resp, _ = LLMClient().chat(messages=[{
                     "role": "user",
-                    "content": ("用不超过12个字概括以下用户请求的主题，输出纯标题"
-                                "（不要标点、引号、解释或前缀）：\n" + user_query[:500])}])
-                title = (resp.choices[0].message.content or "").strip().strip("\"'「」『』")[:16]
+                    "content": (
+                        "请为以下用户请求生成一个简短的会话标题。\n"
+                        "要求：2-12 个字，概括请求的具体事情；只输出标题本身，"
+                        "不要标点、引号、解释或前缀。\n"
+                        "示例：\n"
+                        "请求：帮我把这篇关于国庆文旅的稿子润色一下 → 国庆文旅稿润色\n"
+                        "请求：在服务器上部署 grafana 监控大屏 → 部署 Grafana 监控\n"
+                        "请求：查一下去年十一当天的相关稿件 → 去年十一稿件检索\n\n"
+                        "请求：" + user_query[:300] + " → ")}])
+                title = (resp.choices[0].message.content or "").strip()
             except Exception as _e:
                 print(f"[TaskCore] auto-title llm failed: {_e}")
+            # 清理与质检：去引号/首尾标点；元描述、过短、超长都视为无效
+            title = title.split("\n")[0].strip().strip("\"'「」『』。，,.、：:—- ")
+            if len(title) < 2 or len(title) > 16 or _META_TITLE_RE.search(title):
+                title = ""
             if not title:
                 title = (user_query or "新会话").strip().replace("\n", " ")[:16]
             conn = db_connect()

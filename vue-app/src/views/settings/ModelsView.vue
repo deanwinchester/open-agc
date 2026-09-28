@@ -30,12 +30,13 @@ const modelOptions = ref([]);
 
 // ── 自定义厂商（custom_providers）──
 // GET /api/settings 读入 ref；POST 为整体替换语义。
-// 添加/删除操作立即自动保存（不等页面底部统一保存），成功后清缓存重载刷新。
-// api_key 为掩码（含 "..."）时原样保留回传，后端按原样存储。
+// 添加/删除/编辑操作立即自动保存（不等页面底部统一保存），成功后清缓存重载刷新。
+// api_key 为掩码（含 "..."）或留空时，后端按同名厂商还原已存 key（不修改）。
 const customProviders = ref([]);           // 编辑中的列表
 const initialCustomProviders = ref([]);    // 初始快照，用于 dirty 判断
 const cpSaving = ref(false);               // 添加/删除触发的立即保存中
 const newProvider = reactive({ name: '', base_url: '', api_key: '', models: '' });
+const editingIndex = ref(-1);              // ≥0 时表单处于编辑模式（名称锁定）
 // 预置厂商名：自定义 name 不允许冲突（其模型 id 形如 <name>/<model>）
 const PRESET_PROVIDER_NAMES = ['kimi', 'deepseek', 'openai', 'anthropic', 'gemini', 'glm', 'minimax', 'llamacpp', 'kimi_code', 'xiaomi'];
 
@@ -83,6 +84,21 @@ async function addCustomProvider() {
   const name = newProvider.name.trim().toLowerCase();
   const baseUrl = newProvider.base_url.trim();
   if (!name || !baseUrl) { ElMessage.warning(t.customProviders.missingFields); return; }
+
+  if (editingIndex.value >= 0) {
+    // 编辑模式：替换原条目（名称锁定，掩码/空 key 由后端原样保留）
+    const idx = editingIndex.value;
+    customProviders.value.splice(idx, 1, {
+      name: customProviders.value[idx].name,
+      base_url: baseUrl,
+      api_key: newProvider.api_key.trim(),
+      models: newProvider.models.split(',').map((s) => s.trim()).filter(Boolean),
+    });
+    cancelEditProvider();
+    await saveCustomProviders();
+    return;
+  }
+
   if (!/^[a-z][a-z0-9_-]*$/.test(name)) { ElMessage.warning(t.customProviders.invalidName); return; }
   if (PRESET_PROVIDER_NAMES.includes(name)) {
     // xiaomi 已是预置厂商：若要用订阅 Token Plan 端点（token-plan-cn.xiaomimimo.com），换个名字如 xiaomi_plan
@@ -96,11 +112,25 @@ async function addCustomProvider() {
     api_key: newProvider.api_key.trim(),
     models: newProvider.models.split(',').map((s) => s.trim()).filter(Boolean),
   });
+  cancelEditProvider();
+  await saveCustomProviders();
+}
+
+function editCustomProvider(idx) {
+  const p = customProviders.value[idx];
+  editingIndex.value = idx;
+  newProvider.name = p.name;
+  newProvider.base_url = p.base_url;
+  newProvider.api_key = p.api_key;
+  newProvider.models = (p.models || []).join(', ');
+}
+
+function cancelEditProvider() {
+  editingIndex.value = -1;
   newProvider.name = '';
   newProvider.base_url = '';
   newProvider.api_key = '';
   newProvider.models = '';
-  await saveCustomProviders();
 }
 
 async function removeCustomProvider(idx) {
@@ -566,17 +596,24 @@ onUnmounted(() => {
             </span>
             <span class="cp-detail">{{ t.customProviders.models }}: {{ (p.models || []).join(', ') || '—' }}</span>
           </div>
+          <el-button size="small" plain @click="editCustomProvider(idx)">
+            {{ t.customProviders.edit }}
+          </el-button>
           <el-button size="small" type="danger" plain :loading="cpSaving" @click="removeCustomProvider(idx)">
             {{ t.customProviders.remove }}
           </el-button>
         </div>
       </div>
       <div v-else class="empty-state"><p>{{ t.customProviders.listEmpty }}</p></div>
-      <el-divider content-position="left">{{ t.customProviders.add }}</el-divider>
+      <el-divider content-position="left">
+        {{ editingIndex >= 0 ? t.customProviders.saveEdit : t.customProviders.add }}
+      </el-divider>
+      <el-alert v-if="editingIndex >= 0" type="info" :closable="false" style="margin-bottom:12px"
+                :title="t.customProviders.editHint.replace('{name}', newProvider.name)" />
       <el-form label-position="top">
         <div class="cp-form-grid">
           <el-form-item :label="t.customProviders.name">
-            <el-input v-model="newProvider.name" :placeholder="t.customProviders.namePlaceholder" />
+            <el-input v-model="newProvider.name" :placeholder="t.customProviders.namePlaceholder" :disabled="editingIndex >= 0" />
           </el-form-item>
           <el-form-item :label="t.customProviders.baseUrl">
             <el-input v-model="newProvider.base_url" :placeholder="t.customProviders.baseUrlPlaceholder" />
@@ -588,7 +625,10 @@ onUnmounted(() => {
             <el-input v-model="newProvider.models" :placeholder="t.customProviders.modelsPlaceholder" />
           </el-form-item>
         </div>
-        <el-button type="primary" plain :loading="cpSaving" @click="addCustomProvider">{{ t.customProviders.add }}</el-button>
+        <el-button type="primary" plain :loading="cpSaving" @click="addCustomProvider">
+          {{ editingIndex >= 0 ? t.customProviders.saveEdit : t.customProviders.add }}
+        </el-button>
+        <el-button v-if="editingIndex >= 0" text @click="cancelEditProvider">{{ t.customProviders.cancelEdit }}</el-button>
         <div class="field-hint">{{ t.customProviders.saveHint }}</div>
       </el-form>
     </el-card>

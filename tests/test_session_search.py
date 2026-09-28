@@ -101,15 +101,23 @@ class _FakeLLM:
         return _FakeResp(), "fake-model"
 
 
-def _run_auto_title(db_path, monkeypatch, session_name="会话 3", agent_msgs=0, expect_change=True):
+def _run_auto_title(db_path, monkeypatch, session_name="会话 3", agent_msgs=0,
+                    expect_change=True, llm_output="Grafana 监控部署"):
     """驱动 _maybe_auto_title 的守护线程并等待其落库，返回最终会话名。"""
     import core.llm_client as llm_mod
 
-    monkeypatch.setattr(llm_mod, "LLMClient", _FakeLLM)
+    class _Msg:
+        content = llm_output
+
+    class _LLM:
+        def chat(self, messages, **kw):
+            return type("R", (), {"choices": [type("C", (), {"message": _Msg})()]} )(), "fake-model"
+
+    monkeypatch.setattr(llm_mod, "LLMClient", _LLM)
     monkeypatch.setattr(task_core, "db_connect", lambda: sqlite3.connect(db_path))
 
     conn = sqlite3.connect(db_path)
-    cur = conn.execute("INSERT INTO sessions (name) VALUES (?)", (session_name,))
+    cur = conn.execute("INSERT INTO sessions (id, name) VALUES (10, ?)", (session_name,))
     sid = cur.lastrowid
     conn.execute("INSERT INTO tasks (user_query, session_id) VALUES ('帮我部署 grafana 监控', ?)", (sid,))
     tid = conn.execute("SELECT id FROM tasks WHERE session_id=?", (sid,)).fetchone()[0]
@@ -150,3 +158,33 @@ def test_auto_title_skips_when_agent_already_replied(tmp_path, monkeypatch):
     _make_db(db)
     name = _run_auto_title(db, monkeypatch, session_name="会话 5", agent_msgs=2, expect_change=False)
     assert name == "会话 5"
+
+
+def test_auto_title_never_touches_main_session(tmp_path, monkeypatch):
+    """主会话（id=1）永不自动改名——用户实证主会话被误改。"""
+    db = str(tmp_path / "chat.db")
+    _make_db(db)
+    import core.llm_client as llm_mod
+    monkeypatch.setattr(llm_mod, "LLMClient", _FakeLLM)
+    monkeypatch.setattr(task_core, "db_connect", lambda: sqlite3.connect(db))
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO sessions (id, name) VALUES (1, '默认会话')")
+    conn.execute("INSERT INTO tasks (user_query, session_id) VALUES ('部署 grafana', 1)")
+    conn.commit()
+    conn.close()
+    task_core._maybe_auto_title(1, 1)
+    time.sleep(0.5)
+    conn = sqlite3.connect(db)
+    name = conn.execute("SELECT name FROM sessions WHERE id=1").fetchone()[0]
+    conn.close()
+    assert name == "默认会话"
+
+
+def test_auto_title_rejects_meta_title(tmp_path, monkeypatch):
+    """模型产出「原始查询主题概括」这类元描述时丢弃，回退请求截断。"""
+    db = str(tmp_path / "chat.db")
+    _make_db(db)
+    name = _run_auto_title(db, monkeypatch, session_name="会话 7",
+                           llm_output="原始查询主题概括")
+    assert name == "帮我部署 grafana 监控"[:16]
+
