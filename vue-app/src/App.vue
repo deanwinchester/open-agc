@@ -99,6 +99,7 @@ function closeSidebar() {
 const menus = [
   { path: '/chat', label: zh.menu.chat },
   { path: '/tasks', label: zh.menu.tasks },
+  { path: '/scheduled', label: zh.menu.scheduled },
   { path: '/goals', label: zh.menu.goals },
   { path: '/downloads', label: zh.menu.downloads },
   { path: '/sandbox', label: zh.menu.sandbox },

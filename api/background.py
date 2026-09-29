@@ -210,11 +210,14 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     # Look up session_id BEFORE creating agent, so agent has correct session_id
     # for sandbox auth (_sandbox_waits key must match frontend's session_id)
     bg_session_id = 1
+    task_type = ""
     try:
         bg_conn = db_connect()
-        row = bg_conn.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if row and row[0]:
-            bg_session_id = row[0]
+        row = bg_conn.execute("SELECT session_id, task_type FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row:
+            if row[0]:
+                bg_session_id = row[0]
+            task_type = row[1] or ""
         bg_conn.close()
     except Exception:
         pass
@@ -308,8 +311,10 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
     if context_messages:
         context_messages = [{k:v for k,v in m.items() if k != '_timestamp'} for m in context_messages]
         agent.messages.extend(context_messages)
-    elif not is_resume:
-        # Load last 50 messages as conversation context for new background/spawned tasks
+    elif not is_resume and task_type != 'scheduled':
+        # 非定时的后台任务：带最近 50 条会话消息做上下文。
+        # 定时任务例外——query 本身就是完整指令，历史执行结果全留在会话里，
+        # 每轮点火都拼上只会让上下文越滚越大、白烧 token（用户实证反馈）。
         _ctx = _load_session_context(bg_session_id, limit=50)
         if _ctx:
             agent.messages.extend(_ctx)

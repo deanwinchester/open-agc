@@ -9,6 +9,7 @@ export default {
   menu: {
     chat: '对话',
     tasks: '任务',
+    scheduled: '定时任务',
     goals: '目标',
     downloads: '下载',
     sandbox: '沙箱',
@@ -594,10 +595,24 @@ export default {
     },
   },
 
+  // 定时任务视图（一级菜单，与任务并列）
+  scheduledView: {
+    title: '⏰ 定时任务',
+    desc: '按设定频率自动执行的周期性任务。每次执行拥有独立的步数预算（中断自动恢复），不受历史执行次数影响。',
+    quotaHint: '最多 10 个定时任务',
+    loadFailed: '加载定时任务失败',
+    empty: '暂无定时任务',
+    emptyHint: '点击右上角「创建定时任务」添加',
+    lastRun: '上次执行',
+    runCount: '已执行 ',
+    timesUnit: ' 次',
+    detail: '详情',
+  },
+
   // 任务列表视图（批次 2）
   tasks: {
     title: '📋 任务',
-    desc: 'Agent 执行的任务记录，含一次性任务与定时任务。',
+    desc: 'Agent 执行的任务记录（定时任务在左侧「定时任务」菜单单独管理）。',
     searchPlaceholder: '搜索任务标题或内容...',
     refresh: '刷新',
     createSchedule: '创建定时任务',
