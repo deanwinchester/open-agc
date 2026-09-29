@@ -674,6 +674,33 @@ def _pid_matches_sandbox(proc, sandbox_dir: str) -> bool:
     return False
 
 
+def _has_foreign_alive_ancestor(proc, sandbox_dir: str) -> bool:
+    """向上爬父链：命中一个活着的、不属于 sandbox/本服务的祖先 → 整棵是外来树。
+
+    生产实证：sandbox 在仓库内（workspace/）时，VS Code 打开其子目录会让
+    Code.exe/java.exe（语言服务）的 cwd 命中 sandbox，被误列进「发现的进程」
+    并给出终止按钮——点到就杀了用户的编辑器。真正的 agent 遗留进程：父链
+    要么断了（孤儿，父已死），要么通到本服务进程。
+    """
+    import psutil
+    from api.state import _server_pid
+    seen = set()
+    p = proc
+    while True:
+        try:
+            parent = p.parent()
+        except Exception:
+            return False
+        if parent is None or parent.pid in seen:
+            return False  # 链断（孤儿）→ 不是外来树
+        seen.add(parent.pid)
+        if _server_pid and parent.pid == _server_pid:
+            return False  # 通到本服务 → 我们的
+        if not _pid_matches_sandbox(parent, sandbox_dir):
+            return True   # 活着的、与 sandbox 无关的祖先（如 VS Code 主进程）
+        p = parent
+
+
 def _protected_pid_set() -> set:
     """服务进程自身 + 祖先链 pid 集合（每次扫描只算一次）。
     此前逐进程调 check_protected_pid，每个都重建 Process(server).parents()
@@ -709,6 +736,9 @@ def _discover_sandbox_processes(exclude_pids: set, limit: int = 50) -> list:
             if pid in skip_pids:
                 continue
             if not _pid_matches_sandbox(proc, sandbox_dir):
+                continue
+            # 外来进程树（父链活着且与 sandbox 无关，如 VS Code 子进程）不算遗留
+            if _has_foreign_alive_ancestor(proc, sandbox_dir):
                 continue
             try:
                 cmdline = " ".join(str(c) for c in proc.cmdline())[:200]
