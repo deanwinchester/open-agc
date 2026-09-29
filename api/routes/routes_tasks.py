@@ -16,6 +16,7 @@ from api import deliverables_registry as _dr
 from api.config import load_config
 from api.state import _active_agents, _background_agents, connected_websockets, _broadcast_to_websockets, _llamacpp_download_state, mark_task_deleted
 from api.task_core import (
+    MAX_SCHEDULED_TASKS,
     create_task, update_task_status, update_task_type, get_task_context,
     save_task_context, add_task_step, _extract_task_title,
     _record_task_deliverables, _check_goal_completeness,
@@ -524,6 +525,20 @@ class ScheduleTaskRequest(BaseModel):
     session_id: int = 1
 
 
+# 定时任务数量上限：防失控刷屏/烧 token（口径在 api.task_core.MAX_SCHEDULED_TASKS）
+
+
+def _scheduled_count(enabled_only: bool = False) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    if enabled_only:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE task_type='scheduled' AND schedule_enabled=1").fetchone()
+    else:
+        row = conn.execute("SELECT COUNT(*) FROM tasks WHERE task_type='scheduled'").fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
 @router.post("/api/tasks/schedule")
 async def create_scheduled_task(req: ScheduleTaskRequest):
     """Create a scheduled task."""
@@ -532,6 +547,9 @@ async def create_scheduled_task(req: ScheduleTaskRequest):
         croniter(req.cron)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid cron expression")
+    if _scheduled_count() >= MAX_SCHEDULED_TASKS:
+        raise HTTPException(status_code=400,
+                            detail=f"定时任务最多 {MAX_SCHEDULED_TASKS} 个，请先删除或暂停已有任务")
     task_id = create_task(
         title=req.title, user_query=req.query, task_type='scheduled',
         schedule_cron=req.cron, schedule_enabled=True, session_id=req.session_id
@@ -554,6 +572,10 @@ async def toggle_schedule(task_id: int):
         raise HTTPException(status_code=404, detail="Task not found")
     enabled = 0 if row[0] else 1
     if enabled:
+        if _scheduled_count(enabled_only=True) >= MAX_SCHEDULED_TASKS:
+            conn.close()
+            raise HTTPException(status_code=400,
+                                detail=f"最多同时启用 {MAX_SCHEDULED_TASKS} 个定时任务")
         try:
             cron = conn.execute("SELECT schedule_cron FROM tasks WHERE id=?", (task_id,)).fetchone()
             if cron and cron[0]:

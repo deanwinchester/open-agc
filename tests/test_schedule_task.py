@@ -71,3 +71,46 @@ def test_next_run_utc_format():
     s = _next_run_utc("*/10 * * * *")
     import datetime
     datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+
+
+def test_create_cap_at_max(db):
+    """定时任务数量上限（MAX_SCHEDULED_TASKS=10）：工具侧第 11 个被拒绝。"""
+    import sqlite3
+    from api.task_core import MAX_SCHEDULED_TASKS
+    conn = db.db_connect()
+    for i in range(MAX_SCHEDULED_TASKS):
+        conn.execute(
+            "INSERT INTO tasks (title, user_query, status, task_type, schedule_cron, schedule_enabled, session_id) "
+            "VALUES (?, ?, 'scheduled', 'scheduled', '0 * * * *', 1, 7)",
+            (f"t{i}", "q"))
+    conn.commit()
+    conn.close()
+    out = ScheduleTaskTool().execute(
+        action="create", title="overflow", query="q", cron="0 * * * *",
+        _agent_context=_Ctx())
+    assert "最多" in out
+    # 确认没有多落一行
+    conn = db.db_connect()
+    n = conn.execute("SELECT COUNT(*) FROM tasks WHERE task_type='scheduled'").fetchone()[0]
+    conn.close()
+    assert n == MAX_SCHEDULED_TASKS
+
+
+def test_rest_create_cap_at_max(db, monkeypatch):
+    """REST 侧同样卡口：第 11 个返回 400。"""
+    import asyncio
+    import api.routes.routes_tasks as rt
+    monkeypatch.setattr(rt, "DB_PATH", str(db.DB_PATH))
+    from api.task_core import MAX_SCHEDULED_TASKS
+    conn = db.db_connect()
+    for i in range(MAX_SCHEDULED_TASKS):
+        conn.execute(
+            "INSERT INTO tasks (title, user_query, status, task_type, schedule_cron, schedule_enabled, session_id) "
+            "VALUES (?, ?, 'scheduled', 'scheduled', '0 * * * *', 1, 7)",
+            (f"t{i}", "q"))
+    conn.commit()
+    conn.close()
+    with pytest.raises(Exception) as exc:
+        asyncio.run(rt.create_scheduled_task(
+            rt.ScheduleTaskRequest(title="x", query="q", cron="0 * * * *")))
+    assert "最多" in str(exc.value)

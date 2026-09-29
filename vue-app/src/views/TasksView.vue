@@ -15,7 +15,7 @@
 import { computed, h, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Plus, Refresh, Search, Delete } from '@element-plus/icons-vue';
+import { Refresh, Search, Delete } from '@element-plus/icons-vue';
 import { request } from '../api/client';
 import { formatDbTime } from '../utils/time';
 import zh from '../i18n/zh';
@@ -388,68 +388,6 @@ async function toggleSchedule(task) {
   }
 }
 
-// ── 定时任务弹窗（创建 / 编辑） ──
-
-const scheduleDialog = ref(false);
-const scheduleSaving = ref(false);
-const scheduleEditId = ref(null); // null=创建
-const DEFAULT_FREQ = { mode: 'interval_min', every: 10, hour: 9, minute: 0, weekday: 1, monthDay: 1, raw: '' };
-const scheduleForm = ref({ title: '', query: '', freq: { ...DEFAULT_FREQ } });
-
-import { formToCron, cronToForm, describeCron, utcToLocalShort } from '../utils/schedule';
-
-const CRON_RE = /^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/;
-
-function openScheduleCreate() {
-  scheduleEditId.value = null;
-  scheduleForm.value = { title: '', query: '', freq: { ...DEFAULT_FREQ } };
-  scheduleDialog.value = true;
-}
-
-function openScheduleEdit(task) {
-  scheduleEditId.value = task.id;
-  // 认识的表达式反解成友好表单；不认识的（复杂 cron）进高级模式保留原文
-  const parsed = cronToForm(task.schedule_cron);
-  const freq = parsed || { ...DEFAULT_FREQ, mode: 'advanced', raw: task.schedule_cron || '' };
-  scheduleForm.value = {
-    title: task.title || '',
-    query: task.user_query || '',
-    freq,
-  };
-  scheduleDialog.value = true;
-}
-
-async function saveSchedule() {
-  const form = scheduleForm.value;
-  const title = form.title.trim();
-  const query = form.query.trim();
-  const cron = formToCron(form.freq);
-  if (!title) return ElMessage.error(t.schedule.titleRequired);
-  if (!query) return ElMessage.error(t.schedule.queryRequired);
-  if (!cron) return ElMessage.error(t.schedule.cronRequired);
-  if (!CRON_RE.test(cron)) return ElMessage.error(t.schedule.cronInvalid);
-
-  scheduleSaving.value = true;
-  try {
-    const body = JSON.stringify({ title, query, cron, session_id: 1 });
-    if (scheduleEditId.value) {
-      await request(`/api/tasks/${scheduleEditId.value}/schedule`, {
-        method: 'PUT', headers: JSON_HEADERS, body,
-      });
-      ElMessage.success(t.schedule.saveSuccess);
-    } else {
-      await request('/api/tasks/schedule', { method: 'POST', headers: JSON_HEADERS, body });
-      ElMessage.success(t.schedule.createSuccess);
-    }
-    scheduleDialog.value = false;
-    loadTasks({ silent: true });
-  } catch (err) {
-    ElMessage.error(`${t.schedule.saveFailed}: ${err.message}`);
-  } finally {
-    scheduleSaving.value = false;
-  }
-}
-
 onMounted(() => {
   loadTasks();
   loadProcesses({ silent: true });
@@ -596,9 +534,6 @@ onUnmounted(() => {
             @input="onSearchInput"
           />
           <el-button size="small" :icon="Refresh" :title="t.refresh" @click="loadTasks()" />
-          <el-button size="small" type="primary" :icon="Plus" @click="openScheduleCreate">
-            {{ t.createSchedule }}
-          </el-button>
         </div>
       </div>
 
@@ -629,7 +564,7 @@ onUnmounted(() => {
                   :title="task.schedule_enabled ? t.actions.disableSchedule : t.actions.enableSchedule"
                   @change="toggleSchedule(task)"
                 />
-                <el-button size="small" text @click="openScheduleEdit(task)">
+                <el-button size="small" text @click="router.push('/scheduled')">
                   {{ t.actions.editSchedule }}
                 </el-button>
               </template>
@@ -688,78 +623,7 @@ onUnmounted(() => {
       </div>
     </el-card>
 
-    <!-- 定时任务创建/编辑弹窗 -->
-    <el-dialog :append-to-body="true"
-      v-model="scheduleDialog"
-      :title="scheduleEditId ? t.schedule.editTitle : t.schedule.createTitle"
-      width="480px"
-    >
-      <el-form label-position="top" @submit.prevent>
-        <el-form-item :label="t.schedule.titleLabel">
-          <el-input v-model="scheduleForm.title" :placeholder="t.schedule.titlePlaceholder" />
-        </el-form-item>
-        <el-form-item :label="t.schedule.queryLabel">
-          <el-input
-            v-model="scheduleForm.query"
-            type="textarea"
-            :rows="3"
-            :placeholder="t.schedule.queryPlaceholder"
-          />
-        </el-form-item>
-        <el-form-item :label="t.schedule.freqLabel">
-          <el-select v-model="scheduleForm.freq.mode" style="width: 100%">
-            <el-option :label="t.schedule.freqIntervalMin" value="interval_min" />
-            <el-option :label="t.schedule.freqIntervalHour" value="interval_hour" />
-            <el-option :label="t.schedule.freqDaily" value="daily" />
-            <el-option :label="t.schedule.freqWeekly" value="weekly" />
-            <el-option :label="t.schedule.freqMonthly" value="monthly" />
-            <el-option :label="t.schedule.freqAdvanced" value="advanced" />
-          </el-select>
-        </el-form-item>
-        <el-form-item v-if="scheduleForm.freq.mode === 'interval_min'" :label="t.schedule.everyMin">
-          <el-input-number v-model="scheduleForm.freq.every" :min="1" :max="1440" />
-        </el-form-item>
-        <el-form-item v-else-if="scheduleForm.freq.mode === 'interval_hour'" :label="t.schedule.everyHour">
-          <el-input-number v-model="scheduleForm.freq.every" :min="1" :max="168" />
-        </el-form-item>
-        <el-form-item v-else-if="scheduleForm.freq.mode === 'daily'" :label="t.schedule.atTime">
-          <el-input-number v-model="scheduleForm.freq.hour" :min="0" :max="23" />
-          <span class="freq-sep">{{ t.schedule.hour }}</span>
-          <el-input-number v-model="scheduleForm.freq.minute" :min="0" :max="59" />
-          <span class="freq-sep">{{ t.schedule.minute }}</span>
-        </el-form-item>
-        <el-form-item v-else-if="scheduleForm.freq.mode === 'weekly'" :label="t.schedule.weekDay + ' / ' + t.schedule.atTime">
-          <el-select v-model="scheduleForm.freq.weekday" style="width: 120px">
-            <el-option v-for="(d, i) in t.schedule.weekDays" :key="i" :label="d" :value="i" />
-          </el-select>
-          <el-input-number v-model="scheduleForm.freq.hour" :min="0" :max="23" style="margin-left:8px" />
-          <span class="freq-sep">{{ t.schedule.hour }}</span>
-          <el-input-number v-model="scheduleForm.freq.minute" :min="0" :max="59" />
-          <span class="freq-sep">{{ t.schedule.minute }}</span>
-        </el-form-item>
-        <el-form-item v-else-if="scheduleForm.freq.mode === 'monthly'" :label="t.schedule.monthDay + ' / ' + t.schedule.atTime">
-          <el-input-number v-model="scheduleForm.freq.monthDay" :min="1" :max="31" />
-          <span class="freq-sep">{{ t.schedule.monthDay }}</span>
-          <el-input-number v-model="scheduleForm.freq.hour" :min="0" :max="23" style="margin-left:8px" />
-          <span class="freq-sep">{{ t.schedule.hour }}</span>
-          <el-input-number v-model="scheduleForm.freq.minute" :min="0" :max="59" />
-          <span class="freq-sep">{{ t.schedule.minute }}</span>
-        </el-form-item>
-        <el-form-item v-else :label="t.schedule.cronLabel">
-          <el-input v-model="scheduleForm.freq.raw" :placeholder="t.schedule.cronPlaceholder" />
-        </el-form-item>
-        <div v-if="scheduleForm.freq.mode !== 'advanced'" class="freq-preview">
-          {{ describeCron(formToCron(scheduleForm.freq)) }}
-          <span class="freq-tz">{{ t.schedule.localTimeHint }}</span>
-        </div>
-      </el-form>
-      <template #footer>
-        <el-button @click="scheduleDialog = false">{{ t.schedule.cancel }}</el-button>
-        <el-button type="primary" :loading="scheduleSaving" @click="saveSchedule">
-          {{ t.schedule.save }}
-        </el-button>
-      </template>
-    </el-dialog>
+
   </div>
 </template>
 

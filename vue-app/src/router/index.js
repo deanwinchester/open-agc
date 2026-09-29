@@ -14,11 +14,13 @@ import SkillsView from '../views/settings/SkillsView.vue';
 import McpView from '../views/settings/McpView.vue';
 import PluginsView from '../views/settings/PluginsView.vue';
 import SecretsView from '../views/settings/SecretsView.vue';
+import ScheduledTasksView from '../views/ScheduledTasksView.vue';
 
 const routes = [
   { path: '/', redirect: '/chat' },
   { path: '/chat/:sessionId(\\d+)?', name: 'chat', component: ChatView, meta: { title: '对话' } },
   { path: '/tasks', name: 'tasks', component: TasksView, meta: { title: '任务' } },
+  { path: '/scheduled', name: 'scheduled', component: ScheduledTasksView, meta: { title: '定时任务' } },
   { path: '/tasks/:id(\\d+)', name: 'task-detail', component: TaskDetailView, meta: { title: '任务详情' } },
   { path: '/goals', name: 'goals', component: GoalsView, meta: { title: '目标' } },
   { path: '/downloads', name: 'downloads', component: DownloadsView, meta: { title: '下载' } },

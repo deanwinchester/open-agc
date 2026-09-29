@@ -98,7 +98,15 @@ class ScheduleTaskTool(BaseTool):
         except Exception:
             return (f"Error: cron 表达式无效: {cron!r}。格式如 */10 * * * *"
                     "（每10分钟）、0 * * * *（每小时）、0 9 * * *（每天 UTC 9 点）")
-        from api.task_core import create_task
+        from api.task_core import create_task, MAX_SCHEDULED_TASKS
+        from api.db import db_connect
+        conn = db_connect()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE task_type='scheduled'").fetchone()[0]
+        conn.close()
+        if count >= MAX_SCHEDULED_TASKS:
+            return (f"Error: 定时任务最多 {MAX_SCHEDULED_TASKS} 个（已有 {count} 个）。"
+                    "请先用 toggle 停用或让管理员删除不需要的任务再创建。")
         task_id = create_task(
             title=title, user_query=query, task_type='scheduled',
             schedule_cron=cron, schedule_enabled=True, session_id=session_id)

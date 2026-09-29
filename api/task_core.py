@@ -694,6 +694,10 @@ def _maybe_auto_title(session_id: int, task_id: int):
     _th.Thread(target=_work, daemon=True).start()
 
 
+# 定时任务数量上限（用户约定）：REST 创建/启用与 agent 工具共用此卡口
+MAX_SCHEDULED_TASKS = 10
+
+
 def save_message(role: str, content: str, session_id: int = 1, task_id: int = None,
                  attachments: list = None):
     """Save a chat message. If task_id is provided, links the message to its task.
