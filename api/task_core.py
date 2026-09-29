@@ -459,6 +459,21 @@ def _load_session_context(session_id: int, limit: int = 50) -> list:
         return []
 
 
+def _reap_terminal_processes(task_id: int, reason: str) -> None:
+    """任务终态（failed/interrupted）收割其残留后台进程。
+
+    生产实证 #584：任务死于 LLM_ERROR 后，它 detach 出去的 powershell/cmd
+    永远无人收割（中断/删除路径有 kill，失败路径没有）。completed 不收——
+    「起个服务」类任务的存活进程可能是用户要的结果；backgrounded 同理
+    （进程本就是等待对象）。幂等：跟踪表清空后重复调用是空操作。"""
+    try:
+        pids = kill_tracked_background_process(task_id, notify=False)
+        if pids:
+            print(f"[TaskCore] task #{task_id} terminal({reason}): reaped {pids}")
+    except Exception as _e:
+        print(f"[TaskCore] terminal reap failed for task {task_id}: {_e}")
+
+
 def handle_task_completion(task_id: int, response: str, agent_messages: list,
                            session_id: int = 1, update_title: bool = True,
                            wake_minutes: int = None) -> str:
@@ -475,6 +490,7 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
         return 'deleted'
     if not response:
         update_task_status(task_id, "failed", "No response from agent", interruption_reason="error")
+        _reap_terminal_processes(task_id, "no_response")
         return 'failed'
 
     is_max_iter = response.startswith("[MAX_ITERATIONS_REACHED]")
@@ -536,6 +552,7 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
     if is_user_int:
         # 不写 result_summary：哨兵文本会盖掉任务摘要，列表里看不到任务内容
         update_task_status(task_id, "interrupted", interruption_reason="user")
+        _reap_terminal_processes(task_id, "user_interrupted")
         return 'interrupted_user'
 
     # -- Max iterations --
@@ -558,6 +575,10 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
     if is_llm_error:
         save_task_context(task_id, agent_messages)
         update_task_status(task_id, "failed", summary, interruption_reason="error")
+        # 模型服务不可用而失败：任务不会自愈，残留进程纯属垃圾（实证 #584
+        # 卸载脚本 powershell 挂了 1 小时无人收）。completed/backgrounded/
+        # max_iterations 不收——存活进程可能是用户要的服务或等待对象。
+        _reap_terminal_processes(task_id, "llm_error")
         return 'failed'
 
     # -- 中间交付自动续跑（确定性兜底，不依赖 agent 自觉） --
