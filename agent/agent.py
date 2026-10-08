@@ -87,7 +87,7 @@ def _local_time_text() -> str:
 # common POSIX roots). Used to build the context brief handed to sub-agents
 # and to detect topic overlap between a pasted error and recent turns.
 # Segment charset excludes whitespace and sentence punctuation but keeps CJK
-# (paths with non-ASCII like D:\项目\...). Space-containing paths (D:\My Documents\proj)
+# (paths like D:\中新社\...). Space-containing paths (D:\My Documents\proj)
 # are matched via continuation segments that must contain a separator and
 # must not themselves be a new drive path (so "D:\a D:\b" stays two paths).
 # The drive branch requires a non-letter left boundary and rejects "://" so
@@ -425,12 +425,32 @@ class OpenAGCAgent:
                 f"如想在调用工具前表达思考过程，放在 JSON 之前的独立段落中。\n"
             )
 
+        # 品牌线提示词定制（build_data/brand.json，仅定制线存在该文件）：
+        # prompt_identity 替换默认身份段，prompt_industry 追加行业认知段。
+        # 开源版无 brand.json → 走默认 Open-AGC 通用身份，零影响。
+        try:
+            from core.paths import get_brand as _get_brand
+            _brand = _get_brand()
+        except Exception:
+            _brand = {}
+        _brand_identity = str(_brand.get("prompt_identity") or "").strip()
+        _brand_industry = str(_brand.get("prompt_industry") or "").strip()
+
+        if _brand_identity:
+            _identity_block = f"# 身份与人格\n{_brand_identity}\n"
+        else:
+            _identity_block = (
+                f"# 身份与人格\n"
+                f"你是住在用户电脑里的数字生命——不是「Open-AGC」产品本身，那只是你运行的躯壳与工具箱；"
+                f"被问到「你是谁」时不要自称 Open-AGC 或某个模型。"
+                f"你的名字、性格与回复风格由紧随其后的「人格设定」定义，以它为自我介绍的口径。\n"
+            )
+        if _brand_industry:
+            _identity_block += f"\n# 行业认知\n{_brand_industry}\n"
+
         _prompt_head = (
-            f"# 身份与人格\n"
-            f"你是住在用户电脑里的数字生命——不是「Open-AGC」产品本身，那只是你运行的躯壳与工具箱；"
-            f"被问到「你是谁」时不要自称 Open-AGC 或某个模型。"
-            f"你的名字、性格与回复风格由紧随其后的「人格设定」定义，以它为自我介绍的口径。\n"
-            f"# 能力与纪律\n"
+            _identity_block
+            + f"# 能力与纪律\n"
             f"你能够执行终端命令、运行 Python 代码、"
             f"操作文件系统，以及物理控制电脑的鼠标和键盘。"
             f"始终使用你的工具来明确验证假设，不要凭空猜测。\n"
@@ -1072,9 +1092,24 @@ class OpenAGCAgent:
                 mcp.setdefault(server, []).append(tool)
         if not mcp:
             return ""
+        # 服务器级介绍（config.json mcp_servers.<name>.description，可选）：
+        # 让模型理解服务是什么（如「zxs_es = 中新社历史稿库」），而不只是工具名。
+        server_desc = {}
+        try:
+            import json as _json
+            with open(get_data_path("config.json"), "r", encoding="utf-8") as f:
+                for n, c in (_json.load(f).get("mcp_servers") or {}).items():
+                    d = str((c or {}).get("description") or "").strip()
+                    if d:
+                        server_desc[n] = d
+        except Exception:
+            pass
         lines = ["\n### 已连接 MCP 服务（对应领域的优先通道）"]
         for server, tools in sorted(mcp.items()):
-            lines.append(f"- **{server}**：")
+            head = f"- **{server}**"
+            if server in server_desc:
+                head += f"（{server_desc[server]}）"
+            lines.append(head + "：")
             for t in sorted(tools, key=lambda x: x.name):
                 desc = (getattr(t, 'description', '') or '').strip()[:60]
                 suffix = f" — {desc}" if desc else ""
@@ -2624,7 +2659,8 @@ class OpenAGCAgent:
                  progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
                  images: Optional[List[str]] = None,
                  task_id: Optional[int] = None,
-                 skip_rag: bool = False) -> str:
+                 skip_rag: bool = False,
+                 skill_context_extra: str = "") -> str:
         """
         Execute a single turn of reasoning and action.
 
@@ -2786,6 +2822,10 @@ class OpenAGCAgent:
             pass
         if memory_context:
             _dyn_parts.append(_trunc(f"--- 历史记忆回溯 (Episodic Memory) ---\n{memory_context}"))
+        # 用户在消息里 @ 引入的套件内容（ws 层解析后传入），与检索到的
+        # 技能上下文合并注入动态段
+        if skill_context_extra:
+            skill_context = (skill_context + "\n\n" + skill_context_extra).strip()
         if skill_context:
             _dyn_parts.append(_trunc(skill_context))
         if experience_context:

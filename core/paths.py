@@ -10,7 +10,17 @@ def get_base_dir() -> str:
     if getattr(sys, 'frozen', False):
         # Running as compiled app (PyInstaller)
         if sys.platform == "darwin":
-            base_dir = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Open-AGC")
+            import json
+            import re
+            app_name = "Open-AGC"
+            try:
+                with open(os.path.join(sys._MEIPASS, "data", "brand.json"), encoding="utf-8") as f:
+                    candidate = json.load(f).get("app_name", "")
+                if re.fullmatch(r"[A-Za-z0-9_-]+", candidate):
+                    app_name = candidate
+            except (OSError, ValueError, AttributeError, TypeError):
+                pass
+            base_dir = os.path.join(os.path.expanduser("~"), "Library", "Application Support", app_name)
         elif sys.platform == "win32":
             base_dir = os.path.join(os.getenv("APPDATA", ""), "Open-AGC")
         else:
@@ -21,6 +31,35 @@ def get_base_dir() -> str:
         
     os.makedirs(base_dir, exist_ok=True)
     return base_dir
+
+
+_BRAND_CACHE = None
+
+
+def get_brand() -> dict:
+    """读取品牌配置（build_data/brand.json；打包版在 _MEIPASS/data/）。
+
+    品牌线（如 zxs）可在此放 prompt_identity / prompt_industry 等提示词
+    定制字段；开源版无此文件，返回 {}。结果缓存（运行期不变）。"""
+    global _BRAND_CACHE
+    if _BRAND_CACHE is not None:
+        return _BRAND_CACHE
+    import json
+    candidates = []
+    if getattr(sys, 'frozen', False):
+        candidates.append(os.path.join(sys._MEIPASS, "data", "brand.json"))
+    candidates.append(os.path.join(get_base_dir(), "build_data", "brand.json"))
+    brand = {}
+    for p in candidates:
+        try:
+            if os.path.exists(p):
+                with open(p, encoding="utf-8") as f:
+                    brand = json.load(f)
+                break
+        except (OSError, ValueError):
+            pass
+    _BRAND_CACHE = brand if isinstance(brand, dict) else {}
+    return _BRAND_CACHE
 
 def get_data_dir() -> str:
     """Get the base data directory."""
