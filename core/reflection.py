@@ -313,7 +313,10 @@ class ReflectionEngine:
                     pass
 
                 if not rows:
-                    # Fallback: just get recent successful ones
+                    # 兜底也只取与查询有关键词重叠的成功轨迹——此前无条件注入
+                    # 「本会话最近成功轨迹」，结果写作类请求被塞入无关的清理
+                    # 轨迹，模型直接照抄执行了别人的任务（生产实证 #585：
+                    # @办公套件写通知，模型却照着清理轨迹跑 psutil）。
                     rows = conn.execute("""
                         SELECT task_input, tool_sequence, success, created_at
                         FROM task_trajectories
@@ -321,7 +324,10 @@ class ReflectionEngine:
                     """ + (" AND session_id = ?" if effective_session is not None else "") + """
                         ORDER BY created_at DESC
                         LIMIT ?
-                    """, (*((effective_session,) if effective_session is not None else ()), top_k)).fetchall()
+                    """, (*((effective_session,) if effective_session is not None else ()),
+                          top_k * 3)).fetchall()
+                    rows = [r for r in rows
+                            if any(k in (r[0] or "").lower() for k in keywords)][:top_k]
 
                 result["trajectories"] = [
                     {
