@@ -10,6 +10,15 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 import sys ; sys.setrecursionlimit(sys.getrecursionlimit() * 5)
 
+import platform
+import runpy
+target_arch = os.environ.get('TARGET_ARCH', platform.machine())
+mac_metadata = None
+app_name = 'Open-AGC'
+if sys.platform == 'darwin':
+    mac_metadata = runpy.run_path('packaging/macos_bundle.py')['bundle_metadata']('.', target_arch)
+    app_name = mac_metadata['name']
+
 block_cipher = None
 
 # Collect data files from packages that need them at runtime
@@ -42,6 +51,12 @@ datas = [
 # Real data/config.json with user API keys is NEVER bundled.
 if os.path.exists('build_data/config.json'):
     datas.append(('build_data/config.json', 'data'))
+# 品牌定制（提示词身份/显示名等）全平台打包——此前仅 darwin 打包，
+# Windows/Linux 定制版读不到 prompt_identity 等品牌字段
+if os.path.exists('build_data/brand.json'):
+    datas.append(('build_data/brand.json', 'data'))
+if sys.platform == 'darwin':
+    datas.append(('build/tiktoken_cache', 'tiktoken_cache'))
 
 # Do NOT bundle data/ directory as it may contain sensitive user data (API keys).
 
@@ -75,6 +90,7 @@ rapidocr_submodules = collect_submodules('rapidocr_onnxruntime')
 onnxrt_datas = collect_data_files('onnxruntime')
 onnxrt_submodules = collect_submodules('onnxruntime')
 datas += rapidocr_datas + onnxrt_datas
+
 
 # ---- Linux: pywebview GTK backend (WebKit2 / JavaScriptCore typelibs) ----
 # PyInstaller 自带 hook-gi.repository.Gtk 收集 Gtk/Gdk/Gio/GLib/GObject，
@@ -155,7 +171,7 @@ a = Analysis(
     ] + litellm_submodules + tiktoken_submodules + httpx_submodules + httpcore_submodules + anyio_submodules + aiohttp_submodules + gi_hiddenimports + rapidocr_submodules + onnxrt_submodules + ['tiktoken_ext.openai_public'],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['packaging/macos_runtime.py'] if sys.platform == 'darwin' else [],
     excludes=[
         # Qt/PySide (pulled by pywebview but we use WinForms/Cocoa, not Qt)
         'PySide6', 'PySide2', 'PyQt5', 'PyQt6',
@@ -214,6 +230,15 @@ a = Analysis(
     noarchive=False,
 )
 
+# Chromium contains complete signed .app/.framework bundles. PyInstaller flattens
+# those frameworks while collecting individual Mach-O files, breaking codesign.
+# The Mac build script copies the original browser tree after BUNDLE instead.
+if sys.platform == 'darwin':
+    a.binaries = [entry for entry in a.binaries
+                  if not any('.local-browsers/' in str(path) for path in entry[:2])]
+    a.datas = [entry for entry in a.datas
+              if not any('.local-browsers/' in str(path) for path in entry[:2])]
+
 # ---- Linux: GTK/GNOME 系统库不打进包 ----
 # PyInstaller 的 gi hook 会把 libgtk/libglib/libwebkit2gtk 等系统库收进
 # _internal，bootloader 又把它设为 LD_LIBRARY_PATH 优先加载——GTK 因此
@@ -244,22 +269,20 @@ if sys.platform.startswith('linux'):
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-# Determine target architecture
-import platform
-target_arch = os.environ.get('TARGET_ARCH', platform.machine())
-
 exe = EXE(
     pyz,
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Open-AGC',
+    name=app_name,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     console=False,
     target_arch=target_arch,
+    codesign_identity=os.environ.get('MAC_CODESIGN_IDENTITY') if sys.platform == 'darwin' else None,
+    entitlements_file='packaging/macos.entitlements.plist' if sys.platform == 'darwin' else None,
     icon='static/icon.ico' if os.path.exists('static/icon.ico') else None,
 )
 
@@ -271,21 +294,15 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='Open-AGC',
+    name=app_name,
 )
 
 # macOS .app bundle
-app = BUNDLE(
-    coll,
-    name='Open-AGC.app',
-    icon='static/icon.icns' if os.path.exists('static/icon.icns') else None,
-    bundle_identifier='com.openagc.panda',
-    info_plist={
-        'CFBundleName': 'Open-AGC',
-        'CFBundleDisplayName': 'Open-AGC Panda',
-        'CFBundleShortVersionString': '1.0.0',
-        'CFBundleVersion': '1.0.0',
-        'NSHighResolutionCapable': True,
-        'LSMinimumSystemVersion': '10.15.0',
-    },
-)
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        coll,
+        name=app_name + '.app',
+        icon='static/icon.icns' if os.path.exists('static/icon.icns') else None,
+        bundle_identifier=mac_metadata['bundle_id'],
+        info_plist=mac_metadata['plist'],
+    )
