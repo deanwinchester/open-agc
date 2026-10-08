@@ -142,7 +142,7 @@ class TestResolveAttribution:
 
     def test_running_with_live_background_agent_queues_message(self, tmp_db, monkeypatch):
         """running 复用前查活：_background_agents 有存活 agent →
-        返回哨兵且消息 queue_message 给它，不再复用开第二个 agent。"""
+        插话型消息（≤10 字或续接词）queue_message 给它，返回哨兵。"""
         import api.task_core as tc
         tid = _insert_task(tmp_db, status="running")
         sent = []
@@ -154,8 +154,30 @@ class TestResolveAttribution:
                 sent.append(msg)
 
         monkeypatch.setitem(tc._background_agents, tid, _FakeAgent())
-        assert tc._resolve_task_for_query(1, "新的指令请处理一下") == tc.QUEUED_TO_LIVE_AGENT
-        assert sent == ["新的指令请处理一下"]
+        assert tc._resolve_task_for_query(1, "继续") == tc.QUEUED_TO_LIVE_AGENT
+        assert sent == ["继续"]
+
+    def test_running_live_agent_new_instruction_creates_separate_task(self, tmp_db, monkeypatch):
+        """存活后台 agent 只接插话：较长的新指令/@套件 是独立任务意图，
+        开新任务而非塞进在跑任务（生产实证：@《办公套件》写通知被吞进清理任务）。"""
+        import api.task_core as tc
+        tid = _insert_task(tmp_db, status="running")
+        sent = []
+
+        class _FakeAgent:
+            is_interrupted = False
+
+            def queue_message(self, msg):
+                sent.append(msg)
+
+        monkeypatch.setitem(tc._background_agents, tid, _FakeAgent())
+        new_tid = tc._resolve_task_for_query(1, "新的指令：请帮我处理一份全新的文档整理任务")
+        assert new_tid != tc.QUEUED_TO_LIVE_AGENT and new_tid != tid
+        assert sent == []
+
+        mention_tid = tc._resolve_task_for_query(1, "@《办公套件》 帮我写一篇通知")
+        assert mention_tid != tc.QUEUED_TO_LIVE_AGENT and mention_tid != tid
+        assert sent == []
 
     def test_running_with_dead_background_agent_reused(self, tmp_db, monkeypatch):
         """后台 agent 已中断（句柄尸骸）→ 正常复用任务，不排队。"""

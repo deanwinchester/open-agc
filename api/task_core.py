@@ -355,20 +355,34 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
                         "执行线程失联（无步骤更新超时），已自动标记",
                         interruption_reason="stale_running")
                 else:
-                    # 复用前先查活：存活的后台 agent 已持有该任务，直接把消息
-                    # 排给它，而不是再开一个 agent 复用同一任务（双 agent 写
-                    # 同一任务会写乱步骤流）。调用方见哨兵后不再开跑。
+                    # 复用前先查活：存活的后台 agent 已持有该任务。
+                    # 只把「插话/续接」型消息排给它（≤10 字或续接词开头）；
+                    # @套件 或较长的新指令是明确的新任务意图——塞进无关的在跑
+                    # 任务会污染其上下文（生产实证：@《办公套件》写通知被吞进
+                    # 清理任务里执行）。新指令落到下方 create_task 开独立任务。
                     _bg = _background_agents.get(tid)
                     if _bg is not None and not getattr(_bg, 'is_interrupted', False):
-                        try:
-                            _bg.queue_message(query)
-                            print(f"[Task] Task {tid} owned by a live background agent — "
-                                  f"queued message instead of reusing (session {session_id})")
-                            return QUEUED_TO_LIVE_AGENT
-                        except Exception as _q_err:
-                            print(f"[Task] Queue to live background agent failed: {_q_err}")
-                    print(f"[Task] Reusing running task {tid} for session {session_id}")
-                    return tid
+                        _q = query.strip().lower()
+                        _is_interjection = (
+                            "@《" not in query
+                            and (len(query.strip()) <= 10
+                                 or any(kw and (_q.startswith(kw) or _q == kw)
+                                        for kw in _CONTINUATION_PREFIXES))
+                        )
+                        if _is_interjection:
+                            try:
+                                _bg.queue_message(query)
+                                print(f"[Task] Task {tid} owned by a live background agent — "
+                                      f"queued message instead of reusing (session {session_id})")
+                                return QUEUED_TO_LIVE_AGENT
+                            except Exception as _q_err:
+                                print(f"[Task] Queue to live background agent failed: {_q_err}")
+                        else:
+                            print(f"[Task] Task {tid} owned by live background agent; "
+                                  f"message looks like a new instruction — creating separate task")
+                    else:
+                        print(f"[Task] Reusing running task {tid} for session {session_id}")
+                        return tid
             elif status in ('completed', 'interrupted', 'backgrounded', 'background_failed'):
                 # 窗口看 updated_at 而非 created_at：add_task_step 心跳持续刷新
                 # updated_at，长寿命任务的 created_at 早已掉出窗口（误判新话题）
