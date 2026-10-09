@@ -244,8 +244,16 @@ def reconcile_downloads():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
+    def _norm(p):
+        """路径归一化（Windows 大小写不敏感 + 斜杠混写）。
+
+        生产实证：DB 记录的是 HF 仓库原名（Ternary-…PTQ1_0.gguf.partial），
+        磁盘文件保留首次写入时的名字（小写）——字符串比对失配导致启动时
+        补建「待恢复」重复记录、真记录永远卡在 downloading。"""
+        return os.path.normcase(os.path.abspath(p)) if p else ""
+
     # 1. Find all .partial files
-    partial_files = {}
+    partial_files = {}  # norm_path -> (name, path)
     if os.path.exists(models_dir):
         for f in os.listdir(models_dir):
             if f.endswith(".partial"):
@@ -257,18 +265,38 @@ def reconcile_downloads():
                     except OSError:
                         pass
                 else:
-                    partial_files[f] = partial_path
+                    partial_files[_norm(partial_path)] = (f, partial_path)
 
-    # 2. Fetch existing DB records
-    cursor.execute("SELECT id, partial_path, target_path, status FROM downloads")
-    existing = {row[1]: {"id": row[0], "target_path": row[2], "status": row[3]}
-                for row in cursor.fetchall()}
+    # 2. Fetch existing DB records（含 url/repo/source 供继承与去重）
+    cursor.execute("SELECT id, partial_path, target_path, status, url, repo_id, source, label FROM downloads")
+    db_rows = cursor.fetchall()
+    existing = {}
+    for row in db_rows:
+        key = _norm(row[1])
+        if key and key not in existing:
+            existing[key] = {"id": row[0], "target_path": row[2], "status": row[3],
+                             "url": row[4], "repo_id": row[5], "source": row[6], "label": row[7]}
 
-    # 3. Reconcile .partial files with DB
-    for partial_name, partial_path in partial_files.items():
+    # 2b. 去重：同一归一化 partial_path 多条记录（含历史遗留的「待恢复」
+    # 重复记录）→ 保留有 url 的（可续传），其余连记录带事件删除
+    by_key = {}
+    for row in db_rows:
+        key = _norm(row[1])
+        if key:
+            by_key.setdefault(key, []).append(row)
+    for key, rows in by_key.items():
+        if len(rows) > 1:
+            rows_sorted = sorted(rows, key=lambda r: (0 if r[4] else 1, r[0]))
+            for dup in rows_sorted[1:]:
+                cursor.execute("DELETE FROM download_events WHERE download_id=?", (dup[0],))
+                cursor.execute("DELETE FROM downloads WHERE id=?", (dup[0],))
+                print(f"[Startup] Dedup download record #{dup[0]} (dup of #{rows_sorted[0][0]})")
+
+    # 3. Reconcile .partial files with DB（归一化键匹配）
+    for norm_path, (partial_name, partial_path) in partial_files.items():
         file_size = os.path.getsize(partial_path)
-        if partial_path in existing:
-            rec = existing[partial_path]
+        rec = existing.get(norm_path)
+        if rec:
             if rec["status"] == "downloading":
                 cursor.execute(
                     "UPDATE downloads SET status='paused', downloaded_bytes=?, "
@@ -281,19 +309,39 @@ def reconcile_downloads():
                     "WHERE id=?", (rec["id"],)
                 )
         else:
-            label = partial_name.replace(".partial", "")
+            label = partial_name[:-len(".partial")]
             target_path = os.path.join(models_dir, label)
-            cursor.execute(
-                '''INSERT INTO downloads (type, label, filename, target_path, partial_path,
-                   downloaded_bytes, progress, status, source)
-                   VALUES ('model', ?, ?, ?, ?, ?, 0.0, 'paused', 'huggingface')''',
-                (f"{label} (待恢复)", label, target_path, partial_path, file_size)
-            )
-            cursor.execute(
-                "UPDATE downloads SET progress="
-                "CASE WHEN total_size > 0 THEN CAST(downloaded_bytes AS REAL) / total_size ELSE 0 END "
-                "WHERE id=last_insert_rowid()"
-            )
+            # 同目标文件名（大小写不敏感）的历史记录 → 直接更新它续传
+            # （继承 url/repo_id/source），不再新建没有来源信息的「待恢复」
+            # 死记录（那种记录的续传按钮点了也没处下载）
+            donor = None
+            for row in db_rows:
+                if row[2] and os.path.basename(row[2]).lower() == label.lower():
+                    if donor is None or (row[4] and not donor[4]):
+                        donor = row
+            if donor is not None:
+                cursor.execute(
+                    "UPDATE downloads SET status='paused', downloaded_bytes=?, "
+                    "partial_path=?, target_path=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (file_size, partial_path, target_path, donor[0])
+                )
+                cursor.execute(
+                    "UPDATE downloads SET progress="
+                    "CASE WHEN total_size > 0 THEN CAST(downloaded_bytes AS REAL) / total_size ELSE 0 END "
+                    "WHERE id=?", (donor[0],)
+                )
+            else:
+                cursor.execute(
+                    '''INSERT INTO downloads (type, label, filename, target_path, partial_path,
+                       downloaded_bytes, progress, status, source)
+                       VALUES ('model', ?, ?, ?, ?, ?, 0.0, 'paused', 'huggingface')''',
+                    (f"{label} (待恢复)", label, target_path, partial_path, file_size)
+                )
+                cursor.execute(
+                    "UPDATE downloads SET progress="
+                    "CASE WHEN total_size > 0 THEN CAST(downloaded_bytes AS REAL) / total_size ELSE 0 END "
+                    "WHERE id=last_insert_rowid()"
+                )
 
     # 4. Mark orphaned DB records
     cursor.execute(
