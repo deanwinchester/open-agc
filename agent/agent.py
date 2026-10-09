@@ -47,6 +47,7 @@ from tools.self_review import SelfReviewTool
 from tools.task_plan import TaskPlanTool, format_plan_for_prompt, load_plan
 from tools.task_manager import TaskManagerTool
 from tools.schedule_task import ScheduleTaskTool
+from tools.manage_downloads import ManageDownloadsTool
 from tools.system_config import ConfigureSystemTool
 from tools.plugin_dev import DevelopPluginTool
 from tools.install_skill import InstallSkillTool
@@ -843,6 +844,7 @@ class OpenAGCAgent:
             "manage_task_plan": TaskPlanTool(),
             "manage_task": TaskManagerTool(),
             "schedule_task": ScheduleTaskTool(),
+            "manage_downloads": ManageDownloadsTool(),
             "compact_context": CompactContextTool(),
             "dispatch_subagent": DispatchSubagentTool(),
             "request_secret": RequestSecretTool(),
@@ -889,6 +891,7 @@ class OpenAGCAgent:
             "manage_task_plan": "管理任务计划",
             "manage_task": "查看和管理任务",
             "schedule_task": "定时任务管理",
+            "manage_downloads": "下载管理",
             "dispatch_subagent": "分派子代理",
             "request_secret": "向用户收集凭据",
             "customize_theme": "界面风格定制",
