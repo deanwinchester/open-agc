@@ -814,6 +814,44 @@ class LLMClient:
             _mark(out[-1])
         return out
 
+    @staticmethod
+    def _sanitize_for_anthropic(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Anthropic Messages API 拒绝空 text（"text content is empty" 400）。
+
+        恢复快照/中断轮次里可能有 content 为空串、或列表里带空文本块的消息
+        （实证：Guardian 恢复 #591 第一轮即被拒）。规则：空串/空白 → 占位符；
+        列表剔除空文本块（剔空则整内容换占位符）；content=None 且带
+        tool_calls 的 assistant 消息合法，保留。"""
+        out = []
+        for m in messages:
+            if not isinstance(m, dict):
+                out.append(m)
+                continue
+            c = m.get("content")
+            if c is None:
+                if not m.get("tool_calls"):
+                    m = dict(m)
+                    m["content"] = "（空）"
+                out.append(m)
+                continue
+            if isinstance(c, str):
+                if not c.strip():
+                    m = dict(m)
+                    m["content"] = "（空）"
+                out.append(m)
+                continue
+            if isinstance(c, list):
+                filtered = [b for b in c if not (
+                    isinstance(b, dict) and b.get("type") == "text"
+                    and not str(b.get("text") or "").strip())]
+                if len(filtered) != len(c):
+                    m = dict(m)
+                    m["content"] = filtered if filtered else "（空）"
+                out.append(m)
+                continue
+            out.append(m)
+        return out
+
     def _build_model_kwargs(self, model: str, messages: List[Dict[str, Any]],
                              tools: Optional[List[Dict[str, Any]]] = None,
                              stream: bool = False) -> Dict[str, Any]:
@@ -867,7 +905,7 @@ class LLMClient:
             # 避免每轮变化的「系统补充上下文」污染缓存前缀。分身/短 prompt 的
             # 自动缓存不受影响。
             kwargs["messages"] = self._mark_anthropic_prompt_cache(
-                self._remove_orphaned_tool_calls(messages))
+                self._remove_orphaned_tool_calls(self._sanitize_for_anthropic(messages)))
         elif model.startswith("xiaomi/"):
             # 小米 MiMo（OpenAI 兼容端点）：api_base/api_key 按调用传入
             kwargs["model"] = f"openai/{model.split('/', 1)[1]}"
