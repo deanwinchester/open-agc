@@ -80,3 +80,75 @@ def test_partial_on_disk_suggests_resume(env, monkeypatch):
                         lambda _c=None: str(tmp_path / "no_sandbox"))
     out = DownloadTool().execute(repo_id="x/y", filename="MyModel.gguf")
     assert "续传" in out
+
+
+# ── 管理动作（action=list/resume/delete，与下载页同一数据源）──
+
+@pytest.fixture()
+def mdb(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "chat_history.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE downloads (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, "
+        "label TEXT, repo_id TEXT, filename TEXT, source TEXT, url TEXT, "
+        "target_path TEXT, partial_path TEXT, total_size INTEGER, "
+        "downloaded_bytes INTEGER, status TEXT, progress REAL, error_message TEXT, "
+        "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME "
+        "DEFAULT CURRENT_TIMESTAMP, task_id INTEGER, background_resumed INTEGER DEFAULT 0)")
+    conn.execute(
+        "CREATE TABLE download_events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "download_id INTEGER, event_type TEXT, message TEXT, details TEXT, "
+        "created_at DATETIME DEFAULT CURRENT_TIMESTAMP)")
+    conn.commit()
+    conn.close()
+    import api.routes.routes_settings as rs
+    monkeypatch.setattr(rs, "DB_PATH", db_path)
+    return db_path
+
+
+def _minsert(db_path, label, status, progress=0.0, partial=""):
+    conn = sqlite3.connect(db_path)
+    cur = conn.execute(
+        "INSERT INTO downloads (type, label, filename, source, partial_path, "
+        "total_size, downloaded_bytes, status, progress) "
+        "VALUES ('model', ?, ?, 'huggingface', ?, 1000000, 0, ?, ?)",
+        (label, label, partial, status, progress))
+    rid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return rid
+
+
+def test_list_empty(mdb):
+    assert "没有记录" in DownloadTool().execute(action="list")
+
+
+def test_list_shows_status_and_size(mdb):
+    _minsert(mdb, "mymodel.gguf", "paused", progress=0.355)
+    out = DownloadTool().execute(action="list")
+    assert "paused" in out and "mymodel.gguf" in out and "36%" in out
+
+
+def test_resume_requires_paused_or_failed(mdb):
+    rid = _minsert(mdb, "x.gguf", "completed")
+    out = DownloadTool().execute(action="resume", download_id=rid)
+    assert "续传失败" in out and "completed" in out
+
+
+def test_resume_nonexistent(mdb):
+    out = DownloadTool().execute(action="resume", download_id=999)
+    assert "续传失败" in out
+
+
+def test_delete_removes_record(mdb):
+    rid = _minsert(mdb, "gone.gguf", "failed")
+    out = DownloadTool().execute(action="delete", download_id=rid)
+    assert "已删除" in out
+    conn = sqlite3.connect(mdb)
+    n = conn.execute("SELECT COUNT(*) FROM downloads WHERE id=?", (rid,)).fetchone()[0]
+    conn.close()
+    assert n == 0
+
+
+def test_unknown_action(mdb):
+    assert "未知 action" in DownloadTool().execute(action="hack")
