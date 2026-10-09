@@ -13,8 +13,11 @@ class DownloadTool(BaseTool):
     
     name: str = "queue_download"
     description: str = (
-        "通过系统下载管理器异步下载模型文件。立即返回，下载在后台运行并带有进度追踪。"
-        "支持 HuggingFace, ModelScope 和直接 URL 链接。支持断点续传。"
+        "通过系统下载管理器异步下载模型/大文件。立即返回，后台运行并带进度追踪。"
+        "支持 HuggingFace、ModelScope 和直接 URL，支持断点续传。"
+        "凡下载超过 100MB 的文件必须用它——禁止用 execute_shell/execute_python "
+        "自编脚本下载（无记录、不能续传、会造成重复下载浪费）。"
+        "重复提交会自动识别：已下载完成/已有部分进度时直接返回现状。"
     )
 
     def __init__(self, models_dir: str = None, **kwargs):
@@ -52,13 +55,15 @@ class DownloadTool(BaseTool):
         if not filename or filename in (".", "..") or "/" in filename or "\\" in filename:
             return "Error: Invalid filename."
 
-        # Check for existing download
+        # Check for existing download（大小写不敏感——HF 仓库原名与磁盘首次
+        # 写入名可能大小写不同，Windows 下是同一个文件）
         try:
             import sqlite3
             db_path = get_data_path("chat_history.db")
             conn = sqlite3.connect(db_path)
             rows = conn.execute(
-                "SELECT id, status FROM downloads WHERE filename=? ORDER BY id DESC LIMIT 1",
+                "SELECT id, status FROM downloads WHERE filename=? COLLATE NOCASE "
+                "ORDER BY id DESC LIMIT 1",
                 (filename,)).fetchall()
             conn.close()
             if rows:
@@ -73,6 +78,30 @@ class DownloadTool(BaseTool):
                         f"Download '{filename}' already completed (id={existing[0]}). "
                         "File is ready in the models directory."
                     )
+        except Exception:
+            pass
+
+        # 磁盘兜底：文件已在模型目录（可能由其他途径完成/落库丢失）→ 不重复下载
+        try:
+            from core.llamacpp_manager import get_llamacpp_manager as _glm
+            from core.paths import resolve_sandbox_dir as _rsd
+            from api.config import load_config as _lc
+            _dirs = [_glm().models_dir]
+            _sb = _rsd((_lc() or {}).get("sandbox_dir"))
+            _dl = os.path.join(_sb, "downloads")
+            if os.path.isdir(_dl):
+                _dirs.append(_dl)  # agent 历史自行下载的落点
+            for _md in _dirs:
+                if not os.path.isdir(_md):
+                    continue
+                for f in os.listdir(_md):
+                    if f.lower() == filename.lower():
+                        return (f"'{filename}' 已存在于 {_md}，无需重复下载"
+                                f"（如需装到模型目录，把它移动过去即可）。")
+                    if f.lower() == (filename + ".partial").lower():
+                        _sz = os.path.getsize(os.path.join(_md, f))
+                        return (f"'{filename}' 已有部分下载进度（{_sz // 1048576} MB，在 {_md}）。"
+                                "请通过下载管理器续传，不要重新下载。")
         except Exception:
             pass
 
