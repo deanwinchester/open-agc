@@ -13,9 +13,12 @@ class DownloadTool(BaseTool):
     
     name: str = "queue_download"
     description: str = (
-        "通过系统下载管理器异步下载模型/大文件。立即返回，后台运行并带进度追踪。"
-        "支持 HuggingFace、ModelScope 和直接 URL，支持断点续传。"
-        "凡下载超过 100MB 的文件必须用它——禁止用 execute_shell/execute_python "
+        "下载管理器：下载模型/大文件 + 管理下载记录。action=queue（默认）排队下载，"
+        "立即返回、后台运行带进度追踪，支持 HuggingFace、ModelScope 和直接 URL、"
+        "断点续传；action=list 查看全部下载记录（状态/进度/来源）；"
+        "action=resume 续传已暂停/失败的下载（需 download_id）；"
+        "action=delete 删除记录（连带清理 partial 残留文件）。"
+        "凡下载超过 100MB 的文件必须用本工具——禁止用 execute_shell/execute_python "
         "自编脚本下载（无记录、不能续传、会造成重复下载浪费）。"
         "重复提交会自动识别：已下载完成/已有部分进度时直接返回现状。"
     )
@@ -24,16 +27,18 @@ class DownloadTool(BaseTool):
         super().__init__(**kwargs)
         self.models_dir = models_dir
 
-    def execute(self, url: str = "", repo_id: str = "", filename: str = "",
-                source: str = "huggingface", **kwargs) -> str:
-        """Queue a model download. Supports HuggingFace, ModelScope, and direct URLs.
+    def __init__(self, models_dir: str = None, **kwargs):
+        super().__init__(**kwargs)
+        self.models_dir = models_dir
 
-        Args:
-            url: Direct download URL (use with source='direct').
-            repo_id: HF repo ID like 'Qwen/Qwen2-7B-Instruct-GGUF'.
-            filename: Target filename (e.g. 'qwen2-7b.gguf').
-            source: 'huggingface', 'modelscope', or 'direct'.
-        """
+    def execute(self, url: str = "", repo_id: str = "", filename: str = "",
+                source: str = "huggingface", action: str = "queue",
+                download_id: int = None, **kwargs) -> str:
+        """下载管理：queue（默认）排队下载 / list 列记录 / resume 续传 / delete 删记录。"""
+        # ── 管理动作（list/resume/delete）──
+        if action != "queue":
+            return self._manage(action, download_id)
+
         try:
             from core.llamacpp_manager import get_llamacpp_manager
             from core.paths import get_data_path
@@ -288,14 +293,28 @@ class DownloadTool(BaseTool):
             "function": {
                 "name": "queue_download",
                 "description": (
-                    "排队下载模型等大文件：后台下载、断点续传，立即返回。"
+                    "下载管理器：下载模型/大文件 + 管理下载记录。action=queue（默认）排队下载，"
+                    "后台运行带进度追踪、断点续传，支持 huggingface/modelscope/直链；"
+                    "action=list 查看下载记录（状态/进度/来源）；action=resume 续传"
+                    "已暂停/失败的下载（需 download_id）；action=delete 删除记录"
+                    "（连带清理 partial 残留）。凡下载超过 100MB 的文件必须用本工具，"
+                    "禁止用 execute_shell/execute_python 自编脚本下载。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["queue", "list", "resume", "delete"],
+                            "description": "queue（默认）排队下载；list 列记录；resume 续传；delete 删记录。"
+                        },
+                        "download_id": {
+                            "type": "integer",
+                            "description": "resume/delete 时的记录 ID（从 action=list 获取）。"
+                        },
                         "filename": {
                             "type": "string",
-                            "description": "保存文件名。"
+                            "description": "保存文件名（queue 时必填）。"
                         },
                         "repo_id": {
                             "type": "string",
@@ -311,10 +330,57 @@ class DownloadTool(BaseTool):
                             "description": "下载源，默认 huggingface。"
                         }
                     },
-                    "required": ["filename"]
+                    "required": []
                 }
             }
         }
+
+
+    # ── 管理动作（与下载页同一数据源，复用 routes_settings 记录函数）──
+    def _manage(self, action: str, download_id: int = None) -> str:
+        import asyncio
+        try:
+            from api.routes.routes_settings import (
+                list_download_records, resume_download, delete_download,
+            )
+        except ImportError as e:
+            return f"Error: 下载系统不可用: {e}"
+
+        if action == "list":
+            rows = list_download_records()
+            if not rows:
+                return "下载管理器中没有记录。"
+            lines = []
+            for r in rows:
+                size_mb = (r.get("total_size") or 0) / 1048576
+                done_mb = (r.get("downloaded_bytes") or 0) / 1048576
+                pct = round((r.get("progress") or 0) * 100)
+                err = f"，错误: {r['error_message']}" if r.get("error_message") else ""
+                lines.append(
+                    f"- #{r['id']} [{r['status']}] {r.get('label') or r.get('filename')} "
+                    f"— {done_mb:.0f}/{size_mb:.0f}MB ({pct}%)，来源 {r.get('source') or '?'}，"
+                    f"创建于 {r.get('created_at')}{err}")
+            return "下载记录（按创建倒序）：\n" + "\n".join(lines)
+
+        if action == "resume":
+            if not download_id:
+                return "Error: resume 需要 download_id"
+            try:
+                asyncio.run(resume_download(int(download_id)))
+                return f"已恢复下载 #{download_id}（断点续传，进度见下载管理面板）。"
+            except Exception as e:
+                return f"Error: 续传失败: {getattr(e, 'detail', str(e))}"
+
+        if action == "delete":
+            if not download_id:
+                return "Error: delete 需要 download_id"
+            try:
+                asyncio.run(delete_download(int(download_id)))
+                return f"已删除下载记录 #{download_id}（含 partial 残留文件）。"
+            except Exception as e:
+                return f"Error: 删除失败: {getattr(e, 'detail', str(e))}"
+
+        return f"Error: 未知 action '{action}'（queue/list/resume/delete）"
 
 
 def _preflight_download_url(url: str, timeout: float = 12.0) -> Optional[str]:
