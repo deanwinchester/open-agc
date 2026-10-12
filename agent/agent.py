@@ -1095,9 +1095,10 @@ class OpenAGCAgent:
                 mcp.setdefault(server, []).append(tool)
         if not mcp:
             return ""
-        # 服务器级介绍（config.json mcp_servers.<name>.description，可选）：
-        # 让模型理解服务是什么（如「zxs_es = 中新社历史稿库」），而不只是工具名。
+        # 服务器级介绍与展示名（config.json mcp_servers.<name>.description /
+        # .display_name，可选）：让模型理解服务是什么（如「zxs_es = 中新社语料库」）。
         server_desc = {}
+        server_display = {}
         try:
             import json as _json
             with open(get_data_path("config.json"), "r", encoding="utf-8") as f:
@@ -1105,11 +1106,17 @@ class OpenAGCAgent:
                     d = str((c or {}).get("description") or "").strip()
                     if d:
                         server_desc[n] = d
+                    dn = str((c or {}).get("display_name") or "").strip()
+                    if dn:
+                        server_display[n] = dn
         except Exception:
             pass
         lines = ["\n### 已连接 MCP 服务（对应领域的优先通道）"]
         for server, tools in sorted(mcp.items()):
-            head = f"- **{server}**"
+            label = server_display.get(server, server)
+            head = f"- **{label}**"
+            if label != server:
+                head += f"（配置名 {server}）"
             if server in server_desc:
                 head += f"（{server_desc[server]}）"
             lines.append(head + "：")
