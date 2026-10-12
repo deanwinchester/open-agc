@@ -26,6 +26,23 @@ setUnauthorizedHandler(() => {
   authRequired.value = true;
 });
 
+// 前端渲染异常兜底：此前组件渲染抛错整片区域静默消失（生产实证：任务页
+// 列表整块没了却无任何提示）。统一弹错误提示，附页面与错误摘要。
+if (!window.__agcErrorHooked) {
+  window.__agcErrorHooked = true;
+  window.addEventListener('error', (e) => {
+    try {
+      ElMessage.error(`页面出现异常：${(e.message || '未知错误').slice(0, 120)}（可刷新重试）`, { duration: 8000 });
+    } catch { /* noop */ }
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    try {
+      const msg = (e.reason && (e.reason.message || String(e.reason))) || '未知错误';
+      ElMessage.error(`请求/渲染异常：${msg.slice(0, 120)}`, { duration: 8000 });
+    } catch { /* noop */ }
+  });
+}
+
 onMounted(async () => {
   loadTheme();
   // customize_theme 工具改动后实时应用（广播 theme_updated）
