@@ -113,3 +113,31 @@ class TestMergeBuildDefaults:
         _write(tmpl_path, {"update_manifest_url": "http://x", "ui_theme": {"app_name": "y"}})
         cfg = cfgmod.load_config()
         assert "update_manifest_url" not in cfg
+
+    def test_mcp_server_display_fields_follow_template(self, merge_env):
+        """mcp_servers 的 display_name/description 是品牌管理字段，跟随模板
+        （品牌改名生效）；url/headers 等连接属性不被覆盖。"""
+        cfg_path, tmpl_path = merge_env
+        _write(cfg_path, {"mcp_servers": {"zxs_es": {
+            "url": "http://user-custom:9000/mcp",
+            "headers": {"Authorization": "Bearer user-key"},
+            "display_name": "旧名"}}})
+        _write(tmpl_path, {"mcp_servers": {"zxs_es": {
+            "url": "http://172.16.100.84:8080/mcp",
+            "display_name": "中新社语料库",
+            "description": "历史稿库"}}})
+        cfg = cfgmod.load_config()
+        srv = cfg["mcp_servers"]["zxs_es"]
+        assert srv["display_name"] == "中新社语料库"
+        assert srv["description"] == "历史稿库"
+        assert srv["url"] == "http://user-custom:9000/mcp"      # 连接属性不动
+        assert srv["headers"]["Authorization"] == "Bearer user-key"
+
+    def test_mcp_server_template_only_entry_not_created(self, merge_env):
+        """模板里有而用户没有的 server 不补建（只有展示字段没有 url 的占位
+        条目会在「连接应用」里显示成坏卡片）。"""
+        cfg_path, tmpl_path = merge_env
+        _write(cfg_path, {"mcp_servers": {}})
+        _write(tmpl_path, {"mcp_servers": {"zxs_es": {"display_name": "中新社语料库"}}})
+        cfg = cfgmod.load_config()
+        assert cfg.get("mcp_servers", {}) == {}
