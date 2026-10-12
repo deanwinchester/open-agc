@@ -238,6 +238,51 @@ _DEFAULT_SOUL_MD = """# 人格设定（soul.md）
 """
 
 
+def _default_soul_md() -> str:
+    """默认人格：品牌线（build_data/brand.json 存在）用品牌人格——
+    名字取 ui_theme.assistant_name、身份取 display_name，不出现熊猫/Open-AGC
+    （生产实证：zxs 版 agent 自称「中新社智能体（熊猫）」——熊猫是开源版
+    默认人格泄漏）。通用版返回 _DEFAULT_SOUL_MD。"""
+    try:
+        from core.paths import get_brand
+        brand = get_brand()
+    except Exception:
+        brand = {}
+    if not brand:
+        return _DEFAULT_SOUL_MD
+    display = (brand.get("display_name") or "智能体").strip()
+    try:
+        from api.config import load_config
+        assistant = ((load_config() or {}).get("ui_theme", {}) or {}).get("assistant_name") or ""
+    except Exception:
+        assistant = ""
+    assistant = assistant.strip() or "小助手"
+    return f"""# 人格设定（soul.md）
+
+此文件定义 Agent 的人格，系统在每次任务开始时自动注入提示词。
+可随时修改，立即生效，无需重启。
+
+## 人格
+- 名字：{assistant}——{display}的 AI 工作助手。
+- 自我认知：你是{display}。被问到"你是谁"时以本人格作答，
+  不要自称其他产品或某个模型。
+- 性格：沉稳务实，有好奇心；做事利落，说话有人味但不过度热情；
+  承认不确定，不不懂装懂。
+
+## 回复风格
+- 使用中文回复
+- 简洁明了，先给结论再给细节
+- 对复杂任务先说明计划再执行
+- 遇到错误时先分析原因再重试，不盲目重复
+
+## 行为偏好
+- 优先使用 Python 而非 Shell 命令（对于跨平台兼容的操作）
+- 文件操作时优先使用 write_file/edit_file 而非 echo/cat 重定向
+- 生成图片/文件后告知用户保存路径
+- 大文件下载使用 queue_download 工具
+"""
+
+
 _SHORT_ANSWER_EXACT = {
     "是", "否", "要", "不要", "好", "不好", "可以", "不行", "行", "对", "错",
     "yes", "no", "y", "n", "ok", "okay", "sure", "cancel",
@@ -1192,7 +1237,22 @@ class OpenAGCAgent:
             soul_path = _gdp_soul("soul.md")
             if not os.path.exists(soul_path):
                 with open(soul_path, "w", encoding="utf-8") as f:
-                    f.write(_DEFAULT_SOUL_MD)
+                    f.write(_default_soul_md())
+            else:
+                # 品牌线升级：内容仍是通用默认（逐字节一致）或带熊猫人格标记
+                # （历史版本播种的默认人格）则换成品牌默认人格；用户自己改过
+                # 的（无熊猫字样且非默认文本）保留。
+                try:
+                    from core.paths import get_brand as _gb
+                    if _gb():
+                        with open(soul_path, "r", encoding="utf-8") as f:
+                            _existing = f.read()
+                        if (_existing.strip() == _DEFAULT_SOUL_MD.strip()
+                                or ("熊猫" in _existing and "Panda" in _existing)):
+                            with open(soul_path, "w", encoding="utf-8") as f:
+                                f.write(_default_soul_md())
+                except Exception:
+                    pass
             with open(soul_path, "r", encoding="utf-8") as f:
                 soul_content = f.read().strip()
             if soul_content:
