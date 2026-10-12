@@ -790,9 +790,7 @@ async function loadHistory(sid, { beforeId = 0 } = {}) {
       await nextTick();
       if (el && el.scrollHeight > prevHeight) el.scrollTop = el.scrollHeight - prevHeight;
     } else {
-      items.value = msgs.length
-        ? msgs
-        : [{ kind: 'msg', key: nextKey(), role: 'system', content: personaText(t.welcome) }];
+      items.value = msgs.length ? msgs : [];
       historyLoadedAt.value = Date.now();
       scrollToBottom(true, true);
     }
@@ -1047,6 +1045,10 @@ onUnmounted(() => {
 
       <div ref="listEl" class="msg-list" :style="msgListBgStyle" @scroll="onListScroll">
         <div class="msg-list-inner">
+          <!-- 空会话：居中大字欢迎（此前是顶部一条系统消息，编辑反馈太技术） -->
+          <div v-if="!displayItems.length && !historyPaging.loading" class="empty-hero">
+            <div class="empty-hero-text">{{ t.welcome }}</div>
+          </div>
           <div v-if="historyPaging.hasMore" class="load-more">
             <el-button
               size="small"
@@ -1187,6 +1189,26 @@ onUnmounted(() => {
   max-width: 860px;
   margin: 0 auto;
   padding: 16px;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 空会话居中大字欢迎 */
+.empty-hero {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40vh;
+}
+
+.empty-hero-text {
+  font-size: 30px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  letter-spacing: 0.02em;
+  text-align: center;
 }
 
 /* 系统通知折叠组：紧凑居中 chip，避免刷屏 */

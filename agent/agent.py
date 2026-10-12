@@ -1239,16 +1239,20 @@ class OpenAGCAgent:
                 with open(soul_path, "w", encoding="utf-8") as f:
                     f.write(_default_soul_md())
             else:
-                # 品牌线升级：内容仍是通用默认（逐字节一致）或带熊猫人格标记
-                # （历史版本播种的默认人格）则换成品牌默认人格；用户自己改过
-                # 的（无熊猫字样且非默认文本）保留。
+                # 品牌线升级：内容是通用默认（逐字节一致）或带熊猫人格标记
+                # （历史版本播种的默认人格），或品牌默认人格但名字还是旧默认
+                # 「小新」——都换成当前品牌默认人格；用户自己改过的保留。
                 try:
                     from core.paths import get_brand as _gb
                     if _gb():
                         with open(soul_path, "r", encoding="utf-8") as f:
                             _existing = f.read()
-                        if (_existing.strip() == _DEFAULT_SOUL_MD.strip()
-                                or ("熊猫" in _existing and "Panda" in _existing)):
+                        _is_stock = (
+                            _existing.strip() == _DEFAULT_SOUL_MD.strip()
+                            or ("熊猫" in _existing and "Panda" in _existing)
+                            or ("名字：小新" in _existing and "助手" in _existing)
+                        )
+                        if _is_stock:
                             with open(soul_path, "w", encoding="utf-8") as f:
                                 f.write(_default_soul_md())
                 except Exception:
