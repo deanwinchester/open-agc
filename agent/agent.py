@@ -2832,11 +2832,16 @@ class OpenAGCAgent:
             pass
         if memory_context:
             _dyn_parts.append(_trunc(f"--- 历史记忆回溯 (Episodic Memory) ---\n{memory_context}"))
-        # 用户在消息里 @ 引入的套件内容（ws 层解析后传入），与检索到的
-        # 技能上下文合并注入动态段
+        # 用户在消息里 @ 引入的套件内容（ws 层解析后传入）：用户显式指定，
+        # 优先级最高——放在技能段最前（此前追加在末尾，检索到的长技能先
+        # 吃满截断预算，套件内容被整段截掉——生产实证：@经济新闻套件 的
+        # 请求里套件文本被 human-writing 技能挤没了）。
+        # 预算也分开：检索技能仍受 _MAX_PART_LEN 限制，套件段给独立额度。
         if skill_context_extra:
-            skill_context = (skill_context + "\n\n" + skill_context_extra).strip()
-        if skill_context:
+            skill_context = (skill_context_extra
+                             + ("\n\n" + _trunc(skill_context) if skill_context else "")).strip()
+            _dyn_parts.append(_trunc(skill_context, limit=_MAX_PART_LEN * 4))
+        elif skill_context:
             _dyn_parts.append(_trunc(skill_context))
         if experience_context:
             _dyn_parts.append(_trunc(experience_context))
