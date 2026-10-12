@@ -348,6 +348,9 @@ async function doUpgrade() {
   font-size: 16px;
   font-weight: 700;
   letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   /* 跟随侧边栏文字色（主题派生），此前固定 --panda-on-accent 换主题不变色 */
   color: var(--panda-sidebar-text, #f9fafb);
 }

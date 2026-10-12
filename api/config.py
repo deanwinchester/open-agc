@@ -100,6 +100,13 @@ def _merge_build_defaults(cfg: dict) -> bool:
                 if _v and not (ui.get(_k) or "").strip():
                     ui[_k] = _v
                     changed = True
+            # 一次性迁移：assistant_name 为旧品牌默认「小新」（用户不会主动取
+            # 这个名——它是上一版品牌默认播种的）且模板改了名时跟随模板
+            _cur_name = (ui.get("assistant_name") or "").strip()
+            _tmpl_name = (tmpl_ui.get("assistant_name") or "").strip()
+            if _tmpl_name and _cur_name == "小新" and _cur_name != _tmpl_name:
+                ui["assistant_name"] = _tmpl_name
+                changed = True
 
     tmpl_grounder = defaults.get("computer_grounder") or {}
     if isinstance(tmpl_grounder, dict) and tmpl_grounder.get("base_url") \
