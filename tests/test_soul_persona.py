@@ -37,6 +37,9 @@ class TestSoulInjection:
         assert "人格设定 (soul.md)" in prompt
 
     def test_soul_seeded_when_missing(self, tmp_path, monkeypatch):
+        # 隔离品牌线：本仓 zxs-dev 工作树带 build_data/brand.json，会播种
+        # 品牌人格而非通用熊猫人格；本用例验证的是通用默认路径。
+        monkeypatch.setattr("core.paths._BRAND_CACHE", {})
         monkeypatch.setattr("core.paths.get_data_path", lambda f: str(tmp_path / f))
         agent = ag.OpenAGCAgent.__new__(ag.OpenAGCAgent)
         agent.system_prompt_base = ""
@@ -47,6 +50,29 @@ class TestSoulInjection:
             pytest.skip("_build_system_prompt 签名不适用直调")
         assert (tmp_path / "soul.md").exists(), "缺失时应播种默认人格文件"
         assert "熊猫" in prompt
+
+    def test_soul_seeded_brand_persona(self, tmp_path, monkeypatch):
+        """品牌线：播种品牌人格（助手名+显示名），无熊猫/Open-AGC。"""
+        import json
+        (tmp_path / "build_data").mkdir()
+        (tmp_path / "build_data" / "brand.json").write_text(json.dumps(
+            {"app_name": "ZXS", "display_name": "中新社智能体"}), encoding="utf-8")
+        monkeypatch.setattr("core.paths._BRAND_CACHE", None)
+        monkeypatch.setattr("core.paths.get_base_dir", lambda: str(tmp_path))
+        monkeypatch.setattr("core.paths.get_data_path", lambda f: str(tmp_path / f))
+        import api.config as cfgmod
+        monkeypatch.setattr(cfgmod, "load_config", lambda: {
+            "ui_theme": {"assistant_name": "小新"}})
+        agent = ag.OpenAGCAgent.__new__(ag.OpenAGCAgent)
+        agent.system_prompt_base = ""
+        agent.sandbox_dir = str(tmp_path / "no_sandbox")
+        try:
+            prompt = agent._build_system_prompt()
+        except TypeError:
+            pytest.skip("_build_system_prompt 签名不适用直调")
+        assert "小新" in prompt
+        assert "中新社智能体" in prompt
+        assert "熊猫" not in prompt
 
     def test_memory_md_reads_data_path(self, tmp_path, monkeypatch):
         """MEMORY.md 从 data/ 读取（文档口径），不再只找 sandbox。"""
