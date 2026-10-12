@@ -928,7 +928,7 @@ export default {
     deleteConfirmText: '确定删除这条消息记录吗？删除后不可恢复。',
     deleteSuccess: '已删除',
     deleteFailed: '删除失败',
-    welcome: '你好！我是熊猫，你的专属电脑控制智能体。我可以帮你执行命令行、管理文件或运行代码。今天需要我做什么？',
+    welcome: '你好！我是熊猫，社里的 AI 工作助手。写稿改稿、查历史稿件、做表整数据，或者帮你处理电脑上的杂事，都可以直接跟我说。今天做点什么？',
     loadMore: '加载更早的消息',
     thinking: '熊猫思考中...',
     working: '执行中',
