@@ -106,6 +106,26 @@ def _merge_build_defaults(cfg: dict) -> bool:
             and tmpl_grounder.get("model") and not cfg.get("computer_grounder"):
         cfg["computer_grounder"] = dict(tmpl_grounder)
         changed = True
+
+    # mcp_servers 的品牌管理字段（display_name/description 是构建预置的
+    # 展示属性，url/headers 等连接属性尊重用户配置不覆盖）：
+    # 只合并进用户已有的同名 server——模板有而用户没有的不补建（只有展示
+    # 字段没有 url 的占位条目会在「连接应用」里显示成坏卡片）。
+    tmpl_servers = defaults.get("mcp_servers") or {}
+    if isinstance(tmpl_servers, dict) and tmpl_servers:
+        cfg_servers = cfg.get("mcp_servers")
+        if isinstance(cfg_servers, dict):
+            for name, tentry in tmpl_servers.items():
+                if not isinstance(tentry, dict) or name not in cfg_servers:
+                    continue
+                centry = cfg_servers[name]
+                if not isinstance(centry, dict):
+                    continue
+                for k in ("display_name", "description"):
+                    v = (tentry.get(k) or "").strip()
+                    if v and centry.get(k) != v:
+                        centry[k] = v
+                        changed = True
     return changed
 
 
