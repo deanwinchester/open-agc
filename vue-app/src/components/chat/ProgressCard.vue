@@ -26,6 +26,44 @@ const props = defineProps({
 });
 const emit = defineEmits(['resume', 'submit-ask']);
 
+// ── 动作的友好文案（用户反馈：不要 zxs_es_es_search 这类英文内部名）──
+// shell→执行命令、python→执行脚本、MCP→使用<展示名>（配置 mcp_servers 的
+// display_name，如「中新社语料库」；模块级缓存，多卡片共享一次拉取）。
+let _mcpLabelCache = null;
+const mcpLabels = ref({});
+async function loadMcpLabels() {
+  if (_mcpLabelCache) { mcpLabels.value = _mcpLabelCache; return; }
+  try {
+    const data = await request('/api/mcp/servers');
+    const map = {};
+    for (const s of (data?.servers || [])) map[s.name] = s.display_name || s.name;
+    _mcpLabelCache = map;
+    mcpLabels.value = map;
+  } catch { /* 无则保持原名 */ }
+}
+loadMcpLabels();
+
+function friendlyAction(entry) {
+  const tool = entry.tool || '';
+  if (tool === 'execute_shell') return '执行命令';
+  if (tool === 'execute_python') return '执行脚本';
+  const srv = Object.keys(mcpLabels.value).find((s) => tool.startsWith(s + '_'));
+  if (srv) return `使用${mcpLabels.value[srv]}`;
+  return entry.toolLabel || tool;
+}
+
+// 最近一次工具动作（未展开时也显示在头部）
+const lastActionText = computed(() => {
+  for (let i = props.card.entries.length - 1; i >= 0; i--) {
+    const e = props.card.entries[i];
+    if (e.kind === 'tool') {
+      const a = friendlyAction(e);
+      return e.status === 'running' ? `${t.pcRunningPrefix}${a}` : `${t.pcLastPrefix}${a}`;
+    }
+  }
+  return '';
+});
+
 // 步骤详情抽屉：行内只显示概览，点击步骤在右侧查看完整结果
 const detailEntry = ref(null);
 const detailVisible = computed({
@@ -54,7 +92,7 @@ const currentStepLabel = computed(() => {
   if (!props.card.live) return '';
   for (let i = props.card.entries.length - 1; i >= 0; i--) {
     const e = props.card.entries[i];
-    if (e.kind === 'tool' && e.status === 'running') return e.toolLabel;
+    if (e.kind === 'tool' && e.status === 'running') return `${t.pcRunningPrefix}${friendlyAction(e)}`;
   }
   return '';
 });
@@ -90,7 +128,8 @@ function onSubmitAsk(entry, answer) {
       <div class="pc-left">
         <span v-if="card.live" class="pc-spinner"></span>
         <span class="pc-title">{{ title }}</span>
-        <span v-if="currentStepLabel" class="pc-current"> : {{ currentStepLabel }}</span>
+        <span v-if="currentStepLabel && !card.collapsed" class="pc-current"> : {{ currentStepLabel }}</span>
+        <span v-if="card.collapsed && lastActionText" class="pc-current"> · {{ lastActionText }}</span>
       </div>
       <div class="pc-right">
         <span v-if="card.tokenUsage" class="pc-usage">{{ card.tokenUsage }}</span>
@@ -112,10 +151,8 @@ function onSubmitAsk(entry, answer) {
           <span class="step-icon">{{ stepIcon(entry) }}</span>
           <div class="step-body">
             <span class="step-label">
-              <span v-if="entry.subTask" class="subtask-badge" :title="entry.subTask">🧩 {{ entry.subTask.substring(0, 18) }}</span>{{ entry.step }}. {{ entry.toolLabel }}<span v-if="entry.fullResult || entry.hasFull" class="step-more"> 🔍</span>
+              <span v-if="entry.subTask" class="subtask-badge" :title="entry.subTask">🧩 {{ entry.subTask.substring(0, 18) }}</span>{{ entry.step }}. {{ friendlyAction(entry) }}<span v-if="entry.fullResult || entry.hasFull" class="step-more"> 🔍</span>
             </span>
-            <span v-if="entry.argsPreview" class="step-detail">{{ entry.argsPreview }}</span>
-            <span v-if="entry.resultPreview" class="step-detail">{{ entry.resultPreview }}</span>
           </div>
         </div>
 
@@ -170,7 +207,7 @@ function onSubmitAsk(entry, answer) {
       v-model="detailVisible"
       direction="rtl"
       size="480px"
-      :title="detailEntry ? `${detailEntry.step}. ${detailEntry.toolLabel}` : ''"
+      :title="detailEntry ? `${detailEntry.step}. ${friendlyAction(detailEntry)}` : ''"
       append-to-body
     >
       <div v-if="detailEntry" class="step-full-detail">

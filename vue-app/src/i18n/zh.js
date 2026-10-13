@@ -8,7 +8,7 @@ export default {
   // 侧边栏菜单（同时用于路由 meta.title）
   menu: {
     chat: '对话',
-    tasks: '任务',
+    tasks: '历史任务',
     scheduled: '定时任务',
     goals: '目标',
     downloads: '下载',
@@ -611,7 +611,7 @@ export default {
 
   // 任务列表视图（批次 2）
   tasks: {
-    title: '📋 任务',
+    title: '📋 历史任务',
     desc: 'Agent 执行的任务记录（定时任务在左侧「定时任务」菜单单独管理）。',
     searchPlaceholder: '搜索任务标题或内容...',
     refresh: '刷新',
@@ -930,6 +930,8 @@ export default {
     deleteFailed: '删除失败',
     welcome: '需要我帮你做什么？',
     inputPlaceholder: '开始任务，@ 专家套件呼叫专家',
+    pcRunningPrefix: '正在',
+    pcLastPrefix: '最近：',
     loadMore: '加载更早的消息',
     thinking: '熊猫思考中...',
     working: '执行中',

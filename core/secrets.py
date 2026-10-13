@@ -210,7 +210,13 @@ def substitute_refs(text: str) -> str:
         if field == "uri":
             return build_uri(name) or m.group(0)
         if field in ("username", "password", "host", "note", "database"):
-            return str(entry.get(field) or "")
+            v = str(entry.get(field) or "")
+            if field == "host":
+                # host 必须是纯主机名（可带端口）：剥掉 scheme/路径——否则
+                # SSH 客户端把 http://1.2.3.4 当主机名，getaddrinfo 失败
+                #（生产实证：aiserver.host 存成了带 http:// 的完整 URL）
+                v = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", v).split("/")[0]
+            return v
         return m.group(0)
 
     try:

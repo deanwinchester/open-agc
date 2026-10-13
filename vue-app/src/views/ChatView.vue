@@ -228,7 +228,7 @@ function ensureLiveCard(data) {
   thinking.visible = false;
   const card = reactive({
     kind: 'progress', key: nextKey(), taskId: (data && data.task_id) || null,
-    live: true, history: false, resumable: false, collapsed: false,
+    live: true, history: false, resumable: false, collapsed: true,
     entries: [], shellLines: [], tokenUsage: '',
   });
   items.value.push(card);
@@ -671,7 +671,7 @@ function onResume(taskId) {
   if (card) {
     card.live = true;
     card.history = false;
-    card.collapsed = false;
+    card.collapsed = true;
     card.resumable = false;
     liveCard.value = card;
   }
