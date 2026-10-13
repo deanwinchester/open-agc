@@ -1342,8 +1342,10 @@ class OpenAGCAgent:
                     "\n--- 已保存凭据（本地凭证库，仅元信息，绝不含明文）---\n"
                     + "\n".join(_sec_lines)
                     + "\n引用方式：{{secret:名称.username}} / {{secret:名称.password}} / "
-                    "{{secret:名称.host}} / {{secret:名称.uri}}（执行 shell/python 时自动替换为真实值，"
-                    "不要索要或输出明文）。需要新凭据时用 request_secret 工具向用户收集。\n"
+                    "{{secret:名称.host}}（纯主机名，可带端口，无 scheme；SSH 就用它）/ "
+                    "{{secret:名称.uri}}（完整连接串）。执行 shell/python 时自动替换为真实值，"
+                    "不要索要或输出明文。替换后请直接使用结果，不要再自行改写主机名格式。"
+                    "需要新凭据时用 request_secret 工具向用户收集。\n"
                 )
         except Exception:
             pass
