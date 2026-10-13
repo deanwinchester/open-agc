@@ -219,15 +219,25 @@ function isDupMessage(role, content, messageId) {
 
 // ── 实时进度卡片 ──
 function ensureLiveCard(data) {
-  if (liveCard.value) return liveCard.value;
-  // 同一任务若已有历史卡片，先移除再建实时卡（对齐旧 ensureProgressContainer）
-  if (data && data.task_id) {
-    const idx = items.value.findIndex((i) => i.kind === 'progress' && i.taskId === data.task_id);
-    if (idx >= 0) items.value.splice(idx, 1);
-  }
+  // 按 task_id 归属：多任务并发（前台新任务 + 后台恢复任务）时各进各的卡。
+  // 此前只认 liveCard 单槽（不看 task_id）——任务 B 的进度会写进任务 A 的
+  // 卡片，A 卡片则停在旧步骤不刷新（生产实证：恢复中的任务卡在「第一个
+  // 执行脚本」，切走再回来经 REST 重载才显示 5 步）。
+  const tid = (data && data.task_id) || null;
+  if (liveCard.value && (!tid || liveCard.value.taskId === tid)) return liveCard.value;
   thinking.visible = false;
+  // 同一任务若已有卡片（历史卡/旧实时卡），直接接管为实时卡
+  if (tid) {
+    const existing = items.value.find((i) => i.kind === 'progress' && i.taskId === tid);
+    if (existing) {
+      existing.live = true;
+      existing.history = false;
+      liveCard.value = existing;
+      return existing;
+    }
+  }
   const card = reactive({
-    kind: 'progress', key: nextKey(), taskId: (data && data.task_id) || null,
+    kind: 'progress', key: nextKey(), taskId: tid,
     live: true, history: false, resumable: false, collapsed: true,
     entries: [], shellLines: [], tokenUsage: '',
   });
@@ -313,7 +323,9 @@ function renderHistorySteps(data) {
     liveCard.value = card;
     running.value = true;
     currentTaskId.value = data.task_id;
-    thinking.text = t.resuming;
+    // 用户并未点「继续」——这是进入会话时撞上在跑任务（含后台自动恢复），
+    // 用常规思考文案；「恢复执行中」会让用户疑惑自己没恢复过什么（实证）
+    thinking.text = personaText(t.thinking);
     thinking.visible = true;
   }
   scrollToBottom();
