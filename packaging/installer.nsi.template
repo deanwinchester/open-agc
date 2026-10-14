@@ -16,6 +16,8 @@ UninstallIcon "@ICON_ABS@"
 
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+; 卸载时的「组件选择」页：默认不勾选的「清空用户数据目录」选项
+!insertmacro MUI_UNPAGE_COMPONENTS
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
 Section "Install"
@@ -70,4 +72,12 @@ Section "Uninstall"
   Delete "$DESKTOP\@DISPLAY_NAME@.lnk"
   RMDir /r "$SMPROGRAMS\@APP_NAME@"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\@APP_NAME@"
+SectionEnd
+
+; 可选卸载组件：清空用户数据目录（默认不勾选——数据目录含会话历史、
+; 凭据、已下载模型，删了不可恢复）。$APPDATA 需切到当前用户上下文
+; （安装/卸载以 admin 执行，直接展开拿到的是管理员目录——NSIS 经典坑）。
+Section /o "清空用户数据目录（会话/凭据/模型等全部数据，不可恢复）" UN_CLEANDATA
+  SetShellVarContext current
+  RMDir /r "$APPDATA\Open-AGC"
 SectionEnd
