@@ -731,6 +731,25 @@ class LLMClient:
         return cleaned
 
     @staticmethod
+    def _hoist_mid_system_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """部分 OpenAI 兼容服务端（vLLM 等）严格要求 system 只出现在消息列表
+        开头，中段 system 直接 400（"System message must be at the beginning"）。
+        将首位之后的 system 降级为 user（保留位置与内容，加【系统提示】前缀）
+        ——这类消息本是纠错/提示，放在最近位置反而更容易被模型注意到。
+        （生产实证：qwen38/vLLM 端点，拦截器注入 system 纠错后每轮 400，
+        点「继续」也必挂。）"""
+        out = []
+        for i, m in enumerate(messages):
+            if m.get("role") == "system" and i > 0:
+                content = m.get("content", "")
+                if isinstance(content, str):
+                    content = "【系统提示】\n" + content
+                out.append({**m, "role": "user", "content": content})
+            else:
+                out.append(m)
+        return out
+
+    @staticmethod
     def _remove_orphaned_tool_calls(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Remove assistant messages with tool_calls that lack tool responses.
         Prevents API validation errors like 'insufficient tool messages following tool_calls'.
@@ -892,7 +911,8 @@ class LLMClient:
             kwargs["model"] = f"openai/{model.split('/', 1)[1]}"
             kwargs["api_base"] = _cp["base_url"]
             kwargs["api_key"] = _cp.get("api_key") or "sk-no-key-required"
-            kwargs["messages"] = self._remove_orphaned_tool_calls(messages)
+            kwargs["messages"] = self._hoist_mid_system_messages(
+                self._remove_orphaned_tool_calls(messages))
         elif "kimi_code/" in model:
             # Kimi Code 订阅渠道：Anthropic 兼容端点，模型名映射到 anthropic/ 前缀。
             # 与正式 Anthropic key 隔离，api_key/api_base 按调用传入。

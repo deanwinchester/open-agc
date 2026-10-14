@@ -762,3 +762,49 @@ class TestStreamCollectLogging:
         assert entry["provider"] == "deepseek"
         assert entry["cached_tokens"] == 64
         assert entry["cache_hit"] == "hit"
+
+
+@_litellm
+class TestHoistMidSystemMessages:
+    """vLLM 等严格 OpenAI 兼容服务端拒绝中段 system
+    （400 "System message must be at the beginning"——生产实证 qwen38 端点，
+    拦截器注入 system 纠错后每轮 400，点「继续」也必挂）。
+    自定义厂商分支必须把首位之后的 system 降级为 user。"""
+
+    def test_hoist_static(self):
+        from core.llm_client import LLMClient
+        msgs = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "U1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "system", "content": "⚠️ 纠错"},
+            {"role": "user", "content": "继续"},
+        ]
+        out = LLMClient._hoist_mid_system_messages(msgs)
+        assert [m["role"] for m in out] == ["system", "user", "assistant", "user", "user"]
+        assert out[0]["content"] == "SYS"
+        assert out[3]["content"].startswith("【系统提示】")
+        assert "⚠️ 纠错" in out[3]["content"]
+        # 不修改调用方原列表
+        assert msgs[3]["role"] == "system"
+
+    def test_custom_provider_kwargs_hoisted(self, monkeypatch):
+        import core.llm_client as llm_mod
+        from core.llm_client import LLMClient
+        monkeypatch.setattr(llm_mod, "load_config", lambda: {
+            "custom_providers": [
+                {"name": "qwen38", "base_url": "http://x/v1", "api_key": ""}]})
+        client = LLMClient()
+        msgs = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "U1"},
+            {"role": "system", "content": "HINT"},
+            {"role": "user", "content": "U2"},
+        ]
+        kwargs = client._build_model_kwargs("qwen38/Qwen3.8-27B", msgs, None, stream=False)
+        assert kwargs["model"] == "openai/Qwen3.8-27B"
+        assert kwargs["api_base"] == "http://x/v1"
+        sent = kwargs["messages"]
+        assert [m["role"] for m in sent] == ["system", "user", "user", "user"]
+        assert sent[2]["content"].startswith("【系统提示】")
+        assert "HINT" in sent[2]["content"]
