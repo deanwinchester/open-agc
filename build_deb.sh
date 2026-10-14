@@ -387,6 +387,15 @@ set -e
 # 不要在这里 rm —— 升级顺序（旧 postrm upgrade 在新文件解包之后）
 # 会误删新包装好的符号链接。
 
+# Debian 惯例：remove 保留用户数据，purge 清空。用户数据目录
+# ~/.open_agc（会话历史/凭据/模型），purge 时清掉各用户家目录下的
+# 该目录（用户卸载后反馈需要可选清空）。
+if [ "$1" = "purge" ]; then
+    for d in /home/*/.open_agc /home/*/.open-agc /root/.open_agc /root/.open-agc; do
+        [ -e "$d" ] && rm -rf "$d" || true
+    done
+fi
+
 if command -v update-desktop-database > /dev/null 2>&1; then
     update-desktop-database /usr/share/applications > /dev/null 2>&1 || true
 fi
