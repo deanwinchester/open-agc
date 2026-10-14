@@ -3819,8 +3819,10 @@ class OpenAGCAgent:
                             "apply_patch": 2000,
                             "browser_automation": 2000,
                         }.get(function_name, 1000)
-                        if len(result_str) > _full_cap:
-                            evt["full_result"] = result_str[:_full_cap]
+                        # 始终附带（按工具 cap 截断）——原先只在超长时才带，导致
+                        # 短输出步骤没有 fullResult/hasFull，进度卡片里点不开
+                        # 右侧详情（生产实证：脚本报表类短输出全部点不开）。
+                        evt["full_result"] = result_str[:_full_cap]
                         progress_callback(evt)
                     
                     if verbose:
