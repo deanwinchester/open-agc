@@ -68,7 +68,7 @@ class TestThemeMarket:
             encoding="utf-8")
         data = asyncio.run(rsys.theme_market())
         names = [t["name"] for t in data["themes"]]
-        assert "猫娘粉" in names and "暗夜黑" in names
+        assert "落樱粉" in names and "暗夜黑" in names
         assert all(t["source"] == "preset" for t in data["themes"])
 
     def test_remote_merge(self, cfg, monkeypatch, tmp_path):
@@ -105,7 +105,7 @@ class TestThemeMarket:
 
     def test_light_presets_carry_dark_false(self, cfg):
         """非暗色预设必须显式 dark:False——否则 merge 语义下用户从暗色
-        主题切浅色主题时 dark 标志残留（生产实证：切默认/猫娘粉仍全站黑）。"""
+        主题切浅色主题时 dark 标志残留（生产实证：切默认/落樱粉仍全站黑）。"""
         data = asyncio.run(rsys.theme_market())
         for t in data["themes"]:
             if t["name"] == "暗夜黑":
@@ -114,7 +114,7 @@ class TestThemeMarket:
                 assert t["theme"].get("dark") is False, f"{t['name']} 缺少 dark:False"
 
     def test_switch_dark_to_light(self, cfg):
-        """暗色 → 猫娘粉：dark 必须被关回去。"""
+        """暗色 → 落樱粉：dark 必须被关回去。"""
         asyncio.run(rsys.save_theme({"theme": {"dark": True}}))
         catgirl = {"primary_color": "#E88FB0", "sidebar_color": "#8E5B78",
                    "dark": False, "decor": "petals"}

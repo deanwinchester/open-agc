@@ -264,7 +264,7 @@ async def save_theme(body: dict):
 _THEME_PRESETS = [
     {"name": "默认蓝", "desc": "Element Plus 经典蓝，清爽克制",
      "theme": {"primary_color": "", "sidebar_color": "", "dark": False, "decor": "none"}},
-    {"name": "猫娘粉", "desc": "柔和粉 + 玫瑰紫侧边栏，飘落花瓣",
+    {"name": "落樱粉", "desc": "柔和粉 + 玫瑰紫侧边栏，飘落花瓣",
      "theme": {"primary_color": "#E88FB0", "sidebar_color": "#8E5B78", "dark": False, "decor": "petals"}},
     {"name": "暗夜黑", "desc": "全站深色 + 靛蓝主题色，星空点缀",
      "theme": {"primary_color": "#6366f1", "sidebar_color": "#111827",
