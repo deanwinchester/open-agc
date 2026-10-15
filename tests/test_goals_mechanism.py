@@ -433,3 +433,48 @@ class TestWsGoalLinkBack:
         assert _load_items()[0]["task_ids"] == [5, 9]
         # 目标不存在 → 不回链
         assert ws_mod._link_resolved_goal(99, 10) is False
+
+
+# ── 6. 补救 reopen / goal_add 高相似去重（生产实证：goal#8 done 被补救却仍显示
+#    完成、重复 goal#9 无人收尾）──
+
+class TestRemediationReopenAndDedup:
+    def test_remediation_reopens_done_goal(self, tmp_env, monkeypatch):
+        """判 NO 补救时目标状态必须从 done 回到 doing——否则 done 会绕过
+        goal_add 的相似去重，且界面显示「已完成却在跑」。"""
+        import api.task_core as tc
+        monkeypatch.setattr("core.llm_client.LLMClient", _fake_llm("NO"))
+        monkeypatch.setattr(tc, "_spawn_goal_task_run", lambda *a, **k: None)
+
+        tid = _insert_task(tmp_env, status="completed")
+        _save_goals([_goal(gid=1, desc="整理电影库", status="done",
+                           task_ids=[tid], resume_count=0)])
+
+        assert tc._check_goal_completeness(tid) == -1
+        items = _load_items()
+        assert items[0]["status"] == "doing"
+        assert items[0]["resume_count"] == 1
+
+    def test_goal_add_dedup_similar_existing(self, tmp_env):
+        """goal_add 与已有目标高相似（含 done 状态）时不新建，只回链任务。"""
+        from tools.task_plan import TaskPlanTool
+        _save_goals([_goal(gid=1, desc="评估并安全提升27B模型并发能力",
+                           status="done", task_ids=[100])])
+        tool = TaskPlanTool()
+        r = tool.execute(action="goal_add",
+                         desc="评估并安全提升27B模型并发能力，明确大内存与GPU缓存的作用边界",
+                         task_id=101)
+        assert "已存在相似大目标 #1" in r
+        items = _load_items()
+        assert len(items) == 1
+        assert 101 in items[0]["task_ids"]
+
+    def test_goal_add_dissimilar_creates_new(self, tmp_env):
+        from tools.task_plan import TaskPlanTool
+        _save_goals([_goal(gid=1, desc="整理电影库", status="done")])
+        tool = TaskPlanTool()
+        r = tool.execute(action="goal_add", desc="配置邮件监听服务", task_id=55)
+        assert "已添加大目标" in r
+        items = _load_items()
+        assert len(items) == 2
+        assert items[1]["task_ids"] == [55]

@@ -1090,6 +1090,12 @@ def remediate_goal(goal_id: int, reason: str, summaries: str = "",
                     g["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                     return True, ("stuck", g.get("desc", ""))
                 g["resume_count"] = rc + 1
+                # 补救 = 目标重新进入执行：此前 agent 已 goal_done 而系统判 NO
+                # 时，状态必须回到 doing——否则 done 状态会绕过 goal_add 的
+                # 相似归档（产生重复目标）并在界面上显示「已完成却在跑」
+                # （生产实证：goal #8 done 状态下连续补救 + 重复 goal #9）。
+                g["status"] = "doing"
+                g.pop("reason", None)
                 g["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                 return True, ("remediate", g.get("desc", ""))
         return False, ("missing", "")
