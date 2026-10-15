@@ -384,6 +384,16 @@ function onProgress(data) {
     case 'model_switched':
       card.entries.push({ kind: 'note', text: `${t.modelSwitched}: ${data.from} → ${data.to}` });
       break;
+    case 'tool_heartbeat': {
+      // 长工具心跳（压测/下载类，每 30s 一次）：同一步只维护一条，原地更新不刷屏
+      const hbKey = `hb-${data.step}`;
+      const secs = data.elapsed || 0;
+      const text = `仍在执行（已 ${secs >= 60 ? `${Math.floor(secs / 60)} 分 ${secs % 60} 秒` : `${secs} 秒`}）…`;
+      const existing = card.entries.find((e) => e.kind === 'note' && e.ekey === hbKey);
+      if (existing) existing.text = text;
+      else card.entries.push({ kind: 'note', ekey: hbKey, text });
+      break;
+    }
     case 'response': {
       if (!data.content) break;
       if (data.stream) {

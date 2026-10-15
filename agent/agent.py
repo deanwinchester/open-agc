@@ -681,9 +681,15 @@ class OpenAGCAgent:
             f"\n"
             f"### Goal（大目标）\n"
             f"- goal_add(desc) → 只添加大的目标（如\"完成翻译模型集成\"）\n"
+            f"- goal 仅用于需要跨多个任务/会话持续推进的长期目标；\n"
+            f"  单次问答、一次就能做完的任务不要创建 goal\n"
+            f"- 添加前先看已有目标列表：存在相似目标时用 goal_start 接续，\n"
+            f"  严禁重复 goal_add 同义目标（系统也会对高相似目标去重并返回已有 id）\n"
             f"- 不要将细分步骤加到 goal 中——细分步骤放在 plan 的 steps 里\n"
             f"- goal_start(id) / goal_done(id) 标记大目标进展\n"
             f"- 完成一个大目标关联的所有 plan 步骤后再标记 goal_done\n"
+            f"- 标记 goal_done 即表示目标已真正达成（系统会复核，\n"
+            f"  判未完成会自动创建补救任务继续推进）\n"
             f"\n"
             f"### 规则\n"
             f"- 先 plan.create 规划步骤，再按步骤执行\n"
@@ -3584,6 +3590,37 @@ class OpenAGCAgent:
                             from tools.base import SandboxBlocked
                             tool_success = True
                             attempt = 0
+
+                            # 长工具心跳：压测/下载/训练类工具一跑几分钟，期间
+                            # 无任何进度事件，前端进度卡片像卡死（生产实证：
+                            # bench 脚本十几分钟无刷新）。每 30s 发一次心跳
+                            # （仅展示层，不进 messages，不影响上下文）。
+                            _hb_stop = threading.Event()
+                            _hb_t0 = _time.time()
+
+                            def _tool_heartbeat():
+                                while not _hb_stop.wait(30):
+                                    if progress_callback:
+                                        try:
+                                            progress_callback({
+                                                "event": "tool_heartbeat",
+                                                "step": step_counter,
+                                                "tool": function_name,
+                                                "elapsed": int(_time.time() - _hb_t0),
+                                            })
+                                        except Exception:
+                                            pass
+
+                            def _execute_with_heartbeat(fn):
+                                if not progress_callback:
+                                    return fn()
+                                _hb = threading.Thread(target=_tool_heartbeat, daemon=True)
+                                _hb.start()
+                                try:
+                                    return fn()
+                                finally:
+                                    _hb_stop.set()
+
                             while True:
                                 attempt += 1
                                 try:
@@ -3606,14 +3643,16 @@ class OpenAGCAgent:
                                         extra_kwargs["_sudo_password"] = _sudo_pw
                                         self._pending_sudo_password = ""  # Clear one-shot after passing
                                     if 'interrupt_check' in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-                                        result = tool_instance.execute(
-                                            interrupt_check=lambda: self.is_interrupted,
-                                            _agent_context=self,
-                                            **extra_kwargs,
-                                            **function_args
-                                        )
+                                        result = _execute_with_heartbeat(
+                                            lambda: tool_instance.execute(
+                                                interrupt_check=lambda: self.is_interrupted,
+                                                _agent_context=self,
+                                                **extra_kwargs,
+                                                **function_args
+                                            ))
                                     else:
-                                        result = tool_instance.execute(**function_args, **extra_kwargs)
+                                        result = _execute_with_heartbeat(
+                                            lambda: tool_instance.execute(**function_args, **extra_kwargs))
                                     # Auto-background: shell returning [Still Running] means process
                                     # is still running after timeout — system takes over automatically
                                     # instead of relying on the LLM to call pause_and_wait

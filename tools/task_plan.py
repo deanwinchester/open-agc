@@ -282,7 +282,9 @@ def _heartbeat_plan_context(plan: dict) -> str:
 class TaskPlanTool(BaseTool):
     name: str = "manage_task_plan"
     description: str = (
-        "管理任务计划与大目标。复杂/长任务先建计划；建 plan 应同时 goal_add；check 未完成禁止结束。"
+        "管理任务计划与大目标。复杂任务先建 plan、收尾前 check；"
+        "goal_add 仅用于需要跨多个任务/会话持续推进的长期目标——"
+        "单次问答或单任务内能完成的事不要建大目标。"
     )
 
     def execute(self, action: str = "show", goal: str = "",
@@ -307,6 +309,28 @@ class TaskPlanTool(BaseTool):
                 desc = desc[:_MAX_GOAL_DESC]
 
             def _add(data):
+                # 高相似去重（含 done 状态）：已存在未归档的相似目标时不新建，
+                # 只回链当前任务并返回已有条目——生产实证：agent goal_done 后
+                # 系统判 NO 补救，补救任务里 agent 再 goal_add 同文案，旧目标
+                # 因 done 状态绕过相似归档，产出完全重复的目标 #9。
+                for item in data["items"]:
+                    if item.get("status") == "archived":
+                        continue
+                    _exist_desc = (item.get("desc") or "").strip()
+                    _short, _long = sorted([desc.strip(), _exist_desc], key=len)
+                    # 相似度 0.85+，或一条完整包含另一条（≥8 字符）——后者覆盖
+                    # agent 重新措辞/追加后缀的同义目标（生产实证：补救任务里
+                    # agent 同文案重复 goal_add 产出重复目标 #9）
+                    if (_desc_similarity(desc, _exist_desc) >= 0.85
+                            or (len(_short) >= 8 and _short in _long)):
+                        if task_id:
+                            tids = item.setdefault("task_ids", [])
+                            if not isinstance(tids, list):
+                                tids = item["task_ids"] = []
+                            if task_id not in tids:
+                                tids.append(task_id)
+                        item["updated"] = time.strftime("%Y-%m-%d %H:%M")
+                        return True, {"existing": item}
                 # 上限只统计 active（pending/doing/stuck），done/archived 不占名额
                 _active_n = sum(1 for i in data["items"]
                                 if i.get("status") in _ACTIVE_GOAL_STATUSES)
@@ -325,12 +349,18 @@ class TaskPlanTool(BaseTool):
                     "task_ids": [task_id] if task_id else [],
                     "resume_count": 0,
                 })
-                return True, data
+                return True, {"created": True}
 
-            _goals = update_goals(_add)
-            if _goals is None:
+            _result = update_goals(_add)
+            if _result is None:
                 return f"[TaskPlan] ⚠️ 进行中的大目标已达上限 {_MAX_GOALS} 项，请先完成一些再添加。"
-            return f"[TaskPlan] ✅ 已添加大目标: {desc}\n\n{format_goal_list_for_prompt(_goals)}"
+            if isinstance(_result, dict) and _result.get("existing"):
+                _e = _result["existing"]
+                return (f"[TaskPlan] ℹ️ 已存在相似大目标 #{_e['id']}（{_e.get('status')}），"
+                        f"未重复创建，当前任务已关联到它：{_e.get('desc', '')}\n\n"
+                        f"如需继续推进请用 goal_start/goal_done 操作 #{_e['id']}。\n\n"
+                        f"{format_goal_list_for_prompt()}")
+            return f"[TaskPlan] ✅ 已添加大目标: {desc}\n\n{format_goal_list_for_prompt(load_goals())}"
 
         if action == "goal_start":
             def _start(data):
