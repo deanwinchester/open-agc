@@ -32,6 +32,13 @@ class _LazyLitellm:
 litellm = _LazyLitellm()
 ContextWindowExceededError = Exception  # 占位，litellm 加载后被替换为真实类
 
+# 抑制 litellm 的 pydantic v1 序列化警告：sglang/vLLM 响应带扩展字段
+# （matched_stop、reasoning_content 等），每次调用都在控制台刷一大段
+# PydanticSerializationUnexpectedValue——纯噪音，被用户当成启动报错（用户反馈）。
+import warnings as _warnings
+_warnings.filterwarnings("ignore", message="Pydantic serializer warnings.*",
+                         category=UserWarning)
+
 
 def _llm():
     """显式取 litellm 模块（启动预热线程用；返回已缓存的真实模块）。"""

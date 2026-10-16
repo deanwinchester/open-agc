@@ -137,9 +137,11 @@ class TestLLMCallProtection:
         result = agent.run_turn("随便一个任务", verbose=False, skip_rag=True)
 
         assert result.startswith("[LLM_ERROR]")
-        # 用户态文案净化：原始异常全文（含请求 dump）不上屏，只留类型名
-        assert "ConnectionError" in result
+        # 用户态文案净化：异常全文（含请求 dump）与异常类名/轮次等技术细节
+        # 均不上屏（用户反馈太技术），只留人话指引 + 重试提示
+        assert "ConnectionError" not in result
         assert "network down" not in result
+        assert "重试" in result
         assert saved == [False], "task stats must be saved as failure"
         assert kg_calls, "KG extraction must run on LLM failure"
 
@@ -152,7 +154,8 @@ class TestLLMCallProtection:
         result = agent.run_turn("随便一个任务", verbose=False, skip_rag=True)
 
         assert result.startswith("[LLM_ERROR]")
-        assert "ValueError" in result
+        assert "ValueError" not in result
+        assert "重试" in result
         assert saved == [False]
 
 

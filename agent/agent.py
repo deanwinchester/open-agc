@@ -3308,9 +3308,10 @@ class OpenAGCAgent:
                 # 会把指引里的 markdown 链接渲染成可点击跳转。
                 from core.llm_error_guides import render_llm_error_hint
                 _ehint = render_llm_error_hint(type(e).__name__, _full_err)
-                error_text = (f"[LLM_ERROR] {_ehint}"
-                              f"（{type(e).__name__}，第 {current_iter} 轮）。"
-                              f"点「继续」可重试。")
+                # 上屏文案只留人话指引：异常类名/轮次是技术细节，用户看不懂
+                # （用户反馈「BadRequestError，第 3 轮」太技术）；重试入口由
+                # 前端在 [LLM_ERROR] 气泡下渲染按钮，不靠文字指路。
+                error_text = f"[LLM_ERROR] {_ehint}。点击「重试」继续。"
                 if verbose:
                     print(f"[Agent] {error_text}")
                 # messages 里同样只留净化版：完整 dump 会浪费恢复后的上下文
