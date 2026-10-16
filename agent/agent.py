@@ -3548,6 +3548,14 @@ class OpenAGCAgent:
                         args_preview = function_args["code"][:80]
                     elif "query" in function_args:
                         args_preview = function_args["query"][:80]
+                    elif function_name == "user_interjection_response":
+                        # 响应中断消息：args 本身就是给用户看的回应文本，
+                        # 直接显示（否则会展示一坨 {"action":...} 原始 JSON）
+                        _ir_act = {"accept": "接受", "reject": "拒绝", "ask": "需澄清"}.get(
+                            function_args.get("action", ""), function_args.get("action", ""))
+                        args_preview = (function_args.get("response")
+                                        or function_args.get("reason")
+                                        or function_args.get("question") or _ir_act)[:80]
                     
                     tool_label = self.tool_display_names.get(function_name, function_name)
                     
@@ -3833,10 +3841,26 @@ class OpenAGCAgent:
 
                     # Notify: tool done
                     if progress_callback:
+                        # 展示层文本：默认即结果原文；个别工具的 JSON 协议结果
+                        # 转成可读文案（用户反馈「响应中断消息」详情是一坨
+                        # 原始 JSON）。只影响展示/落库预览，不影响上下文。
+                        _display_str = result_str
+                        if function_name == "user_interjection_response":
+                            try:
+                                _ir = json.loads(result_str)
+                                _ir_act = {"accept": "接受插入并回复",
+                                           "reject": "判定与当前任务无关",
+                                           "ask": "需要向用户澄清"}.get(
+                                               _ir.get("action", ""), _ir.get("action", ""))
+                                _ir_body = (_ir.get("response") or _ir.get("reason")
+                                            or _ir.get("question") or "")
+                                _display_str = f"{_ir_act}：\n{_ir_body}"
+                            except Exception:
+                                pass
                         # Longer preview for shell output so it survives page refresh
                         preview_limit = 500 if function_name == "execute_shell" else 120
-                        preview = result_str[:preview_limit]
-                        if len(result_str) > preview_limit:
+                        preview = _display_str[:preview_limit]
+                        if len(_display_str) > preview_limit:
                             preview += "..."
                         evt = {
                             "event": "tool_done",
@@ -3862,7 +3886,7 @@ class OpenAGCAgent:
                         # 始终附带（按工具 cap 截断）——原先只在超长时才带，导致
                         # 短输出步骤没有 fullResult/hasFull，进度卡片里点不开
                         # 右侧详情（生产实证：脚本报表类短输出全部点不开）。
-                        evt["full_result"] = result_str[:_full_cap]
+                        evt["full_result"] = _display_str[:_full_cap]
                         progress_callback(evt)
                     
                     if verbose:
