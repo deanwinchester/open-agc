@@ -517,6 +517,13 @@ function onMessage(data) {
   // 中断等场景下 response 可能为空 —— 状态已重置，空内容不再渲染空气泡
   if (data.content && String(data.content).trim()) {
     appendItem({ kind: 'msg', key: nextKey(), role, content: data.content, taskId: data.task_id || null, id: data.message_id || null });
+    // LLM 调用失败的收口消息：显示重试条（用户反馈只见技术文案、没有
+    // 重试入口——LLM_ERROR 走普通 message 事件，不触发 onError 的重试条）
+    if (String(data.content).startsWith('[LLM_ERROR]')) {
+      const lastUser = [...items.value].reverse().find((i) => i.kind === 'msg' && i.role === 'user');
+      retryBar.originalQuery = lastUser ? String(lastUser.content || '') : '';
+      retryBar.visible = true;
+    }
   }
   scrollToBottom();
 }
