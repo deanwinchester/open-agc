@@ -396,6 +396,10 @@ function onProgress(data) {
     }
     case 'response': {
       if (!data.content) break;
+      // 过滤空回复与历史占位符：旧 sanitizer 把空正文写成「（空）」，
+      // 模型会模仿输出（生产实证：进度卡片满屏空助手回复）
+      const respText = String(data.content).trim();
+      if (!respText || respText === '（空）') break;
       if (data.stream) {
         // 流式增量：按迭代轮次分卡。同一轮追加，跨轮新建，避免多轮回复串成一条。
         const iter = data.iteration != null ? data.iteration : null;
