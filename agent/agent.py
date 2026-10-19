@@ -137,6 +137,40 @@ def _session_paths(text: str) -> List[str]:
     return out
 
 
+def _generated_files_for_tool(function_name: str, function_args: dict) -> list:
+    """写文件类工具调用产物清单（[{path}]）——落 task_steps.generated_files，
+    产物 chips 走此记录机制而非从回复文本正则提取（用户拍板）。
+
+    tmp/ 一次性产物不记（最终产物才值得附着）；相对路径原样记录，
+    查询端按沙箱根解析。"""
+    try:
+        args = function_args or {}
+        if function_name in ("write_file", "edit_file"):
+            p = str(args.get("path") or "").strip()
+            if p and not _is_tmp_path(p):
+                return [{"path": p}]
+        elif function_name == "apply_patch":
+            patches = args.get("patches")
+            if isinstance(patches, str):
+                patches = json.loads(patches)
+            if isinstance(patches, list):
+                out = []
+                for b in patches:
+                    p = str((b or {}).get("path") or "").strip()
+                    if p and not _is_tmp_path(p):
+                        out.append({"path": p})
+                return out
+    except Exception:
+        pass
+    return []
+
+
+def _is_tmp_path(path: str) -> bool:
+    """路径是否落在沙箱 tmp/ 分区（中间产物，不作为交付物附着）。"""
+    p = str(path or "").replace("\\", "/")
+    return "/tmp/" in p or p.startswith("tmp/")
+
+
 def _topic_tokens(text: str) -> set:
     """Topic tokens: path components (project/file names) + identifiers."""
     tokens = set()
@@ -3889,6 +3923,12 @@ class OpenAGCAgent:
                         # 短输出步骤没有 fullResult/hasFull，进度卡片里点不开
                         # 右侧详情（生产实证：脚本报表类短输出全部点不开）。
                         evt["full_result"] = _display_str[:_full_cap]
+                        # 产物记录机制接线：写文件类工具成功时登记 generated_files
+                        # （产物 chips 的来源；tmp/ 中间产物不记）
+                        if evt["success"]:
+                            _gen = _generated_files_for_tool(function_name, function_args)
+                            if _gen:
+                                evt["generated_files"] = json.dumps(_gen, ensure_ascii=False)
                         progress_callback(evt)
                     
                     if verbose:

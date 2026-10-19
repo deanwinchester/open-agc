@@ -171,9 +171,62 @@ def _record_task_deliverables(task_id: int):
         print(f"[Task] Record deliverables error: {e}")
 
 
+def merge_generated_files(task_id: int, new_gf_json: str,
+                          tool_call_id: str = None, step_number: int = None) -> None:
+    """把工具调用产生的文件清单合并进对应 task_steps.generated_files（幂等去重）。
+
+    generated_files 是产物 chips 的数据源（此前该列无任何写入点，机制建了
+    没接线——用户拍板接线）。行定位与 tool_done 更新同口径：优先
+    tool_call_id，缺失/未命中回退 step_number。失败静默（不阻断主流程）。"""
+    try:
+        try:
+            new_files = json.loads(new_gf_json) if isinstance(new_gf_json, str) else new_gf_json
+        except Exception:
+            return
+        if not isinstance(new_files, list) or not new_files:
+            return
+        conn = db_connect()
+        conn.row_factory = sqlite3.Row
+        row = None
+        if tool_call_id:
+            row = conn.execute(
+                "SELECT id, generated_files FROM task_steps WHERE task_id=? AND tool_call_id=?",
+                (task_id, tool_call_id)).fetchone()
+        if row is None and step_number is not None:
+            row = conn.execute(
+                "SELECT id, generated_files FROM task_steps WHERE task_id=? AND step_number=? "
+                "ORDER BY id DESC LIMIT 1",
+                (task_id, step_number)).fetchone()
+        if row is None:
+            conn.close()
+            return
+        existing = []
+        try:
+            parsed = json.loads(row["generated_files"]) if row["generated_files"] else []
+            if isinstance(parsed, list):
+                existing = parsed
+        except Exception:
+            existing = []
+        seen = {f.get("path", "") if isinstance(f, dict) else str(f) for f in existing}
+        changed = False
+        for f in new_files:
+            p = f.get("path", "") if isinstance(f, dict) else str(f)
+            if p and p not in seen:
+                existing.append(f)
+                seen.add(p)
+                changed = True
+        if changed:
+            conn.execute("UPDATE task_steps SET generated_files=? WHERE id=?",
+                         (json.dumps(existing, ensure_ascii=False), row["id"]))
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[TaskCore] merge_generated_files error: {e}")
+
+
 def update_task_status(task_id: int, status: str,
                        result_summary: str = None,
-                       interruption_reason: str = None):
+                     interruption_reason: str = None):
     """Update task status and optional result_summary/interruption_reason."""
     try:
         conn = db_connect()

@@ -83,47 +83,21 @@ function dlHref(name) {
   return '/api/upload/' + encodeURIComponent(name);
 }
 
-// ── 产物路径一键打开 ──
-// agent 回复里的绝对路径（Windows D:\... / POSIX /home/... 等）提取为
-// 可点击 chips，点击调 /api/sandbox/open_folder 用系统默认应用打开。
-// 保守匹配：排除 URL（含 ://）、Markdown 反引号/引号包裹、末尾标点。
-const PATH_RE = /([A-Za-z]:\\(?:[^\s\\/:*?"<>|，。；、）】」'"`]+\\?)+)|(\/(?:home|Users|opt|srv|var|tmp|mnt|data|workspace|root)(?:\/[^\s，。；、）】」'"`]+)+)/g;
-
-const deliverablePaths = computed(() => {
-  if (props.item.role !== 'agent') return [];
-  const found = new Set();
-  for (const m of String(props.item.content || '').matchAll(PATH_RE)) {
-    let p = m[0].replace(/[\\/.:，,;`"']+$/, '');
-    if (!p || p.includes('://')) continue;
-    // 至少两级目录才算路径，避免误命中 /home 这类短词
-    if ((p.match(/[\\/]/g) || []).length < 2) continue;
-    found.add(p);
-    if (found.size >= 6) break;
-  }
-  return [...found];
-});
-
-// 只附着本机真实存在的产物：远端服务器（SSH）上生成的路径不应出现在
-// 产物 chips（点了也打不开）；本机已生成的文件则保留（用户反馈两类问题）
+// ── 产物 chips：走 generated_files 记录机制（写文件类工具落库，
+// tmp/ 中间产物已排除、只含本机真实存在的文件），不从回复文本正则
+// 提取路径（远端服务器路径会被误附着——用户拍板）。
 const localPaths = ref([]);
-async function filterExistingPaths() {
-  const candidates = deliverablePaths.value;
-  if (!candidates.length) { localPaths.value = []; return; }
+async function loadGeneratedFiles() {
+  if (!props.item.taskId) { localPaths.value = []; return; }
   try {
-    const data = await request('/api/sandbox/paths_exist', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paths: candidates }),
-    });
-    const results = data?.results || {};
-    localPaths.value = candidates.filter((p) => results[p]?.exists);
+    const data = await request(`/api/tasks/${props.item.taskId}/generated_files`);
+    localPaths.value = (data?.files || []).map((f) => f.path);
   } catch {
-    // 检查失败时不误伤：保守展示原候选（与旧行为一致）
-    localPaths.value = candidates;
+    localPaths.value = [];
   }
 }
-onMounted(filterExistingPaths);
-watch(deliverablePaths, filterExistingPaths);
+onMounted(loadGeneratedFiles);
+watch(() => props.item.taskId, loadGeneratedFiles);
 
 function baseName(p) {
   const parts = p.split(/[\\/]/).filter(Boolean);

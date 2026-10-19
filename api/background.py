@@ -300,6 +300,14 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
                 conn.close()
             except Exception:
                 pass
+            # 产物登记：写文件类工具成功时合并 generated_files（幂等去重）
+            if event.get("generated_files"):
+                try:
+                    from api.task_core import merge_generated_files as _mgf
+                    _mgf(task_id, event["generated_files"],
+                         tool_call_id=event.get("tool_call_id"), step_number=done_step)
+                except Exception:
+                    pass
 
         # Push progress to connected clients with session_id for proper routing
         event["task_id"] = task_id
