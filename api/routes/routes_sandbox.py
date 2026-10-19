@@ -74,6 +74,25 @@ async def open_folder(path: str = Body(..., embed=True)):
     return {"status": "success", "path": real}
 
 
+@router.post("/api/sandbox/paths_exist")
+async def paths_exist(paths: list = Body(..., embed=True)):
+    """批量查询路径在本机是否存在（会话产物 chips 过滤用：远端服务器上
+    生成的路径（如 /home/cns/worker/...）不应附着为可打开的本地产物）。"""
+    out = {}
+    for p in (paths or [])[:50]:
+        p = str(p or "").strip()
+        if not p:
+            continue
+        real = os.path.realpath(os.path.abspath(os.path.expanduser(p)))
+        exists = os.path.exists(real)
+        out[p] = {
+            "exists": exists,
+            "is_dir": os.path.isdir(real) if exists else False,
+            "size": os.path.getsize(real) if exists and os.path.isfile(real) else 0,
+        }
+    return {"results": out}
+
+
 @router.get("/api/sandbox/browse_dirs")
 async def browse_dirs(path: Optional[str] = None):
     """目录浏览（沙箱页可视化选择沙箱目录用，只读）。
