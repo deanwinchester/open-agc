@@ -12,17 +12,17 @@ def _s(msgs):
 
 def test_empty_string_replaced():
     out = _s([{"role": "assistant", "content": ""}])
-    assert out[0]["content"] == "（空）"
+    assert out[0]["content"] == " "
 
 
 def test_whitespace_only_replaced():
     out = _s([{"role": "assistant", "content": "  \n "}])
-    assert out[0]["content"] == "（空）"
+    assert out[0]["content"] == " "
 
 
 def test_none_without_tool_calls_replaced():
     out = _s([{"role": "assistant", "content": None}])
-    assert out[0]["content"] == "（空）"
+    assert out[0]["content"] == " "
 
 
 def test_none_with_tool_calls_kept():
@@ -45,7 +45,7 @@ def test_empty_text_block_filtered_from_list():
 
 def test_all_empty_blocks_become_placeholder():
     out = _s([{"role": "user", "content": [{"type": "text", "text": "  "}]}])
-    assert out[0]["content"] == "（空）"
+    assert out[0]["content"] == [{"type": "text", "text": " "}]
 
 
 def test_normal_messages_untouched():

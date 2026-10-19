@@ -840,6 +840,13 @@ class LLMClient:
             _mark(out[-1])
         return out
 
+    # 空正文占位：用单个空格而非「（空）」等可见文本——可见占位符会被模型
+    # 当成历史 assistant 输出模仿，工具调用轮也自己输出「（空）」，进度卡片
+    # 里满屏空回复（生产实证）。单空格既过 Anthropic 非空校验（实测 k3 接受），
+    # 又不给模型留下可模仿的内容。
+    _EMPTY_TEXT_PLACEHOLDER = " "
+    _EMPTY_TEXT_BLOCK = {"type": "text", "text": " "}
+
     @staticmethod
     def _sanitize_for_anthropic(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Anthropic Messages API 拒绝空 text（"text content is empty" 400）。
@@ -857,13 +864,13 @@ class LLMClient:
             if c is None:
                 if not m.get("tool_calls"):
                     m = dict(m)
-                    m["content"] = "（空）"
+                    m["content"] = LLMClient._EMPTY_TEXT_PLACEHOLDER
                 out.append(m)
                 continue
             if isinstance(c, str):
                 if not c.strip():
                     m = dict(m)
-                    m["content"] = "（空）"
+                    m["content"] = LLMClient._EMPTY_TEXT_PLACEHOLDER
                 out.append(m)
                 continue
             if isinstance(c, list):
@@ -872,7 +879,7 @@ class LLMClient:
                     and not str(b.get("text") or "").strip())]
                 if len(filtered) != len(c):
                     m = dict(m)
-                    m["content"] = filtered if filtered else "（空）"
+                    m["content"] = filtered if filtered else [LLMClient._EMPTY_TEXT_BLOCK]
                 out.append(m)
                 continue
             out.append(m)
