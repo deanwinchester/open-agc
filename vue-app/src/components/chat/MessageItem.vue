@@ -5,7 +5,7 @@
 //（文件名+大小、下载链接 /api/upload/{name}）——对齐旧 static/app.js appendMessage。
 // 气泡下方显示消息时间（DB UTC 时间戳或本地 ISO）；有 DB id 的消息悬停出现删除按钮。
 // agent 消息（有 DB id）附 👍/👎 反馈按钮（M3 好评率采集，/api/feedback）。
-import { computed, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import MarkdownView from '../MarkdownView.vue';
 import { request } from '../../api/client';
@@ -103,6 +103,28 @@ const deliverablePaths = computed(() => {
   return [...found];
 });
 
+// 只附着本机真实存在的产物：远端服务器（SSH）上生成的路径不应出现在
+// 产物 chips（点了也打不开）；本机已生成的文件则保留（用户反馈两类问题）
+const localPaths = ref([]);
+async function filterExistingPaths() {
+  const candidates = deliverablePaths.value;
+  if (!candidates.length) { localPaths.value = []; return; }
+  try {
+    const data = await request('/api/sandbox/paths_exist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: candidates }),
+    });
+    const results = data?.results || {};
+    localPaths.value = candidates.filter((p) => results[p]?.exists);
+  } catch {
+    // 检查失败时不误伤：保守展示原候选（与旧行为一致）
+    localPaths.value = candidates;
+  }
+}
+onMounted(filterExistingPaths);
+watch(deliverablePaths, filterExistingPaths);
+
 function baseName(p) {
   const parts = p.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || p;
@@ -158,9 +180,9 @@ async function openPath(p) {
         <button v-if="canDelete" class="msg-del" :title="t.deleteMessage" @click="onDelete">×</button>
         <MarkdownView :content="item.content" />
         <router-link v-if="item.taskId" class="task-link" :to="`/tasks/${item.taskId}`">#{{ item.taskId }}</router-link>
-        <div v-if="deliverablePaths.length" class="msg-deliv">
+        <div v-if="localPaths.length" class="msg-deliv">
           <button
-            v-for="p in deliverablePaths"
+            v-for="p in localPaths"
             :key="p"
             class="deliv-chip"
             :title="p"
