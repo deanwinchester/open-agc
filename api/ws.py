@@ -542,6 +542,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         conn.close()
                     except Exception as e:
                         print(f"[Task] Failed to update step: {e}")
+                    # 产物登记：写文件类工具成功时合并 generated_files（去重）
+                    _gf = event.get("generated_files")
+                    if _gf:
+                        try:
+                            from api.task_core import merge_generated_files as _mgf
+                            _mgf(ws_task_id, _gf, tool_call_id=event.get("tool_call_id"),
+                                 step_number=adjusted_step)
+                        except Exception as _gfe:
+                            print(f"[Task] generated_files merge error: {_gfe}")
 
                 # Update task_steps with tool result (result_preview only set on tool_done)
                 if ws_task_id and event.get("event") == "tool_done":

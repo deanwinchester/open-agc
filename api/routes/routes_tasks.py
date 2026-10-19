@@ -146,6 +146,70 @@ async def get_task_steps(task_id: int, page: int = 1, page_size: int = 50):
     return {"steps": [dict(s) for s in rows], "total": total, "page": page, "page_size": page_size, "total_pages": pages}
 
 
+@router.get("/api/tasks/{task_id}/generated_files")
+async def get_task_generated_files(task_id: int):
+    """任务产物文件列表（chips 数据源）：来自 task_steps.generated_files
+    记录机制，而非从回复文本正则提取（用户拍板）。
+
+    口径：
+    - tmp/ 分区（中间产物）排除；
+    - 相对路径按沙箱根解析；
+    - 只返回本机真实存在的文件（远端/已删除的不附着）。
+    """
+    import json as _json
+    import os as _os
+    from api.deliverables_registry import sandbox_root as _sb_root, is_under_root as _under
+
+    root = _sb_root()
+    root_real = _os.path.realpath(root)
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT generated_files FROM task_steps WHERE task_id=? "
+        "AND generated_files IS NOT NULL AND generated_files != ''",
+        (task_id,)).fetchall()
+    conn.close()
+
+    seen = set()
+    files = []
+    for r in rows:
+        try:
+            parsed = _json.loads(r[0])
+        except Exception:
+            continue
+        if not isinstance(parsed, list):
+            continue
+        for f in parsed:
+            p = f.get("path", "") if isinstance(f, dict) else str(f)
+            p = (p or "").strip()
+            if not p:
+                continue
+            real = p if _os.path.isabs(p) else _os.path.join(root_real, p)
+            real = _os.path.realpath(_os.path.abspath(_os.path.expanduser(real)))
+            key = _os.path.normcase(real)
+            if key in seen:
+                continue
+            seen.add(key)
+            # tmp/ 分区（中间产物）不附着；沙箱外绝对路径（用户指定目录）保留
+            if _under(root_real, real):
+                rel = _os.path.relpath(real, root_real).replace("\\", "/")
+                if rel.split("/")[0] == "tmp":
+                    continue
+            if not _os.path.isfile(real):
+                continue  # 远端服务器产物/已删除：不附着
+            try:
+                st = _os.stat(real)
+            except OSError:
+                continue
+            files.append({
+                "path": real,
+                "name": _os.path.basename(real),
+                "size": st.st_size,
+                "mtime": int(st.st_mtime),
+            })
+    files.sort(key=lambda x: x["mtime"])
+    return {"files": files}
+
+
 @router.post("/api/tasks/{task_id}/interrupt")
 async def interrupt_task(task_id: int):
     """Mark a task as interrupted by user and stop its agent."""
