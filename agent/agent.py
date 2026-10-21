@@ -754,6 +754,9 @@ class OpenAGCAgent:
             f"如果你成功完成了一项之前未完成过的复杂任务，并且得到了用户的正面反馈，"
             f"必须主动询问用户是否需要将过程保存为新技能。"
             f"如用户同意，请使用 save_learned_skill 工具（扩展工具，需先 search_available_tools 启用）。\n"
+            f"用户要求「新建/创建技能」时直接用 save_learned_skill 落盘到技能目录，"
+            f"不要去读仓库目录下的 data/skills（打包安装版没有那个目录，"
+            f"技能目录的实际路径见下方「已安装技能包」一节）。\n"
             f"{self._installed_skills_line()}"
             f"\n## 自我审查机制\n"
             f"当任务接近最大迭代次数或你感觉陷入循环时，可以调用 self_review 工具进行自我审查。"
@@ -1230,12 +1233,17 @@ class OpenAGCAgent:
             for s in skills[:12]:
                 title = (s.get("title") or s["filename"]).strip()
                 names.append(f"{title}（{s['filename']}）")
+            # 用真实技能目录（get_skills_dir()）：exe/打包版的 data 目录不在
+            # 仓库下（%APPDATA%\\Open-AGC\\skills），写死 data/skills 相对路径
+            # 会让模型按 CWD/历史记忆拼出仓库路径、触发沙箱授权（生产实证）。
+            from core.paths import get_skills_dir as _gsd
+            _skills_abs = _gsd()
             return (
-                "\n### 已安装技能包（本地 data/skills/）\n"
+                "\n### 已安装技能包\n"
                 + "、".join(names)
-                + "。需要其方法时请直接使用（read_file 读 data/skills/<名>/SKILL.md"
-                  "及其 references/，或搜索启用相关工具）；**已安装的禁止再从 "
-                  "GitHub/网络重复下载或克隆同名仓库**。\n"
+                + f"。技能文件在 {_skills_abs}（读结构用 read_file 读该目录下的"
+                  " <文件名>/SKILL.md 或 <文件名>.md；该目录已默认放行沙箱）；"
+                  "**已安装的禁止再从 GitHub/网络重复下载或克隆同名仓库**。\n"
             )
         except Exception:
             return ""
