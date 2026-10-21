@@ -100,6 +100,19 @@ class BaseTool(BaseModel):
             if abs_path == allowed_abs or abs_path.startswith(allowed_abs + os.sep):
                 return
 
+        # 应用自身技能目录（data/skills，沙箱外）默认放行：agent 读技能结构/
+        # 新建技能都要动这里（生产实证：exe 安装版新建技能时 read_file 技能
+        # 目录被拦弹授权框——目录是本应用数据区，放行无安全风险）
+        try:
+            from core.paths import get_skills_dir
+            skills_abs = os.path.normcase(os.path.abspath(get_skills_dir()))
+            if os.path.commonpath([skills_abs, abs_path]) == skills_abs:
+                return
+        except (ValueError, OSError):
+            pass
+        except Exception:
+            pass
+
         # Allow paths in the session whitelist (one-time approvals)
         if session_whitelist:
             for wp in session_whitelist:
