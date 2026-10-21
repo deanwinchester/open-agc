@@ -99,28 +99,6 @@ async function loadGeneratedFiles() {
 onMounted(loadGeneratedFiles);
 watch(() => props.item.taskId, loadGeneratedFiles);
 
-// 只附着本机真实存在的产物：远端服务器（SSH）上生成的路径不应出现在
-// 产物 chips（点了也打不开）；本机已生成的文件则保留（用户反馈两类问题）
-const localPaths = ref([]);
-async function filterExistingPaths() {
-  const candidates = deliverablePaths.value;
-  if (!candidates.length) { localPaths.value = []; return; }
-  try {
-    const data = await request('/api/sandbox/paths_exist', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paths: candidates }),
-    });
-    const results = data?.results || {};
-    localPaths.value = candidates.filter((p) => results[p]?.exists);
-  } catch {
-    // 检查失败时不误伤：保守展示原候选（与旧行为一致）
-    localPaths.value = candidates;
-  }
-}
-onMounted(filterExistingPaths);
-watch(deliverablePaths, filterExistingPaths);
-
 function baseName(p) {
   const parts = p.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || p;
