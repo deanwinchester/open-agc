@@ -17,7 +17,11 @@ UninstallIcon "@ICON_ABS@"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 ; 卸载时的「组件选择」页：默认不勾选的「清空用户数据目录」选项
+; ⚠ 必须紧跟 MUI_UNPAGE_INSTFILES——缺它时组件页变成最后一页，按钮
+; 显示「关闭」且卸载 Section 永不执行（生产实证：装了 1.0.0 的用户
+; 卸载程序只有「关闭/取消」，点了直接退出，目录原样还在）。
 !insertmacro MUI_UNPAGE_COMPONENTS
+!insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
 Section "Install"

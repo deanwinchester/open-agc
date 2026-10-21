@@ -28,3 +28,7 @@ python-multipart>=0.0.18
 # tests/test_mcp_http_transport.py + tests/test_mcp_http_connect_kwargs.py
 mcp>=1.26.0,<1.27.0
 chromadb>=0.5.0
+
+# 面向编辑用户的交付格式（zxs 线提示词依赖）：文稿 .docx / 数据清单 .xlsx
+python-docx>=1.1.0
+openpyxl>=3.1.0
