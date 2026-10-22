@@ -183,7 +183,15 @@ class SkillManager:
         # Save the skill
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
-        
+
+        # Rebuild the retrieval index so the skill is usable immediately
+        # (same as the GitHub install path in skill_installer)
+        try:
+            from core.skill_store import SkillStore
+            SkillStore(skills_dir=self.skills_dir).build_index()
+        except Exception as e:
+            print(f"[SkillManager] SkillStore index rebuild after import failed: {e}")
+
         return {
             "success": True,
             "message": f"Skill '{filename}' imported successfully.",

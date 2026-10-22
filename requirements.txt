@@ -18,6 +18,7 @@ pyautogui
 packaging>=21.0
 Pillow
 rapidocr-onnxruntime>=1.3.0  # 截图文字锚点（弱视觉模型按文字找目标；无则静默降级）
+pymupdf>=1.24  # 扫描版 PDF 渲染为图片（文档 OCR；无则 PDF OCR 静默降级，图片 OCR 不受影响）
 opencv-python
 httptools
 croniter>=2.0.0

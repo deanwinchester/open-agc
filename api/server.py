@@ -62,6 +62,7 @@ from api.routes.routes_settings import router as settings_router
 from api.routes.routes_secrets import router as secrets_router
 from api.routes.routes_sandbox import router as sandbox_router
 from api.routes.routes_auth import router as auth_router
+from api.routes.routes_ocr import router as ocr_router
 
 # Load environment variables
 env_file = get_data_path(".env")
@@ -123,6 +124,7 @@ app.include_router(settings_router)
 app.include_router(secrets_router)
 app.include_router(sandbox_router)
 app.include_router(auth_router)
+app.include_router(ocr_router)
 
 # Initialize benchmark and download route modules with dependencies
 init_benchmark_routes(

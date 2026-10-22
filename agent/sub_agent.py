@@ -524,7 +524,7 @@ class SubAgent:
                     })
 
                     if self.progress_callback:
-                        self.progress_callback({
+                        _evt = {
                             "event": "tool_done",
                             "tool": func_name,
                             "step": tool_call_count,
@@ -532,7 +532,20 @@ class SubAgent:
                             "result_preview": str(result)[:200],
                             "tool_call_id": tc.id,
                             "sub_task": self.task[:50],
-                        })
+                        }
+                        # 产物记录机制接线（与主 agent 同格式/同口径）：子代理
+                        # 事件经主 agent progress_callback 走 ws/background 的
+                        # merge_generated_files 链落 task_steps.generated_files
+                        if success:
+                            try:
+                                from agent.agent import _generated_files_for_tool
+                                _gen = _generated_files_for_tool(func_name, func_args)
+                                if _gen:
+                                    _evt["generated_files"] = json.dumps(
+                                        _gen, ensure_ascii=False)
+                            except Exception:
+                                pass
+                        self.progress_callback(_evt)
                     steps.append({
                         "tool": func_name,
                         "args": tc.function.arguments[:200],

@@ -91,6 +91,10 @@ onnxrt_datas = collect_data_files('onnxruntime')
 onnxrt_submodules = collect_submodules('onnxruntime')
 datas += rapidocr_datas + onnxrt_datas
 
+# pymupdf（文档 OCR 渲染 PDF）：wheel 自带 C 扩展，函数内懒加载 import
+# PyInstaller 静态分析扫不到，需显式 hiddenimport；无额外数据文件需 collect
+# （字体/ICC 均为内置，不走 collect_data_files）
+
 
 # ---- Linux: pywebview GTK backend (WebKit2 / JavaScriptCore typelibs) ----
 # PyInstaller 自带 hook-gi.repository.Gtk 收集 Gtk/Gdk/Gio/GLib/GObject，
@@ -168,7 +172,7 @@ a = Analysis(
         'webview.platforms.winforms',
         # Linux GTK 后端（此前缺失，Linux 下 pywebview 找不到 GTK 后端）
         'webview.platforms.gtk',
-    ] + litellm_submodules + tiktoken_submodules + httpx_submodules + httpcore_submodules + anyio_submodules + aiohttp_submodules + gi_hiddenimports + rapidocr_submodules + onnxrt_submodules + ['tiktoken_ext.openai_public'],
+    ] + litellm_submodules + tiktoken_submodules + httpx_submodules + httpcore_submodules + anyio_submodules + aiohttp_submodules + gi_hiddenimports + rapidocr_submodules + onnxrt_submodules + ['tiktoken_ext.openai_public', 'pymupdf'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['packaging/macos_runtime.py'] if sys.platform == 'darwin' else [],
