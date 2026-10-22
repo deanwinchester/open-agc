@@ -1,5 +1,6 @@
 """WebSocket endpoint - register with app.websocket()."""
 import os, sys, json, re, sqlite3, asyncio, threading, queue, concurrent.futures, traceback
+import logging
 import time as _time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -29,6 +30,8 @@ from agent.agent import OpenAGCAgent
 from tools.shell import interrupt_shell
 # Import background helper for task history broadcast
 from api.state import _broadcast_task_history
+
+_wslog = logging.getLogger("ws")
 
 
 def _link_resolved_goal(resolved_goal: int, ws_task_id) -> bool:
@@ -671,13 +674,42 @@ async def websocket_endpoint(websocket: WebSocket):
 
             loop = asyncio.get_event_loop()
 
+            # @《套件》引入：解析为套件上下文（技能内容 + 链接应用提示）随本轮注入
+            _suite_extra = ""
+            _suite_apps = []
+            if not resume_task_id:
+                try:
+                    from api.suite_mentions import resolve_suite_mentions, extract_suite_apps
+                    _suite_extra = resolve_suite_mentions(query)
+                    _suite_apps = extract_suite_apps(query)
+                    if _suite_extra:
+                        _wslog.info(f"[WS] Suite mention injected ({len(_suite_extra)} chars, apps={_suite_apps})")
+                except Exception as _sm_e:
+                    _wslog.warning(f"[WS] suite mention resolve failed: {_sm_e}")
+            _wslog.info(f"[WS] suite mention check: extra={len(_suite_extra)} chars, apps={_suite_apps}, resume={bool(resume_task_id)}")
+
+            # 套件链接应用（MCP 服务）直接启用——用户 @ 了套件就是要用这些
+            # 服务，不必再等模型 search_available_tools 唤醒（生产实证：
+            # 模型不唤醒就不用，套件形同虚设）
+            if _suite_apps:
+                _enabled = []
+                for _app in _suite_apps:
+                    for _tn, _ti in agent.full_available_tools.items():
+                        if getattr(_ti, 'mcp_server_name', None) == _app and _tn not in agent.active_tool_names:
+                            agent.active_tool_names.add(_tn)
+                            agent.available_tools[_tn] = _ti
+                            _enabled.append(_tn)
+                if _enabled:
+                    agent.tool_schemas = [t.get_openai_schema() for t in agent.available_tools.values() if t is not None]
+                    _wslog.info(f"[WS] Suite apps auto-enabled: {_enabled}")
+
             import concurrent.futures
             # 在事件循环线程内、提交前复位中断标志：与 WS 置位（同线程）
             # 保持先后序，消除「WS 已置 True、线程后启动又清掉」的竞态。
             agent.is_interrupted = False
             agent_future = loop.run_in_executor(
                 None,
-                lambda: agent.run_turn(query, False, progress_callback, images=images, task_id=ws_task_id, skip_rag=bool(resume_task_id))
+                lambda: agent.run_turn(query, False, progress_callback, images=images, task_id=ws_task_id, skip_rag=bool(resume_task_id), skill_context_extra=_suite_extra)
             )
             
             # Handle agent progress and check for interruption
@@ -1017,6 +1049,10 @@ async def websocket_endpoint(websocket: WebSocket):
                             progress_callback=progress_callback,
                             task_id=ws_task_id,
                             skip_rag=True,
+                            # 自动重试也要带上 @ 套件上下文——此前重试轮丢注入，
+                            # 模型只看到裸 @ 文本（生产实证：首轮 400 后重试
+                            # 把「@《经济新闻套件》 中国中车」理解成「制作套件」）
+                            skill_context_extra=_suite_extra,
                         )
                     )
                     # If retry succeeded, log and return（落库前剥内部协议串）
@@ -1406,6 +1442,18 @@ async def websocket_endpoint(websocket: WebSocket):
                                 _goal_tids = sorted(_matched_goal["task_ids"], reverse=True)
                                 for _goal_tid in _goal_tids:
                                     try:
+                                        # 用户主动中断的任务不得被新指令自动续跑
+                                        # （用户实测：中断后发新指令，新指令不响应、
+                                        # 旧任务反而继续执行）。继续走「继续」按钮/
+                                        # resume 消息显式恢复。
+                                        _st_conn = db_connect()
+                                        _st_row = _st_conn.execute(
+                                            "SELECT status, interruption_reason FROM tasks WHERE id=?",
+                                            (_goal_tid,)).fetchone()
+                                        _st_conn.close()
+                                        if _st_row and _st_row[0] == "interrupted" and _st_row[1] == "user":
+                                            print(f"[WS] goal task #{_goal_tid} was user-interrupted, skip auto-resume")
+                                            continue
                                         _ctx = get_task_context(_goal_tid)
                                         if _ctx:
                                             resume_id_for_run = _goal_tid

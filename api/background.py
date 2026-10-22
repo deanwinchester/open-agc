@@ -432,6 +432,11 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
 
         return response
     except Exception as e:
+        # 用户中断（LLMInterrupted 透出）不是失败：不广播「后台任务失败:
+        # interrupted by user」这类技术噪音（用户实测偶发看到）。
+        if "interrupted by user" in str(e).lower():
+            update_task_status(task_id, "interrupted", interruption_reason="user")
+            return None
         update_task_status(task_id, "failed", str(e)[:200], interruption_reason="error")
         _broadcast_to_websockets({
             "type": "error",
