@@ -955,7 +955,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             _uf_save = _user_facing(_tb_response)
                             if _uf_save:
                                 try:
-                                    _saved_mid = save_message("agent", _uf_save, _tb_session_id)
+                                    _saved_mid = save_message("agent", _uf_save, _tb_session_id,
+                                                              task_id=_tb_ws_task_id)
                                     # 回写 message_id：pending 推送/broadcast 带上，
                                     # 前端实时消息即可即时反馈（M3 好评率）
                                     if _saved_mid:

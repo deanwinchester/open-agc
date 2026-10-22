@@ -109,6 +109,12 @@ const pendingQuestion = computed(() => {
     return null;
   }
 });
+// 任务终态（completed/failed）：问题卡片只读展示，不再渲染回答入口——
+// 失败收官已清 pending_question，残留的均为历史僵尸卡片，答了也投不进
+const pendingQuestionTerminal = computed(() => {
+  const s = task.value?.status;
+  return s === 'completed' || s === 'failed';
+});
 const pqAnswer = ref('');
 const pqSending = ref(false);
 
@@ -609,11 +615,14 @@ onUnmounted(() => {
           <div class="section-block">{{ task.user_query }}</div>
         </div>
 
-        <!-- 待回答问题（ask_user 持久化）：显示问题与回答框，回答即恢复任务 -->
+        <!-- 待回答问题（ask_user 持久化）：显示问题与回答框，回答即恢复任务；
+             任务终态时降级为只读历史（不再渲染可回答卡片） -->
         <div v-if="pendingQuestion" class="section pending-q">
           <div class="section-title">❓ {{ t.pendingQuestion }}</div>
           <div class="section-block">
             <div class="pq-text">{{ pendingQuestion.question }}</div>
+            <div v-if="pendingQuestionTerminal" class="pq-closed">{{ t.pendingQuestionClosed }}</div>
+            <template v-else>
             <div v-if="pendingQuestion.options && pendingQuestion.options.length" class="pq-options">
               <el-button
                 v-for="opt in pendingQuestion.options"
@@ -638,6 +647,7 @@ onUnmounted(() => {
                 @click="answerQuestion(pqAnswer)"
               >{{ t.pendingAnswerSend }}</el-button>
             </div>
+            </template>
           </div>
         </div>
 
@@ -959,6 +969,11 @@ onUnmounted(() => {
 .pq-text {
   font-weight: 600;
   margin-bottom: 8px;
+}
+
+.pq-closed {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 
 .pq-options {

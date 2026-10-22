@@ -62,6 +62,22 @@ class TestPendingQuestion:
         tc.handle_task_completion(1, "任务完成的结果", [], session_id=1)
         assert tc.get_pending_question(1) is None
 
+    def test_llm_error_failure_clears_pending(self, tmp_db):
+        """LLM 失败收官（[LLM_ERROR] 前缀）同样清除 pending_question——
+        此前只在成功分支清除，失败任务的详情页永远挂着一张答不了的
+        僵尸提问卡片（生产实证）。"""
+        tc.set_pending_question(1, "还继续吗？")
+        r = tc.handle_task_completion(1, "[LLM_ERROR] 模型服务调用失败。点击「重试」继续。", [], session_id=1)
+        assert r == 'failed'
+        assert tc.get_pending_question(1) is None
+
+    def test_no_response_failure_clears_pending(self, tmp_db):
+        """空响应失败分支同口径清除。"""
+        tc.set_pending_question(1, "还继续吗？")
+        r = tc.handle_task_completion(1, "", [], session_id=1)
+        assert r == 'failed'
+        assert tc.get_pending_question(1) is None
+
     def test_reply_endpoint_clears(self, tmp_db, monkeypatch):
         import api.routes.routes_tasks as rt
         monkeypatch.setattr(rt, "DB_PATH", tmp_db)

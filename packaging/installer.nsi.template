@@ -78,6 +78,10 @@ Section "Uninstall"
   MessageBox MB_YESNO|MB_ICONQUESTION "是否同时删除用户数据（会话历史、凭据、已下载模型等）？$\n$\n选择「是」将清空用户数据目录（不可恢复）；选择「否」仅卸载程序，数据保留。" /SD IDNO IDYES +2
   Goto +3
   SetShellVarContext current
+  ; 真实用户数据根是 ~/.open-agc（launcher.py/gui_app.py 的 OPEN_AGC_DATA_DIR，
+  ; 打包版全部数据落这里）；$APPDATA\Open-AGC 是 core/paths.py 无 env 时的
+  ; 兜底根，两个都删（生产实证：只删 APPDATA 漏掉 .open-agc）
+  RMDir /r "$PROFILE\.open-agc"
   RMDir /r "$APPDATA\Open-AGC"
   RMDir /r "$INSTDIR"
   Delete "$DESKTOP\@DISPLAY_NAME@.lnk"

@@ -43,7 +43,7 @@ async def get_history(session_id: int = None, before_id: int = 0, limit: int = 1
     if before_id > 0:
         where.append("id < ?")
         params.append(before_id)
-    sql = "SELECT id, role, content, timestamp, attachments FROM messages WHERE {} ORDER BY id DESC LIMIT ?".format(" AND ".join(where))
+    sql = "SELECT id, role, content, timestamp, attachments, task_id FROM messages WHERE {} ORDER BY id DESC LIMIT ?".format(" AND ".join(where))
     cursor.execute(sql, params + [limit])
     rows = cursor.fetchall()
     history = []
@@ -70,6 +70,7 @@ async def get_history(session_id: int = None, before_id: int = 0, limit: int = 1
                 atts = []
         history.append({"id": r["id"], "role": r["role"], "content": r["content"],
                         "timestamp": r["timestamp"], "attachments": atts,
+                        "task_id": r["task_id"] if "task_id" in r.keys() else None,
                         "feedback": feedback_map.get(r["id"], 0)})
     oldest_id = history[0]["id"] if history else 0
     has_more = False
