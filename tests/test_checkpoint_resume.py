@@ -174,3 +174,123 @@ class TestGetTaskContextInjection:
         assert all(not m.get("content", "").startswith(tc._CHECKPOINT_NOTICE_PREFIX)
                    if isinstance(m.get("content"), str) else True
                    for m in ctx)
+
+
+# ---------- 毒化 tool_calls 清洗（生产实证 #652 恢复死循环）----------
+
+# 200 字符硬切从 \uXXXX 转义中间断开的残缺 arguments（生产实证 #652 的
+# 分身步骤 args_preview 形态）：json.loads 必抛 Invalid \uXXXX escape
+_TRUNCATED_ARGS = '{"path": "outputs/报告.md", "content": "标题\\u4e2'
+
+
+class TestSanitizeToolCallArgs:
+    def test_fallback_reconstruction_replaces_truncated_args(self, tmp_db, sandbox):
+        """兜底重建遇截断 args_preview → arguments="{}" 且 tool 消息带说明。"""
+        tid = _insert_task(tmp_db)  # 无 context_snapshot → 走 task_steps 重建
+        tc.add_task_step(tid, 1, "write_file",
+                         args_preview=_TRUNCATED_ARGS,
+                         result_preview="OK", tool_call_id="c1")
+        ctx = tc.get_task_context(tid)
+        asst = next(m for m in ctx if m.get("role") == "assistant")
+        args = asst["tool_calls"][0]["function"]["arguments"]
+        assert json.loads(args) == {}
+        tool_msg = next(m for m in ctx if m.get("role") == "tool")
+        assert tool_msg["content"].startswith(tc._TOOL_ARGS_TRUNCATED_NOTE)
+
+    def test_poisoned_snapshot_sanitized_on_load(self, tmp_db, sandbox):
+        """含非法 arguments 的存量毒化快照经 get_task_context 加载即清洗。"""
+        bad = [
+            {"role": "user", "content": "写文档"},
+            {"role": "assistant", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "write_file",
+                             "arguments": _TRUNCATED_ARGS}}]},
+            {"role": "tool", "tool_call_id": "c1", "name": "write_file",
+             "content": "已写入"},
+        ]
+        tid = _insert_task(tmp_db, snapshot=bad)
+        ctx = tc.get_task_context(tid)
+        args = ctx[1]["tool_calls"][0]["function"]["arguments"]
+        assert json.loads(args) == {}
+        assert ctx[2]["content"].startswith(tc._TOOL_ARGS_TRUNCATED_NOTE)
+        # 说明幂等：再次清洗不重复叠加
+        again = tc._sanitize_tool_call_args(ctx)
+        assert again[2]["content"].count(tc._TOOL_ARGS_TRUNCATED_NOTE) == 1
+
+    def test_valid_arguments_untouched(self, tmp_db, sandbox):
+        """合法 arguments 原样保留，tool 消息不加说明。"""
+        good = [
+            {"role": "user", "content": "写文档"},
+            {"role": "assistant", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "write_file",
+                             "arguments": '{"path": "a.md", "content": "x"}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "name": "write_file",
+             "content": "已写入"},
+        ]
+        tid = _insert_task(tmp_db, snapshot=good)
+        ctx = tc.get_task_context(tid)
+        assert ctx[1]["tool_calls"][0]["function"]["arguments"] == \
+            '{"path": "a.md", "content": "x"}'
+        assert not ctx[2]["content"].startswith(tc._TOOL_ARGS_TRUNCATED_NOTE)
+
+
+# ---------- 分身步骤补记 full_args（tool_start 事件携带 tool_args）----------
+
+class TestSubAgentFullArgs:
+    """分身 tool_start 事件携带完整 tool_args（ws/background 落 full_args
+    的数据源）——替身模式参照 test_generated_files.py。"""
+
+    def test_tool_start_event_carries_full_args(self):
+        import json as _json
+        from types import SimpleNamespace
+        from agent.sub_agent import SubAgent
+
+        def _tc(name, args, call_id):
+            fn = SimpleNamespace(
+                name=name, arguments=_json.dumps(args, ensure_ascii=False))
+            return SimpleNamespace(id=call_id, type="function", function=fn)
+
+        def _resp(text=None, tool_calls=None):
+            msg = SimpleNamespace(
+                role="assistant", content=text or "", tool_calls=tool_calls)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=msg)], usage=None), "mock"
+
+        class _LLM:
+            def __init__(self, script):
+                self.script = list(script)
+
+            def chat(self, messages=None, tools=None, interrupt_check=None):
+                text, tcs = self.script.pop(0)
+                return _resp(text, tcs)
+
+        class _ReadTool:
+            name = "read_file"
+            description = "fake"
+
+            def get_openai_schema(self):
+                return {"type": "function", "function": {
+                    "name": "read_file", "description": "fake",
+                    "parameters": {"type": "object", "properties": {}}}}
+
+            def execute(self, **kwargs):
+                return "OK"
+
+        # 参数超过 200 字符：args_preview 装不下，full_args 必须走 tool_args
+        long_args = {"path": "outputs/数据.csv", "mode": "长" * 300}
+        events = []
+        llm = _LLM([
+            (None, [_tc("read_file", long_args, "c1")]),
+            ("完成", None),
+        ])
+        sub = SubAgent(task="读文件", tools=["read_file"],
+                       parent_tools={"read_file": _ReadTool()},
+                       max_iterations=5, llm_client=llm,
+                       progress_callback=events.append)
+        result = sub.run()
+        assert result["success"] is True
+        starts = [e for e in events if e.get("event") == "tool_start"]
+        assert len(starts) == 1
+        assert _json.loads(starts[0]["tool_args"]) == long_args
+        assert len(starts[0]["args_preview"]) <= 200

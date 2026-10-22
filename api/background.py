@@ -1341,7 +1341,7 @@ def _guardian_resume_task(task_id: int) -> None:
             if e.get("event") == "thinking" and e.get("content"):
                 _hb_thinking["content"] = e["content"]
             if e.get("event") == "tool_start":
-                add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", ""), session_id=_hb_session, sub_task=e.get("sub_task"), thinking_content=_hb_thinking["content"])
+                add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", ""), session_id=_hb_session, sub_task=e.get("sub_task"), thinking_content=_hb_thinking["content"], full_args=e.get("tool_args"))
                 _hb_thinking["content"] = None  # 思考只随其后首个工具步骤落库一次（防重复显示）
             # Persist sandbox approvals so they survive agent recreation
             if e.get("event") == "sandbox_approved":
@@ -1402,13 +1402,21 @@ def _guardian_resume_task(task_id: int) -> None:
             except Exception as _gd_save_e:
                 print(f"[Guardian] Save message error: {_gd_save_e}")
             try:
+                # 失败收官不得挂「完成」标题（生产实证 #652：恢复死于
+                # [LLM_ERROR] 时聊天里仍显示「自动恢复任务完成」，标题与
+                # 内容不符）。失败前缀与前端 isLlmErrorContent 检测对齐，
+                # 保住气泡下的「重试」入口。
+                _rc = str(resp)
+                _rtitle = ("❌ 自动恢复任务失败"
+                           if _rc.startswith(("[LLM_ERROR]", "[ERROR]"))
+                           else "🔄 自动恢复任务完成")
                 _broadcast_to_websockets({
                     "type": "message",
                     "role": "agent",
                     "background": True,
                     "session_id": _hb_session,
                     "task_id": task_id,
-                    "content": f"**🔄 自动恢复任务完成**\n\n{resp}"
+                    "content": f"**{_rtitle}**\n\n{resp}"
                 })
             except Exception as _bc_e:
                 print(f"[Guardian] Broadcast error: {_bc_e}")

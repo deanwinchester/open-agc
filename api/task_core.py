@@ -923,6 +923,49 @@ def _with_checkpoint_notice(task_id: int, messages: list) -> list:
     return kept
 
 
+_TOOL_ARGS_TRUNCATED_NOTE = "[系统] 该步骤的原始调用参数因记录截断已省略"
+
+
+def _sanitize_tool_call_args(messages: list) -> list:
+    """清洗 assistant tool_calls 里无法 json.loads 的 function.arguments。
+
+    生产实证 #652：分身（sub_agent）步骤只落了 200 字符 args_preview
+    （硬切可能从 \\uXXXX 转义中间断开），恢复时兜底重建把它当完整
+    arguments 写进上下文，又被 save_task_context 存回 context_snapshot
+    永久污染——此后每次恢复 vLLM 网关解析该 arguments 必 400
+    （Invalid \\uXXXX escape）→ 任务 failed → 重试再失败的确定性死循环。
+    此处统一兜底：非法 arguments 替换为 "{}"，并在紧随的 tool 消息
+    content 头部补一行说明，让模型知道参数缺失而不是凭空猜。
+    快照与兜底重建两条返回路径都过它（存量毒化快照加载即修复）。
+    """
+    for i, m in enumerate(messages):
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        tool_calls = m.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        fixed = False
+        for call in tool_calls:
+            fn = call.get("function") if isinstance(call, dict) else None
+            if not isinstance(fn, dict):
+                continue
+            args = fn.get("arguments")
+            if not isinstance(args, str):
+                continue
+            try:
+                json.loads(args)
+            except Exception:
+                fn["arguments"] = "{}"
+                fixed = True
+        if fixed and i + 1 < len(messages):
+            nxt = messages[i + 1]
+            if (isinstance(nxt, dict) and nxt.get("role") == "tool"
+                    and isinstance(nxt.get("content"), str)
+                    and not nxt["content"].startswith(_TOOL_ARGS_TRUNCATED_NOTE)):
+                nxt["content"] = f"{_TOOL_ARGS_TRUNCATED_NOTE}\n{nxt['content']}"
+    return messages
+
+
 def get_task_context(task_id: int) -> Optional[list]:
     """Load saved context with fallback reconstruction from task_steps + messages."""
     try:
@@ -941,7 +984,8 @@ def get_task_context(task_id: int) -> Optional[list]:
                 result = json.loads(snapshot)
                 if isinstance(result, list) and len(result) > 1:
                     conn.close()
-                    return _with_checkpoint_notice(task_id, result)
+                    return _with_checkpoint_notice(
+                        task_id, _sanitize_tool_call_args(result))
             except Exception:
                 pass
 
@@ -974,7 +1018,11 @@ def get_task_context(task_id: int) -> Optional[list]:
                 "name": s["tool_name"],
                 "content": s["full_result"] or s["result_preview"] or ""
             })
-        return _with_checkpoint_notice(task_id, entries)
+        # full_args 缺失时退到 args_preview（200 字符硬切，可能是残缺的
+        # JSON）——不在这里逐条判断，统一由 _sanitize_tool_call_args 校验：
+        # 非法 arguments 替换为 "{}" 并在 tool 消息头部补说明（见该函数注释）
+        return _with_checkpoint_notice(
+            task_id, _sanitize_tool_call_args(entries))
     except Exception as e:
         print(f"[Task] Get context error: {e}")
         return None
