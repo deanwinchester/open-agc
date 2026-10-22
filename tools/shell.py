@@ -204,7 +204,9 @@ class ShellTool(BaseTool):
     description: str = ("在本机执行 shell 命令（Windows 上是 cmd——没有 grep/ls/sed，"
                         "搜索文本用 findstr，列目录用 dir；POSIX 上是 bash）。"
                         "sudo 弹密码框（密码不入会话，失败提示需要密码时重试一次即可触发）；"
-                        "交互程序用 shell_send 续聊。")
+                        "交互程序用 shell_send 续聊。"
+                        "禁止用 start/explorer 打开文件或目录（路径拼错会弹 Windows"
+                        "「找不到文件」系统对话框，不返回错误码）；交付物在回复里给路径即可。")
 
     def get_openai_schema(self) -> Dict[str, Any]:
         return {
