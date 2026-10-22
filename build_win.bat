@@ -48,11 +48,13 @@ call build_venv\Scripts\activate.bat
 REM pip self-upgrade must go through python -m pip (plain "pip install --upgrade pip"
 REM fails on Windows: running script cannot replace itself). Old bundled pip (22.x)
 REM cannot even parse UTF-8 requirements.txt on GBK locale -- upgrade FIRST.
-REM 网络偶发 IncompleteRead（生产实证：win-builder 上阿里云镜像断流）——
-REM 重试 + 清华镜像兜底，双路都失败才中止。
+REM Network occasionally drops mid-download (prod evidence: IncompleteRead on
+REM win-builder via aliyun mirror) -- retry + tsinghua mirror fallback.
+REM NOTE: keep this .bat pure ASCII -- CJK comments break cmd.exe parsing
+REM (GBK codepage misreads UTF-8 bytes across line boundaries, prod incident).
 python -m pip install --upgrade pip -q --retries 5 --timeout 60 || python -m pip install --upgrade pip -q --retries 5 --timeout 60 -i https://pypi.tuna.tsinghua.edu.cn/simple
 if errorlevel 1 (
-    echo ERROR: pip self-upgrade failed (both mirrors)!
+    echo ERROR: pip self-upgrade failed on both mirrors!
     exit /b 1
 )
 pip install pyinstaller -q --retries 5 --timeout 60 || pip install pyinstaller -q --retries 5 --timeout 60 -i https://pypi.tuna.tsinghua.edu.cn/simple
