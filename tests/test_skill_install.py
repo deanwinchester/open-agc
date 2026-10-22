@@ -626,3 +626,22 @@ class TestInstalledSkillsLine:
                 return []
         a.skill_store = _SS()
         assert a._installed_skills_line() == ""
+
+
+class TestImportSkillRebuildsIndex:
+    """市场导入技能后必须重建检索索引（对比 GitHub 安装路径的
+    store.build_index()——否则市场装的技能对 agent 不可见）。"""
+
+    def test_import_rebuilds_index(self, tmp_path):
+        from core.skill_manager import SkillManager
+        skills_dir = str(tmp_path / "skills")
+        mgr = SkillManager(skills_dir=skills_dir)
+        # 预置空索引（市场导入前仓库已建过索引的旧状态）
+        SkillStore(skills_dir=skills_dir).build_index()
+
+        result = mgr.import_skill("market-skill", SKILL_MD_FM)
+        assert result["success"] is True
+
+        idx = SkillStore(skills_dir=skills_dir).index
+        filenames = {s["filename"] for s in idx["skills"]}
+        assert "market-skill.md" in filenames

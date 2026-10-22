@@ -28,6 +28,7 @@ from tools.computer import ComputerTool
 from tools.memory import MemoryTool
 from tools.web_search import WebSearchTool
 from tools.fetch_url import FetchURLTool
+from tools.ocr_document import OcrDocumentTool
 from tools.image_view import ImageViewTool
 from tools.system_mac import MacSystemTool
 from tools.save_skill import SaveSkillTool
@@ -169,6 +170,46 @@ def _is_tmp_path(path: str) -> bool:
     """路径是否落在沙箱 tmp/ 分区（中间产物，不作为交付物附着）。"""
     p = str(path or "").replace("\\", "/")
     return "/tmp/" in p or p.startswith("tmp/")
+
+
+def _snapshot_outputs(outputs_dir: str) -> dict:
+    """outputs/ 目录树文件快照 {相对 POSIX 路径: (mtime_ns, size)}。
+
+    execute_python/execute_shell 的产物无法从参数推路径（docx/xlsx/pdf 等
+    二进制文档只经此类工具生成），靠执行前后 diff 捕获。遍历失败返回 {}
+    （diff 退化为「全部新增」，无害）。文件数超 2 万截断快照（防爆）。"""
+    snap = {}
+    try:
+        for dirpath, _dirs, files in os.walk(outputs_dir):
+            for fn in files:
+                fp = os.path.join(dirpath, fn)
+                try:
+                    st = os.stat(fp)
+                except OSError:
+                    continue
+                rel = os.path.relpath(fp, outputs_dir).replace("\\", "/")
+                snap[rel] = (st.st_mtime_ns, st.st_size)
+                if len(snap) >= 20000:
+                    return snap
+    except OSError:
+        pass
+    return snap
+
+
+def _diff_outputs(before: dict, outputs_dir: str) -> list:
+    """执行后快照与执行前 diff：新增/mtime 或大小变化的文件 →
+    [{path: "outputs/<rel>"}]（与 write_file 记录同格式）。tmp/ 中间产物
+    不记（与 _generated_files_for_tool 同口径）。"""
+    if before is None:
+        return []
+    after = _snapshot_outputs(outputs_dir)
+    out = []
+    for rel, meta in after.items():
+        if before.get(rel) != meta:
+            p = f"outputs/{rel}"
+            if not _is_tmp_path(p):
+                out.append({"path": p})
+    return out
 
 
 def _topic_tokens(text: str) -> set:
@@ -912,6 +953,7 @@ class OpenAGCAgent:
             "manage_memory": memory_tool,
             "search_web": WebSearchTool(),
             "fetch_url": FetchURLTool(),
+            "ocr_document": OcrDocumentTool(),
             "image_view": ImageViewTool(),
             "mac_system_action": MacSystemTool(),
             "save_learned_skill": SaveSkillTool(),
@@ -956,6 +998,7 @@ class OpenAGCAgent:
             "manage_memory": "管理记忆",
             "search_web": "搜索网页",
             "fetch_url": "抓取网页正文",
+            "ocr_document": "文档 OCR 识别",
             "image_view": "查看图片",
             "mac_system_action": "系统操作",
             "save_learned_skill": "保存技能",
@@ -2585,6 +2628,7 @@ class OpenAGCAgent:
     _TOOL_RESULT_WRITE_CAPS = {
         "read_file": 8000,
         "fetch_url": 8000,
+        "ocr_document": 8000,
         "execute_shell": 12000,
         "execute_python": 12000,
     }
@@ -3619,7 +3663,17 @@ class OpenAGCAgent:
                         print(f"\n[Tool Execution] {function_name}({function_args})")
                     
                     tool_instance = self.available_tools.get(function_name)
-                    
+
+                    # 产物 diff 快照：execute_python/execute_shell 生成文件无法从
+                    # 参数推路径（docx/xlsx/pdf 等二进制产物只经此类工具生成），
+                    # 执行前后 diff outputs/ 目录树捕获新增/修改文件。
+                    _outputs_dir = None
+                    _outputs_before = None
+                    if function_name in ("execute_python", "execute_shell"):
+                        _outputs_dir = os.path.join(
+                            getattr(self, "sandbox_dir", None) or os.getcwd(), "outputs")
+                        _outputs_before = _snapshot_outputs(_outputs_dir)
+
                     # Tool Loop Detection Check
                     # 判定「调用+结果双同」才算循环（生产实证：browser_automation
                     # 读页面是天然无参重复调用，页面内容每次不同却在推进，
@@ -3935,6 +3989,10 @@ class OpenAGCAgent:
                         # （产物 chips 的来源；tmp/ 中间产物不记）
                         if evt["success"]:
                             _gen = _generated_files_for_tool(function_name, function_args)
+                            if _outputs_dir is not None:
+                                # execute_python/execute_shell：执行前后
+                                # outputs/ diff 出新增/修改文件
+                                _gen += _diff_outputs(_outputs_before, _outputs_dir)
                             if _gen:
                                 evt["generated_files"] = json.dumps(_gen, ensure_ascii=False)
                         progress_callback(evt)

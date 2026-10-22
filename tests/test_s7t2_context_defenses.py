@@ -184,6 +184,7 @@ class TestToolResultWriteTruncation:
         assert OpenAGCAgent._TOOL_RESULT_WRITE_CAPS == {
             "read_file": 8000,
             "fetch_url": 8000,
+            "ocr_document": 8000,
             "execute_shell": 12000,
             "execute_python": 12000,
         }
