@@ -118,7 +118,16 @@ def _resolve_model_endpoint(model_name: str, agent):
     prefix = name.split('/', 1)[0] if '/' in name else ''
     cp = getattr(llm, "_custom_providers", {}).get(prefix)
     if cp:
-        return cp.get("base_url"), cp.get("api_key") or "sk-no-key-required"
+        api_key = cp.get("api_key") or ""
+        if cp.get("use_server_token"):
+            # 网关厂商：探测请求也要带登录 token，否则 401 → 误判非视觉
+            # （生产实证：zxs_gw/Qwen3.8-27B 明明支持视觉却报「未识别为视觉模型」）
+            try:
+                from core.server_auth import get_token
+                api_key = get_token() or ""
+            except Exception:
+                api_key = ""
+        return cp.get("base_url"), api_key or "sk-no-key-required"
     if "llamacpp/" in name:
         return getattr(llm, "llamacpp_api_base", None), "sk-no-key-required"
     return None, None
