@@ -88,7 +88,10 @@ _PY_CACHE = {}
 
 class PythonREPLTool(BaseTool):
     name: str = "execute_python"
-    description: str = "执行 Python 代码并返回 stdout/stderr。"
+    description: str = ("执行 Python 代码并返回 stdout/stderr。"
+                        "禁止在脚本里用 os.startfile/explorer/subprocess start 打开文件或目录"
+                        "（路径拼错会弹 Windows「找不到文件」系统对话框，不返回错误码，"
+                        "用户实测被弹窗骚扰）；交付物在回复里给路径即可，前端会渲染成可点击打开的产物。")
 
     # ---- 解释器解析（真机优先，嵌入兜底）----
     # config.python_env：auto（默认，真机>=3.10 优先，无则嵌入）/ system（仅真机）/ embedded（仅嵌入）

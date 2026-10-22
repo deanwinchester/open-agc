@@ -48,12 +48,14 @@ call build_venv\Scripts\activate.bat
 REM pip self-upgrade must go through python -m pip (plain "pip install --upgrade pip"
 REM fails on Windows: running script cannot replace itself). Old bundled pip (22.x)
 REM cannot even parse UTF-8 requirements.txt on GBK locale -- upgrade FIRST.
-python -m pip install --upgrade pip -q
+REM 网络偶发 IncompleteRead（生产实证：win-builder 上阿里云镜像断流）——
+REM 重试 + 清华镜像兜底，双路都失败才中止。
+python -m pip install --upgrade pip -q --retries 5 --timeout 60 || python -m pip install --upgrade pip -q --retries 5 --timeout 60 -i https://pypi.tuna.tsinghua.edu.cn/simple
 if errorlevel 1 (
-    echo ERROR: pip self-upgrade failed!
+    echo ERROR: pip self-upgrade failed (both mirrors)!
     exit /b 1
 )
-pip install pyinstaller -q
+pip install pyinstaller -q --retries 5 --timeout 60 || pip install pyinstaller -q --retries 5 --timeout 60 -i https://pypi.tuna.tsinghua.edu.cn/simple
 if errorlevel 1 (
     echo ERROR: pyinstaller install failed!
     exit /b 1
@@ -61,7 +63,7 @@ if errorlevel 1 (
 REM requirements install MUST succeed -- with -q and no check the build would
 REM ship a package missing pywebview/uvicorn etc. (CI produced exactly such a
 REM broken zip: gui_app crash "No module named 'webview'", prod evidence).
-pip install -r requirements.txt -q
+pip install -r requirements.txt -q --retries 5 --timeout 60 || pip install -r requirements.txt -q --retries 5 --timeout 60 -i https://pypi.tuna.tsinghua.edu.cn/simple
 if errorlevel 1 (
     echo ERROR: requirements install failed -- aborting, do NOT ship a broken package!
     exit /b 1

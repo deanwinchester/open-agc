@@ -16,11 +16,10 @@ UninstallIcon "@ICON_ABS@"
 
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-; 卸载时的「组件选择」页：默认不勾选的「清空用户数据目录」选项
-; ⚠ 必须紧跟 MUI_UNPAGE_INSTFILES——缺它时组件页变成最后一页，按钮
-; 显示「关闭」且卸载 Section 永不执行（生产实证：装了 1.0.0 的用户
-; 卸载程序只有「关闭/取消」，点了直接退出，目录原样还在）。
-!insertmacro MUI_UNPAGE_COMPONENTS
+; 卸载流程：确认页 + 执行页。组件选择页已被两次实践证明水土不服
+; （缺 INSTFILES 时按钮变「关闭」不执行卸载；加上后可选的「清空用户数据
+; 目录」节又不进列表）——改为卸载执行前弹 MessageBox 询问是否清数据。
+!insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
@@ -72,16 +71,16 @@ Section "Uninstall"
   ; 卸载前结束运行中的实例（主程序/WebView2 子进程的文件锁会让 RMDir 失败）
   nsExec::ExecToLog "powershell -NoProfile -Command $\"Get-Process | Where-Object { $$_.Path -like '$INSTDIR\*' } | Stop-Process -Force$\""
   Sleep 1500
+  ; 是否清空用户数据目录：MessageBox 询问（不走组件选择页——组件页两次
+  ; 实证水土不服：缺 INSTFILES 时「关闭」不执行卸载，加上后可选项又不
+  ; 进列表）。/S 静默卸载走默认 IDNO（保留数据）。$APPDATA 需切到当前
+  ; 用户上下文（卸载以 admin 执行，直接展开拿到的是管理员目录）。
+  MessageBox MB_YESNO|MB_ICONQUESTION "是否同时删除用户数据（会话历史、凭据、已下载模型等）？$\n$\n选择「是」将清空用户数据目录（不可恢复）；选择「否」仅卸载程序，数据保留。" /SD IDNO IDYES +2
+  Goto +3
+  SetShellVarContext current
+  RMDir /r "$APPDATA\Open-AGC"
   RMDir /r "$INSTDIR"
   Delete "$DESKTOP\@DISPLAY_NAME@.lnk"
   RMDir /r "$SMPROGRAMS\@APP_NAME@"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\@APP_NAME@"
-SectionEnd
-
-; 可选卸载组件：清空用户数据目录（默认不勾选——数据目录含会话历史、
-; 凭据、已下载模型，删了不可恢复）。$APPDATA 需切到当前用户上下文
-; （安装/卸载以 admin 执行，直接展开拿到的是管理员目录——NSIS 经典坑）。
-Section /o "清空用户数据目录（会话/凭据/模型等全部数据，不可恢复）" UN_CLEANDATA
-  SetShellVarContext current
-  RMDir /r "$APPDATA\Open-AGC"
 SectionEnd
