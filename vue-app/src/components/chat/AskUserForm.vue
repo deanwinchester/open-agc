@@ -16,12 +16,14 @@ const input = ref('');
 
 function choose(opt) {
   if (props.entry.answered) return;
+  props.entry.error = ''; // 重试时清掉上次的错误提示（表单保留，见模板）
   emit('submit', props.entry, opt);
 }
 
 function submit() {
   const v = input.value.trim();
   if (!v || props.entry.answered) return;
+  props.entry.error = '';
   emit('submit', props.entry, v);
   input.value = '';
 }
@@ -37,7 +39,9 @@ function submit() {
     </div>
     <div v-else-if="entry.error" class="ask-error">✗ {{ entry.error }}</div>
 
-    <template v-if="!entry.answered && !entry.error">
+    <!-- 投递失败不清表单：错误提示上方展示，选项/输入框保留供重试
+         （此前 error 态整个表单消失，用户连重试入口都没有——生产实证） -->
+    <template v-if="!entry.answered">
       <div v-if="entry.options && entry.options.length" class="ask-options">
         <el-button
           v-for="opt in entry.options"

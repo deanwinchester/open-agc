@@ -90,6 +90,17 @@ const currentTaskId = ref(null);
 const historyPaging = reactive({ oldestId: 0, hasMore: false, loading: false });
 const historyLoadedAt = ref(0);
 const retryBar = reactive({ visible: false, originalQuery: '' });
+// LLM_ERROR 失败任务集合（taskId）：聊天里 [LLM_ERROR] 结果气泡下渲染
+// 「重试」按钮（用户多次反馈文案说点击重试却没有按钮）。任务恢复/推进到
+// 非 failed 态时移除，按钮只在任务 failed 且可恢复时出现。
+const llmErrorTasks = reactive(new Set());
+function markLlmError(content, taskId) {
+  if (taskId && String(content || '').startsWith('[LLM_ERROR]')) llmErrorTasks.add(taskId);
+}
+function isLlmErrorRetryable(item) {
+  return item.kind === 'msg' && item.taskId && llmErrorTasks.has(item.taskId)
+    && String(item.content || '').startsWith('[LLM_ERROR]');
+}
 const scrollHint = ref(false);
 // 窄屏会话栏抽屉（≤768px 时 SessionRail 隐藏，头部 🗂 按钮滑出）
 const railOpen = ref(false);
@@ -279,6 +290,10 @@ function renderHistorySteps(data) {
   if (!steps.length) return;
 
   const isLive = data.task_status === 'running' || data.task_status === 'resuming';
+  // 同步 LLM_ERROR 重试集合：failed → 气泡可挂「重试」；任务一旦推进到
+  // 其它状态（恢复/完成）即摘除，按钮只在 failed 且可恢复时出现
+  if (data.task_status === 'failed') llmErrorTasks.add(data.task_id);
+  else llmErrorTasks.delete(data.task_id);
   const card = reactive({
     kind: 'progress', key: nextKey(), taskId: data.task_id,
     live: isLive, history: !isLive,
@@ -499,6 +514,7 @@ function onMessage(data) {
   if (data.background) {
     if (data.content && String(data.content).trim()) {
       appendItem({ kind: 'msg', key: nextKey(), role, content: data.content, taskId: data.task_id || null, id: data.message_id || null });
+      markLlmError(data.content, data.task_id); // 后台任务 LLM 失败：气泡下挂「重试」
       scrollToBottom();
     }
     const isOwnRun = data.task_id && currentTaskId.value === data.task_id;
@@ -524,6 +540,7 @@ function onMessage(data) {
     // LLM 调用失败的收口消息：显示重试条（用户反馈只见技术文案、没有
     // 重试入口——LLM_ERROR 走普通 message 事件，不触发 onError 的重试条）
     if (String(data.content).startsWith('[LLM_ERROR]')) {
+      markLlmError(data.content, data.task_id); // 气泡下同时挂「重试」按钮
       const lastUser = [...items.value].reverse().find((i) => i.kind === 'msg' && i.role === 'user');
       retryBar.originalQuery = lastUser ? String(lastUser.content || '') : '';
       retryBar.visible = true;
@@ -699,6 +716,7 @@ function onStop() {
 function onResume(taskId) {
   if (running.value) { ElMessage.warning(t.agentBusy); return; }
   if (!ws.connected) { ElMessage.error(t.sendFailed); return; }
+  llmErrorTasks.delete(taskId); // 任务进入恢复流程，摘掉「重试」按钮
   // 先把卡片本地标记为运行中（服务端随后会推 task_status=resuming 的 history_steps）
   const card = items.value.find((i) => i.kind === 'progress' && i.taskId === taskId);
   if (card) {
@@ -724,6 +742,25 @@ function onRetry() {
 function onRetryContinue() {
   retryBar.visible = false;
   onSend(t.continueMessage);
+}
+
+// [LLM_ERROR] 气泡下的「重试」：与任务详情页「继续」同一恢复端点
+//（POST /api/tasks/{id}/resume，后端 resume CAS 状态集本就含 failed）
+const llmErrorRetrying = reactive(new Set());
+async function onRetryFailedTask(taskId) {
+  if (!taskId || llmErrorRetrying.has(taskId)) return;
+  llmErrorRetrying.add(taskId);
+  try {
+    const resp = await request(`/api/tasks/${taskId}/resume`, {
+      method: 'POST', headers: JSON_HEADERS, body: '{}',
+    });
+    llmErrorTasks.delete(taskId);
+    ElMessage.success(resp?.message || t.taskResumed);
+  } catch (e) {
+    ElMessage.error(`${t.taskResumeFailed}: ${e.message}`);
+  } finally {
+    llmErrorRetrying.delete(taskId);
+  }
 }
 
 async function onSubmitAsk(entry, answer) {
@@ -807,6 +844,7 @@ async function loadHistory(sid, { beforeId = 0 } = {}) {
       return {
       kind: 'msg', key: nextKey(), role: m.role, content: m.content,
       id: m.id, timestamp: m.timestamp || null,
+      taskId: m.task_id || null,
       feedback: m.feedback || 0,
       // 附件（粘贴图片落盘路径 uploads/xxx）→ 缩略图 URL，经 /api/upload 提供
       images: (Array.isArray(m.attachments) && m.attachments.length)
@@ -1093,6 +1131,15 @@ onUnmounted(() => {
 
           <template v-for="item in displayItems" :key="item.key">
             <MessageItem v-if="item.kind === 'msg'" :item="item" @delete="onDeleteMessage" />
+            <div v-if="isLlmErrorRetryable(item)" class="llm-error-retry">
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                :loading="llmErrorRetrying.has(item.taskId)"
+                @click="onRetryFailedTask(item.taskId)"
+              ><el-icon><RefreshRight /></el-icon> {{ t.retry }}</el-button>
+            </div>
             <ProgressCard
               v-else-if="item.kind === 'progress'"
               :card="item"
@@ -1312,6 +1359,11 @@ onUnmounted(() => {
   display: flex;
   gap: 8px;
   padding: 4px 0 14px;
+}
+
+/* [LLM_ERROR] 气泡下的重试入口：与气泡左对齐、间距紧凑 */
+.llm-error-retry {
+  margin: -8px 0 16px 0;
 }
 
 .scroll-hint {

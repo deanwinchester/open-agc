@@ -557,6 +557,7 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
         return 'deleted'
     if not response:
         update_task_status(task_id, "failed", "No response from agent", interruption_reason="error")
+        clear_pending_question(task_id)  # 失败收官同样清除待回答问题（同成功分支口径）
         _reap_terminal_processes(task_id, "no_response")
         return 'failed'
 
@@ -642,6 +643,7 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
     if is_llm_error:
         save_task_context(task_id, agent_messages)
         update_task_status(task_id, "failed", summary, interruption_reason="error")
+        clear_pending_question(task_id)  # 失败收官也清除待回答问题（同成功分支口径），否则详情页残留答不了的僵尸卡片
         # 模型服务不可用而失败：任务不会自愈，残留进程纯属垃圾（实证 #584
         # 卸载脚本 powershell 挂了 1 小时无人收）。completed/backgrounded/
         # max_iterations 不收——存活进程可能是用户要的服务或等待对象。

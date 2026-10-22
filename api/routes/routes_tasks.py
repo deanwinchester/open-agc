@@ -1291,7 +1291,7 @@ async def reply_to_background_task(task_id: int, body: dict):
     answer = body.get("answer", "")
     if not answer:
         raise HTTPException(status_code=400, detail="answer is required")
-    from api.state import _background_agents
+    from api.state import _background_agents, _active_agents
     from api.task_core import clear_pending_question
     agent = _background_agents.get(task_id)
     if agent and not getattr(agent, "is_interrupted", False):
@@ -1301,6 +1301,18 @@ async def reply_to_background_task(task_id: int, body: dict):
             return {"status": "success", "message": f"Answer delivered to task #{task_id}"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to deliver answer: {e}")
+    # 前台（WS 会话）agent 同样可能持有该 task 并阻塞在 ask_user 上——聊天里
+    # 恢复的问卡一律走本 REST 端点，只查后台注册表会让回答落入下方 resume
+    # 路径、被 running 状态拒收（生产实证 #652）。结构：{session_id: {task_id: agent}}
+    for _sess_agents in list(_active_agents.values()):
+        _fg_agent = _sess_agents.get(task_id)
+        if _fg_agent is not None and not getattr(_fg_agent, "is_interrupted", False):
+            try:
+                _fg_agent.user_input_queue.put_nowait(answer)
+                clear_pending_question(task_id)
+                return {"status": "success", "message": f"Answer delivered to task #{task_id}"}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to deliver answer: {e}")
     # No live agent — inject the answer into context and resume the task
     from api.background import resume_task_with_late_answer
     result = resume_task_with_late_answer(task_id, answer)

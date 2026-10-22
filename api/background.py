@@ -471,10 +471,11 @@ def resume_task_with_late_answer(task_id: int, answer: str) -> dict:
         return {"ok": False, "error": "not_found",
                 "message": f"任务 #{task_id} 不存在"}
     status, user_query, summary, int_reason = row[0], row[1] or "", row[2] or "", row[3]
-    if status in ("completed", "failed"):
-        label = "已完成" if status == "completed" else "已失败"
+    if status == "completed":
         return {"ok": False, "error": "terminal", "status": status,
-                "message": f"任务 #{task_id} {label}，无需再回答"}
+                "message": f"任务 #{task_id} 已完成，无需再回答"}
+    # failed 不拒收：迟到的回答 = 带答案恢复任务（与 resume_task_manual 的
+    # failed 可恢复口径一致）——提问后任务先失败的场景，用户的回答不该被丢
     if status == "running":
         return {"ok": False, "error": "running", "status": status,
                 "message": f"任务 #{task_id} 正在运行，回答暂无法投递"}
@@ -483,7 +484,7 @@ def resume_task_with_late_answer(task_id: int, answer: str) -> dict:
                 "message": f"任务 #{task_id} 已被用户中断"}
     # CAS: atomically claim the task so guardian/BgMonitor/another reply
     # can't resume it concurrently.
-    if not claim_task_for_resume(task_id, ("backgrounded", "interrupted")):
+    if not claim_task_for_resume(task_id, ("backgrounded", "interrupted", "failed")):
         return {"ok": False, "error": "claim_failed",
                 "message": f"任务 #{task_id} 已被其他路径恢复，请稍候"}
     # Recover the original question from the pause summary (best effort) so

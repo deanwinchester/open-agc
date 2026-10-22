@@ -146,7 +146,8 @@ class TestResumeWithLateAnswer:
         assert result["ok"] is True
         assert result["status"] == "resumed"
         # CAS claim happened before the resume thread was spawned
-        assert patched_bg["claimed"] == (7, ("backgrounded", "interrupted"))
+        # （failed 也在认领集内：迟到的回答 = 带答案恢复失败任务）
+        assert patched_bg["claimed"] == (7, ("backgrounded", "interrupted", "failed"))
         # Answer injected into context with anti-re-ask guidance + question
         saved = patched_bg["saved"]
         assert saved is not None
@@ -173,12 +174,17 @@ class TestResumeWithLateAnswer:
         assert patched_bg["claimed"] is None
         assert patched_bg["saved"] is None
 
-    def test_failed_task_returns_terminal_status(self, patched_bg):
+    def test_failed_task_injected_and_resumed(self, patched_bg):
+        """failed 不再当终态拒收：迟到的回答 = 带答案恢复任务（与
+        resume_task_manual 的 failed 可恢复口径一致）。提问后任务先失败、
+        用户回答被「已失败，无需再回答」丢弃是生产实证 bug。"""
         patched_bg["row"] = ("failed", "q", "", None)
         result = bg.resume_task_with_late_answer(7, "答案")
-        assert result["ok"] is False
-        assert result["error"] == "terminal"
-        assert result["status"] == "failed"
+        assert result["ok"] is True
+        assert result["status"] == "resumed"
+        assert patched_bg["claimed"] == (7, ("backgrounded", "interrupted", "failed"))
+        saved = patched_bg["saved"]
+        assert saved is not None and "答案" in saved[-1]["content"]
 
     def test_not_found(self, patched_bg):
         patched_bg["row"] = None
@@ -246,6 +252,53 @@ class TestRestReplyFallback:
             assert delivered == ["x"]
         finally:
             state._background_agents.pop(43, None)
+
+    def test_foreground_active_agent_gets_queue_delivery(self, monkeypatch):
+        """前台（WS 会话）agent 持有该 task 时同样直接投递——聊天里恢复的
+        问卡一律按 background 走 REST reply，只查 _background_agents 会让
+        前台任务的回答落入 resume 路径被 running 拒收（生产实证 #652）。"""
+        import api.state as state
+        from api.routes import routes_tasks
+        delivered = []
+        fake_agent = types.SimpleNamespace(
+            is_interrupted=False,
+            user_input_queue=types.SimpleNamespace(
+                put_nowait=lambda a: delivered.append(a)))
+        state._background_agents.pop(45, None)  # 后台注册表无此任务
+        state._active_agents.setdefault(7, {})[45] = fake_agent
+        try:
+            def _boom(*a, **k):
+                raise AssertionError("resume helper must not run for live agent")
+            monkeypatch.setattr("api.background.resume_task_with_late_answer", _boom)
+            result = asyncio.run(
+                routes_tasks.reply_to_background_task(45, {"answer": "前台答案"}))
+            assert result["status"] == "success"
+            assert delivered == ["前台答案"]
+        finally:
+            state._active_agents.get(7, {}).pop(45, None)
+
+    def test_interrupted_active_agent_falls_through(self, monkeypatch):
+        """_active_agents 里命中的 agent 已中断：不投递，落到 late-answer
+        resume 兜底（与 _background_agents 的 is_interrupted 语义对齐）。"""
+        import api.state as state
+        from api.routes import routes_tasks
+        state._background_agents.pop(46, None)
+        state._active_agents.setdefault(7, {})[46] = types.SimpleNamespace(
+            is_interrupted=True,
+            user_input_queue=types.SimpleNamespace(put_nowait=lambda a: None))
+        called = {}
+        monkeypatch.setattr(
+            "api.background.resume_task_with_late_answer",
+            lambda tid, ans: called.update(tid=tid)
+            or {"ok": True, "status": "resumed", "message": "ok"})
+        try:
+            result = asyncio.run(
+                routes_tasks.reply_to_background_task(46, {"answer": "x"}))
+            assert result["status"] == "success"
+            assert result["resumed"] is True
+            assert called == {"tid": 46}
+        finally:
+            state._active_agents.get(7, {}).pop(46, None)
 
     def test_terminal_task_returns_status_not_404(self, monkeypatch):
         import api.state as state
