@@ -94,12 +94,18 @@ const retryBar = reactive({ visible: false, originalQuery: '' });
 // 「重试」按钮（用户多次反馈文案说点击重试却没有按钮）。任务恢复/推进到
 // 非 failed 态时移除，按钮只在任务 failed 且可恢复时出现。
 const llmErrorTasks = reactive(new Set());
+// [LLM_ERROR] 判定：直出失败气泡，或自动恢复失败收官（后端广播标题前缀，
+// 见 background.py 自动恢复完成广播）——两种形态都要挂「重试」入口
+function isLlmErrorContent(content) {
+  const c = String(content || '');
+  return c.startsWith('[LLM_ERROR]') || c.startsWith('**❌ 自动恢复任务失败**');
+}
 function markLlmError(content, taskId) {
-  if (taskId && String(content || '').startsWith('[LLM_ERROR]')) llmErrorTasks.add(taskId);
+  if (taskId && isLlmErrorContent(content)) llmErrorTasks.add(taskId);
 }
 function isLlmErrorRetryable(item) {
   return item.kind === 'msg' && item.taskId && llmErrorTasks.has(item.taskId)
-    && String(item.content || '').startsWith('[LLM_ERROR]');
+    && isLlmErrorContent(item.content);
 }
 const scrollHint = ref(false);
 // 窄屏会话栏抽屉（≤768px 时 SessionRail 隐藏，头部 🗂 按钮滑出）
@@ -539,7 +545,7 @@ function onMessage(data) {
     appendItem({ kind: 'msg', key: nextKey(), role, content: data.content, taskId: data.task_id || null, id: data.message_id || null });
     // LLM 调用失败的收口消息：显示重试条（用户反馈只见技术文案、没有
     // 重试入口——LLM_ERROR 走普通 message 事件，不触发 onError 的重试条）
-    if (String(data.content).startsWith('[LLM_ERROR]')) {
+    if (isLlmErrorContent(data.content)) {
       markLlmError(data.content, data.task_id); // 气泡下同时挂「重试」按钮
       const lastUser = [...items.value].reverse().find((i) => i.kind === 'msg' && i.role === 'user');
       retryBar.originalQuery = lastUser ? String(lastUser.content || '') : '';

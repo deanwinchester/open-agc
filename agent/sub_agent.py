@@ -414,6 +414,14 @@ class SubAgent:
                             "tool": func_name,
                             "step": tool_call_count,
                             "args_preview": tc.function.arguments[:200],
+                            # 完整参数（与主 agent 同 key：ws/background 的
+                            # add_task_step 链路读 tool_args 落 full_args）。
+                            # 生产实证 #652：分身步骤 full_args 为空，恢复兜底
+                            # 重建只能拿 200 字符截断 preview 当完整 arguments，
+                            # 毒化上下文造成恢复死循环。用解析后重序列化的
+                            # func_args（而非原始 arguments 串），保证落库
+                            # 的一定是合法 JSON（解析失败时为 {}）。
+                            "tool_args": json.dumps(func_args, ensure_ascii=False),
                             "tool_call_id": tc.id,
                             "sub_task": self.task[:50]
                         })
