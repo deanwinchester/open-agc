@@ -85,6 +85,9 @@ def _register_surviving_descendants(root_pid: int, task_id, session_id) -> int:
 # 缓存会被 ModelMetaclass 处理掉，放类外）
 _PY_CACHE = {}
 
+import re as _re
+_re_mnf = _re.compile(r"ModuleNotFoundError: No module named '([^']+)'")
+
 
 class PythonREPLTool(BaseTool):
     name: str = "execute_python"
@@ -100,10 +103,12 @@ class PythonREPLTool(BaseTool):
         import platform
         ver = platform.python_version()
         if getattr(sys, 'frozen', False):
-            # 冻结包：--pyrun 内部通道（见 gui_app.main），嵌入解释器 + 打包依赖，
-            # spec 排除了 pip → 不能 pip install
-            return [sys.executable, "--pyrun"], f"嵌入解释器 {ver}（仅打包内依赖，不可 pip 安装新包）"
-        return [sys.executable], f"当前环境 Python {ver}"
+            # 冻结包：--pyrun 内部通道（见 gui_app.main），嵌入解释器 + 打包依赖
+            # + 用户扩展库（pip_install 安装处）；spec 已收 pip 支持 -m pip
+            return [sys.executable, "--pyrun"], (
+                f"嵌入解释器 {ver}（打包依赖+用户扩展库；缺包可用 pip_install 工具安装；"
+                f"确需真机环境（如 GPU 训练）时提醒用户在设置里把 python_env 切为 system）")
+        return [sys.executable], f"当前环境 Python {ver}（缺包可用 pip_install 工具安装）"
 
     @staticmethod
     def _find_system_python():
@@ -139,7 +144,12 @@ class PythonREPLTool(BaseTool):
     # 进程级解释器解析缓存（模块级——BaseTool 是 pydantic BaseModel，
     # 类属性缓存会被 ModelMetaclass 吞掉，放类外）
     def _resolve_python(self):
-        """返回 (cmd_prefix|None, 描述, 来源 system|embedded|missing)。"""
+        """返回 (cmd_prefix|None, 描述, 来源 system|embedded|missing)。
+
+        内嵌优先（用户拍板）：打包依赖是测过的固定组合，agent 代码跨机器
+        行为一致，且不污染真机环境（pip_install 也落在独立的 pylibs 扩展
+        库）；真机 Python 只在确有必要时用（如 GPU 训练的 torch/CUDA 环境）
+        ——config python_env=system 强制真机，auto/embedded 均走内嵌。"""
         cached = _PY_CACHE.get("resolved")
         if cached is not None:
             return cached
@@ -152,16 +162,15 @@ class PythonREPLTool(BaseTool):
         except Exception:
             pass
 
-        if mode != "embedded":
+        if mode == "system":
             sys_cmd = self._find_system_python()
             if sys_cmd:
                 _PY_CACHE["resolved"] = (
                     sys_cmd, f"真机 {self._py_version_str(sys_cmd)}（{sys_cmd[0]}）", "system")
                 return _PY_CACHE["resolved"]
-            if mode == "system":
-                _PY_CACHE["resolved"] = (
-                    None, "python_env=system 但真机 PATH 上没有 Python >= 3.10", "missing")
-                return _PY_CACHE["resolved"]
+            _PY_CACHE["resolved"] = (
+                None, "python_env=system 但真机 PATH 上没有 Python >= 3.10", "missing")
+            return _PY_CACHE["resolved"]
 
         cmd, desc = self._embedded_python()
         _PY_CACHE["resolved"] = (cmd, desc, "embedded")
@@ -289,6 +298,14 @@ class PythonREPLTool(BaseTool):
             import sys
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
+            # 用户扩展库（pip_install 装包处）：子进程自动可见，装一次持久可用
+            try:
+                from tools.pip_install import pylibs_dir as _pylibs_dir
+                _pl = _pylibs_dir()
+                env["PYTHONPATH"] = _pl + (os.pathsep + env["PYTHONPATH"]
+                                           if env.get("PYTHONPATH") else "")
+            except Exception:
+                pass
 
             # 解释器解析：真机 >=3.10 优先，无则嵌入（--pyrun）；python_env 可配
             _py_cmd, _py_info, _py_src = self._resolve_python()
@@ -319,6 +336,14 @@ class PythonREPLTool(BaseTool):
                 if stderr:
                     output += f"STDERR:\n{stderr}\n"
                 output += f"Exit Code: {proc.returncode}"
+                # 缺包引导：ModuleNotFoundError 时告诉 agent 自助装包的出口
+                # （生产实证：打包版缺 openpyxl 曾把 App 炸出致命弹窗；给模型
+                # 明确出口它就不会绕路写替代脚本）
+                _mnf = _re_mnf.search(stderr or "")
+                if _mnf:
+                    output += (f"\n[缺包提示] 缺少模块 '{_mnf.group(1)}'——"
+                               f"可调用 pip_install 工具安装（装到用户扩展库，"
+                               f"装完后续执行直接 import 可用）。")
                 # 告知 agent 实际运行环境（写代码时按此对齐依赖/语法）
                 output = f"[Python] {_py_info}\n{output}"
 

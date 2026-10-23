@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""execute_python 解释器解析（真机优先/嵌入兜底）回归测试。
+"""execute_python 解释器解析（内嵌优先/真机按需）回归测试。
 
-python_env=auto（默认）：真机 PATH 上第一个 >=3.10 的 python 优先，找不到
-回退嵌入解释器（frozen=--pyrun，源码=当前解释器）；system 仅真机，找不到
-明确报错；embedded 仅嵌入。agent 需被告知运行环境（schema 描述 + 返回行）。
+内嵌优先（用户拍板）：打包依赖是测过的固定组合、行为跨机器一致、不污染
+真机环境——python_env=auto（默认）与 embedded 均走内嵌（frozen=--pyrun，
+源码=当前解释器）；仅 python_env=system 强制真机（GPU 训练等必要场景），
+找不到明确报错。agent 需被告知运行环境（schema 描述 + 返回行）。
 """
 import sys
 
@@ -36,13 +37,17 @@ def _set_mode(monkeypatch, mode):
     monkeypatch.setattr("json.load", lambda f: {"python_env": mode})
 
 
-def test_auto_prefers_system_python(monkeypatch):
+def test_auto_prefers_embedded(monkeypatch):
+    """内嵌优先：auto 模式即使真机有 Python >=3.10 也不用（除非 python_env
+    =system 显式强制）。"""
     _set_mode(monkeypatch, "auto")
     _fake_system_python(monkeypatch)
     cmd, info, src = PythonREPLTool()._resolve_python()
-    assert src == "system"
-    assert cmd == ["/usr/bin/python3.11"]
-    assert "真机" in info
+    assert src == "embedded"
+    if getattr(sys, "frozen", False):
+        assert cmd[1] == "--pyrun"
+    else:
+        assert cmd == [sys.executable]
 
 
 def test_auto_falls_back_to_embedded(monkeypatch):
@@ -91,4 +96,5 @@ def test_schema_description_includes_runtime(monkeypatch):
     _fake_system_python(monkeypatch)
     schema = PythonREPLTool().get_openai_schema()
     assert "运行环境" in schema["function"]["description"]
-    assert "真机" in schema["function"]["description"]
+    # 内嵌环境描述：告知缺包出口（pip_install）与真机切换路径
+    assert "pip_install" in schema["function"]["description"]

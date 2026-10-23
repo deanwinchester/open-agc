@@ -29,6 +29,7 @@ from tools.memory import MemoryTool
 from tools.web_search import WebSearchTool
 from tools.fetch_url import FetchURLTool
 from tools.ocr_document import OcrDocumentTool
+from tools.pip_install import PipInstallTool
 from tools.image_view import ImageViewTool
 from tools.system_mac import MacSystemTool
 from tools.save_skill import SaveSkillTool
@@ -975,6 +976,7 @@ class OpenAGCAgent:
             "search_web": WebSearchTool(),
             "fetch_url": FetchURLTool(),
             "ocr_document": OcrDocumentTool(),
+            "pip_install": PipInstallTool(),
             "image_view": ImageViewTool(),
             "mac_system_action": MacSystemTool(),
             "save_learned_skill": SaveSkillTool(),
@@ -1021,6 +1023,7 @@ class OpenAGCAgent:
             "search_web": "搜索网页",
             "fetch_url": "抓取网页正文",
             "ocr_document": "文档 OCR 识别",
+            "pip_install": "安装 Python 包",
             "image_view": "查看图片",
             "mac_system_action": "系统操作",
             "save_learned_skill": "保存技能",

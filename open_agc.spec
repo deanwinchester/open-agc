@@ -91,6 +91,16 @@ onnxrt_datas = collect_data_files('onnxruntime')
 onnxrt_submodules = collect_submodules('onnxruntime')
 datas += rapidocr_datas + onnxrt_datas
 
+# python-docx / openpyxl（编辑友好交付格式）：应用代码从不 import，只有
+# agent 的 --pyrun 脚本在运行时才用——PyInstaller 静态分析永远扫不到，
+# 必须显式收集子模块（生产实证：打包版 agent 写 xlsx 直接
+# ModuleNotFoundError: openpyxl，异常逃逸还把 App 炸出致命对话框）
+docx_submodules = collect_submodules('docx')
+openpyxl_submodules = collect_submodules('openpyxl')
+# pip 本体：--pyrun -m pip 模块通道（agent 经 pip_install 工具自助装包到
+# 用户扩展库）——spec 历史上显式排除 pip，现已改为内嵌优先策略的关键依赖
+pip_submodules = collect_submodules('pip')
+
 # pymupdf（文档 OCR 渲染 PDF）：wheel 自带 C 扩展，函数内懒加载 import
 # PyInstaller 静态分析扫不到，需显式 hiddenimport；无额外数据文件需 collect
 # （字体/ICC 均为内置，不走 collect_data_files）
@@ -172,7 +182,7 @@ a = Analysis(
         'webview.platforms.winforms',
         # Linux GTK 后端（此前缺失，Linux 下 pywebview 找不到 GTK 后端）
         'webview.platforms.gtk',
-    ] + litellm_submodules + tiktoken_submodules + httpx_submodules + httpcore_submodules + anyio_submodules + aiohttp_submodules + gi_hiddenimports + rapidocr_submodules + onnxrt_submodules + ['tiktoken_ext.openai_public', 'pymupdf'],
+    ] + litellm_submodules + tiktoken_submodules + httpx_submodules + httpcore_submodules + anyio_submodules + aiohttp_submodules + gi_hiddenimports + rapidocr_submodules + onnxrt_submodules + docx_submodules + openpyxl_submodules + pip_submodules + ['tiktoken_ext.openai_public', 'pymupdf'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['packaging/macos_runtime.py'] if sys.platform == 'darwin' else [],
@@ -221,8 +231,8 @@ a = Analysis(
         'bitsandbytes',
         'sentencepiece',
         'sklearn', 'scikit-learn',
-        # Not needed for packaging
-        'pip',
+        # pip 不再排除——内嵌优先策略下 agent 经 --pyrun -m pip 自助装包
+        # （pip_install 工具 → 用户扩展库 pylibs），是运行链路的关键依赖
         # doctest 不能排除——pygetwindow（前台窗口标题，computer_control 截图
         # 的「当前前台窗口」标注依赖它）的依赖链 import 它，排除后打包版
         # 标注恒为「未知」（生产实证）
