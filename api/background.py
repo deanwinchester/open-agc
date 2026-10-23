@@ -416,7 +416,9 @@ def _run_background_task(task_id: int, user_query: str, context_messages: list =
 
         # Push final result to clients (skip heartbeat tasks entirely)
         if not _is_heartbeat and response:
-            from api.task_core import save_message as _bg_save_msg
+            from api.task_core import save_message as _bg_save_msg, \
+                display_safe_llm_response as _bg_display_safe
+            response = _bg_display_safe(response)
             try:
                 _bg_save_msg("agent", response, bg_session_id, task_id=task_id)
             except Exception as _bg_save_e:
@@ -1343,6 +1345,38 @@ def _guardian_resume_task(task_id: int) -> None:
             if e.get("event") == "tool_start":
                 add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", ""), session_id=_hb_session, sub_task=e.get("sub_task"), thinking_content=_hb_thinking["content"], full_args=e.get("tool_args"))
                 _hb_thinking["content"] = None  # 思考只随其后首个工具步骤落库一次（防重复显示）
+            # tool_done 回写执行结果：guardian 恢复路径此前只记 tool_start，
+            # 步骤永远没结果——前端「查看详情」放大镜无内容可显示（生产实证
+            # 恢复任务的步骤大片点不开）。逻辑与 _run_background_task 的
+            # tool_done 处理同口径（call_id 精确匹配，step 号兜底）。
+            if e.get("event") == "tool_done":
+                try:
+                    _dn_conn = db_connect()
+                    _dn_cur = _dn_conn.cursor()
+                    _dn_tcid = e.get("tool_call_id")
+                    if _dn_tcid:
+                        _dn_cur.execute(
+                            "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND tool_call_id=?",
+                            (e.get("result_preview", ""), e.get("full_result", e.get("result_preview", "")),
+                             1 if e.get("success") else 0, task_id, _dn_tcid))
+                    if not _dn_tcid or _dn_cur.rowcount == 0:
+                        _dn_cur.execute(
+                            "UPDATE task_steps SET result_preview=?, full_result=?, success=? WHERE task_id=? AND step_number=? AND (result_preview IS NULL OR result_preview='')",
+                            (e.get("result_preview", ""), e.get("full_result", e.get("result_preview", "")),
+                             1 if e.get("success") else 0, task_id, e.get("step", 0)))
+                    _dn_conn.commit()
+                    _dn_conn.close()
+                except Exception:
+                    pass
+                # 产物登记同 _run_background_task 口径（写文件类工具成功时合并）
+                if e.get("generated_files"):
+                    try:
+                        from api.task_core import merge_generated_files as _mgf
+                        _mgf(task_id, e["generated_files"],
+                             tool_call_id=e.get("tool_call_id"),
+                             step_number=e.get("step", 0))
+                    except Exception:
+                        pass
             # Persist sandbox approvals so they survive agent recreation
             if e.get("event") == "sandbox_approved":
                 _path = e.get("path", "")
@@ -1396,7 +1430,9 @@ def _guardian_resume_task(task_id: int) -> None:
 
         # Broadcast completion to the session's WebSocket clients
         if resp:
-            from api.task_core import save_message as _gd_save
+            from api.task_core import save_message as _gd_save, \
+                display_safe_llm_response as _gd_display_safe
+            resp = _gd_display_safe(resp)
             try:
                 _gd_save("agent", resp, _hb_session, task_id=task_id)
             except Exception as _gd_save_e:

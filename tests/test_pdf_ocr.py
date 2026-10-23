@@ -178,6 +178,85 @@ def test_remote_timeout_fallback_local(local_env, tmp_path, monkeypatch):
     assert local_env.calls == 1
 
 
+# ── /v1（vLLM OpenAI 兼容端点）形态 ─────────────────────────────────────
+
+class _VllmResp:
+    """chat/completions 响应替身。"""
+
+    def __init__(self, text="vLLM 识别结果"):
+        self._text = text
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"choices": [{"message": {"content": self._text}}]}
+
+
+def test_remote_vllm_chat_completions(local_env, tmp_path, monkeypatch):
+    """/v1 结尾的 ocr_remote_url 走 chat/completions，请求体结构正确。"""
+    import api.config as api_config
+    monkeypatch.setattr(api_config, "load_config", lambda: {})
+    monkeypatch.setattr(pdf_ocr, "_remote_url", lambda: "http://gpu:8004/v1")
+    calls = []
+
+    def _post(url, json=None, headers=None, timeout=None):
+        calls.append({"url": url, "json": json,
+                      "headers": headers, "timeout": timeout})
+        return _VllmResp()
+
+    monkeypatch.setattr(pdf_ocr.requests, "post", _post)
+    result = pdf_ocr.ocr_pdf(_write_png(tmp_path))
+    assert result["engine"] == "remote-vllm"
+    assert result["text"] == "vLLM 识别结果"
+    assert local_env.calls == 0  # 不经过本地引擎
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["url"] == "http://gpu:8004/v1/chat/completions"
+    assert call["timeout"] == pdf_ocr._REMOTE_TIMEOUT_VLLM
+    assert not (call["headers"] or {}).get("Authorization")  # 未配 key 不带头
+    body = call["json"]
+    assert body["model"] == "Unlimited-OCR"  # ocr_remote_model 默认值
+    content = body["messages"][0]["content"]
+    assert [c["type"] for c in content] == ["image_url", "text"]
+    assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert "识别" in content[1]["text"]
+
+
+def test_remote_vllm_model_override_and_key(local_env, tmp_path, monkeypatch):
+    """ocr_remote_model 覆盖默认值；ocr_remote_key 非空时带 Bearer 头。"""
+    import api.config as api_config
+    monkeypatch.setattr(api_config, "load_config", lambda: {
+        "ocr_remote_model": "MyOCR",
+        "ocr_remote_key": "secret-key",
+    })
+    monkeypatch.setattr(pdf_ocr, "_remote_url", lambda: "http://gpu:8004/v1")
+    calls = []
+
+    def _post(url, json=None, headers=None, timeout=None):
+        calls.append({"json": json, "headers": headers})
+        return _VllmResp()
+
+    monkeypatch.setattr(pdf_ocr.requests, "post", _post)
+    pdf_ocr.ocr_pdf(_write_png(tmp_path))
+    assert calls[0]["json"]["model"] == "MyOCR"
+    assert calls[0]["headers"]["Authorization"] == "Bearer secret-key"
+
+
+def test_remote_vllm_failure_fallback_local(local_env, tmp_path, monkeypatch):
+    """vLLM 端点报错 → 降级本地 rapidocr，engine=local。"""
+    monkeypatch.setattr(pdf_ocr, "_remote_url", lambda: "http://gpu:8004/v1")
+
+    def _boom(*a, **k):
+        raise pdf_ocr.requests.exceptions.ConnectionError("conn refused")
+
+    monkeypatch.setattr(pdf_ocr.requests, "post", _boom)
+    result = pdf_ocr.ocr_pdf(_write_png(tmp_path))
+    assert result["engine"] == "local"
+    assert result["text"] == "第一行左 右\n第二行"
+    assert local_env.calls == 1
+
+
 # ── api/routes/routes_ocr.py ────────────────────────────────────────────
 
 def _api_client(tmp_path, monkeypatch):

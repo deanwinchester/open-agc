@@ -192,8 +192,8 @@ async def get_task_generated_files(task_id: int):
             # tmp/ 分区（中间产物）不附着；沙箱外绝对路径（用户指定目录）保留
             if _under(root_real, real):
                 rel = _os.path.relpath(real, root_real).replace("\\", "/")
-                if rel.split("/")[0] == "tmp":
-                    continue
+                if rel.split("/")[0] in ("tmp", ".checkpoints"):
+                    continue  # .checkpoints 是断点续跑内部状态，非交付物
             if not _os.path.isfile(real):
                 continue  # 远端服务器产物/已删除：不附着
             try:

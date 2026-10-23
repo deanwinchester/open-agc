@@ -6,9 +6,15 @@ tools/screen_ocr.py 的 ocr_anchors() 是截图锚点用途（按置信度截断
 丢阅读顺序），不能复用做全文 OCR——本模块按阅读顺序（box 的 y 再 x）拼行。
 
 双后端：
-- 远程：config.json 配 ``ocr_remote_url``（如 http://192.168.148.200:8377，
-  部署见 scripts/ocr_server/）时，每页渲染图 POST 到 ``{url}/ocr``
-  （请求 {"image_b64", "page"}，响应 {"text"}，超时 120s）；
+- 远程：config.json 配 ``ocr_remote_url`` 时启用，按 URL 形态分两种契约：
+  - 以 ``/v1`` 结尾（如 http://192.168.148.200:8004/v1）：OpenAI 兼容
+    视觉端点（vLLM 直接部署 Unlimited-OCR 的场景），走
+    ``POST {url}/chat/completions``，模型取 ``ocr_remote_model``
+    （默认 "Unlimited-OCR"），鉴权头取 ``ocr_remote_key``（空则不带），
+    超时 180s（生产实证：vLLM 单页大图推理明显慢于薄服务）；
+  - 其它（如 http://192.168.148.200:8377）：自建薄服务（部署见
+    scripts/ocr_server/），每页渲染图 POST 到 ``{url}/ocr``
+    （请求 {"image_b64", "page"}，响应 {"text"}，超时 120s）；
 - 本地：远程未配置或调用失败时降级到 rapidocr 单例（复用
   screen_ocr._get_engine，use_cls=False）。rapidocr 无线程安全保证且
   CPU 密集，模块级 Semaphore(1) 串行化推理。
@@ -29,7 +35,8 @@ import requests
 _DEFAULT_MAX_PAGES = 10
 _MAX_PAGES_HARD = 50      # max_pages 硬顶，超出截断
 _PDF_DPI = 170            # 渲染分辨率：清晰度和 CPU OCR 耗时的折中
-_REMOTE_TIMEOUT = 120     # 远程 OCR 单页超时（秒）
+_REMOTE_TIMEOUT = 120     # 远程 OCR 单页超时（秒，自建薄服务）
+_REMOTE_TIMEOUT_VLLM = 180  # vLLM OpenAI 兼容端点超时（秒，大图推理更慢）
 
 _IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif", ".tif", ".tiff"}
 
@@ -66,6 +73,17 @@ def _remote_url() -> str:
     return str(cfg.get("ocr_remote_url") or "").strip().rstrip("/")
 
 
+def _remote_vllm_model_key():
+    """config.json 的 (ocr_remote_model, ocr_remote_key)，vLLM 形态用。"""
+    try:
+        from api.config import load_config
+        cfg = load_config() or {}
+    except Exception:
+        cfg = {}
+    return (str(cfg.get("ocr_remote_model") or "Unlimited-OCR").strip(),
+            str(cfg.get("ocr_remote_key") or "").strip())
+
+
 def _cache_dir() -> str:
     from core.paths import get_data_path
     d = get_data_path("ocr_cache")
@@ -89,7 +107,7 @@ def _cache_path(path: str, max_pages: int) -> str:
 
 
 def _ocr_remote(img_bytes: bytes, page: int, url: str) -> str:
-    """调远程 GPU OCR 服务，失败抛异常（调用方降级本地）。"""
+    """调远程 GPU OCR 薄服务（POST {url}/ocr），失败抛异常（调用方降级本地）。"""
     resp = requests.post(
         f"{url}/ocr",
         json={"image_b64": base64.b64encode(img_bytes).decode("ascii"),
@@ -98,6 +116,33 @@ def _ocr_remote(img_bytes: bytes, page: int, url: str) -> str:
     )
     resp.raise_for_status()
     return str(resp.json().get("text") or "")
+
+
+def _ocr_remote_vllm(img_bytes: bytes, url: str) -> str:
+    """调 OpenAI 兼容视觉端点（vLLM 直接部署，如 http://host:8004/v1），
+    失败抛异常（调用方降级本地）。图片以 data:image/png;base64 内联。"""
+    model, key = _remote_vllm_model_key()
+    headers = {}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    resp = requests.post(
+        f"{url}/chat/completions",
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url":
+                    "data:image/png;base64,"
+                    + base64.b64encode(img_bytes).decode("ascii")}},
+                {"type": "text", "text":
+                    "识别这张扫描件中的全部文字，按阅读顺序输出原文，"
+                    "不要添加任何解说。"},
+            ]}],
+        },
+        headers=headers,
+        timeout=_REMOTE_TIMEOUT_VLLM,
+    )
+    resp.raise_for_status()
+    return str(resp.json()["choices"][0]["message"]["content"] or "")
 
 
 def _boxes_to_text(result) -> str:
@@ -155,6 +200,10 @@ def _ocr_page(img_bytes: bytes, page: int, remote_url: str):
     """单页 OCR：远程优先、失败降级本地。返回 (text, engine)。"""
     if remote_url:
         try:
+            # /v1 结尾 = vLLM 的 OpenAI 兼容端点（生产实证：
+            # Unlimited-OCR 已用 vLLM 部署在 192.168.148.200:8004/v1）
+            if remote_url.endswith("/v1"):
+                return _ocr_remote_vllm(img_bytes, remote_url), "remote-vllm"
             return _ocr_remote(img_bytes, page, remote_url), "remote"
         except Exception as e:
             print(f"[PdfOCR] 远程 OCR 失败（第 {page} 页），降级本地: {e}")
@@ -184,8 +233,8 @@ def ocr_pdf(path: str, max_pages: int = _DEFAULT_MAX_PAGES) -> dict:
     """对 PDF / 图片文件做全文 OCR。
 
     返回 {text, pages, engine, truncated, cached}；失败返回带 error 字段的
-    dict（不抛异常，供工具层直接透传）。engine ∈ remote / local /
-    remote+local（部分页降级）。max_pages 硬顶 50，超出截断。
+    dict（不抛异常，供工具层直接透传）。engine ∈ remote-vllm / remote /
+    local / 两两组合（部分页降级）。max_pages 硬顶 50，超出截断。
     """
     result = {"text": "", "pages": 0, "engine": "", "truncated": False,
               "cached": False}

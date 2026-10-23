@@ -67,3 +67,24 @@ GPU 服务；服务不可达时自动降级本机 rapidocr（慢，但可用）�
 
 `batch_ocr_dams.py` 是批量 OCR 报纸 PDF 并回写 DAMS historypdf 库的骨架
 脚本（默认 dry-run），用法见脚本内 docstring。
+
+## vLLM 直接部署（备选）
+
+如果 GPU 机器上直接用 vLLM 起 OpenAI 兼容视觉端点，就不必跑本目录的
+`ocr_service.py` 薄封装：
+
+```bash
+vllm serve /path/to/Unlimited-OCR --port 8004 --max-model-len 8192
+```
+
+open-agc 端 `data/config.json` 把 `ocr_remote_url` 配成以 `/v1` 结尾的
+端点即可（会按 OpenAI chat/completions 契约调用，模型名取
+`ocr_remote_model`，默认 "Unlimited-OCR"）：
+
+```json
+"ocr_remote_url": "http://192.168.148.200:8004/v1",
+"ocr_remote_model": "Unlimited-OCR"
+```
+
+生产实证：zxs 产品线即按此方式部署在 192.168.148.200:8004。两种形态的
+降级逻辑相同——端点不可达时自动回落本机 rapidocr。
