@@ -444,9 +444,35 @@ def main():
     # [exe, --pyrun, script] 调用，这里 runpy 执行目标脚本后退出，不进 App。
     if len(sys.argv) >= 3 and sys.argv[1] == "--pyrun":
         import runpy
+        # -m <module>：模块通道（pip 等）——打包环境把嵌入解释器当通用
+        # Python 用（agent 自助装包：exe --pyrun -m pip install ...）
+        if sys.argv[2] == "-m" and len(sys.argv) >= 4:
+            module = sys.argv[3]
+            sys.argv = [module] + sys.argv[4:]
+            try:
+                runpy.run_module(module, run_name="__main__", alter_sys=True)
+            except SystemExit:
+                raise
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            return
         target = sys.argv[2]
         sys.argv = [target] + sys.argv[3:]
-        runpy.run_path(target, run_name="__main__")
+        try:
+            runpy.run_path(target, run_name="__main__")
+        except SystemExit:
+            raise  # 脚本主动退出：原样透传退出码
+        except BaseException:
+            # agent 脚本的未处理异常（缺包/语法/运行时错误）必须就地转为
+            # stderr 输出 + 非零退出码——父进程（execute_python）把它当工具
+            # 结果展示给模型。绝不能让异常逃出 main：PyInstaller 会弹
+            # 「Failed to execute script」致命对话框（生产实证：agent 写
+            #  import openpyxl 直接炸掉整个 App 并弹窗骚扰用户）
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
         return
 
     # 单实例：已有实例在跑就直接退出，不再开新窗口
