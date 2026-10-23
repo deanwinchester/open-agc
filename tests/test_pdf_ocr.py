@@ -218,9 +218,12 @@ def test_remote_vllm_chat_completions(local_env, tmp_path, monkeypatch):
     body = call["json"]
     assert body["model"] == "Unlimited-OCR"  # ocr_remote_model 默认值
     content = body["messages"][0]["content"]
-    assert [c["type"] for c in content] == ["image_url", "text"]
-    assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")
-    assert "识别" in content[1]["text"]
+    # 先文本（模型原生 document parsing 指令，无 <image> 字面量——
+    # chat_template 自动补占位，双占位会退化，A/B 实证）后图片
+    assert [c["type"] for c in content] == ["text", "image_url"]
+    assert content[0]["text"] == "document parsing."
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert body.get("temperature") == 0 and body.get("max_tokens") == 4096
 
 
 def test_remote_vllm_model_override_and_key(local_env, tmp_path, monkeypatch):

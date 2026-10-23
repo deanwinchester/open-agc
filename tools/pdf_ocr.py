@@ -129,13 +129,17 @@ def _ocr_remote_vllm(img_bytes: bytes, url: str) -> str:
         f"{url}/chat/completions",
         json={
             "model": model,
+            # 采样参数显式给零温度+封顶（默认 temperature=1.0 在 OCR 上会产生
+            # 幻觉/退化）；提示词用模型原生 document parsing 指令，且文本里
+            # 不带 <image> 字面量——chat_template 已为图像项插入占位符，再写
+            # 就是双占位符，A/B 实证输出整页重复退化
+            "temperature": 0,
+            "max_tokens": 4096,
             "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "document parsing."},
                 {"type": "image_url", "image_url": {"url":
                     "data:image/png;base64,"
                     + base64.b64encode(img_bytes).decode("ascii")}},
-                {"type": "text", "text":
-                    "识别这张扫描件中的全部文字，按阅读顺序输出原文，"
-                    "不要添加任何解说。"},
             ]}],
         },
         headers=headers,
