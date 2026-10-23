@@ -22,6 +22,16 @@ class TestGeneratedFilesForTool:
         assert _generated_files_for_tool("write_file", {"path": "tmp/一次性.py"}) == []
         assert _generated_files_for_tool("edit_file", {"path": "workspace/tmp/x.py"}) == []
 
+    def test_checkpoint_path_excluded(self):
+        """断点检查点是内部机制文件，不作交付物附着（生产实证 #652：
+        会话里挂出 task_652.json chip）。"""
+        from agent.agent import _generated_files_for_tool
+        assert _generated_files_for_tool(
+            "write_file", {"path": ".checkpoints/task_652.json"}) == []
+        assert _generated_files_for_tool(
+            "write_file",
+            {"path": "D:/x/workspace/.checkpoints/task_652.json"}) == []
+
     def test_apply_patch_multiple(self):
         from agent.agent import _generated_files_for_tool
         patches = [{"path": "outputs/a.md", "edits": [{"old_string": "a", "new_string": "b"}]},

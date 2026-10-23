@@ -488,3 +488,72 @@ class TestLlmErrorCompletion:
         assert result == 'failed'
         st = _task_state(tmp_db, tid)
         assert st["status"] == "failed" and st["resume_count"] == 4
+
+    def test_raw_llm_failure_text_marks_failed(self, tmp_db):
+        """兜底错误文本 "Error: LLM call failed:" 形态同样判失败——生产实证
+        #652：恢复轮以此形态返回，只认 [LLM_ERROR] 哨兵会漏判落进 Normal
+        completion，失败任务被误标 completed（重试按钮随之消失）。"""
+        from api.task_core import handle_task_completion
+        tid = _insert_task(tmp_db, status="running")
+        result = handle_task_completion(
+            tid,
+            "Error: LLM call failed: BadRequestError: litellm.BadRequestError: "
+            "OpenAIException - Invalid \\uXXXX escape: line 1 column 197",
+            [])
+        assert result == 'failed'
+        st = _task_state(tmp_db, tid)
+        assert st["status"] == "failed"
+        assert st["interruption_reason"] == "error"
+
+
+# ---------- 内部技术便签不得污染会话 ----------
+
+class TestInternalLlmNoteFilter:
+    """agent.py 失败轮写入工作上下文的 "Error: LLM call failed:" 便签是给
+    模型看的（下轮成功即清出上下文），落会话库/上屏即污染（生产实证 #652
+    聊天里裸 BadRequestError 全文气泡）。"""
+
+    def test_display_safe_converts_note(self):
+        from api.task_core import display_safe_llm_response
+        assert display_safe_llm_response(
+            "Error: LLM call failed: BadRequestError: x"
+        ) == "[LLM_ERROR] 模型服务调用失败。点击「重试」继续。"
+        # 其它响应原样
+        assert display_safe_llm_response("正常回复") == "正常回复"
+        assert display_safe_llm_response(
+            "[LLM_ERROR] 模型服务调用失败。点击「重试」继续。"
+        ) == "[LLM_ERROR] 模型服务调用失败。点击「重试」继续。"
+
+    def test_save_message_skips_note(self, tmp_db):
+        from api.task_core import save_message
+        mid = save_message(
+            "agent", "Error: LLM call failed: BadRequestError: x",
+            session_id=1, task_id=1)
+        assert mid is None
+        conn = tmp_db.db_connect()
+        n = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE content LIKE 'Error: LLM call failed:%'"
+        ).fetchone()[0]
+        conn.close()
+        assert n == 0
+
+    def test_save_message_keeps_normal(self, tmp_db):
+        from api.task_core import save_message
+        mid = save_message("agent", "正常的任务结果", session_id=1, task_id=1)
+        assert mid is not None
+
+    def test_claim_resume_clears_error_bubbles(self, tmp_db):
+        """恢复认领成功即清除该任务的 [LLM_ERROR]/内部便签气泡（生产实证：
+        重试后旧错误气泡持续挂会话里污染视觉）；认领失败不清。"""
+        from api.task_core import claim_task_for_resume, save_message
+        tid = _insert_task(tmp_db, status="failed")
+        save_message("agent", "[LLM_ERROR] 模型服务调用失败。点击「重试」继续。",
+                     session_id=1, task_id=tid)
+        save_message("agent", "正常的任务结果", session_id=1, task_id=tid)
+        assert claim_task_for_resume(tid, ("failed",)) is True
+        conn = tmp_db.db_connect()
+        rows = conn.execute(
+            "SELECT content FROM messages WHERE task_id=?", (tid,)).fetchall()
+        conn.close()
+        contents = [r[0] for r in rows]
+        assert contents == ["正常的任务结果"]

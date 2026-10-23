@@ -52,6 +52,7 @@ from tools.system_config import ConfigureSystemTool
 from tools.plugin_dev import DevelopPluginTool
 from tools.install_skill import InstallSkillTool
 from tools.compact_context import CompactContextTool
+from tools.drop_context import DropContextTool
 from tools.subagent_dispatch import DispatchSubagentTool
 from tools.dispatch_worker import DispatchWorkerTool
 from tools.message_worker import MessageWorkerTool
@@ -143,12 +144,14 @@ def _generated_files_for_tool(function_name: str, function_args: dict) -> list:
     产物 chips 走此记录机制而非从回复文本正则提取（用户拍板）。
 
     tmp/ 一次性产物不记（最终产物才值得附着）；相对路径原样记录，
-    查询端按沙箱根解析。"""
+    查询端按沙箱根解析。`.checkpoints/` 机制文件不记（生产实证 #652：
+    agent 按约定写断点检查点被当成交付物，会话里挂出 task_652.json
+    的 chip——它是断点续跑机制的内部状态，不是用户产物）。"""
     try:
         args = function_args or {}
         if function_name in ("write_file", "edit_file"):
             p = str(args.get("path") or "").strip()
-            if p and not _is_tmp_path(p):
+            if p and not _is_tmp_path(p) and not _is_checkpoint_path(p):
                 return [{"path": p}]
         elif function_name == "apply_patch":
             patches = args.get("patches")
@@ -158,7 +161,7 @@ def _generated_files_for_tool(function_name: str, function_args: dict) -> list:
                 out = []
                 for b in patches:
                     p = str((b or {}).get("path") or "").strip()
-                    if p and not _is_tmp_path(p):
+                    if p and not _is_tmp_path(p) and not _is_checkpoint_path(p):
                         out.append({"path": p})
                 return out
     except Exception:
@@ -170,6 +173,12 @@ def _is_tmp_path(path: str) -> bool:
     """路径是否落在沙箱 tmp/ 分区（中间产物，不作为交付物附着）。"""
     p = str(path or "").replace("\\", "/")
     return "/tmp/" in p or p.startswith("tmp/")
+
+
+def _is_checkpoint_path(path: str) -> bool:
+    """路径是否落在 .checkpoints/（断点续跑机制的内部状态文件，非用户交付物）。"""
+    p = str(path or "").replace("\\", "/")
+    return "/.checkpoints/" in p or p.startswith(".checkpoints/")
 
 
 def _snapshot_outputs(outputs_dir: str) -> dict:
@@ -604,6 +613,18 @@ class OpenAGCAgent:
             f"当用户要求\"重试\"\"再下载一遍\"\"再试一次\"等操作时，"
             f"必须先检查对话历史中的 tool_call 记录，复用已有的 URL、参数、文件路径等数据。"
             f"绝对不要重新浏览网页或重新搜索来获取已知信息。\n"
+            f"\n## 上下文主动管理\n"
+            f"工具结果超长时会按上限压缩/截断后写入上下文，完整内容自动存到沙箱 "
+            f"tool_results/ 文件（截断说明里附路径与总字符数）——可用 read_file 的 "
+            f"offset/limit 参数分段读取该文件，或用 execute_python 处理它。\n"
+            f"调用任何工具时都可附带可选参数 result_limit（整数，字符数，上限 200000）"
+            f"自定义本次工具结果写入上下文的长度：已知结果很大且确需更多原文时调大它，"
+            f"只需要点时调小它。\n"
+            f"当你确认某段历史工具结果已无价值（如大段无关检索结果、已用完的长日志）时，"
+            f"应主动调用 drop_context 工具（扩展工具，未启用时先 search_available_tools）"
+            f"丢弃它释放上下文：targets 填该结果的 tool_call_id 或「最近第N轮」，"
+            f"reason 填丢弃原因。最近 2 轮是当前工作现场，受保护不可丢弃；"
+            f"被丢弃处会保留占位符，原始内容可在 tool_results/ 或重新执行获得。\n"
             f"\n## 4. 失败处理\n"
             f"如果某个方法失败，先分析错误原因再换策略。不要盲目重试同样的操作，"
             f"也不要因为一次失败就完全放弃可行的方法。\n"
@@ -976,6 +997,7 @@ class OpenAGCAgent:
             "manage_task": TaskManagerTool(),
             "schedule_task": ScheduleTaskTool(),
             "compact_context": CompactContextTool(),
+            "drop_context": DropContextTool(),
             "dispatch_subagent": DispatchSubagentTool(),
             "request_secret": RequestSecretTool(),
             "customize_theme": CustomizeThemeTool(),
@@ -1008,6 +1030,7 @@ class OpenAGCAgent:
             "queue_download": "下载文件",
             "search_available_tools": "检索扩展工具",
             "compact_context": "清理上下文历史",
+            "drop_context": "丢弃上下文内容",
             "ask_user_question": "向用户提问",
             "user_interjection_response": "响应中断消息",
             "search_history": "检索会话历史",
@@ -2633,8 +2656,12 @@ class OpenAGCAgent:
         "execute_python": 12000,
     }
     _TOOL_RESULT_WRITE_CAP_DEFAULT = 4000
+    # result_limit（模型自选截断长度，见下）的封顶：防模型传一个巨型值把
+    # 上下文撑爆。
+    _TOOL_RESULT_LIMIT_MAX = 200000
 
-    def _truncate_tool_result_for_context(self, result: str, tool_name: str) -> str:
+    def _truncate_tool_result_for_context(self, result: str, tool_name: str,
+                                          result_limit=None) -> str:
         """工具结果写入 messages 前的上下文截断（写入侧防线）。
 
         超出按工具类型的 cap 时先走 compress_tool_result（JSON 结构化压缩 /
@@ -2643,12 +2670,23 @@ class OpenAGCAgent:
         附明确指引——避免模型把截断误判为工具故障、绕过 MCP 用 Python
         直接请求接口（生产实证）。
 
+        result_limit：模型在工具入参里透传的约定参数（不进各工具 schema），
+        由主循环取出后传到这里——生效时替代默认 cap，但仍封顶
+        _TOOL_RESULT_LIMIT_MAX 防爆炸。
+
         与进度事件里的 _full_cap 分工：本方法只裁写入 self.messages 的上下文
         内容；_full_cap 只裁 full_result（前端展示 / 落库 task_steps），不影响
         上下文。
         """
         cap = self._TOOL_RESULT_WRITE_CAPS.get(
             tool_name, self._TOOL_RESULT_WRITE_CAP_DEFAULT)
+        if result_limit is not None:
+            try:
+                rl = int(result_limit)
+                if rl > 0:
+                    cap = min(rl, self._TOOL_RESULT_LIMIT_MAX)
+            except (TypeError, ValueError):
+                pass  # 非法值静默回落默认 cap
         if len(result) <= cap:
             return result
         original_len = len(result)
@@ -2679,12 +2717,13 @@ class OpenAGCAgent:
                 f.write(result)
             rel = f"tool_results/{fname}"
             return (
-                f"\n[截断说明] 工具完整返回 {original_len} 字符，为节省上下文"
-                f"上方内容已压缩。数据在服务端是完整的，这不是工具故障——"
-                f"不要改用 execute_python/execute_shell 直接请求该接口重试。"
-                f"如需完整数据：用 execute_python 读取沙箱文件 `{rel}` 做统计/"
-                f"筛选/分页查看；或用更精确的查询参数（更小 size、分页、字段"
-                f"过滤、更窄关键词）重新调用本工具。"
+                f"\n[截断说明] 完整结果已存 `{rel}`（共 {original_len} 字符）。"
+                f"可用 read_file 分段读取（offset=起始行号、limit=行数，如 "
+                f"offset=1, limit=200），或用 execute_python 处理该文件做统计/"
+                f"筛选/分页查看。上方内容已压缩以节省上下文；数据在服务端是完整的，"
+                f"这不是工具故障——不要改用 execute_python/execute_shell 直接请求"
+                f"该接口重试。也可用更精确的查询参数（更小 size、分页、字段过滤、"
+                f"更窄关键词）重新调用本工具。"
             )
         except Exception:
             return ""
@@ -3623,7 +3662,13 @@ class OpenAGCAgent:
                         except json.JSONDecodeError:
                             print(f"[Agent] Failed to parse tool_call args for {function_name}: {str(raw_args)[:200]}")
                             continue
-                    
+
+                    # result_limit 是主循环层面的约定透传参数（模型自选本次工具
+                    # 结果写入上下文的截断长度，不进各工具 schema）——在主循环
+                    # 统一取出并剔除，避免透传给未声明 **kwargs 的工具签名导致
+                    # TypeError。
+                    _result_limit = function_args.pop("result_limit", None)
+
                     step_counter += 1
                     
                     # Create a short preview of args for the UI
@@ -3935,7 +3980,8 @@ class OpenAGCAgent:
                     # 与下方 _full_cap 的分工：这里裁的是写入 self.messages 的
                     # 上下文内容；_full_cap 只裁进度事件 full_result（前端展示/
                     # 落库 task_steps），不影响上下文。
-                    result_str = self._truncate_tool_result_for_context(result_str, function_name)
+                    result_str = self._truncate_tool_result_for_context(
+                        result_str, function_name, result_limit=_result_limit)
 
                     # Notify: tool done
                     if progress_callback:

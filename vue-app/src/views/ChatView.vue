@@ -723,6 +723,9 @@ function onResume(taskId) {
   if (running.value) { ElMessage.warning(t.agentBusy); return; }
   if (!ws.connected) { ElMessage.error(t.sendFailed); return; }
   llmErrorTasks.delete(taskId); // 任务进入恢复流程，摘掉「重试」按钮
+  // 同步摘掉该任务的 [LLM_ERROR] 气泡（后端在 resume CAS 认领时已删库，
+  // 这里做实时移除——恢复进行中，旧错误不再是事实）
+  items.value = items.value.filter((i) => !(i.kind === 'msg' && i.taskId === taskId && isLlmErrorContent(i.content)));
   // 先把卡片本地标记为运行中（服务端随后会推 task_status=resuming 的 history_steps）
   const card = items.value.find((i) => i.kind === 'progress' && i.taskId === taskId);
   if (card) {
@@ -761,6 +764,8 @@ async function onRetryFailedTask(taskId) {
       method: 'POST', headers: JSON_HEADERS, body: '{}',
     });
     llmErrorTasks.delete(taskId);
+    // 同 onResume：摘掉该任务的 [LLM_ERROR] 气泡（后端已删库，这里实时移除）
+    items.value = items.value.filter((i) => !(i.kind === 'msg' && i.taskId === taskId && isLlmErrorContent(i.content)));
     ElMessage.success(resp?.message || t.taskResumed);
   } catch (e) {
     ElMessage.error(`${t.taskResumeFailed}: ${e.message}`);

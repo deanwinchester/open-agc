@@ -293,6 +293,14 @@ def claim_task_for_resume(task_id: int, allowed_statuses: tuple) -> bool:
             f"WHERE id=? AND status IN ({placeholders})",
             (task_id, *allowed_statuses))
         claimed = cursor.rowcount == 1
+        if claimed:
+            # 认领成功即清除该任务的 [LLM_ERROR] 失败气泡——恢复进行中，
+            # 旧错误不再是事实（生产实证：重试后错误气泡持续挂会话里污染
+            # 视觉）。恢复若再失败，收官时会产出新的失败气泡。
+            conn.execute(
+                "DELETE FROM messages WHERE task_id=? AND role='agent' "
+                "AND (content LIKE '[LLM_ERROR]%' OR content LIKE ?)",
+                (task_id, INTERNAL_LLM_NOTE_PREFIX + "%"))
         conn.commit()
         conn.close()
         return claimed
@@ -526,6 +534,20 @@ def _load_session_context(session_id: int, limit: int = 50) -> list:
         return []
 
 
+# agent.py 失败轮写入工作上下文的技术便签前缀（给模型看的「上一轮调用失败」
+# 记录，下轮成功即清出上下文）——面向模型而非用户，不得原样落会话/上屏
+INTERNAL_LLM_NOTE_PREFIX = "Error: LLM call failed:"
+
+
+def display_safe_llm_response(response: str) -> str:
+    """上屏/落库前的响应净化：内部技术便签形态（INTERNAL_LLM_NOTE_PREFIX）
+    统一换成用户态 [LLM_ERROR] 文案（生产实证 #652：裸 BadRequestError 全文
+    气泡污染会话，用户看不懂也点不了重试）。其它响应原样返回。"""
+    if isinstance(response, str) and response.startswith(INTERNAL_LLM_NOTE_PREFIX):
+        return "[LLM_ERROR] 模型服务调用失败。点击「重试」继续。"
+    return response
+
+
 def _reap_terminal_processes(task_id: int, reason: str) -> None:
     """任务终态（failed/interrupted）收割其残留后台进程。
 
@@ -563,7 +585,10 @@ def handle_task_completion(task_id: int, response: str, agent_messages: list,
 
     is_max_iter = response.startswith("[MAX_ITERATIONS_REACHED]")
     is_backgrounded = response.startswith("[TASK_BACKGROUNDED]")
-    is_llm_error = response.startswith("[LLM_ERROR]")
+    # 两种失败形态都认：标准 [LLM_ERROR] 哨兵，与兜底错误文本（agent.py 失败
+    # 轮写入工作上下文的技术便签——生产实证 #652：恢复轮以此形态返回，只认
+    # 哨兵会漏判落进 Normal completion，任务被误标 completed，重试按钮消失）
+    is_llm_error = response.startswith(("[LLM_ERROR]", INTERNAL_LLM_NOTE_PREFIX))
     is_user_int = "interrupted by user" in response.lower()
     summary = response[:200]
 
@@ -795,6 +820,12 @@ def save_message(role: str, content: str, session_id: int = 1, task_id: int = No
     attachments: 附件相对路径列表（如 ["uploads/paste_x.png"]，沙箱相对），
     以 JSON 存入 messages.attachments——历史展示缩略图与后续轮次视觉上下文
     重建都靠它（此前粘贴截图只以 base64 过路，落库后彻底丢失）。"""
+    # 内部技术便签（agent 工作上下文里的失败记录）不是面向用户的消息，
+    # 落库即污染会话历史（生产实证 #652 聊天里裸 BadRequestError 气泡）
+    if role == "agent" and isinstance(content, str) \
+            and content.startswith(INTERNAL_LLM_NOTE_PREFIX):
+        print("[TaskCore] save_message: skipped internal LLM note")
+        return None
     try:
         att_json = json.dumps(attachments, ensure_ascii=False) if attachments else None
         conn = db_connect()
