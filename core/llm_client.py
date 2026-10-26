@@ -183,13 +183,30 @@ def _detect_cached_tokens(response) -> int:
 
 
 # ── Global logging toggle ──
-_model_logging_enabled = True
+_model_logging_enabled = False
+_model_logging_config_loaded = False
+
+
+def _load_model_logging_config():
+    global _model_logging_enabled, _model_logging_config_loaded
+    if _model_logging_config_loaded:
+        return
+    _model_logging_config_loaded = True
+    try:
+        from api.config import load_config
+        _model_logging_enabled = bool(load_config().get("model_logging_enabled", False))
+    except Exception:
+        _model_logging_enabled = False
+
 
 def set_model_logging(enabled: bool):
-    global _model_logging_enabled
-    _model_logging_enabled = enabled
+    global _model_logging_enabled, _model_logging_config_loaded
+    _model_logging_enabled = bool(enabled)
+    _model_logging_config_loaded = True
+
 
 def is_model_logging_enabled() -> bool:
+    _load_model_logging_config()
     return _model_logging_enabled
 
 
@@ -208,12 +225,15 @@ def _log_model_call(provider: str, model: str, prompt_tokens: int,
                      cached_tokens: int = 0,
                      session_id: int = None, task_id: int = None):
     """Insert a model call log entry. Full request/response saved to files."""
-    if not _model_logging_enabled:
+    if not is_model_logging_enabled():
         return
     try:
         from core.paths import get_data_path
+        from core.secrets import mask_secrets
         import os as _ml_os
         import time as _ml_time
+        request_data = mask_secrets(request_data)
+        response_data = mask_secrets(response_data)
         _log_dir = _ml_os.path.join(get_data_path("logs"), "model_calls")
         _ml_os.makedirs(_log_dir, exist_ok=True)
 
@@ -245,6 +265,12 @@ def _log_model_call(provider: str, model: str, prompt_tokens: int,
         with open(_resp_path, "w", encoding="utf-8") as _f:
             if response_data:
                 _f.write(response_data)
+        for _path in (_req_path, _resp_path):
+            try:
+                # POSIX: owner-only. Windows chmod cannot express ACLs; use 0600 best-effort.
+                _ml_os.chmod(_path, 0o600)
+            except OSError:
+                pass
 
         # Store file paths + summary in DB
         _init_model_logs_table()

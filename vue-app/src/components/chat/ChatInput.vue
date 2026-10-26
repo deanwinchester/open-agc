@@ -15,7 +15,7 @@ import { ref, computed, nextTick, onUnmounted } from 'vue';
 import { ElMessage } from 'element-plus';
 import { Picture, Paperclip, Microphone, Promotion } from '@element-plus/icons-vue';
 import zh from '../../i18n/zh';
-import { request } from '../../api/client';
+import { request, getServerAuthToken } from '../../api/client';
 import { personaText } from '../../stores/theme';
 import SecretConfirmModal from './SecretConfirmModal.vue';
 import { detectSecrets, describeHit, suggestName, buildOutTexts } from '../../utils/secretDetect';
@@ -266,6 +266,9 @@ function uploadFiles(files) {
     });
 
     xhr.open('POST', '/api/upload');
+    xhr.setRequestHeader('X-OpenAGC-Client', '1');
+    const serverToken = getServerAuthToken();
+    if (serverToken) xhr.setRequestHeader('Authorization', `Bearer ${serverToken}`);
     xhr.send(formData);
   }
 }
@@ -280,7 +283,7 @@ function removeAttachedFile(index) {
   const f = attachedFiles.value[index];
   attachedFiles.value.splice(index, 1);
   if (f) {
-    fetch(dlHref(f.name), { method: 'DELETE' }).catch(() => {
+    request(dlHref(f.name), { method: 'DELETE' }).catch(() => {
       ElMessage.warning(t.removeServerFailedPrefix + f.name + t.removeServerFailedSuffix);
     });
   }

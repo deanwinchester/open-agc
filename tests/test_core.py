@@ -178,6 +178,9 @@ class TestLLMClient:
             "llamacpp_ctx_size": 32768,
         }
         monkeypatch.setattr("core.llm_client.load_config", lambda: test_config)
+        # 真实 api.server 在其他用例中导入时会加载本机 .env；配置中的 key
+        # 必须覆盖既有环境变量，避免测试依赖开发机状态。
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         from core.llm_client import LLMClient
         client = LLMClient()
         assert client.default_model == "deepseek/deepseek-chat"

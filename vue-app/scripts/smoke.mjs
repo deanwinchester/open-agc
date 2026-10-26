@@ -4,8 +4,8 @@
 // 运行：node vue-app/scripts/smoke.mjs
 
 import assert from 'node:assert/strict';
-import { createApiClient, lookupTtl, ApiError, setUnauthorizedHandler, notifyUnauthorized } from '../src/api/client.js';
-import { reconnectDelay, createDispatcher, isAuthCloseCode, createChunkReassembler } from '../src/stores/ws.js';
+import { createApiClient, lookupTtl, ApiError, setUnauthorizedHandler, notifyUnauthorized, getServerAuthToken, setServerAuthToken } from '../src/api/client.js';
+import { reconnectDelay, createDispatcher, isAuthCloseCode, createChunkReassembler, buildWebSocketUrl } from '../src/stores/ws.js';
 
 let passed = 0;
 function ok(name) {
@@ -207,8 +207,59 @@ ok('lookupTtl 前缀匹配');
   ok('401 全局钩子（setUnauthorizedHandler/notifyUnauthorized）');
 }
 
+// 写操作统一带 CSRF 自定义头，调用方显式 headers 不丢失。
+{
+  let seenOptions;
+  const fetchImpl = async (url, options) => {
+    seenOptions = options;
+    return jsonResponse({ ok: true });
+  };
+  const client = createApiClient({ fetchImpl });
+  await client.request('/api/write', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  });
+  assert.equal(seenOptions.headers['X-OpenAGC-Client'], '1');
+  assert.equal(seenOptions.headers['Content-Type'], 'application/json');
+  ok('写操作 X-OpenAGC-Client 头');
+}
+
+// LAN 登录响应保存 JWT，后续 HTTP 请求自动带 Bearer；本机登录不保存。
+{
+  setServerAuthToken(null);
+  const seen = [];
+  const fetchImpl = async (url, options) => {
+    seen.push({ url, options });
+    if (url === '/api/auth/server-login') {
+      return jsonResponse({ token: 'lan-jwt', layer: 'lan' });
+    }
+    return jsonResponse({ ok: true });
+  };
+  const client = createApiClient({ fetchImpl });
+  await client.request('/api/auth/server-login', { method: 'POST' });
+  assert.equal(getServerAuthToken(), 'lan-jwt');
+  await client.request('/api/ping');
+  assert.equal(seen[1].options.headers.Authorization, 'Bearer lan-jwt');
+  setServerAuthToken(null);
+  ok('LAN JWT 保存与 Authorization 注入');
+}
+
 // ---- stores/ws.js（纯逻辑部分） ----
 console.log('stores/ws.js');
+
+assert.equal(
+  buildWebSocketUrl({ protocol: 'http:', host: 'localhost:8765' }, 7, 'a/b token'),
+  'ws://localhost:8765/ws?session_id=7&token=a%2Fb%20token'
+);
+assert.equal(
+  buildWebSocketUrl({ protocol: 'https:', host: '127.0.0.1' }, 1, 'jwt'),
+  'wss://127.0.0.1/ws?session_id=1&token=jwt'
+);
+assert.equal(
+  buildWebSocketUrl({ protocol: 'http:', host: '192.168.1.2' }, 1, ''),
+  'ws://192.168.1.2/ws?session_id=1',
+  '密码 LAN 依赖 Cookie，不请求或拼接 WS token'
+);
+ok('buildWebSocketUrl 会话令牌编码');
 
 // 退避表：1s 起步 ×2 递增，30s 封顶（对齐旧 app.js）
 assert.equal(reconnectDelay(0), 1000);

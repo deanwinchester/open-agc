@@ -13,20 +13,20 @@ router = APIRouter()
 
 @router.get("/api/model-logs/status")
 async def get_model_logging_status():
-    from api.config import load_config
-    cfg = load_config()
-    enabled = cfg.get("model_logging_enabled", False)
-    return {"enabled": enabled}
+    from core.llm_client import is_model_logging_enabled
+    return {"enabled": is_model_logging_enabled()}
 
 
 @router.post("/api/model-logs/toggle")
 async def toggle_model_logging(body: dict = {}):
     from api.config import load_config, save_config
+    from core.llm_client import set_model_logging
     cfg = load_config()
     enabled = body.get("enabled", None)
     if enabled is not None:
         cfg["model_logging_enabled"] = enabled
         save_config(cfg)
+    set_model_logging(cfg.get("model_logging_enabled", False))
     return {"enabled": cfg.get("model_logging_enabled", False)}
 
 

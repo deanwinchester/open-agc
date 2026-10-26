@@ -37,8 +37,20 @@ class InstallSkillTool(BaseTool):
 
     def execute(self, url: str, **kwargs) -> str:
         from core.skill_installer import install_skill_from_url, SkillInstallError
+        from core.system_guard import approval_operation, require_one_shot_approval
+        from tools.base import SandboxBlocked
+
+        def approve_scripts(scripts):
+            payload = {"action": "install_skill", "url": url, "scripts": scripts}
+            require_one_shot_approval(
+                approval_operation(self.name, payload), kwargs.get("_session_id"),
+                tool_name=self.name, category="plugin_install",
+                description="技能包包含 scripts/ 可执行文件，安装后可能被调用执行，仅本次授权")
+
         try:
-            result = install_skill_from_url(url)
+            result = install_skill_from_url(url, approval_callback=approve_scripts)
+        except SandboxBlocked:
+            raise
         except SkillInstallError as e:
             return f"技能安装失败：{e}"
         except Exception as e:

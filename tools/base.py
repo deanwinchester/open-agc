@@ -47,20 +47,14 @@ class BaseTool(BaseModel):
             return
 
         import json
+        from api.deliverables_registry import resolve_under_root
         if sandbox_dir is None:
             from core.paths import resolve_sandbox_dir
             sandbox_dir = resolve_sandbox_dir(config.get("sandbox_dir"))
-        # Normalize case for cross-platform path comparison (critical on Windows:
-        # "D:\\AndroidSDK" and "d:\\androidsdk" should match)
-        abs_path = os.path.normcase(os.path.abspath(path))
-        norm_sandbox = os.path.normcase(sandbox_dir)
 
-        # Allow paths directly under sandbox_dir
-        try:
-            if os.path.commonpath([norm_sandbox, abs_path]) == norm_sandbox:
-                return
-        except ValueError:
-            pass
+        # Allow paths directly under sandbox_dir, resolving links before checking.
+        if resolve_under_root(sandbox_dir, path) is not None:
+            return
 
         # Deny paths in the explicit denied_paths list
         denied_paths = config.get("denied_paths", []) if config else []
@@ -70,15 +64,7 @@ class BaseTool(BaseModel):
             except Exception:
                 denied_paths = []
         for dp in denied_paths:
-            if not dp:
-                continue
-            denied_abs = os.path.normcase(os.path.abspath(os.path.expandvars(dp)))
-            try:
-                if os.path.commonpath([denied_abs, abs_path]) == denied_abs:
-                    raise SandboxBlocked(path, sandbox_dir, tool_name)
-            except ValueError:
-                pass
-            if abs_path == denied_abs or abs_path.startswith(denied_abs + os.sep):
+            if dp and resolve_under_root(os.path.expandvars(dp), path) is not None:
                 raise SandboxBlocked(path, sandbox_dir, tool_name)
 
         # Allow paths in the explicit allowed_paths list
@@ -89,15 +75,7 @@ class BaseTool(BaseModel):
             except Exception:
                 allowed_paths = []
         for ap in allowed_paths:
-            if not ap:
-                continue
-            allowed_abs = os.path.normcase(os.path.abspath(os.path.expandvars(ap)))
-            try:
-                if os.path.commonpath([allowed_abs, abs_path]) == allowed_abs:
-                    return
-            except ValueError:
-                pass
-            if abs_path == allowed_abs or abs_path.startswith(allowed_abs + os.sep):
+            if ap and resolve_under_root(os.path.expandvars(ap), path) is not None:
                 return
 
         # 应用自身技能目录（data/skills，沙箱外）默认放行：agent 读技能结构/
@@ -105,8 +83,7 @@ class BaseTool(BaseModel):
         # 目录被拦弹授权框——目录是本应用数据区，放行无安全风险）
         try:
             from core.paths import get_skills_dir
-            skills_abs = os.path.normcase(os.path.abspath(get_skills_dir()))
-            if os.path.commonpath([skills_abs, abs_path]) == skills_abs:
+            if resolve_under_root(get_skills_dir(), path) is not None:
                 return
         except (ValueError, OSError):
             pass
@@ -116,13 +93,7 @@ class BaseTool(BaseModel):
         # Allow paths in the session whitelist (one-time approvals)
         if session_whitelist:
             for wp in session_whitelist:
-                wp_abs = os.path.normcase(os.path.abspath(os.path.expandvars(wp)))
-                try:
-                    if os.path.commonpath([wp_abs, abs_path]) == wp_abs:
-                        return
-                except ValueError:
-                    pass
-                if abs_path == wp_abs or abs_path.startswith(wp_abs + os.sep):
+                if resolve_under_root(os.path.expandvars(wp), path) is not None:
                     return
 
         # Not in sandbox, not in allowed_paths, not in whitelist → block

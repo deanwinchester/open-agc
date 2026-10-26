@@ -12,10 +12,19 @@ CI 的 release:promote job 在 81（制品服务器）上执行：
     AGC_RELEASE_BASE_URL 清单里资产 URL 的基址
         （默认 http://127.0.0.1:8080/release）
 """
+import hashlib
 import json
 import os
 import sys
 import time
+
+
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def main() -> int:
@@ -56,7 +65,10 @@ def main() -> int:
         "version": version,
         "released_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "base_url": f"{base_url}/v{version}/",
-        "assets": assets,
+        "assets": {
+            key: {"name": fname, "sha256": _sha256(os.path.join(release_dir, fname))}
+            for key, fname in assets.items()
+        },
     }
     out_path = os.path.join(root, "release", "version.json")
     with open(out_path, "w", encoding="utf-8") as f:

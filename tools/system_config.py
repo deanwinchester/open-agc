@@ -4,8 +4,9 @@ import os
 import sqlite3
 from typing import Any, Dict, Optional
 
-from tools.base import BaseTool
+from tools.base import BaseTool, SandboxBlocked
 from core.paths import get_data_path
+from core.secrets import mask_sensitive_data
 
 CONFIG_PATH = get_data_path("config.json")
 
@@ -37,16 +38,38 @@ def _mask_keys(api_keys: dict) -> dict:
     return masked
 
 
-_SENSITIVE_KEY_PARTS = ("password", "secret", "token")
-
-
-def _mask_sensitive(key: str, value):
-    """Mask values whose key name looks sensitive (password/secret/token), recursively for dicts."""
-    if any(part in str(key).lower() for part in _SENSITIVE_KEY_PARTS):
-        return "***"
+def _contains_base_url(value) -> bool:
     if isinstance(value, dict):
-        return {k: _mask_sensitive(k, v) for k, v in value.items()}
-    return value
+        return any(str(k).lower().replace("-", "_") == "base_url" or _contains_base_url(v)
+                   for k, v in value.items())
+    if isinstance(value, list):
+        return any(_contains_base_url(item) for item in value)
+    return False
+
+
+def _contains_stdio_server(value) -> bool:
+    if isinstance(value, dict):
+        return bool(value.get("command")) or any(
+            _contains_stdio_server(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_stdio_server(item) for item in value)
+    return False
+
+
+def _config_risk_category(key: str, value) -> str:
+    normalized = str(key).strip().lower().replace("-", "_")
+    if normalized == "sandbox_mode" and not value:
+        return "sandbox_off"
+    if normalized == "mcp_servers" and _contains_stdio_server(value):
+        return "mcp_add"
+    tokens = set(normalized.split("_"))
+    if (normalized in {"access_password", "access_control", "server_url"}
+            or tokens.intersection({"auth", "authentication", "authorization"})
+            or (normalized.startswith("update_")
+                and ("url" in tokens or "source" in tokens))
+            or _contains_base_url({normalized: value})):
+        return "config_risk"
+    return ""
 
 
 class ConfigureSystemTool(BaseTool):
@@ -144,7 +167,7 @@ class ConfigureSystemTool(BaseTool):
         for k, v in config.items():
             if k in skip:
                 continue
-            lines.append(f"{k}: {json.dumps(_mask_sensitive(k, v), ensure_ascii=False)}")
+            lines.append(f"{k}: {json.dumps(mask_sensitive_data(v, k), ensure_ascii=False)}")
         lines.append(f"\n配置文件路径: {CONFIG_PATH}")
         return "\n".join(lines)
 
@@ -154,6 +177,15 @@ class ConfigureSystemTool(BaseTool):
             parsed = json.loads(value)
         except json.JSONDecodeError:
             parsed = value
+        category = _config_risk_category(key, parsed)
+        if category:
+            from core.system_guard import approval_operation, require_one_shot_approval
+            payload = {"action": "update_setting", "key": key, "value": parsed}
+            require_one_shot_approval(
+                approval_operation(self.name, payload), session_id,
+                tool_name=self.name, category=category,
+                description=(f"修改高风险配置 {key} 可能关闭沙箱、改变访问认证、"
+                             "更新来源或模型网关，仅本次授权"))
         config[key] = parsed
         _save_config(config)
 
@@ -182,7 +214,8 @@ class ConfigureSystemTool(BaseTool):
             except Exception as _esync_err:
                 print(f"[Config] Failed to sync email key to sessions table: {_esync_err}")
 
-        return f"已更新配置 {key} = {json.dumps(parsed, ensure_ascii=False)}"
+        masked = mask_sensitive_data(parsed, key)
+        return f"已更新配置 {key} = {json.dumps(masked, ensure_ascii=False)}"
 
     def _get_mcp_servers(self) -> str:
         config = _load_config()
@@ -380,11 +413,19 @@ class ConfigureSystemTool(BaseTool):
             elif action == "get_mcp_servers":
                 return self._get_mcp_servers()
             elif action == "add_mcp_server":
-                return self._add_mcp_server(
-                    kwargs.get("mcp_server_name", ""),
-                    kwargs.get("mcp_command", ""),
-                    kwargs.get("mcp_args", "[]"),
-                )
+                name = kwargs.get("mcp_server_name", "")
+                command = kwargs.get("mcp_command", "")
+                raw_args = kwargs.get("mcp_args", "[]")
+                parsed_args = json.loads(raw_args) if raw_args else []
+                env = kwargs.get("mcp_env")
+                from core.system_guard import approval_operation, require_one_shot_approval
+                payload = {"action": "add_mcp_server", "name": name,
+                           "command": command, "args": parsed_args, "env": env}
+                require_one_shot_approval(
+                    approval_operation(self.name, payload), kwargs.get("_session_id"),
+                    tool_name=self.name, category="mcp_add",
+                    description=f"添加或修改 stdio MCP 服务器 {name} 会启动本地命令，仅本次授权")
+                return self._add_mcp_server(name, command, raw_args)
             elif action == "remove_mcp_server":
                 return self._remove_mcp_server(kwargs.get("mcp_server_name", ""))
             elif action == "list_plugins":
@@ -419,5 +460,7 @@ class ConfigureSystemTool(BaseTool):
                 return self._delete_skill(kwargs.get("skill_filename", ""))
             else:
                 return f"未知操作: {action}"
+        except SandboxBlocked:
+            raise
         except Exception as e:
             return f"操作失败: {e}"
