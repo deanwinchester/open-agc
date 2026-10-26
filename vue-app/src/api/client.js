@@ -30,6 +30,23 @@ export function setUnauthorizedHandler(fn) {
   unauthorizedHandler = typeof fn === 'function' ? fn : null;
 }
 
+// 中央账号模式的 LAN 凭据属于当前标签页；本机免密流程不写它。
+const SERVER_TOKEN_STORAGE_KEY = 'open_agc_server_token';
+let serverAuthToken = null;
+try { serverAuthToken = sessionStorage.getItem(SERVER_TOKEN_STORAGE_KEY) || null; } catch { /* Node/桌面无存储 */ }
+
+export function getServerAuthToken() {
+  return serverAuthToken;
+}
+
+export function setServerAuthToken(token) {
+  serverAuthToken = typeof token === 'string' && token ? token : null;
+  try {
+    if (serverAuthToken) sessionStorage.setItem(SERVER_TOKEN_STORAGE_KEY, serverAuthToken);
+    else sessionStorage.removeItem(SERVER_TOKEN_STORAGE_KEY);
+  } catch { /* 内存态仍可用于当前页面 */ }
+}
+
 // 主动触发未认证通知：HTTP 401 之外，WebSocket 被访问控制关闭（4401/4403）也走这里。
 export function notifyUnauthorized(info) {
   if (unauthorizedHandler) {
@@ -58,9 +75,14 @@ export function createApiClient({ fetchImpl, ttlTable = TTL_TABLE, now = () => D
 
   // 基础请求：JSON 解析 + 错误规范化。写操作（POST/DELETE 等）走这里，不进缓存。
   async function request(url, options = {}) {
+    const method = String(options.method || 'GET').toUpperCase();
+    const headers = { ...(options.headers || {}) };
+    if (['POST', 'PUT', 'DELETE'].includes(method)) headers['X-OpenAGC-Client'] = '1';
+    if (serverAuthToken && !headers.Authorization) headers.Authorization = `Bearer ${serverAuthToken}`;
+    const requestOptions = { ...options, headers };
     let res;
     try {
-      res = await doFetch(url, options);
+      res = await doFetch(url, requestOptions);
     } catch (err) {
       throw new ApiError(`网络请求失败: ${err.message}`, { url });
     }
@@ -77,6 +99,11 @@ export function createApiClient({ fetchImpl, ttlTable = TTL_TABLE, now = () => D
       // 401（局域网未认证）通知全局钩子弹密码页；原 ApiError 照常抛出
       if (err.status === 401) notifyUnauthorized(err);
       throw err;
+    }
+    if (String(url).split('?')[0] === '/api/auth/server-login') {
+      setServerAuthToken(data && data.layer === 'lan' ? data.token : null);
+    } else if (String(url).split('?')[0] === '/api/auth/server-logout') {
+      setServerAuthToken(null);
     }
     return data;
   }

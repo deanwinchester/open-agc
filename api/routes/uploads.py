@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 
+from api.deliverables_registry import resolve_under_root
+
 
 router = APIRouter(prefix="", tags=["uploads"])
 
@@ -38,8 +40,8 @@ def _safe_path(filename: str) -> str:
     """Resolve and validate that the given file lives under uploads/."""
     uploads = _uploads_dir()
     safe_name = os.path.basename(filename)
-    full = os.path.abspath(os.path.join(uploads, safe_name))
-    if os.path.commonpath([uploads, full]) != uploads:
+    full = resolve_under_root(uploads, os.path.join(uploads, safe_name))
+    if full is None:
         raise HTTPException(status_code=403, detail="Forbidden directory traversal")
     return full
 

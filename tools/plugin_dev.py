@@ -491,8 +491,15 @@ export default function setup(ctx) {
         return "\n".join(lines)
 
     def execute(self, action: str, **kwargs) -> str:
+        name = kwargs.get("plugin_name", "").strip()
+        if action == "install":
+            from core.system_guard import approval_operation, require_one_shot_approval
+            payload = {"action": "install", "plugin_name": name}
+            require_one_shot_approval(
+                approval_operation(self.name, payload), kwargs.get("_session_id"),
+                tool_name=self.name, category="plugin_install",
+                description=f"安装插件 {name} 会加载并执行其中的 Python 代码，仅本次授权")
         try:
-            name = kwargs.get("plugin_name", "").strip()
             if action == "scaffold":
                 return self._scaffold(**kwargs)
             elif action == "install":

@@ -1,6 +1,6 @@
 // WebSocket 连接管理（Pinia store）。
 //
-// 通道：/ws?session_id=<id>（见 dev-docs/API契约.md 第 3 节）。
+// 通道：/ws?session_id=<id>&token=<进程 WS 令牌或 LAN 账号 JWT>。
 // 重连策略沿用旧 static/app.js：指数退避 1s 起步、每次 ×2、30s 封顶；
 // 网络恢复（navigator.onLine）时重置退避并立即重连；主动关闭（切会话/登出）不重连。
 //
@@ -13,7 +13,12 @@
 
 import { defineStore } from 'pinia';
 // 显式 .js 后缀：smoke.mjs 用 Node 原生 ESM 直接加载本文件，Node 不做扩展名补全
-import { notifyUnauthorized } from '../api/client.js';
+import { notifyUnauthorized, request, getServerAuthToken } from '../api/client.js';
+
+export function buildWebSocketUrl(location, sessionId, token) {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${location.host}/ws?session_id=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(token)}`;
+}
 
 // 退避间隔（毫秒）：第 attempt 次重连前的等待，1s * 2^attempt，上限 30s。纯函数，可测。
 export function reconnectDelay(attempt) {
@@ -103,6 +108,8 @@ export const useWsStore = defineStore('ws', {
         this._ws = null;
         this._reconnectTimer = null;
         this._intentionalClose = false;
+        this._connecting = false;
+        this._connectEpoch = 0;
         // 网络恢复：重置退避并立即重连（对齐旧 app.js 的 online 处理）。
         window.addEventListener('online', () => {
           if (!this.connected && !this._intentionalClose) {
@@ -114,17 +121,38 @@ export const useWsStore = defineStore('ws', {
       }
     },
 
-    connect(sessionId = this.sessionId) {
+    async connect(sessionId = this.sessionId) {
       this._ensureInternals();
-      if (
+      if (this._connecting || (
         this._ws &&
         (this._ws.readyState === WebSocket.OPEN || this._ws.readyState === WebSocket.CONNECTING)
-      ) {
-        return; // 已有打开/进行中的连接
+      )) {
+        return; // 已有打开/进行中的连接（含令牌获取阶段）
       }
       this.sessionId = sessionId;
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws?session_id=${sessionId}`);
+      const epoch = this._connectEpoch;
+      this._connecting = true;
+      let token;
+      try {
+        // LAN 使用登录响应里的账号 JWT；本机从 loopback-only 端点领取进程令牌。
+        token = getServerAuthToken();
+        if (!token) {
+          const data = await request('/api/bootstrap/ws-token');
+          token = data && data.token;
+        }
+      } catch (err) {
+        this._connecting = false;
+        if (!err.status) {
+          const delay = reconnectDelay(this.reconnectAttempt);
+          this.reconnectAttempt += 1;
+          clearTimeout(this._reconnectTimer);
+          this._reconnectTimer = setTimeout(() => this.connect(), delay);
+        }
+        return;
+      }
+      this._connecting = false;
+      if (epoch !== this._connectEpoch || !token) return;
+      const ws = new WebSocket(buildWebSocketUrl(window.location, sessionId, token));
       this._ws = ws;
 
       ws.onopen = () => {
@@ -182,6 +210,7 @@ export const useWsStore = defineStore('ws', {
     disconnect() {
       this._ensureInternals();
       clearTimeout(this._reconnectTimer);
+      this._connectEpoch += 1; // 使令牌请求期间发生的断连/切会话使旧连接作废
       if (this._ws) {
         this._intentionalClose = true;
         this._ws.close();

@@ -373,6 +373,63 @@ async function doUpgrade() {
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+<<<<<<< HEAD
+=======
+.footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;  /* UOS 窄窗/WebKit 小屏下允许换行，避免姓名/版本被升级按钮挤没 */
+  row-gap: 4px;
+}
+
+.user-name {
+  font-size: 12px;
+  color: var(--panda-sidebar-text, rgba(230, 237, 247, 0.85));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 4px;
+  border-radius: 4px;
+  flex: 1 1 60px;  /* 姓名可缩不消失（用户实测 UOS 上被升级按钮挤没） */
+  min-width: 0;
+}
+
+.version-text { flex: 0 0 auto; }
+.upgrade-badge { flex: 0 0 auto; white-space: nowrap; }
+
+.user-name:hover { background: rgba(255, 255, 255, 0.1); }
+
+.user-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 12px;
+  right: 12px;
+  background: #1f2733;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+  z-index: 50;
+}
+
+.user-menu-item {
+  padding: 8px 12px;
+  font-size: 13px;
+  color: rgba(230, 237, 247, 0.9);
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.user-menu-item:hover { background: rgba(255, 255, 255, 0.08); }
+.user-menu-item.danger { color: #f7918a; }
+.user-menu-item.danger:hover { background: rgba(247, 145, 138, 0.12); }
+
+>>>>>>> 7edbead (feat(security): 远程接管/供应链/沙箱逃逸三层收口 + promote 版本一致 + UOS 侧栏)
 .version-text {
   font-size: 11px;
   color: var(--panda-sidebar-text-dim, rgba(207, 216, 227, 0.55));

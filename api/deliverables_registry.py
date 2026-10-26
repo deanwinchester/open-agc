@@ -72,14 +72,26 @@ def sandbox_root() -> str:
     return resolve_sandbox_dir(cfg.get("sandbox_dir"))
 
 
-def is_under_root(root: str, path: str) -> bool:
-    """realpath 口径判断 path 是否严格位于 sandbox 根内（含根本身）。"""
+def resolve_under_root(root: str, path: str):
+    """解析 path 的真实路径；不在 root 内（含根本身）时返回 None。
+
+    realpath 解析符号链接/junction，normcase + commonpath 保证 Windows
+    大小写不敏感且不会把名称前缀相同的兄弟目录误判为子目录。"""
     try:
-        root_real = os.path.normcase(os.path.realpath(root))
-        real = os.path.normcase(os.path.realpath(path))
-        return os.path.commonpath([root_real, real]) == root_real
+        root_real = os.path.realpath(root)
+        real = os.path.realpath(path)
+        root_key = os.path.normcase(root_real)
+        real_key = os.path.normcase(real)
+        if os.path.commonpath([root_key, real_key]) != root_key:
+            return None
+        return real
     except (ValueError, OSError):
-        return False
+        return None
+
+
+def is_under_root(root: str, path: str) -> bool:
+    """realpath 口径判断 path 是否位于 sandbox 根内（含根本身）。"""
+    return resolve_under_root(root, path) is not None
 
 
 def resolve_files_dir(root: str, files_dir: str):
@@ -93,8 +105,9 @@ def resolve_files_dir(root: str, files_dir: str):
         os.path.join(os.getcwd(), p),
     ]
     for c in candidates:
-        if is_under_root(root, c) and os.path.isdir(c):
-            return os.path.realpath(c)
+        real = resolve_under_root(root, c)
+        if real is not None and os.path.isdir(real):
+            return real
     return None
 
 

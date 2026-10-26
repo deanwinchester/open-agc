@@ -111,3 +111,90 @@ async def auth_check(request: Request):
         return {"authenticated": False, "layer": layer}
     token = request.cookies.get(TOKEN_COOKIE_NAME, "")
     return {"authenticated": bool(token and verify_token(token, password)), "layer": layer}
+<<<<<<< HEAD
+=======
+
+
+@router.get("/api/bootstrap/ws-token")
+async def bootstrap_ws_token(request: Request):
+    """仅本机回环客户端可领取当前进程的 WS 会话令牌。"""
+    if _client_layer(request) != "local":
+        raise HTTPException(status_code=403, detail="WS 会话令牌仅允许本机获取。")
+    from api import state
+    return {"token": state._WS_TOKEN}
+
+
+# ── 中央服务器账号登录（zxs 产品线，配置 server_url 时启用）──────────────
+# 与上面的实例级访问密码是两套机制：server_url 存在时由账号登录取代
+# 实例密码（LAN 逐请求携带同一 JWT，公网仍禁），token 同时作为内网大模型
+# 网关的调用凭据（服务端按账号记账/限额）。
+
+
+class ServerLoginBody(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+@router.post("/api/auth/server-login")
+async def server_login(body: ServerLoginBody, request: Request):
+    """账号密码登录中央服务器，落本地 token。"""
+    from core import server_auth
+    if not server_auth.enabled():
+        raise HTTPException(status_code=404, detail="当前实例未启用账号登录。")
+    client_ip = request.client.host if request.client else ""
+    if _login_throttled(client_ip):
+        raise HTTPException(status_code=429, detail="失败次数过多，请 60 秒后再试。")
+    try:
+        info = server_auth.login(body.username, body.password)
+    except server_auth.ServerAuthError as e:
+        _login_record_failure(client_ip)
+        raise HTTPException(status_code=401, detail=str(e))
+    _login_clear(client_ip)
+    # LAN 客户端后续必须自行携带同一 JWT；本机仍由中间件免凭据判定。
+    return {"status": "success", **info,
+            "token": server_auth.get_token(), "layer": _client_layer(request)}
+
+
+@router.get("/api/auth/server-status")
+async def server_status():
+    """账号登录态快照：前端启动时据此决定是否弹登录遮罩。"""
+    from core import server_auth
+    return server_auth.status()
+
+
+@router.post("/api/auth/server-logout")
+async def server_logout():
+    """登出：吊销服务端 token 并清除本地登录态（幂等）。"""
+    from core import server_auth
+    server_auth.logout()
+    return {"ok": True}
+
+
+@router.get("/api/auth/server-profile")
+async def server_profile_get():
+    """本人资料（姓名/手机号/部门/额度），供「个人信息」页只读展示。"""
+    from core import server_auth
+    try:
+        p = server_auth.fetch_profile()
+    except server_auth.ServerAuthError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    return {"username": p.get("username", ""), "display_name": p.get("display_name", ""),
+            "phone": p.get("phone", ""), "department": p.get("department", ""),
+            "token_quota": p.get("token_quota"), "token_used": p.get("token_used", 0)}
+
+
+class ServerPasswordBody(BaseModel):
+    old_password: str = ""
+    new_password: str = ""
+
+
+@router.post("/api/auth/server-password")
+async def server_password_change(body: ServerPasswordBody):
+    """修改本人密码（服务端校验旧密码）。"""
+    from core import server_auth
+    try:
+        server_auth.change_password(body.old_password, body.new_password)
+    except server_auth.ServerAuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success"}
+>>>>>>> 7edbead (feat(security): 远程接管/供应链/沙箱逃逸三层收口 + promote 版本一致 + UOS 侧栏)

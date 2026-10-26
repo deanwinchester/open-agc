@@ -423,11 +423,11 @@ class TestConvergenceSource:
                 "WHERE id=? AND background_resumed=0") in src
         assert "claim_task_for_resume(task_id, ('backgrounded',))" in src
 
-    def test_ws_late_sandbox_resume_uses_cas_no_downgrade(self):
-        """ws.py 迟沙箱授权恢复：起线程前 CAS 认领，不再无条件写回 interrupted。"""
+    def test_ws_rejects_late_sandbox_approval(self):
+        """未知/过期 request_id 不得转成任意路径授权并恢复任务。"""
         src = _WS_SRC.read_text(encoding="utf-8")
-        assert "claim_task_for_resume(_tid2, ('backgrounded', 'interrupted'))" in src
-        assert "延迟授权触发恢复" not in src
+        assert "Late sandbox approval" not in src
+        assert "_matching_sandbox_wait(user_msg, ws_session_id)" in src
 
 
 # ---------- 成功完成清零 resume_count ----------

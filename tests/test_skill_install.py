@@ -281,8 +281,10 @@ class TestInstallSkillTool:
     def test_tool_success_and_failure(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             "core.skill_installer.get_skills_dir", lambda: str(tmp_path / "skills"))
-        monkeypatch.setattr("core.skill_installer._fetch_bytes",
-                            lambda url, max_bytes=None: _skill_zip_bytes())
+        monkeypatch.setattr(
+            "core.skill_installer._fetch_bytes",
+            lambda url, max_bytes=None: _skill_zip_bytes(
+                {"human-writing/SKILL.md": SKILL_MD_FM}))
         from tools.install_skill import InstallSkillTool
 
         tool = InstallSkillTool()

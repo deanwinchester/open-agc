@@ -13,6 +13,7 @@ The same module is used by the manual upgrade API.
 import os
 import sys
 import json
+import hashlib
 import logging
 import subprocess
 import tarfile
@@ -94,10 +95,11 @@ class AutoUpgrader:
         self.restart_required: bool = False
         # 内网清单通道（None = GitHub Releases）
         self.manifest_url: Optional[str] = _get_update_manifest_url()
-        # 清单里的平台资产映射 {platform_key: filename}
+        # 清单里的平台资产映射，兼容文件名字符串及 {name, sha256} 对象
         self._manifest_assets: dict = {}
         # 静默下载完成后的安装包路径（install_staged_update 使用）
         self.staged_installer: Optional[str] = None
+        self._integrity_warning = ""
 
     def fetch_latest_release(self) -> Optional[str]:
         """Query the update source for the latest release version.
@@ -121,10 +123,15 @@ class AutoUpgrader:
             base_url = payload.get("base_url", "").rstrip("/") + "/"
             self._manifest_assets = payload.get("assets", {}) or {}
             self.latest_version = version
-            self.latest_assets = [
-                {"name": fname, "browser_download_url": base_url + fname}
-                for fname in self._manifest_assets.values()
-            ]
+            self.latest_assets = []
+            for value in self._manifest_assets.values():
+                fname = self._manifest_asset_name(value)
+                if not fname:
+                    continue
+                asset = {"name": fname, "browser_download_url": base_url + fname}
+                if isinstance(value, dict) and value.get("sha256"):
+                    asset["sha256"] = value["sha256"]
+                self.latest_assets.append(asset)
             return version
         except requests.RequestException as e:
             logger.warning("Cannot check internal manifest: %s", e)
@@ -322,19 +329,43 @@ class AutoUpgrader:
 
     # ── desktop 通道：下载打包资产，而非覆盖源码 ──
 
+    @staticmethod
+    def _manifest_asset_name(value) -> str:
+        if isinstance(value, dict):
+            return str(value.get("name", ""))
+        return str(value or "")
+
     def _desktop_asset_name(self, version: str) -> str:
         """本次升级要用的资产文件名。内网清单通道直接按平台键查清单
         （版本号已在清单里，不走命名约定）；GitHub 通道按 CI 命名约定。"""
         if self._manifest_assets:
             if sys.platform == "darwin":
+<<<<<<< HEAD
                 key = "macos"
+=======
+                import platform as _pf
+                machine = _pf.machine().lower()
+                arch = "arm64" if machine in ("arm64", "aarch64") else "x86_64"
+                # Prefer native builds, then explicitly universal/legacy assets.
+                for key in (f"macos-{arch}", "macos-universal", "macos"):
+                    name = self._manifest_asset_name(self._manifest_assets.get(key))
+                    if name:
+                        # Older manifests used a single key even for thin builds.
+                        lower = name.lower()
+                        if arch == "x86_64" and "-arm64.dmg" in lower:
+                            continue
+                        if arch == "arm64" and "-x86_64.dmg" in lower:
+                            continue
+                        return name
+                return ""  # Never fall through to an unrelated upstream package.
+>>>>>>> 7edbead (feat(security): 远程接管/供应链/沙箱逃逸三层收口 + promote 版本一致 + UOS 侧栏)
             elif sys.platform == "win32":
                 key = "windows"
             else:
                 import platform as _pf
                 machine = _pf.machine().lower()
                 key = "linux-arm64" if machine in ("aarch64", "arm64") else "linux-amd64"
-            name = self._manifest_assets.get(key)
+            name = self._manifest_asset_name(self._manifest_assets.get(key))
             if name:
                 return name
         if sys.platform == "darwin":
@@ -374,6 +405,39 @@ class AutoUpgrader:
             logger.error("Download failed: %s", e)
             return False
 
+    def _verify_download(self, asset: dict, dest: str) -> bool:
+        """安装或解压前校验 SHA-256；旧清单无哈希时仅警告。"""
+        self._integrity_warning = ""
+        expected = str(asset.get("sha256", "") or "").strip().lower()
+        if not expected:
+            self._integrity_warning = "清单未含哈希，未做完整性校验"
+            logger.warning("%s: %s", dest, self._integrity_warning)
+            return True
+        try:
+            digest = hashlib.sha256()
+            with open(dest, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    digest.update(chunk)
+            actual = digest.hexdigest()
+        except OSError as e:
+            actual = ""
+            logger.error("Cannot hash downloaded update %s: %s", dest, e)
+        if actual == expected:
+            return True
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        self.last_message = f"更新包 {os.path.basename(dest)} 完整性校验失败，已删除下载文件"
+        logger.error("SHA-256 mismatch for %s: expected %s, got %s", dest, expected, actual)
+        return False
+
+    def _download_succeeded(self, message: str) -> bool:
+        self.last_message = message
+        if self._integrity_warning:
+            self.last_message += f"；{self._integrity_warning}"
+        return True
+
     def _download_macos_dmg(self, progress_cb=None) -> bool:
         """macOS 桌面端：下载 dmg 到 ~/Downloads，指引用户手动拖装。"""
         asset_name = self._desktop_asset_name(self.latest_version)
@@ -386,12 +450,13 @@ class AutoUpgrader:
         if not self._download_file(asset["browser_download_url"], dest, progress_cb):
             self.last_message = f"下载 {asset_name} 失败"
             return False
-        self.last_message = (
+        if not self._verify_download(asset, dest):
+            return False
+        logger.info("DMG downloaded to %s", dest)
+        return self._download_succeeded(
             f"已下载 {asset_name} 到下载目录，请退出 Open-AGC 后手动安装："
             "打开 dmg 并将新 App 拖入「应用程序」替换旧版本"
         )
-        logger.info("DMG downloaded to %s", dest)
-        return True
 
     def _prepare_windows_update(self, progress_cb=None) -> bool:
         """Windows 桌面端静默下载（不安装）。
@@ -419,25 +484,28 @@ class AutoUpgrader:
             pf = os.environ.get("ProgramFiles", r"C:\Program Files")
             if exe_dir.lower().startswith(pf.lower()):
                 return self._prepare_windows_installer(asset, asset_name, exe_path, progress_cb)
-            zip_name = (self._manifest_assets or {}).get("windows_zip")
+            zip_name = self._manifest_asset_name((self._manifest_assets or {}).get("windows_zip"))
             zip_asset = self._select_asset(zip_name) if zip_name else None
             if not zip_asset:
-                self.last_message = (
-                    f"已下载 {asset_name} 到临时目录。当前是从 zip 解压运行的实例，"
-                    f"请退出程序后手动运行安装包完成安装"
-                )
                 dest = os.path.join(tempfile.gettempdir(), asset_name)
                 if not self._download_file(asset["browser_download_url"], dest, progress_cb):
                     self.last_message = f"下载 {asset_name} 失败"
                     return False
+                if not self._verify_download(asset, dest):
+                    return False
                 self.staged_installer = dest  # 仅下载，无 bat；install 时给指引
-                return True
+                return self._download_succeeded(
+                    f"已下载 {asset_name} 到临时目录。当前是从 zip 解压运行的实例，"
+                    f"请退出程序后手动运行安装包完成安装"
+                )
             asset, asset_name = zip_asset, zip_name
 
         zip_path = os.path.join(tempfile.gettempdir(), asset_name)
         try:
             if not self._download_file(asset["browser_download_url"], zip_path, progress_cb):
                 self.last_message = f"下载 {asset_name} 失败"
+                return False
+            if not self._verify_download(asset, zip_path):
                 return False
             if os.path.exists(staging):
                 shutil.rmtree(staging, ignore_errors=True)
@@ -475,9 +543,8 @@ class AutoUpgrader:
         if not bat_path:
             return False
         self.staged_installer = bat_path
-        self.last_message = f"v{self.latest_version} 已下载就绪，确认后安装并重启"
         logger.info("Update downloaded to %s (not installed yet)", staging)
-        return True
+        return self._download_succeeded(f"v{self.latest_version} 已下载就绪，确认后安装并重启")
 
     def _prepare_windows_installer(self, asset: dict, asset_name: str,
                                    exe_path: str, progress_cb=None) -> bool:
@@ -490,14 +557,17 @@ class AutoUpgrader:
         if not self._download_file(asset["browser_download_url"], setup_path, progress_cb):
             self.last_message = f"下载 {asset_name} 失败"
             return False
+        if not self._verify_download(asset, setup_path):
+            return False
         target_exe = os.path.join(exe_dir, os.path.basename(exe_path))
         bat_path = self._write_installer_bat(setup_path, target_exe)
         if not bat_path:
             return False
         self.staged_installer = bat_path
-        self.last_message = f"v{self.latest_version} 安装包已下载，确认后安装并重启"
         logger.info("Installer %s downloaded; apply bat %s", setup_path, bat_path)
-        return True
+        return self._download_succeeded(
+            f"v{self.latest_version} 安装包已下载，确认后安装并重启"
+        )
 
     def _write_installer_bat(self, setup_path: str, target_exe: str) -> Optional[str]:
         bat_path = os.path.join(tempfile.gettempdir(), "open_agc_apply_update.bat")
@@ -550,9 +620,12 @@ class AutoUpgrader:
         if not self._download_file(asset["browser_download_url"], dest, progress_cb):
             self.last_message = f"下载 {asset_name} 失败"
             return False
+        if not self._verify_download(asset, dest):
+            return False
         self.staged_installer = dest
-        self.last_message = f"v{self.latest_version} 已下载，确认后安装（需系统授权）"
-        return True
+        return self._download_succeeded(
+            f"v{self.latest_version} 已下载，确认后安装（需系统授权）"
+        )
 
     @staticmethod
     def _locate_payload(staging: str) -> Optional[str]:

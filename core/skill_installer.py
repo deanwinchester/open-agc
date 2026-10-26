@@ -200,8 +200,38 @@ def _validate_skill_content(skill_dir: str) -> None:
                 f"技能包含危险内容，已拒绝安装（{os.path.basename(path)}）: {issues}")
 
 
+_EXECUTABLE_SUFFIXES = {
+    ".py", ".pyw", ".sh", ".bash", ".zsh", ".fish", ".ps1", ".psm1",
+    ".bat", ".cmd", ".com", ".exe", ".dll", ".so", ".dylib", ".js",
+    ".mjs", ".cjs", ".ts", ".rb", ".pl", ".php", ".lua", ".jar",
+}
+
+
+def _executable_scripts(skill_dir: str) -> List[str]:
+    """返回 scripts/ 下可执行文件的技能相对路径（统一使用 /）。"""
+    scripts_dir = os.path.join(skill_dir, "scripts")
+    if not os.path.isdir(scripts_dir):
+        return []
+    found = []
+    for root, _dirs, files in os.walk(scripts_dir):
+        for filename in files:
+            path = os.path.join(root, filename)
+            executable = os.path.splitext(filename)[1].lower() in _EXECUTABLE_SUFFIXES
+            if not executable:
+                try:
+                    executable = bool(os.stat(path).st_mode & 0o111)
+                    if not executable:
+                        with open(path, "rb") as f:
+                            executable = f.read(2) == b"#!"
+                except OSError:
+                    pass
+            if executable:
+                found.append(os.path.relpath(path, skill_dir).replace(os.sep, "/"))
+    return sorted(found)
+
+
 def install_skill_from_url(url: str, skills_dir: str = None,
-                           allow_local: bool = False) -> Dict:
+                           allow_local: bool = False, approval_callback=None) -> Dict:
     """Install a directory skill from a GitHub repo URL or GitHub zip link.
 
     Remote fetches are SSRF-guarded (https + GitHub hosts only). Local zip
@@ -255,6 +285,10 @@ def install_skill_from_url(url: str, skills_dir: str = None,
         if os.path.exists(dest):
             raise SkillInstallError(f"技能 '{name}' 已存在，请先在技能管理中删除后再安装")
 
+        if approval_callback:
+            scripts = _executable_scripts(skill_dir)
+            if scripts:
+                approval_callback(scripts)
         shutil.copytree(skill_dir, dest)
         files_count = sum(len(files) for _r, _d, files in os.walk(dest))
 

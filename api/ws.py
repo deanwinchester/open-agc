@@ -1,10 +1,13 @@
 """WebSocket endpoint - register with app.websocket()."""
 import os, sys, json, re, sqlite3, asyncio, threading, queue, concurrent.futures, traceback
+import hmac
 import logging
 import time as _time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+from urllib.parse import urlsplit
 from fastapi import WebSocket, WebSocketDisconnect
+from api import state as _state
 from api.db import DB_PATH, db_connect
 from api.config import load_config, log_agent_error
 from api.state import (
@@ -56,9 +59,8 @@ def _try_store_late_secret(user_msg: dict):
     """迟到凭据提交（授权等待超时后）直接入 vault，返回用户提示；非凭据提交返回 None。
 
     前端凭据弹窗恒带 secret_name/secret_type 字段（ChatView.vue:onSandboxRespond，
-    拒绝时不带这些字段）。若把这类消息当普通迟到授权处理，path（LLM 建议的
-    凭据名）会被误当沙箱路径加白名单，密码则被静默丢弃——所以前台与后台会话的
-    late-approval 分支都先过这里。抽出为模块级函数以便单测。
+    拒绝时不带这些字段）。保留为凭据保管辅助及兼容测试入口；sandbox_response
+    不再调用它，未知/过期 request_id 一律拒绝，不产生任何迟到副作用。
     """
     if not (user_msg.get("secret_name") or user_msg.get("secret_type")):
         return None
@@ -208,7 +210,104 @@ def _user_facing(response: str):
     return response
 
 
+def _allowed_ws_origin(origin: str, host: str, layer: str) -> bool:
+    """Allow loopback browser pages and desktop webview schemes.
+
+    Authenticated LAN browser pages additionally use their exact same-origin
+    URL. Empty Origin remains supported for native/non-browser WS clients.
+    """
+    if not origin:
+        return True
+    try:
+        parsed = urlsplit(origin)
+        if parsed.query or parsed.fragment or parsed.path not in ("", "/"):
+            return False
+        if parsed.scheme in ("file", "app", "tauri"):
+            return True
+        if parsed.scheme not in ("http", "https"):
+            return False
+        if parsed.hostname in ("localhost", "127.0.0.1", "::1"):
+            return True
+        return layer == "lan" and origin.rstrip("/") == f"{parsed.scheme}://{host}"
+    except (TypeError, ValueError):
+        return False
+
+
+def _valid_server_ws_credential(websocket: WebSocket) -> bool:
+    credential = websocket.query_params.get("token", "")
+    authorization = websocket.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        credential = authorization[7:].strip()
+    try:
+        from core import server_auth
+        expected = server_auth.get_token()
+        return bool(credential and expected and hmac.compare_digest(credential, expected))
+    except Exception:
+        return False
+
+
+async def _authorize_websocket(websocket: WebSocket) -> bool:
+    from core.access_control import classify_ip
+    client_host = websocket.client.host if websocket.client else ""
+    layer = classify_ip(client_host)
+    host = websocket.headers.get("host", "")
+    origin = websocket.headers.get("origin", "")
+    allowed = layer in ("local", "lan") and _allowed_ws_origin(origin, host, layer)
+    if layer == "local":
+        try:
+            request_host = urlsplit(f"//{host}").hostname
+        except ValueError:
+            request_host = None
+        token = websocket.query_params.get("token", "")
+        allowed = bool(
+            allowed and request_host in ("localhost", "127.0.0.1", "::1")
+            and token and hmac.compare_digest(token, _state._WS_TOKEN))
+    elif layer == "lan":
+        try:
+            server_mode = bool(str((load_config() or {}).get("server_url") or "").strip())
+        except Exception:
+            server_mode = False
+        if server_mode:
+            allowed = allowed and _valid_server_ws_credential(websocket)
+    if not allowed:
+        # Closing before accept makes the WS handshake fail with HTTP 403.
+        await websocket.close(code=1008, reason="Forbidden")
+    return allowed
+
+
+_SANDBOX_RESPONSE_ACTIONS = frozenset({
+    "deny_once", "deny_always", "approve_once", "approve_dir", "approve_always", "approve_session",
+})
+
+
+def _matching_sandbox_wait(user_msg: dict, default_session_id: int):
+    """Return the one registered wait exactly bound by an approval message."""
+    request_id = user_msg.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return None
+    wait = _sandbox_waits.get(request_id)
+    if not isinstance(wait, dict) or wait.get("request_id") != request_id:
+        return None
+    if user_msg.get("action") not in _SANDBOX_RESPONSE_ACTIONS:
+        return None
+    payload = wait.get("payload") or {}
+    try:
+        session_matches = int(user_msg.get("session_id", default_session_id)) == int(wait["session_id"])
+        task_matches = int(user_msg.get("task_id")) == int(wait["task_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not session_matches or not task_matches:
+        return None
+    if user_msg.get("path", "") != payload.get("path", ""):
+        return None
+    if user_msg.get("tool_name", "") != payload.get("tool_name", ""):
+        return None
+    return wait
+
+
 async def websocket_endpoint(websocket: WebSocket):
+    if not await _authorize_websocket(websocket):
+        return
     await websocket.accept()
     connected_websockets.append(websocket)
 
@@ -246,6 +345,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 "type": "progress",
                 "event": "sandbox_blocked",
                 "session_id": _entry.get("session_id", ws_session_id),
+                "task_id": _entry.get("task_id"),
                 "request_id": _rid,
                 **_pl,
             })
@@ -786,33 +886,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         elif user_msg.get("type") == "sandbox_response":
                             sid = user_msg.get("session_id", ws_session_id)
                             action = user_msg.get("action", "deny_once")
-                            # Match by unique request_id when present (concurrent
-                            # waits in one session). Only fall back to the legacy
-                            # session_id key when the client sent no request_id —
-                            # a stale rid must not route the reply to another wait.
                             req_id = user_msg.get("request_id")
-                            wait = _sandbox_waits.get(req_id) if req_id else _sandbox_waits.get(sid)
-                            if wait:
+                            wait = _matching_sandbox_wait(user_msg, ws_session_id)
+                            if wait is not None:
                                 # Secret form fields pass through in-memory (see api.state)
                                 resolve_sandbox_wait(wait, user_msg)
                                 print(f"[WS] Sandbox response: {action} for {sid} (req={req_id})")
-                            elif action in ("approve_once", "approve_dir", "approve_always", "approve_session"):
-                                # Late secret submission (auth wait timed out):
-                                # store into the vault — never whitelist/resume.
-                                _late_secret_msg = _try_store_late_secret(user_msg)
-                                if _late_secret_msg:
-                                    await _safe_send({"type": "system_message",
-                                                      "message": _late_secret_msg,
-                                                      "session_id": sid})
-                                else:
-                                    # Late approval: apply to running agent's whitelist directly
-                                    _path = user_msg.get("path", "")
-                                    if _path and hasattr(agent, '_session_sandbox_whitelist'):
-                                        import os as _ws_os
-                                        _ws_dir = _ws_os.path.dirname(_ws_os.path.abspath(_path))
-                                        agent._session_sandbox_whitelist.add(_ws_dir)
-                                        agent._session_sandbox_whitelist.add(_path)
-                                        print(f"[WS] Late sandbox approval applied to running agent: {_path}")
+                            else:
+                                print(f"[WS] Rejected unmatched sandbox response for {sid} (req={req_id})")
                         else:
                             # Non-blocking input: queue message to agent
                             q = user_msg.get("query", user_msg.get("text", ""))
@@ -1199,67 +1280,18 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 if msg_type == "sandbox_response":
-                    # Resolve a pending sandbox auth wait
+                    # 只允许审批仍登记的真实请求；request_id、任务、会话、路径、
+                    # 工具必须全部匹配。未知/过期请求不得转成任意路径迟到授权。
                     sid = user_msg.get("session_id", ws_session_id)
                     action = user_msg.get("action", "deny_once")
-                    # Match by unique request_id when present (concurrent waits
-                    # in one session). Only fall back to the legacy session_id key
-                    # when the client sent no request_id — a stale rid must not
-                    # route the reply to another wait.
                     req_id = user_msg.get("request_id")
-                    wait = _sandbox_waits.get(req_id) if req_id else _sandbox_waits.get(sid)
-                    if wait:
+                    wait = _matching_sandbox_wait(user_msg, ws_session_id)
+                    if wait is not None:
                         # Secret form fields pass through in-memory (see api.state)
                         resolve_sandbox_wait(wait, user_msg)
                         print(f"[WS] Sandbox response: {action} for session {sid} (req={req_id})")
-                    elif action in ("approve_once", "approve_dir", "approve_always", "approve_session"):
-                        # Late secret submission (auth wait timed out): store
-                        # into the vault — never whitelist, never resume.
-                        _late_secret_msg = _try_store_late_secret(user_msg)
-                        if _late_secret_msg:
-                            await _safe_send({"type": "system_message",
-                                              "message": _late_secret_msg,
-                                              "session_id": sid})
-                            continue
-                        # Late approval after wait timed out — save and resume task
-                        _path = user_msg.get("path", "")
-                        if _path:
-                            print(f"[WS] Late sandbox approval: {action} for {_path}")
-                            _pending_sandbox_approvals.setdefault(sid, []).append({
-                                "action": action, "path": _path
-                            })
-                            # Find backgrounded/interrupted task for this session and resume
-                            try:
-                                _late = db_connect()
-                                _late_t = _late.execute(
-                                    "SELECT id, user_query FROM tasks WHERE session_id=? AND status IN ('backgrounded','interrupted') ORDER BY id DESC LIMIT 1",
-                                    (sid,)).fetchone()
-                                _late.close()
-                                if _late_t:
-                                    _tid2 = _late_t[0]
-                                    _uq2 = _late_t[1] or ""
-                                    # CAS: 认领即 running，不再降级 interrupted；认领失败说明
-                                    # Guardian/BgMonitor 已接管，放弃本次恢复避免双 agent
-                                    if not claim_task_for_resume(_tid2, ('backgrounded', 'interrupted')):
-                                        print(f"[WS] Task #{_tid2}: late-approval resume claim failed (claimed by another path), skipping")
-                                        continue
-                                    _ctx2 = get_task_context(_tid2)
-                                    if _ctx2 is None:
-                                        _ctx2 = []
-                                    _ctx2.append({"role": "user", "content":
-                                        f"【系统通知】你之前因沙箱权限等待超时而中断。路径 {_path} 已获得用户授权，"
-                                        f"请重新尝试之前被阻止的操作。"})
-                                    save_task_context(_tid2, _ctx2)
-                                    print(f"[WS] Resuming task #{_tid2} after late sandbox approval")
-                                    import threading as _thr
-                                    from api.background import _run_background_task
-                                    _thr.Thread(
-                                        target=_run_background_task,
-                                        args=(_tid2, _uq2, _ctx2, True),
-                                        daemon=True
-                                    ).start()
-                            except Exception as _late_err:
-                                print(f"[WS] Late sandbox resume error: {_late_err}")
+                    else:
+                        print(f"[WS] Rejected unmatched sandbox response for session {sid} (req={req_id})")
                     continue
 
                 if msg_type == "tool_reply":

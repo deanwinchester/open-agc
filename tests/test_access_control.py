@@ -130,7 +130,8 @@ def _make_app(monkeypatch, password):
 
 
 def _client(app, ip):
-    return TestClient(app, client=(ip, 50000))
+    return TestClient(app, client=(ip, 50000),
+                      headers={"X-OpenAGC-Client": "1"})
 
 
 def test_local_always_allowed(monkeypatch):

@@ -189,8 +189,8 @@ def test_concurrent_sandbox_waits_do_not_clobber():
         assert len(set(rid_by_path.values())) == 2, "request_id 必须唯一"
         # 两个条目同时存在于 _sandbox_waits（旧实现第二个会覆盖第一个）
         assert all(rid in _sandbox_waits for rid in rid_by_path.values())
-        # 旧版 session 键仍保留（向后兼容回退）
-        assert _sandbox_waits.get(1) is not None
+        # 不再保留 session 兼容键：审批只能按 request_id 精确匹配。
+        assert _sandbox_waits.get(1) is None
 
         # 只响应 /p1 的等待
         rid1 = rid_by_path[p1]

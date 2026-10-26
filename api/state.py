@@ -5,6 +5,7 @@ without circular dependency issues.
 """
 import asyncio
 import os
+import secrets
 import threading
 from datetime import datetime, timezone
 from typing import Dict, Optional
@@ -16,6 +17,10 @@ _main_event_loop: asyncio.AbstractEventLoop = None
 _server_pid: int = os.getpid()
 _SERVER_START_TIME = datetime.now(timezone.utc)
 
+# Per-process WebSocket session credential. It is never persisted or exposed to
+# non-loopback clients; a restart therefore invalidates every old WS URL.
+_WS_TOKEN = secrets.token_urlsafe(32)
+
 # Connected WebSocket clients (for background task push)
 connected_websockets: list = []  # List of active WebSocket connections
 
@@ -23,7 +28,7 @@ connected_websockets: list = []  # List of active WebSocket connections
 # Maps session_id -> {"content": str, "task_id": int}
 _pending_final_responses: Dict[int, dict] = {}
 
-# Sandbox auth waits: {session_id: {"event": threading.Event, "result": dict}}
+# Sandbox auth waits: {request_id: {"event": threading.Event, "result": dict, ...}}
 _sandbox_waits: dict = {}
 
 # Pending sandbox approvals: {session_id: [paths]} — late approvals applied on task resume

@@ -21,6 +21,27 @@ _lock = threading.RLock()
 
 MASK = "***"
 
+_SENSITIVE_KEY_PARTS = (
+    "password", "secret", "token", "authorization", "api_key", "apikey", "cookie",
+)
+
+
+def _is_sensitive_key(key) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
+
+
+def mask_sensitive_data(value, key=""):
+    """Recursively mask sensitive values without mutating the input object."""
+    if key and _is_sensitive_key(key):
+        return MASK
+    if isinstance(value, dict):
+        return {k: mask_sensitive_data(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [mask_sensitive_data(item) for item in value]
+    return value
+
+
 # {{secret:name.field}} — name is the vault key, field one of VALID_FIELDS
 _REF_RE = re.compile(r"\{\{\s*secret:([A-Za-z0-9_-]+)\.([A-Za-z]+)\s*\}\}")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -68,6 +89,11 @@ def _save(data: dict) -> None:
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp_path, path)
+    try:
+        # POSIX: owner-only. Windows chmod cannot express ACLs; retain 0600 semantics best-effort.
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _mask_username(username: str) -> str:
@@ -247,23 +273,42 @@ def unreplaced_refs_warning(text: str) -> str:
     )
 
 
-def mask_secrets(text: str) -> str:
-    """Replace known password values and credential-bearing URIs with ***.
+def _configured_secret_values() -> list:
+    """Collect plaintext credentials from config.json for free-text masking."""
+    try:
+        from api.config import load_config
+        config = load_config()
+    except Exception:
+        return []
+    values = []
 
-    Passwords shorter than 4 chars are skipped as bare values (masking "1"
-    would drown the output in ***), though a credential-bearing URI containing
-    one is still masked as a whole. The percent-encoded form of each password
-    is masked too, so URI-encoded fragments can't escape. Empty values are
-    skipped; URIs without username/password are skipped (the host alone is
-    already visible in the masked list view). Never raises — on any error the
-    original text is returned unchanged.
+    def _collect(value, sensitive=False):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                _collect(item, sensitive or _is_sensitive_key(key))
+        elif isinstance(value, list):
+            for item in value:
+                _collect(item, sensitive)
+        elif sensitive and isinstance(value, str) and value:
+            values.append(value)
+
+    _collect(config)
+    return values
+
+
+def mask_secrets(text: str) -> str:
+    """Mask vault/config credentials and sensitive fields in JSON text.
+
+    Vault passwords shorter than 4 chars are skipped as bare values, though a
+    credential-bearing URI containing one is still masked as a whole. Config
+    credentials are masked regardless of length. Never raises.
     """
     if not text:
         return text
     try:
         with _lock:
             data = _load()
-        values = []
+        values = _configured_secret_values()
         for name, entry in data.items():
             if not isinstance(entry, dict):
                 continue
@@ -282,6 +327,13 @@ def mask_secrets(text: str) -> str:
         # Longest first so a URI containing the password is masked as a whole
         for value in sorted(set(values), key=len, reverse=True):
             text = text.replace(value, MASK)
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            return text
+        masked = mask_sensitive_data(parsed)
+        if masked != parsed:
+            return json.dumps(masked, ensure_ascii=False)
         return text
     except Exception:
         return text

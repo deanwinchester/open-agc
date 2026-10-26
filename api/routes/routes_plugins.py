@@ -13,15 +13,17 @@ router = APIRouter()
 async def approve_sandbox_request(body: dict):
     """Approve a sandbox path via persistent config."""
     from api.state import _sandbox_waits, resolve_sandbox_wait
+    from api.ws import _matching_sandbox_wait
+    from fastapi import HTTPException
     sid = body.get("session_id", body.get("sid", 1))
-    # Prefer the unique request_id (concurrent waits in one session). Only fall
-    # back to the legacy session_id key when the client sent no request_id —
-    # a stale rid must not route the reply to another wait.
-    req_id = body.get("request_id")
-    wait = _sandbox_waits.get(req_id) if req_id else _sandbox_waits.get(sid)
-    if wait:
-        # Secret form fields pass through in-memory (see api.state)
-        resolve_sandbox_wait(wait, body)
+    # 与 ws.py 同一精确绑定校验：request_id/任务/会话/路径/工具全匹配才受理，
+    # 无 request_id 的 session 兼容键与任意路径迟到授权一律 403（生产实证：
+    # 恶意网页可伪造审批通过）
+    wait = _matching_sandbox_wait(body, sid)
+    if wait is None:
+        raise HTTPException(status_code=403, detail="unmatched or expired sandbox approval")
+    # Secret form fields pass through in-memory (see api.state)
+    resolve_sandbox_wait(wait, body)
     return {"status": "ok"}
 
 

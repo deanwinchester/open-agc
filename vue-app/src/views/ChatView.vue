@@ -8,7 +8,7 @@
 //   {type:'resume', task_id, extra_instruction?} 恢复中断任务
 //   {type:'retry', query?}                       重试上一轮（query 缺省时服务端用 last_query）
 //   {type:'tool_reply', answer}                  回复前台 ask_user
-//   {type:'sandbox_response', session_id, action, path, password?, request_id?}  沙箱授权回复
+//   {type:'sandbox_response', session_id, task_id, request_id, action, path, tool_name, password?}  沙箱授权回复
 //     （category='secret' 时附带 secret_name/secret_type/host/username/note 表单字段）
 // 服务端 → 客户端：见底部 REPORT 注释与各 on* 处理器。
 //
@@ -126,7 +126,8 @@ const railOpen = ref(false);
 const downloadBanner = reactive({ visible: false, label: '', pct: 0 });
 const sandboxState = reactive({
   visible: false, path: '', toolName: '', blockType: 'path', description: '', category: '',
-  requestId: '', // 唯一等待 id：随 sandbox_response 回传，ws.py 据此精确匹配（兼容旧会话键）
+  requestId: '', // 唯一等待 id：随 sandbox_response 回传，ws.py 据此精确匹配
+  taskId: null, // 审批必须同时绑定任务、路径和工具，防止伪造/串用
   fromSession: 0, // 授权请求来源会话（非当前会话时弹窗标注，授权不分会话展示）
 });
 
@@ -385,6 +386,7 @@ function onProgress(data) {
     sandboxState.description = data.description || '';
     sandboxState.category = data.category || '';
     sandboxState.requestId = data.request_id || '';
+    sandboxState.taskId = data.task_id ?? null;
     sandboxState.fromSession = data.session_id && data.session_id !== currentSessionId.value
       ? data.session_id : 0;
     sandboxState.visible = true;
@@ -813,11 +815,13 @@ function onSandboxRespond(payload) {
   const { action, password } = payload;
   const msg = {
     type: 'sandbox_response',
-    session_id: currentSessionId.value,
+    session_id: sandboxState.fromSession || currentSessionId.value,
+    task_id: sandboxState.taskId,
+    request_id: sandboxState.requestId,
     action,
     path: sandboxState.path,
+    tool_name: sandboxState.toolName,
   };
-  if (sandboxState.requestId) msg.request_id = sandboxState.requestId;
   if (password) msg.password = password;
   // 凭据收集表单（category='secret'）：全部字段透传到 agent 的 result_holder，
   // ws.py 仅放内存，由 agent 写入本机凭证库；拒绝时弹窗侧本就不带这些字段

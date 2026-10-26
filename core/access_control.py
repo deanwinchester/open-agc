@@ -20,6 +20,7 @@ import json
 import os
 import time
 from typing import Callable, Optional
+from urllib.parse import parse_qs
 
 # ── IP 分类 ──────────────────────────────────────────────────────────────
 
@@ -115,6 +116,31 @@ MSG_WRONG_CREDENTIAL = "访问密码错误或令牌无效。"
 # 公网 403 与「未配置密码 = 仅本机」两条规则约束。
 AUTH_EXEMPT_PATHS = frozenset({"/api/auth/login", "/api/auth/check"})
 
+<<<<<<< HEAD
+=======
+# 中央服务器账号模式（config.json 配置 server_url，zxs 产品线）：
+# 本机凭登录态免密；LAN 的每个 API/WS 请求必须出示同一账号 JWT。
+# 仅登录与状态自检可匿名到达；公网依旧一律 403。
+SERVER_AUTH_EXEMPT_PATHS = frozenset({
+    "/api/auth/login", "/api/auth/check",
+    "/api/auth/server-login", "/api/auth/server-status",
+})
+MSG_SERVER_LOGIN_REQUIRED = "请先登录账号。"
+MSG_CSRF_HEADER_REQUIRED = "写操作需要 X-OpenAGC-Client: 1 请求头。"
+
+
+def _server_mode(config: Optional[dict]) -> bool:
+    return bool(str((config or {}).get("server_url") or "").strip())
+
+
+def _server_logged_in() -> bool:
+    try:
+        from core import server_auth
+        return server_auth.is_logged_in()
+    except Exception:
+        return False
+
+>>>>>>> 7edbead (feat(security): 远程接管/供应链/沙箱逃逸三层收口 + promote 版本一致 + UOS 侧栏)
 
 def _default_config_loader() -> dict:
     """默认配置来源：api.config.load_config（惰性导入，避免 core → api 硬依赖）。"""
@@ -172,6 +198,42 @@ def _extract_bearer(scope: dict) -> Optional[str]:
     return None
 
 
+_LOCAL_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1", "[::1]",
+                              # ASGI TestClient 默认 Host（非真实域名，仅测试流量）
+                              "testserver"})
+
+
+def _host_allowed(scope: dict) -> bool:
+    """本机回环的 Host 白名单（DNS rebinding 防御）。Host 缺失（非浏览器
+    客户端）放行；存在时仅允许 localhost/127.0.0.1/[::1]（含端口变体）。"""
+    host = _header_value(scope, b"host")
+    if not host:
+        return True
+    name = host.strip().lower().rstrip(".")
+    if name.startswith("[") and "]" in name:
+        name = name.split("]", 1)[0] + "]"
+    else:
+        name = name.rsplit(":", 1)[0] if ":" in name else name
+    return name in _LOCAL_HOSTNAMES
+
+
+def _extract_query_token(scope: dict) -> Optional[str]:
+    values = parse_qs((scope.get("query_string") or b"").decode("latin-1"))
+    return (values.get("token") or [None])[0]
+
+
+def _server_credential_valid(scope: dict) -> bool:
+    """LAN 必须出示本机保存的账号 JWT（当前或滚动刷新上一代，宽限不杀旧 token）。"""
+    credential = _extract_bearer(scope) or _extract_query_token(scope)
+    try:
+        from core import server_auth
+        expected = {t for t in (server_auth.get_token(), server_auth.previous_token()) if t}
+        return bool(credential and expected and
+                    any(hmac.compare_digest(credential, t) for t in expected))
+    except Exception:
+        return False
+
+
 def _extract_cookie_token(scope: dict) -> Optional[str]:
     cookie = _header_value(scope, b"cookie")
     if not cookie:
@@ -209,6 +271,53 @@ class AccessControlMiddleware:
         client = scope.get("client")
         layer = classify_ip(client[0] if client else "")
 
+<<<<<<< HEAD
+=======
+        # 公网一律 403（两种模式相同）
+        if layer == "public":
+            await self._reject(scope, send, 403, MSG_PUBLIC_DENIED)
+            return
+
+        # Host 白名单（DNS rebinding 防御）：本机回环请求也只认本机域名/IP——
+        # 恶意网页可用任意域名指向 127.0.0.1，Host 不在清单的一律拒绝；
+        # 无 Host 的非浏览器客户端（curl/桌面内嵌）放行。
+        if layer == "local" and not _host_allowed(scope):
+            await self._reject(scope, send, 403, MSG_LOCAL_ONLY)
+            return
+
+        # 跨站 HTML form/fetch 的简单写请求无法携带自定义头；所有状态变更
+        # 统一在此拦截，避免逐个路由遗漏（含登录、登出和插件挂载的路由）。
+        if (scope["type"] == "http" and scope.get("method") in ("POST", "PUT", "DELETE")
+                and _header_value(scope, b"x-openagc-client") != "1"):
+            await self._reject(scope, send, 403, MSG_CSRF_HEADER_REQUIRED)
+            return
+
+        try:
+            config = self._config_loader()
+        except Exception:
+            config = {}
+
+        # ── 中央服务器账号模式：本机沿用登录态；LAN 必须逐请求出示同一 JWT ──
+        if _server_mode(config):
+            path = scope.get("path", "")
+            if path in SERVER_AUTH_EXEMPT_PATHS:
+                await self.app(scope, receive, send)
+                return
+            # 只拦 API 与 WS；静态资源/SPA 页面放行（登录遮罩由前端渲染）
+            if path.startswith("/api/") or scope["type"] == "websocket":
+                authenticated = (
+                    _server_logged_in() if layer == "local"
+                    else _server_credential_valid(scope))
+                if authenticated:
+                    await self.app(scope, receive, send)
+                else:
+                    await self._reject(scope, send, 401, MSG_SERVER_LOGIN_REQUIRED,
+                                       code="server_login_required")
+                return
+            await self.app(scope, receive, send)
+            return
+
+>>>>>>> 7edbead (feat(security): 远程接管/供应链/沙箱逃逸三层收口 + promote 版本一致 + UOS 侧栏)
         if layer == "local":
             await self.app(scope, receive, send)
             return
@@ -286,7 +395,7 @@ async function go(ev) {{
   const e = document.getElementById('e'); e.textContent = '';
   try {{
     const r = await fetch('/api/auth/login', {{method:'POST',
-      headers:{{'Content-Type':'application/json'}},
+      headers:{{'Content-Type':'application/json','X-OpenAGC-Client':'1'}},
       body: JSON.stringify({{password: document.getElementById('pw').value}})}});
     if (r.ok) {{ location.replace('/'); return; }}
     const d = await r.json().catch(() => ({{}}));
