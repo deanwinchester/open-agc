@@ -223,7 +223,7 @@ def test_remote_vllm_chat_completions(local_env, tmp_path, monkeypatch):
     assert [c["type"] for c in content] == ["text", "image_url"]
     assert content[0]["text"] == "document parsing."
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
-    assert body.get("temperature") == 0 and body.get("max_tokens") == 2048
+    assert body.get("temperature") == 0 and body.get("max_tokens") == 4096
 
 
 def test_remote_vllm_model_override_and_key(local_env, tmp_path, monkeypatch):
