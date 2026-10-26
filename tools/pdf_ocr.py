@@ -119,12 +119,25 @@ def _ocr_remote(img_bytes: bytes, page: int, url: str) -> str:
 
 
 def _ocr_remote_vllm(img_bytes: bytes, url: str) -> str:
-    """调 OpenAI 兼容视觉端点（vLLM 直接部署，如 http://host:8004/v1），
-    失败抛异常（调用方降级本地）。图片以 data:image/png;base64 内联。"""
+    """调 OpenAI 兼容视觉端点（vLLM 直接部署或 zxs_gw 网关），
+    失败抛异常（调用方降级本地）。图片以 data:image/png;base64 内联。
+
+    默认引擎是网关 Qwen3.8-27B：同图实测 3.6s/页逐字准确，比专用
+    Unlimited-OCR（43s/页带标注退化）快一个数量级；专用模型路径保留
+    frequency_penalty 抑制退化。提示词按模型区分：专用模型用原生
+    document parsing.（无 <image> 字面量，防双占位错位），通用视觉模型
+    用中文逐字转写指令。网关地址时自动带当前登录 token 鉴权。"""
     model, key = _remote_vllm_model_key()
     headers = {}
+    if not key and "172.16.100.84:8080" in url:
+        try:
+            from core.server_auth import get_token
+            key = get_token() or ""
+        except Exception:
+            key = ""
     if key:
         headers["Authorization"] = f"Bearer {key}"
+    is_unlimited = model.strip().lower() == "unlimited-ocr"
     resp = requests.post(
         f"{url}/chat/completions",
         json={
@@ -134,9 +147,12 @@ def _ocr_remote_vllm(img_bytes: bytes, url: str) -> str:
             # 不带 <image> 字面量——chat_template 已为图像项插入占位符，再写
             # 就是双占位符，A/B 实证输出整页重复退化
             "temperature": 0,
-            "max_tokens": 4096,
+            "max_tokens": 2048,
+            **({"frequency_penalty": 1.0} if is_unlimited else {}),
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": "document parsing."},
+                {"type": "text", "text":
+                    "document parsing." if is_unlimited else
+                    "把这张扫描件中的全部文字按阅读顺序逐字转写出来，不要添加任何解说。"},
                 {"type": "image_url", "image_url": {"url":
                     "data:image/png;base64,"
                     + base64.b64encode(img_bytes).decode("ascii")}},

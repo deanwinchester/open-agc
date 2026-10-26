@@ -1,4 +1,5 @@
 {
+    "server_url": "http://172.16.100.84:8080",
     "api_keys": {
         "kimi": "",
         "ollama": "http://localhost:11434",
@@ -11,8 +12,33 @@
         "glm": "",
         "minimax": ""
     },
-    "default_model": "sglang/Qwen/Qwen3.5-9B-Instruct",
-    "fallback_models": ["ollama/qwen3.5:9b"],
+    "default_model": "zxs_gw/Qwen3.8-27B",
+    "fallback_models": [
+        "ollama/qwen3.5:9b"
+    ],
+    "vision_models": [
+        "Unlimited-OCR"
+    ],
+    "custom_providers": [
+        {
+            "name": "zxs_gw",
+            "base_url": "http://172.16.100.84:8080/v1",
+            "api_key": "",
+            "use_server_token": true,
+            "models": [
+                "Qwen3.8-27B",
+                "Unlimited-OCR"
+            ]
+        },
+        {
+            "name": "zxs",
+            "base_url": "http://192.168.148.200:8001/v1",
+            "api_key": "",
+            "models": [
+                "Qwen3.8-27B"
+            ]
+        }
+    ],
     "disabled_skills": [],
     "sandbox_mode": true,
     "sandbox_dir": "./workspace",
@@ -23,5 +49,34 @@
     "email_password": "",
     "email_imap_server": "",
     "email_smtp_server": "",
-    "owner_email": ""
+    "owner_email": "",
+    "mcp_servers": {
+        "zxs_es": {
+            "url": "http://172.16.100.84:8080/mcp",
+            "headers": {
+                "Authorization": "Bearer zxs-FKYVwBngmVn7t2xU-AyKeIXVc3PPkerr"
+            },
+            "description": "中新社历史稿库（1954年至今稿件/报纸/资料全文检索，涉社内报道的权威来源）",
+            "display_name": "中新社语料库"
+        }
+    },
+    "ui_theme": {
+        "app_name": "中新社智能体",
+        "assistant_name": "中新社智能体",
+        "splash_title": "正在启动中新社智能体",
+        "splash_subtitle": "组件加载中……",
+        "hide_agent_model_selector": true
+    },
+    "computer_grounder": {
+        "base_url": "http://192.168.148.200:8003/v1",
+        "api_key": "",
+        "model": "UI-TARS-1.5-7B",
+        "coord_mode": "abs"
+    },
+    "ocr_remote_url": "http://172.16.100.84:8080/v1",
+    "ocr_remote_model": "Qwen3.8-27B",
+    "update_manifest_url": "http://172.16.100.81:8080/release/version.json",
+    "skills_market_url": "http://172.16.100.84:8080",
+    "plugins_market_url": "http://172.16.100.84:8080/api/market/plugins",
+    "skills_market_key": "zxs-FKYVwBngmVn7t2xU-AyKeIXVc3PPkerr"
 }
