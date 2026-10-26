@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, ref, computed } from 'vue';
+import { onMounted, onUnmounted, reactive, ref, computed } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import zh from './i18n/zh';
 import { pluginNav } from './plugins/registry';
@@ -21,9 +21,23 @@ const authPassword = ref('');
 const authError = ref('');
 const authSubmitting = ref(false);
 
+// ── 中央服务器账号登录（zxs 产品线：配置了 server_url 时启用）──
+// server 模式下账号登录取代实例密码遮罩：未登录时全屏登录页；
+// 登录后左下角显示用户名、可退出。token 由后端持久化（180 天有效，
+// 90 天不活跃失效，临期自动刷新）。
+const serverMode = ref(false);
+const serverLoggedIn = ref(false);
+const serverUser = ref('');
+const loginUsername = ref('');
+const loginPassword = ref('');
+const loginError = ref('');
+const loginSubmitting = ref(false);
+const loginRequired = computed(() => serverMode.value && !serverLoggedIn.value);
+
 // 立即注册（而非 onMounted），保证最早一批请求的 401 也能被拦截
 setUnauthorizedHandler(() => {
-  authRequired.value = true;
+  if (serverMode.value) serverLoggedIn.value = false;  // 账号模式：拉起登录遮罩
+  else authRequired.value = true;
 });
 
 // 前端渲染异常兜底：此前组件渲染抛错整片区域静默消失（生产实证：任务页
@@ -51,6 +65,14 @@ onMounted(async () => {
     if (!ws.connected) ws.connect();
     ws.on('theme_updated', () => loadTheme());
   } catch { /* WS 未就绪则等下次刷新应用 */ }
+  // 账号模式优先于实例密码：启用后跳过 /api/auth/check 的密码判定
+  try {
+    const st = await request('/api/auth/server-status');
+    serverMode.value = !!st?.enabled;
+    serverLoggedIn.value = !!st?.logged_in;
+    serverUser.value = st?.display_name || st?.username || '';
+  } catch { /* 接口不存在（旧后端）视为未启用 */ }
+  if (serverMode.value) return;  // 登录遮罩由 loginRequired 驱动
   try {
     const res = await request('/api/auth/check');
     authRequired.value = !(res && res.authenticated);
@@ -66,6 +88,79 @@ onMounted(async () => {
     // 其他错误（网络失败等）不拦截，避免本机故障时锁死界面
   }
 });
+
+async function submitServerLogin() {
+  if (!loginUsername.value || !loginPassword.value || loginSubmitting.value) return;
+  loginSubmitting.value = true;
+  loginError.value = '';
+  try {
+    await request('/api/auth/server-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: loginUsername.value, password: loginPassword.value }),
+    });
+    // token 已落后端；整体刷新让所有数据请求与 WebSocket 以登录态重建
+    window.location.reload();
+  } catch (err) {
+    loginError.value = err.message || zh.auth.loginFailed;
+  } finally {
+    loginSubmitting.value = false;
+  }
+}
+
+async function doServerLogout() {
+  userMenuOpen.value = false;
+  try {
+    await request('/api/auth/server-logout', { method: 'POST' });
+  } catch { /* 登出幂等，本地态清掉即可 */ }
+  window.location.reload();
+}
+
+// ── 用户菜单（点击左下角用户名弹出）：个人信息 / 改密码 / 退出 ──
+const userMenuOpen = ref(false);
+const profileDialog = reactive({ visible: false, loading: false, error: '',
+  displayName: '', phone: '', department: '', quota: null, used: 0 });
+const pwDialog = reactive({ visible: false, saving: false, oldPw: '', newPw: '', confirm: '', error: '' });
+
+function closeUserMenu() { userMenuOpen.value = false; }
+onMounted(() => document.addEventListener('click', closeUserMenu));
+onUnmounted(() => document.removeEventListener('click', closeUserMenu));
+
+async function openProfileDialog() {
+  userMenuOpen.value = false;
+  profileDialog.error = ''; profileDialog.visible = true; profileDialog.loading = true;
+  try {
+    const p = await request('/api/auth/server-profile');
+    profileDialog.displayName = p.display_name || '';
+    profileDialog.phone = p.phone || '';
+    profileDialog.department = p.department || '';
+    profileDialog.quota = p.token_quota;
+    profileDialog.used = p.token_used || 0;
+  } catch (err) { profileDialog.error = err.message || ''; }
+  finally { profileDialog.loading = false; }
+}
+
+function openPasswordDialog() {
+  userMenuOpen.value = false;
+  pwDialog.oldPw = ''; pwDialog.newPw = ''; pwDialog.confirm = '';
+  pwDialog.error = ''; pwDialog.visible = true;
+}
+
+async function savePassword() {
+  if (pwDialog.saving) return;
+  if (pwDialog.newPw.length < 6) { pwDialog.error = zh.auth.newPassword; return; }
+  if (pwDialog.newPw !== pwDialog.confirm) { pwDialog.error = zh.auth.passwordMismatch; return; }
+  pwDialog.saving = true; pwDialog.error = '';
+  try {
+    await request('/api/auth/server-password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_password: pwDialog.oldPw, new_password: pwDialog.newPw }),
+    });
+    pwDialog.visible = false;
+    ElMessage.success(zh.auth.passwordChanged);
+  } catch (err) { pwDialog.error = err.message || ''; }
+  finally { pwDialog.saving = false; }
+}
 
 async function submitAuth() {
   if (!authPassword.value || authSubmitting.value) return;
@@ -120,9 +215,25 @@ const menus = [
   { path: '/goals', label: zh.menu.goals },
   { path: '/downloads', label: zh.menu.downloads },
   { path: '/sandbox', label: zh.menu.sandbox },
+  { path: '/plaza', label: zh.menu.plaza },
   { path: '/settings', label: zh.menu.settings },
   { path: '/debug', label: zh.menu.debug },
 ];
+
+// 调试菜单可见性：dev/rc 构建默认显示；release（版本号无 rc）默认隐藏，
+// 在「设置 → 系统设置」底部连点版本号 5 次解锁；解锁状态存 localStorage，
+// 调试页内可再关闭（dispatch debug-unlock-changed 同步侧栏）。
+const debugUnlocked = ref(localStorage.getItem('debug_unlocked') === '1');
+const visibleMenus = computed(() => menus.filter((m) => {
+  if (m.path !== '/debug') return true;
+  if (debugUnlocked.value) return true;
+  return /rc/i.test(version.value);  // rc 构建 = dev 通道
+}));
+function onDebugUnlockChanged() {
+  debugUnlocked.value = localStorage.getItem('debug_unlocked') === '1';
+}
+onMounted(() => window.addEventListener('debug-unlock-changed', onDebugUnlockChanged));
+onUnmounted(() => window.removeEventListener('debug-unlock-changed', onDebugUnlockChanged));
 
 // ── 版本号与升级徽标（旧版侧栏底部同款）──
 const version = ref('');
@@ -220,12 +331,12 @@ async function doUpgrade() {
     >☰</button>
     <aside class="sidebar" :class="{ open: sidebarOpen }">
       <div class="logo">
-        <img class="logo-img" :src="logoUrl" alt="熊猫事务所" />
-        <span class="logo-text">{{ themeState.appName || '熊猫事务所' }}</span>
+        <img class="logo-img" :src="logoUrl" alt="小新AI事务所" />
+        <span class="logo-text" :title="themeState.appName || '小新AI事务所'">{{ themeState.appName || '小新AI事务所' }}</span>
       </div>
       <nav class="menu">
         <router-link
-          v-for="item in menus"
+          v-for="item in visibleMenus"
           :key="item.path"
           :to="item.path"
           class="menu-item"
@@ -261,14 +372,25 @@ async function doUpgrade() {
       </nav>
       <!-- 版本号与升级入口（侧栏底部） -->
       <div class="sidebar-footer">
-        <span class="version-text">{{ version || 'v…' }}</span>
-        <span
-          v-if="updateAvailable"
-          class="upgrade-badge"
-          :class="{ upgrading }"
-          title="发现新版本，点击升级"
-          @click="doUpgrade"
-        >{{ upgrading ? '升级中…' : '⬆ 升级' }}</span>
+        <div class="footer-row">
+          <template v-if="serverLoggedIn">
+            <span class="user-name" :title="serverUser" @click.stop="userMenuOpen = !userMenuOpen">👤 {{ serverUser }}</span>
+          </template>
+          <span v-if="!updateAvailable" class="version-text">{{ version || 'v…' }}</span>
+          <span
+            v-if="updateAvailable"
+            class="upgrade-badge"
+            :class="{ upgrading }"
+            title="发现新版本，点击升级"
+            @click="doUpgrade"
+          >{{ upgrading ? '升级中…' : '⬆ 升级' }}</span>
+        </div>
+        <!-- 用户菜单：点击用户名弹出 -->
+        <div v-if="userMenuOpen && serverLoggedIn" class="user-menu" @click.stop>
+          <div class="user-menu-item" @click="openProfileDialog">{{ zh.auth.editProfile }}</div>
+          <div class="user-menu-item" @click="openPasswordDialog">{{ zh.auth.changePassword }}</div>
+          <div class="user-menu-item danger" @click="doServerLogout">{{ zh.auth.logout }}</div>
+        </div>
       </div>
     </aside>
     <div v-if="sidebarOpen" class="sidebar-overlay" @click="closeSidebar"></div>
@@ -280,9 +402,9 @@ async function doUpgrade() {
       </router-view>
     </main>
     <!-- 全局访问密码遮罩：局域网未认证时拦截整个界面 -->
-    <div v-if="authRequired" class="auth-overlay">
+    <div v-if="authRequired && !serverMode" class="auth-overlay">
       <div class="auth-card">
-        <img class="auth-logo" :src="logoUrl" alt="熊猫事务所" />
+        <img class="auth-logo" :src="logoUrl" alt="小新AI事务所" />
         <h1 class="auth-title">{{ zh.auth.title }}</h1>
         <p class="auth-desc">{{ authLocked ? authLockedMessage : zh.auth.desc }}</p>
         <template v-if="!authLocked">
@@ -302,6 +424,70 @@ async function doUpgrade() {
             @click="submitAuth"
           >{{ authSubmitting ? zh.auth.loggingIn : zh.auth.submit }}</button>
         </template>
+      </div>
+    </div>
+    <!-- 账号登录遮罩（zxs 产品线：server_url 模式下未登录时拦截整个界面） -->
+    <div v-if="loginRequired" class="auth-overlay auth-overlay--account">
+      <div class="auth-blob auth-blob-a"></div>
+      <div class="auth-blob auth-blob-b"></div>
+      <div class="auth-card auth-card--account">
+        <div class="auth-brand">
+          <img class="auth-logo" :src="logoUrl" alt="logo" />
+          <h1 class="auth-title">{{ zh.auth.serverTitle }}</h1>
+        </div>
+        <input
+          v-model="loginUsername"
+          class="auth-input"
+          type="text"
+          :placeholder="zh.auth.usernamePlaceholder"
+          autocomplete="username"
+          autofocus
+        />
+        <input
+          v-model="loginPassword"
+          class="auth-input"
+          type="password"
+          :placeholder="zh.auth.serverPasswordPlaceholder"
+          autocomplete="current-password"
+          @keyup.enter="submitServerLogin"
+        />
+        <p v-if="loginError" class="auth-error">{{ loginError }}</p>
+        <button
+          class="auth-submit"
+          type="button"
+          :disabled="loginSubmitting || !loginUsername || !loginPassword"
+          @click="submitServerLogin"
+        >{{ loginSubmitting ? zh.auth.loggingIn : zh.auth.login }}</button>
+      </div>
+    </div>
+    <!-- 个人信息（只读：姓名/手机号/部门由管理员维护） -->
+    <div v-if="profileDialog.visible" class="auth-overlay auth-overlay--account" @click.self="profileDialog.visible = false">
+      <div class="auth-blob auth-blob-a"></div>
+      <div class="auth-blob auth-blob-b"></div>
+      <div class="auth-card auth-card--account profile-card">
+        <h1 class="auth-title">{{ zh.auth.editProfile }}</h1>
+        <p v-if="profileDialog.error" class="auth-error">{{ profileDialog.error }}</p>
+        <template v-else>
+          <div class="profile-row"><span class="profile-label">登录名</span><span>{{ profileDialog.phone || '—' }}</span></div>
+          <div class="profile-row"><span class="profile-label">姓名</span><span>{{ profileDialog.displayName || '—' }}</span></div>
+          <div class="profile-row"><span class="profile-label">部门</span><span>{{ profileDialog.department || '—' }}</span></div>
+          <div class="profile-row"><span class="profile-label">token 用量</span><span>{{ profileDialog.used }} / {{ profileDialog.quota == null ? '不限' : profileDialog.quota }}</span></div>
+        </template>
+        <button class="auth-cancel" type="button" @click="profileDialog.visible = false">{{ zh.auth.close }}</button>
+      </div>
+    </div>
+    <!-- 修改密码 -->
+    <div v-if="pwDialog.visible" class="auth-overlay auth-overlay--account" @click.self="pwDialog.visible = false">
+      <div class="auth-blob auth-blob-a"></div>
+      <div class="auth-blob auth-blob-b"></div>
+      <div class="auth-card auth-card--account">
+        <h1 class="auth-title">{{ zh.auth.changePassword }}</h1>
+        <input v-model="pwDialog.oldPw" class="auth-input" type="password" :placeholder="zh.auth.oldPassword" autocomplete="current-password" />
+        <input v-model="pwDialog.newPw" class="auth-input" type="password" :placeholder="zh.auth.newPassword" autocomplete="new-password" />
+        <input v-model="pwDialog.confirm" class="auth-input" type="password" :placeholder="zh.auth.confirmPassword" autocomplete="new-password" @keyup.enter="savePassword" />
+        <p v-if="pwDialog.error" class="auth-error">{{ pwDialog.error }}</p>
+        <button class="auth-submit" type="button" :disabled="pwDialog.saving || !pwDialog.oldPw || !pwDialog.newPw" @click="savePassword">{{ zh.auth.save }}</button>
+        <button class="auth-cancel" type="button" @click="pwDialog.visible = false">{{ zh.auth.cancel }}</button>
       </div>
     </div>
   </div>
@@ -331,26 +517,28 @@ async function doUpgrade() {
 .logo {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 18px 16px;
+  gap: 10px;
+  padding: 18px 14px;
   border-bottom: 1px solid var(--panda-sidebar-divider);
 }
 
 .logo-img {
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   border-radius: 10px;
+  flex-shrink: 0;
   /* 品牌感：描边 + 竹绿微光晕 */
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14), var(--panda-shadow-glow);
 }
 
 .logo-text {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.01em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;  /* flex 收缩生效，极端窄屏才退到省略号（悬停可见全名） */
   /* 跟随侧边栏文字色（主题派生），此前固定 --panda-on-accent 换主题不变色 */
   color: var(--panda-sidebar-text, #f9fafb);
 }
@@ -367,14 +555,11 @@ async function doUpgrade() {
 }
 
 .sidebar-footer {
-  display: flex;
-  align-items: center;
+  position: relative;
   padding: 10px 16px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-<<<<<<< HEAD
-=======
 .footer-row {
   display: flex;
   align-items: center;
@@ -429,7 +614,6 @@ async function doUpgrade() {
 .user-menu-item.danger { color: #f7918a; }
 .user-menu-item.danger:hover { background: rgba(247, 145, 138, 0.12); }
 
->>>>>>> 7edbead (feat(security): 远程接管/供应链/沙箱逃逸三层收口 + promote 版本一致 + UOS 侧栏)
 .version-text {
   font-size: 11px;
   color: var(--panda-sidebar-text-dim, rgba(207, 216, 227, 0.55));
@@ -586,8 +770,7 @@ async function doUpgrade() {
 
 .auth-input {
   width: 100%;
-  padding: 9px 12px;
-  border: 1px solid var(--el-border-color);
+  padding: 9px 12px;  border: 1px solid var(--el-border-color);
   border-radius: 8px;
   font-size: 14px;
   outline: none;
@@ -596,6 +779,40 @@ async function doUpgrade() {
 
 .auth-input:focus {
   border-color: var(--el-color-primary);
+}
+
+.auth-input + .auth-input {
+  margin-top: 10px;
+}
+
+.auth-cancel {
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.auth-cancel:hover { color: var(--el-text-color-primary); }
+
+.profile-card { align-items: stretch; }
+.profile-card .auth-title { align-self: center; }
+.profile-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 9px 4px;
+  font-size: 14px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.profile-row:last-of-type { border-bottom: none; }
+.profile-label { color: var(--el-text-color-secondary); font-size: 13px; }
+
+.auth-title + .auth-input {
+  margin-top: 14px;
 }
 
 .auth-error {
@@ -785,5 +1002,109 @@ body::after {
     linear-gradient(45deg, rgba(64, 158, 255, 0.05) 25%, transparent 25%),
     linear-gradient(-45deg, rgba(64, 158, 255, 0.05) 25%, transparent 25%);
   background-size: 40px 40px;
+}
+
+/* ── 账号登录页美化（zxs 线）：渐变底 + 装饰光斑 + 玻璃感卡片 ── */
+.auth-overlay--account {
+  background:
+    radial-gradient(1100px 550px at 15% 8%, rgba(0, 185, 107, 0.12), transparent 60%),
+    radial-gradient(900px 500px at 88% 82%, rgba(37, 99, 235, 0.10), transparent 60%),
+    linear-gradient(160deg, #f2faf5 0%, #f7fafc 55%, #eef5f1 100%);
+  overflow: hidden;
+}
+
+.auth-overlay--account .auth-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(60px);
+  pointer-events: none;
+}
+
+.auth-overlay--account .auth-blob-a {
+  width: 420px;
+  height: 420px;
+  left: -120px;
+  top: -100px;
+  background: rgba(0, 185, 107, 0.16);
+}
+
+.auth-overlay--account .auth-blob-b {
+  width: 360px;
+  height: 360px;
+  right: -100px;
+  bottom: -90px;
+  background: rgba(37, 99, 235, 0.12);
+}
+
+.auth-card--account {
+  position: relative;
+  width: min(400px, 90vw);
+  padding: 44px 40px 36px;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 18px 50px rgba(16, 74, 46, 0.12), 0 2px 8px rgba(16, 74, 46, 0.06);
+}
+
+.auth-card--account .auth-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 26px;
+}
+
+.auth-card--account .auth-logo {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  box-shadow: 0 6px 18px rgba(0, 185, 107, 0.22);
+}
+
+.auth-card--account .auth-title {
+  margin: 16px 0 0;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+/* 弹窗版（个人信息/修改密码，无 logo 区）：标题与内容拉开距离 */
+.auth-card--account > .auth-title:first-child {
+  margin: 0 0 18px;
+}
+
+.auth-card--account .auth-input {
+  padding: 11px 14px;
+  border-radius: 10px;
+  border-color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.9);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.auth-card--account .auth-input:focus {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 3px rgba(0, 185, 107, 0.12);
+}
+
+.auth-card--account .auth-submit {
+  margin-top: 18px;
+  padding: 12px 0;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  background: linear-gradient(135deg, var(--el-color-primary) 0%, #0a8a54 100%);
+  box-shadow: 0 8px 20px rgba(0, 185, 107, 0.28);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.auth-card--account .auth-submit:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(0, 185, 107, 0.36);
+}
+
+.auth-card--account .auth-submit:disabled {
+  opacity: 0.55;
 }
 </style>
