@@ -147,8 +147,11 @@ def _ocr_remote_vllm(img_bytes: bytes, url: str) -> str:
             # 不带 <image> 字面量——chat_template 已为图像项插入占位符，再写
             # 就是双占位符，A/B 实证输出整页重复退化
             "temperature": 0,
-            "max_tokens": 2048,
-            **({"frequency_penalty": 1.0} if is_unlimited else {}),
+            "max_tokens": 4096,
+            **({"frequency_penalty": 1.0} if is_unlimited else
+               # Qwen 推理模型：密集版面会把 token 预算全耗在 reasoning 上，
+               # 最终 content=null（实证：大图返回空文本）。OCR 转写不需要推理
+               {"chat_template_kwargs": {"enable_thinking": False}}),
             "messages": [{"role": "user", "content": [
                 {"type": "text", "text":
                     "document parsing." if is_unlimited else
