@@ -5,7 +5,7 @@
 Unicode true
 !include "MUI2.nsh"
 
-Name "@DISPLAY_NAME@"
+Name "@DISPLAY_NAME@ v@VERSION@"
 OutFile "@OUT_ABS@\@DISPLAY_NAME@-@VERSION@-Setup.exe"
 InstallDir "$PROGRAMFILES\@APP_NAME@"
 RequestExecutionLevel admin
@@ -14,8 +14,20 @@ BrandingText "@DISPLAY_NAME@"
 Icon "@ICON_ABS@"
 UninstallIcon "@ICON_ABS@"
 
+; 完成页「现在打开」复选框（默认勾选，装完即启动；MUI_FINISHPAGE_RUN
+; 默认即勾选，无需额外 define）。标题带版本号（用户需求：安装器可见版本）
+!define MUI_FINISHPAGE_RUN "$INSTDIR\Open-AGC.exe"
+!define MUI_FINISHPAGE_RUN_TEXT "现在打开 @DISPLAY_NAME@"
+; 品牌头图：欢迎/完成页大图与各页右上小图统一用品牌 logo（替换
+; Nullsoft 默认；also 必须显式指定——GUIInit 对默认 modern-wizard.bmp
+; 做 !pragma verifyloadimage，缺默认素材时 MUI_PAGE_FINISH 直接编译失败）
+!define MUI_HEADERIMAGE
+!define MUI_HEADERIMAGE_BITMAP "@HEADER_BMP_ABS@"
+!define MUI_WELCOMEFINISHPAGE_BITMAP "@HEADER_BMP_ABS@"
+
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
 ; 卸载流程：确认页 + 执行页。组件选择页已被两次实践证明水土不服
 ; （缺 INSTFILES 时按钮变「关闭」不执行卸载；加上后可选的「清空用户数据
 ; 目录」节又不进列表）——改为卸载执行前弹 MessageBox 询问是否清数据。
