@@ -46,6 +46,19 @@ const RESUMABLE_STATUSES = ['interrupted', 'backgrounded', 'background_failed', 
 const RECENT_CARD_STATUSES = ['running', 'interrupted', 'backgrounded', 'background_failed', 'failed'];
 
 const route = useRoute();
+const chatInputRef = ref(null);
+// 智能广场「试试问我/去使用」跳转：/chat?prompt=... → 预填输入框。
+// 进会话时 sessionId 补全重定向（onMounted 里 router.replace）会丢 query，
+// 且 immediate watcher 的 nextTick 时机下 ChatInput 未必就绪（实证：点击后
+// ?prompt 在 URL 上仅存活 ~200ms，输入框始终为空）——setup 时先捕获，
+// enterSession 完成后应用；watcher 兜底同页导航场景。
+const pendingPrompt = route.query.prompt ? String(route.query.prompt) : '';
+function applyPromptText(p) {
+  nextTick(() => chatInputRef.value && chatInputRef.value.setText(p));
+}
+watch(() => route.query.prompt, (p) => {
+  if (p) applyPromptText(String(p));
+});
 const router = useRouter();
 const ws = useWsStore();
 
@@ -1075,6 +1088,8 @@ onMounted(async () => {
     router.replace(`/chat/${sid}`);
   }
   await enterSession(sid);
+  // 广场预填在会话就绪后落输入框（setup 捕获的 pendingPrompt 见上方注释）
+  if (pendingPrompt) applyPromptText(pendingPrompt);
 });
 
 onUnmounted(() => {
@@ -1111,11 +1126,13 @@ onUnmounted(() => {
         ><el-icon><Collection /></el-icon></button>
         <span class="session-title" :title="currentSessionName">{{ currentSessionName }}</span>
         <div class="header-right">
-          <el-select v-model="selectedAgent" size="small" class="agent-select" :title="t.agentSelectTitle">
-            <el-option value="default" :label="t.defaultAgent" />
-            <el-option v-for="a in agents" :key="a.name" :value="a.name" :label="a.name" />
-          </el-select>
-          <span v-if="defaultModel" class="model-badge">{{ defaultModel }}</span>
+          <template v-if="!themeState.hideAgentModelSelector">
+            <el-select v-model="selectedAgent" size="small" class="agent-select" :title="t.agentSelectTitle">
+              <el-option value="default" :label="t.defaultAgent" />
+              <el-option v-for="a in agents" :key="a.name" :value="a.name" :label="a.name" />
+            </el-select>
+            <span v-if="defaultModel" class="model-badge">{{ defaultModel }}</span>
+          </template>
           <span v-if="tokenUsageText" class="token-usage">{{ tokenUsageText }}</span>
         </div>
       </header>
@@ -1187,7 +1204,7 @@ onUnmounted(() => {
         <span>{{ t.newMessages }}</span>
       </div>
 
-      <ChatInput :running="running" :connected="ws.connected" @send="onSend" @stop="onStop" />
+      <ChatInput ref="chatInputRef" :running="running" :connected="ws.connected" @send="onSend" @stop="onStop" />
     </div>
 
     <SandboxModal v-model="sandboxState.visible" :data="sandboxState" @respond="onSandboxRespond" />
