@@ -44,7 +44,12 @@ class MCPToolWrapper(BaseTool):
         # 只转发模型实际给出的参数：去下划线前缀键与可调用对象。
         args = {k: v for k, v in kwargs.items()
                 if not k.startswith("_") and not callable(v)}
-        return self.mcp_manager.call_tool_sync(self.mcp_server_name, self.tool_name, args)
+        # 逐页 OCR 是重资源调用（每页数秒~十几秒），默认 120s 对多页文档
+        # 会误伤（生产实证：agent 查 1954 报纸重读连续超时）——该工具放宽到
+        # 300s；真正慢到超出的请服务端调 DPI/页数，不在这里硬等
+        timeout = 300.0 if self.tool_name == "es_get_doc_ocr" else 120.0
+        return self.mcp_manager.call_tool_sync(
+            self.mcp_server_name, self.tool_name, args, timeout=timeout)
 
 class MCPClientManager:
     """
