@@ -63,6 +63,7 @@ def main() -> int:
                .replace("@OUT_ABS@", out_abs)
                .replace("@ICON_ABS@", icon_abs)
                .replace("@HEADER_BMP_ABS@", os.path.join(ROOT, "static", "installer_header.bmp"))
+               .replace("@WELCOME_BMP_ABS@", os.path.join(ROOT, "static", "installer_welcome.bmp"))
                .replace("@EXE_NAME@", "Open-AGC.exe"))
     os.makedirs("dist", exist_ok=True)
     out = os.path.join("dist", "installer.nsi")
