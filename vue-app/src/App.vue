@@ -436,17 +436,26 @@ async function doUpgrade() {
 }
 
 .upgrade-badge {
-  margin-left: 8px;
+  margin-left: auto;
   font-size: 11px;
-  color: #fff;
-  background: var(--el-color-primary);
-  border-radius: 4px;
-  padding: 2px 8px;
+  line-height: 1.4;
+  color: var(--el-color-primary-light-3, #9ecbff);
+  background: rgba(64, 158, 255, 0.10);
+  border: 1px solid rgba(64, 158, 255, 0.32);
+  border-radius: 999px;
+  padding: 2px 10px;
   cursor: pointer;
   user-select: none;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  transition: background-color 0.15s, border-color 0.15s;
 }
 
-.upgrade-badge:hover { filter: brightness(1.1); }
+.upgrade-badge:hover {
+  background: rgba(64, 158, 255, 0.20);
+  border-color: rgba(64, 158, 255, 0.55);
+  filter: none;
+}
 .upgrade-badge.upgrading { opacity: 0.6; pointer-events: none; }
 
 .menu-item {
