@@ -253,20 +253,27 @@ async def _authorize_websocket(websocket: WebSocket) -> bool:
     host = websocket.headers.get("host", "")
     origin = websocket.headers.get("origin", "")
     allowed = layer in ("local", "lan") and _allowed_ws_origin(origin, host, layer)
+    try:
+        server_mode = bool(str((load_config() or {}).get("server_url") or "").strip())
+    except Exception:
+        server_mode = False
     if layer == "local":
         try:
             request_host = urlsplit(f"//{host}").hostname
         except ValueError:
             request_host = None
         token = websocket.query_params.get("token", "")
-        allowed = bool(
-            allowed and request_host in ("localhost", "127.0.0.1", "::1")
-            and token and hmac.compare_digest(token, _state._WS_TOKEN))
+        if server_mode:
+            # 中央账号模式下本机也接受账号 JWT（前端登录后用它连接；不再
+            # 只认进程 _WS_TOKEN，否则登录用户实时步骤全断——实证）
+            allowed = allowed and (
+                (token and hmac.compare_digest(token, _state._WS_TOKEN)
+                 or _valid_server_ws_credential(websocket)))
+        else:
+            allowed = bool(
+                allowed and request_host in ("localhost", "127.0.0.1", "::1")
+                and token and hmac.compare_digest(token, _state._WS_TOKEN))
     elif layer == "lan":
-        try:
-            server_mode = bool(str((load_config() or {}).get("server_url") or "").strip())
-        except Exception:
-            server_mode = False
         if server_mode:
             allowed = allowed and _valid_server_ws_credential(websocket)
     if not allowed:
