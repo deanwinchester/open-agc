@@ -66,6 +66,18 @@ def test_ws_allows_desktop_and_loopback_browser_origins(ws_app):
             pass
 
 
+def test_ws_server_mode_accepts_account_jwt(monkeypatch, ws_app):
+    """中央账号模式下本机也接受账号 JWT（实证：登录后实时步骤全断）。"""
+    app, _ = ws_app
+    from core import server_auth
+    monkeypatch.setattr(ws_module, "load_config",
+                        lambda: {"server_url": "http://172.16.100.84:8080"})
+    monkeypatch.setattr(server_auth, "get_token", lambda: "account-jwt")
+    client = TestClient(app, client=("127.0.0.1", 50000))
+    with client.websocket_connect("/ws?token=account-jwt", headers=LOCAL_HEADERS):
+        pass
+
+
 def _wait_entry():
     return {
         "event": threading.Event(),
