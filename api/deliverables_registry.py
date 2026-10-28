@@ -251,7 +251,35 @@ def register_task_deliverables(task_id: int, root: str = None):
     for rel in dict.fromkeys(dirs):  # 去重保序
         if register_deliverable(rel, task_id=task_id, touch=True) is not None:
             registered.append(rel)
+            # xlsx 交付物统一补表头筛选（编辑用户高频需求；模型写 openpyxl
+            # 时经常漏 autoFilter——完成钩子里兜底，存在即不改）
+            _ensure_xlsx_autofilter(os.path.join(root, rel))
     return registered
+
+
+def _ensure_xlsx_autofilter(dir_path: str):
+    """目录下所有 .xlsx：没有筛选行时补 ws.auto_filter.ref（存在不改）。
+    失败只告警不阻断登记流程。"""
+    try:
+        from openpyxl import load_workbook
+        for base, _dirs, files in os.walk(dir_path):
+            for fn in files:
+                if not fn.lower().endswith(".xlsx"):
+                    continue
+                p = os.path.join(base, fn)
+                try:
+                    wb = load_workbook(p)
+                    changed = False
+                    for ws in wb.worksheets:
+                        if not ws.auto_filter.ref and (ws.max_row > 1 and ws.max_column > 1):
+                            ws.auto_filter.ref = ws.dimensions
+                            changed = True
+                    if changed:
+                        wb.save(p)
+                except Exception as e:
+                    print(f"[Deliverables] xlsx autofilter skip {p}: {e}")
+    except Exception as e:
+        print(f"[Deliverables] autofilter walk error: {e}")
 
 
 def backfill_deliverables(root: str = None):
