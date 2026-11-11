@@ -340,9 +340,6 @@ class AutoUpgrader:
         （版本号已在清单里，不走命名约定）；GitHub 通道按 CI 命名约定。"""
         if self._manifest_assets:
             if sys.platform == "darwin":
-<<<<<<< HEAD
-                key = "macos"
-=======
                 import platform as _pf
                 machine = _pf.machine().lower()
                 arch = "arm64" if machine in ("arm64", "aarch64") else "x86_64"
@@ -358,7 +355,6 @@ class AutoUpgrader:
                             continue
                         return name
                 return ""  # Never fall through to an unrelated upstream package.
->>>>>>> 7edbead (feat(security): 远程接管/供应链/沙箱逃逸三层收口 + promote 版本一致 + UOS 侧栏)
             elif sys.platform == "win32":
                 key = "windows"
             else:

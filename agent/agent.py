@@ -1743,10 +1743,16 @@ class OpenAGCAgent:
         # it) — importing the light state module avoids pulling the whole
         # server (and its import-time DB init) into the agent loop.
         try:
-            from api.state import _sandbox_waits
+            from api.state import _sandbox_waits, _SANDBOX_LATE_APPROVAL_TTL
         except Exception as e:
             print(f"[Agent] Failed to import _sandbox_waits: {e}")
             return f"Sandbox authorization failed (internal error): {sb.path}"
+        # 有界清理迟到的授权凭据，避免超时请求永久堆积。
+        _now = _time.time()
+        for _rid, _old in list(_sandbox_waits.items()):
+            if (_old.get("expired_at") and
+                    _now - _old["expired_at"] > _SANDBOX_LATE_APPROVAL_TTL):
+                _sandbox_waits.pop(_rid, None)
         entry = {"event": wait_event, "result": result_holder,
                  "session_id": self.session_id, "request_id": request_id,
                  "task_id": getattr(self, "task_id", None),
@@ -1793,11 +1799,14 @@ class OpenAGCAgent:
                     pass
 
         if not responded:
-            _clear_wait_entry()
             if self.is_interrupted:
+                _clear_wait_entry()
                 print(f"[Agent] Sandbox wait interrupted for {sb.path}")
                 return f"Sandbox authorization interrupted by user: {sb.path}"
-            print(f"[Agent] Sandbox wait timeout for {sb.path}")
+            # 不再立即删除请求：任务转为后台挂起后，用户仍可能点击原弹窗。
+            # 保留精确绑定的请求凭据，由迟到授权路径校验后恢复对应任务。
+            entry["expired_at"] = _time.time()
+            print(f"[Agent] Sandbox wait timeout for {sb.path}; late approval retained")
             from tools.interaction import TaskPaused
             raise TaskPaused(f"等待权限授权超时，转入后台挂起状态，请确认权限后恢复执行。路径: {sb.path}")
 

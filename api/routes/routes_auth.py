@@ -111,8 +111,7 @@ async def auth_check(request: Request):
         return {"authenticated": False, "layer": layer}
     token = request.cookies.get(TOKEN_COOKIE_NAME, "")
     return {"authenticated": bool(token and verify_token(token, password)), "layer": layer}
-<<<<<<< HEAD
-=======
+
 
 
 @router.get("/api/bootstrap/ws-token")
@@ -197,4 +196,3 @@ async def server_password_change(body: ServerPasswordBody):
     except server_auth.ServerAuthError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"status": "success"}
->>>>>>> 7edbead (feat(security): 远程接管/供应链/沙箱逃逸三层收口 + promote 版本一致 + UOS 侧栏)

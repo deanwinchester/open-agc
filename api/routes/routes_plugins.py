@@ -22,6 +22,13 @@ async def approve_sandbox_request(body: dict):
     wait = _matching_sandbox_wait(body, sid)
     if wait is None:
         raise HTTPException(status_code=403, detail="unmatched or expired sandbox approval")
+    if wait.get("expired_at"):
+        from api.background import resume_task_with_late_sandbox_approval
+        result = resume_task_with_late_sandbox_approval(wait, body)
+        if not result.get("ok"):
+            status = 403 if result.get("error") == "expired" else 409
+            raise HTTPException(status_code=status, detail=result.get("message", "恢复失败"))
+        return {"status": "resumed", **result}
     # Secret form fields pass through in-memory (see api.state)
     resolve_sandbox_wait(wait, body)
     return {"status": "ok"}

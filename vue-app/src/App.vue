@@ -215,7 +215,6 @@ const menus = [
   { path: '/goals', label: zh.menu.goals },
   { path: '/downloads', label: zh.menu.downloads },
   { path: '/sandbox', label: zh.menu.sandbox },
-  { path: '/plaza', label: zh.menu.plaza },
   { path: '/settings', label: zh.menu.settings },
   { path: '/debug', label: zh.menu.debug },
 ];
@@ -498,6 +497,7 @@ async function doUpgrade() {
   display: flex;
   height: 100vh;
   margin: 0;
+  overflow: hidden;
   font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
 }
 
@@ -722,7 +722,10 @@ async function doUpgrade() {
 
 .content {
   flex: 1;
-  overflow: auto;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
   background: var(--el-bg-color-page);
 }
 

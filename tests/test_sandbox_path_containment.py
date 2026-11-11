@@ -126,6 +126,25 @@ def test_tool_check_sandbox_allows_regular_file(tmp_path):
     BaseTool.check_sandbox(str(regular), sandbox_dir=str(root), config={})
 
 
+def test_tool_check_sandbox_allows_only_internal_memory_file(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    memory_file = data_dir / "MEMORY.md"
+    memory_file.write_text("用户偏好：回复简洁", encoding="utf-8")
+    monkeypatch.setattr("core.paths.get_data_path", lambda name: str(data_dir / name))
+    monkeypatch.setattr("core.paths.get_skills_dir", lambda: str(tmp_path / "skills"))
+
+    BaseTool.check_sandbox(str(memory_file), sandbox_dir=str(tmp_path / "workspace"), config={})
+
+    # 精确放行不等于开放整个 data 目录或相似文件名。
+    with pytest.raises(SandboxBlocked):
+        BaseTool.check_sandbox(str(data_dir / "config.json"),
+                               sandbox_dir=str(tmp_path / "workspace"), config={})
+    with pytest.raises(SandboxBlocked):
+        BaseTool.check_sandbox(str(data_dir / "MEMORY.md.bak"),
+                               sandbox_dir=str(tmp_path / "workspace"), config={})
+
+
 def test_file_route_rejects_prefix_sibling(tmp_path, monkeypatch):
     root = tmp_path / "workspace"
     sibling = tmp_path / "workspace_secret"

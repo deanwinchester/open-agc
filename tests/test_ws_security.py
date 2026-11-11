@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """恶意网页隔离、WS 会话令牌、LAN 账号绑定与沙箱审批绑定回归测试。"""
 import threading
+import time
 
 import pytest
 from fastapi import FastAPI
@@ -145,6 +146,30 @@ def test_sandbox_response_accepts_exact_binding(ws_app):
         sock.send_json(_sandbox_message())
     assert wait["event"].is_set()
     assert wait["result"]["action"] == "approve_once"
+
+
+def test_sandbox_response_late_approval_resumes_backgrounded_task(ws_app, monkeypatch):
+    """超时转后台后，迟到授权应写入恢复白名单并唤起原任务。"""
+    app, token = ws_app
+    wait = _wait_entry()
+    wait["expired_at"] = time.time()
+    state._sandbox_waits["req-real"] = wait
+    resumed = {}
+
+    def _fake_resume(task_id, extra_instruction=""):
+        resumed.update(task_id=task_id, instruction=extra_instruction)
+        return {"ok": True, "status": "resumed", "message": "已恢复"}
+
+    monkeypatch.setattr("api.background.resume_task_manual", _fake_resume)
+    with TestClient(app, client=("127.0.0.1", 50000)).websocket_connect(f"/ws?token={token}", headers=LOCAL_HEADERS) as sock:
+        sock.send_json(_sandbox_message())
+
+    assert resumed["task_id"] == 42
+    assert "/expected/path" in resumed["instruction"]
+    assert state._pending_sandbox_approvals[7] == [
+        {"action": "approve_once", "path": "/expected/path"}]
+    assert "req-real" not in state._sandbox_waits
+    assert not wait["event"].is_set(), "迟到授权不应再唤醒已消失的原等待线程"
 
 
 def test_sandbox_response_accepts_bound_deny_always(ws_app):

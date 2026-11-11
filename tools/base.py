@@ -90,6 +90,20 @@ class BaseTool(BaseModel):
         except Exception:
             pass
 
+        # 应用自身持久化事实文件默认放行：系统提示词要求 agent 维护
+        # data/MEMORY.md，且内容每次任务开始都会自动注入。只放行精确文件，
+        # 不扩大到整个 data 目录，config.json 等敏感配置仍须授权。
+        try:
+            from core.paths import get_data_path
+            memory_path = os.path.normcase(os.path.realpath(get_data_path("MEMORY.md")))
+            candidate_path = os.path.normcase(os.path.realpath(path))
+            if candidate_path == memory_path:
+                return
+        except (ValueError, OSError):
+            pass
+        except Exception:
+            pass
+
         # Allow paths in the session whitelist (one-time approvals)
         if session_whitelist:
             for wp in session_whitelist:

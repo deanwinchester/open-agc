@@ -338,7 +338,7 @@ async def websocket_endpoint(websocket: WebSocket):
     # 其他会话的请求永远看不到而超时）。
     _seen_waits = set()
     for _entry in list(_sandbox_waits.values()):
-        if not isinstance(_entry, dict):
+        if not isinstance(_entry, dict) or _entry.get("expired_at"):
             continue
         _rid = _entry.get("request_id")
         if not _rid or _rid in _seen_waits:
@@ -896,9 +896,21 @@ async def websocket_endpoint(websocket: WebSocket):
                             req_id = user_msg.get("request_id")
                             wait = _matching_sandbox_wait(user_msg, ws_session_id)
                             if wait is not None:
-                                # Secret form fields pass through in-memory (see api.state)
-                                resolve_sandbox_wait(wait, user_msg)
-                                print(f"[WS] Sandbox response: {action} for {sid} (req={req_id})")
+                                if wait.get("expired_at"):
+                                    # 等待已超时并转后台：应用迟到授权并恢复对应任务，
+                                    # 不再唤醒一个已经不存在的线程等待句柄。
+                                    from api.background import resume_task_with_late_sandbox_approval
+                                    _late_res = resume_task_with_late_sandbox_approval(wait, user_msg)
+                                    await _safe_send({"type": "system_message",
+                                                      "message": _late_res.get("message", ""),
+                                                      "session_id": sid,
+                                                      "task_id": user_msg.get("task_id")})
+                                    print(f"[WS] Late sandbox response: {action} for {sid} "
+                                          f"(req={req_id}, ok={_late_res.get('ok')})")
+                                else:
+                                    # Secret form fields pass through in-memory (see api.state)
+                                    resolve_sandbox_wait(wait, user_msg)
+                                    print(f"[WS] Sandbox response: {action} for {sid} (req={req_id})")
                             else:
                                 print(f"[WS] Rejected unmatched sandbox response for {sid} (req={req_id})")
                         else:

@@ -116,8 +116,7 @@ MSG_WRONG_CREDENTIAL = "访问密码错误或令牌无效。"
 # 公网 403 与「未配置密码 = 仅本机」两条规则约束。
 AUTH_EXEMPT_PATHS = frozenset({"/api/auth/login", "/api/auth/check"})
 
-<<<<<<< HEAD
-=======
+
 # 中央服务器账号模式（config.json 配置 server_url，brand 产品线）：
 # 本机凭登录态免密；LAN 的每个 API/WS 请求必须出示同一账号 JWT。
 # 仅登录与状态自检可匿名到达；公网依旧一律 403。
@@ -140,7 +139,7 @@ def _server_logged_in() -> bool:
     except Exception:
         return False
 
->>>>>>> 7edbead (feat(security): 远程接管/供应链/沙箱逃逸三层收口 + promote 版本一致 + UOS 侧栏)
+
 
 def _default_config_loader() -> dict:
     """默认配置来源：api.config.load_config（惰性导入，避免 core → api 硬依赖）。"""
@@ -271,8 +270,7 @@ class AccessControlMiddleware:
         client = scope.get("client")
         layer = classify_ip(client[0] if client else "")
 
-<<<<<<< HEAD
-=======
+
         # 公网一律 403（两种模式相同）
         if layer == "public":
             await self._reject(scope, send, 403, MSG_PUBLIC_DENIED)
@@ -317,7 +315,7 @@ class AccessControlMiddleware:
             await self.app(scope, receive, send)
             return
 
->>>>>>> 7edbead (feat(security): 远程接管/供应链/沙箱逃逸三层收口 + promote 版本一致 + UOS 侧栏)
+
         if layer == "local":
             await self.app(scope, receive, send)
             return

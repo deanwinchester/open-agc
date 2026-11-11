@@ -30,6 +30,8 @@ _pending_final_responses: Dict[int, dict] = {}
 
 # Sandbox auth waits: {request_id: {"event": threading.Event, "result": dict, ...}}
 _sandbox_waits: dict = {}
+# 超时授权保留 1 小时，允许迟到响应恢复已挂起任务；过期条目不再向新连接重播。
+_SANDBOX_LATE_APPROVAL_TTL = 3600
 
 # Pending sandbox approvals: {session_id: [paths]} — late approvals applied on task resume
 _pending_sandbox_approvals: dict = {}

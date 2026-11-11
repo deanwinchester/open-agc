@@ -4,7 +4,7 @@ from contextlib import closing
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from api.db import DB_PATH, db_connect
-from api.config import load_config
+from api.config import load_config, save_config
 from core.process import pid_alive, pid_alive_as
 from api.state import (
     connected_websockets, _main_event_loop, _active_agents, _background_agents,
@@ -513,6 +513,89 @@ def resume_task_with_late_answer(task_id: int, answer: str) -> dict:
     print(f"[BgTask] Task #{task_id}: late answer injected, resuming")
     return {"ok": True, "status": "resumed",
             "message": f"回答已注入，任务 #{task_id} 已恢复执行"}
+
+
+def resume_task_with_late_sandbox_approval(wait: dict, msg: dict) -> dict:
+    """Apply an exactly-bound, expired path authorization and resume its task.
+
+    ``wait`` must already have passed ``api.ws._matching_sandbox_wait``'s full
+    request/session/task/path/tool binding check. Unknown request IDs therefore
+    cannot inject arbitrary approvals. Only path requests support late resume;
+    credential and sensitive-operation prompts still require a live waiter.
+    """
+    from api.state import _sandbox_waits, _SANDBOX_LATE_APPROVAL_TTL
+
+    expired_at = wait.get("expired_at")
+    if not expired_at or _time.time() - expired_at > _SANDBOX_LATE_APPROVAL_TTL:
+        return {"ok": False, "error": "expired", "message": "授权请求已过期"}
+    payload = wait.get("payload") or {}
+    if payload.get("block_type") != "path":
+        return {"ok": False, "error": "unsupported",
+                "message": "该类型授权已超时，请手动恢复任务后重新发起"}
+    task_id = wait.get("task_id")
+    session_id = wait.get("session_id")
+    path = payload.get("path", "")
+    action = msg.get("action", "deny_once")
+    if not task_id or not path:
+        return {"ok": False, "error": "invalid", "message": "授权请求缺少任务或路径"}
+
+    pending_entry = None
+    try:
+        if action.startswith("approve"):
+            # 新 agent 在恢复启动时通过 _apply_pending_sandbox_approvals 消费，
+            # 保留原 action 语义；一次性授权不会写入持久配置。
+            pending_entry = {"action": action, "path": path}
+            _pending_sandbox_approvals.setdefault(session_id, []).append(pending_entry)
+
+        if action in ("approve_dir", "approve_always", "deny_always"):
+            config = load_config() or {}
+            abs_path = os.path.abspath(path)
+            if action == "deny_always":
+                denied = config.get("denied_paths", [])
+                if isinstance(denied, str):
+                    denied = json.loads(denied)
+                if path not in denied:
+                    denied.append(path)
+                config["denied_paths"] = denied
+            else:
+                dirpath = abs_path if os.path.isdir(abs_path) else os.path.dirname(abs_path)
+                allowed = config.get("allowed_paths", [])
+                if isinstance(allowed, str):
+                    allowed = json.loads(allowed)
+                if dirpath not in allowed:
+                    allowed.append(dirpath)
+                config["allowed_paths"] = allowed
+            save_config(config)
+
+        decision = "已授权" if action.startswith("approve") else "已拒绝"
+        instruction = (
+            f"【沙箱授权结果】用户对超时请求{decision}：{path}\n"
+            f"动作：{action}。请从上次中断处继续原任务；若已获授权，直接重试此前受阻的文件操作，"
+            "不要重复请求同一权限；若被拒绝，请说明限制并选择其他可行方案。"
+        )
+        result = resume_task_manual(task_id, instruction)
+    except Exception as e:
+        result = {"ok": False, "error": "resume_error", "message": str(e)}
+
+    if not result.get("ok"):
+        if pending_entry is not None:
+            entries = _pending_sandbox_approvals.get(session_id, [])
+            try:
+                entries.remove(pending_entry)
+            except ValueError:
+                pass
+        return result
+
+    # 仅移除仍然指向同一凭据的条目，避免误删同 ID 的新等待（理论防御）。
+    request_id = wait.get("request_id")
+    if _sandbox_waits.get(request_id) is wait:
+        _sandbox_waits.pop(request_id, None)
+    message = f"授权结果已应用，任务 #{task_id} 已恢复执行"
+    _broadcast_to_websockets({
+        "type": "system_message", "session_id": session_id,
+        "task_id": task_id, "message": message,
+    })
+    return {"ok": True, "status": "resumed", "task_id": task_id, "message": message}
 
 
 def resume_task_manual(task_id: int, extra_instruction: str = "") -> dict:
