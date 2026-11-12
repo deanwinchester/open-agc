@@ -18,7 +18,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from tools.shell import _is_background_command, _detect_interactive_prompt
+from tools.shell import _is_background_command, _detect_interactive_prompt, _prepare_child_env
 from tools.download import _download_direct
 from tools.auto_tool import validate_tool_code
 from tools.mcp_tool import MCPClientManager
@@ -97,6 +97,20 @@ class TestInteractivePrompt:
     ])
     def test_interactive(self, data):
         assert _detect_interactive_prompt(data) is True
+
+
+# ───────────────────────── Fix 2.5: 非交互启动器防卡死 ─────────────────────────
+
+def test_strata_launcher_cannot_wait_for_unattended_input():
+    env = {}
+    _prepare_child_env(env)
+    assert env["STRATA_NO_PROMPT"] == "1"
+    assert env["PYTHONIOENCODING"] == "utf-8"
+
+    # 用户显式配置优先，保留 shell_send 等人工交互场景的选择。
+    explicit = {"STRATA_NO_PROMPT": "0"}
+    _prepare_child_env(explicit)
+    assert explicit["STRATA_NO_PROMPT"] == "0"
 
 
 # ───────────────────────── Fix 3: 直连下载 HTTP 错误处理 ─────────────────────────

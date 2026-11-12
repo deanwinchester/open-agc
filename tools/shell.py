@@ -129,6 +129,19 @@ def _python_utf8_env(env: dict) -> dict:
     return env
 
 
+def _prepare_child_env(env: dict) -> dict:
+    """规范 Agent 子进程环境，并禁止无人应答的启动器交互提问。
+
+    ShellTool 的 stdin 是受管 PIPE，不是用户终端；但 VS Code 等父进程会留下
+    TERM_PROGRAM/TERM，Strata 据此误以为人可以回答问题，在只有 family、没有
+    model/preset 时永久等待输入（任务 #68 实证）。禁止其 plain questions，
+    让命令立即返回可操作的错误；用户显式设置该变量时仍尊重原值。
+    """
+    _python_utf8_env(env)
+    env.setdefault("STRATA_NO_PROMPT", "1")
+    return env
+
+
 def _decode_mixed(raw: bytes) -> str:
     """按行解码混合编码的原始字节：逐行 strict UTF-8，失败的行退回系统区域编码。
 
@@ -458,7 +471,7 @@ class ShellTool(BaseTool):
                     popen_kwargs["env"] = _sudo_safe_env()
                 else:
                     popen_kwargs["env"] = os.environ.copy()
-                _python_utf8_env(popen_kwargs["env"])
+                _prepare_child_env(popen_kwargs["env"])
                 if sys.platform == "win32":
                     popen_kwargs["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
                                                         | subprocess.CREATE_NO_WINDOW)
@@ -495,7 +508,7 @@ class ShellTool(BaseTool):
                     popen_kwargs["env"] = _sudo_safe_env()
                 else:
                     popen_kwargs["env"] = os.environ.copy()
-                _python_utf8_env(popen_kwargs["env"])
+                _prepare_child_env(popen_kwargs["env"])
                 if sys.platform == "win32":
                     popen_kwargs["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
                                                         | subprocess.CREATE_NO_WINDOW)

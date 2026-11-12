@@ -18,6 +18,9 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       upload_url: ${{ steps.release.outputs.upload_url }}
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKERHUB_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -43,11 +46,12 @@ jobs:
       # Docker Hub 的 Overview 只读 Hub 仓库自身的 description 字段，
       # 不会自动同步 GitHub README——需显式推送（用户反馈 Hub 页空白）
       - name: Update Docker Hub description
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_PASSWORD != ''
         uses: peter-evans/dockerhub-description@v4
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-          repository: ${{ secrets.DOCKER_USERNAME }}/open-agc
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_PASSWORD }}
+          repository: ${{ env.DOCKERHUB_USERNAME }}/open-agc
           readme-filepath: ./README.md
         # 密钥未配置时不阻塞发布主流程
         continue-on-error: true
@@ -59,6 +63,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKERHUB_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,12 +85,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_PASSWORD != ''
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_PASSWORD }}
 
-      - name: Build and push
+      - name: Build and push GHCR
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -94,8 +102,25 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.create-release.outputs.version }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ secrets.DOCKER_USERNAME }}/open-agc:${{ needs.create-release.outputs.version }}
-            ${{ secrets.DOCKER_USERNAME }}/open-agc:latest
+          labels: |
+            org.opencontainers.image.version=${{ needs.create-release.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      # 重建仓库没有继承 Docker Hub Secrets 时跳过，不影响 GHCR 与桌面包。
+      # 配回凭据后复用同一 Buildx 缓存推送 Docker Hub 双架构镜像。
+      - name: Build and push Docker Hub
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_PASSWORD != ''
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            APP_VERSION=${{ needs.create-release.outputs.version }}
+          tags: |
+            ${{ env.DOCKERHUB_USERNAME }}/open-agc:${{ needs.create-release.outputs.version }}
+            ${{ env.DOCKERHUB_USERNAME }}/open-agc:latest
           labels: |
             org.opencontainers.image.version=${{ needs.create-release.outputs.version }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
