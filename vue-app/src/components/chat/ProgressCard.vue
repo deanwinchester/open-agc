@@ -2,7 +2,7 @@
 // Agent 执行进度卡片：实时（live）与历史（history）两种模式。
 // 条目类型：tool（工具步骤）/ thinking（思考过程）/ response（LLM 中间回复）/
 // note（模型切换等提示）/ ask（Agent 提问）。shellLines 为实时 shell 输出。
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import zh from '../../i18n/zh';
 import { request } from '../../api/client';
 import { personaEmoji } from '../../stores/theme';
@@ -62,6 +62,59 @@ const lastActionText = computed(() => {
     }
   }
   return '';
+});
+
+// 收起时保留最近一条思考/助手回复的上下文。流式内容原地更新，预览也会
+// 随之刷新；跳过空条目，避免工具完成后预览突然消失。
+const collapsedPreview = computed(() => {
+  for (let i = props.card.entries.length - 1; i >= 0; i--) {
+    const entry = props.card.entries[i];
+    if (entry.kind !== 'thinking' && entry.kind !== 'response') continue;
+    const content = String(entry.content || '')
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/[*_`#>~]/g, '')
+      .replace(/^\s*[-+]\s+/gm, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (content) {
+      return {
+        content,
+        label: entry.kind === 'thinking' ? t.thinkingProcess : t.llmResponse,
+      };
+    }
+  }
+  return null;
+});
+
+// 执行耗时：仅运行中的卡片启动秒级时钟，完成后冻结在 endedAt，避免每张
+// 历史卡都常驻一个定时器。
+const clock = ref(Date.now());
+let elapsedTimer = null;
+function syncElapsedTimer(live) {
+  if (elapsedTimer) {
+    clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
+  clock.value = Date.now();
+  if (live) elapsedTimer = setInterval(() => { clock.value = Date.now(); }, 1000);
+}
+watch(() => props.card.live, syncElapsedTimer, { immediate: true });
+onBeforeUnmount(() => {
+  if (elapsedTimer) clearInterval(elapsedTimer);
+});
+
+const elapsedText = computed(() => {
+  const start = Number(props.card.startedAt || 0);
+  if (!start) return '';
+  const end = props.card.live ? clock.value : Number(props.card.endedAt || clock.value);
+  const total = Math.max(0, Math.floor((end - start) / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+  return `${Math.floor(total / 60)}:${String(seconds).padStart(2, '0')}`;
 });
 
 // 步骤详情抽屉：行内只显示概览，点击步骤在右侧查看完整结果
@@ -132,6 +185,9 @@ function onSubmitAsk(entry, answer) {
         <span v-if="card.collapsed && lastActionText" class="pc-current"> · {{ lastActionText }}</span>
       </div>
       <div class="pc-right">
+        <span v-if="elapsedText" class="pc-elapsed">
+          ⏱ {{ card.live ? t.executingFor : t.elapsed }} {{ elapsedText }}
+        </span>
         <span v-if="card.tokenUsage" class="pc-usage">{{ card.tokenUsage }}</span>
         <el-button
           v-if="card.resumable && !card.live"
@@ -142,6 +198,18 @@ function onSubmitAsk(entry, answer) {
           @click.stop="onResume"
         >{{ t.resume }}</el-button>
         <span class="pc-toggle">{{ card.collapsed ? '▸' : '▾' }}</span>
+      </div>
+    </div>
+
+    <div
+      v-if="card.collapsed && collapsedPreview"
+      class="pc-collapsed-preview"
+      :title="t.expandSteps"
+      @click="toggle"
+    >
+      <div class="pc-preview-clamp">
+        <span class="pc-preview-label">{{ collapsedPreview.label }}</span>
+        {{ collapsedPreview.content }}
       </div>
     </div>
 
@@ -288,6 +356,42 @@ function onSubmitAsk(entry, answer) {
 .pc-usage {
   font-size: 11px;
   color: var(--el-text-color-secondary);
+}
+
+.pc-elapsed {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.pc-collapsed-preview {
+  padding: 9px 14px 11px;
+  border-top: 1px solid var(--el-border-color-lighter);
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 20px;
+  word-break: break-word;
+  cursor: pointer;
+  transition: background-color var(--panda-transition);
+}
+
+/* 裁切必须放在无 padding 的内层：否则文字会绘制进外层的下 padding，
+   即使外层限制四行高度，仍可能露出第五行的上半截。 */
+.pc-preview-clamp {
+  max-height: 80px;
+  overflow: hidden;
+}
+
+.pc-collapsed-preview:hover {
+  background: var(--el-color-primary-light-9);
+}
+
+.pc-preview-label {
+  margin-right: 7px;
+  color: var(--el-text-color-regular);
+  font-weight: 600;
 }
 
 .pc-toggle {

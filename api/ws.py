@@ -1383,7 +1383,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "WHERE task_id=? ORDER BY id", (task_id,)).fetchall()
                             # Also fetch the original task goal
                             task_row = conn2.execute(
-                                "SELECT user_query FROM tasks WHERE id=?", (task_id,)).fetchone()
+                                "SELECT user_query, created_at, updated_at FROM tasks WHERE id=?", (task_id,)).fetchone()
                             conn2.close()
                             _slim_steps = []
                             for _s in steps:
@@ -1396,6 +1396,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "type": "history_steps",
                                 "task_id": task_id,
                                 "task_status": "resuming",
+                                "task_created_at": task_row["created_at"] if task_row else None,
+                                "task_updated_at": task_row["updated_at"] if task_row else None,
                                 "steps": _slim_steps
                             })
                             if ctx:

@@ -1,4 +1,5 @@
 """System-level API endpoints: version, self-upgrade, server logs."""
+import asyncio
 import os
 import json
 from fastapi import APIRouter, HTTPException
@@ -286,18 +287,24 @@ async def theme_market():
     from api.config import load_config
     url = (load_config() or {}).get("theme_market_url") or (
         "https://raw.githubusercontent.com/deanwinchester/open-agc/main/marketplace/themes.json")
-    remote = []
-    try:
-        import urllib.request
-        with urllib.request.urlopen(url, timeout=8) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        for item in (data.get("themes") or []):
-            if isinstance(item, dict) and item.get("name") and isinstance(item.get("theme"), dict):
-                remote.append({"name": item["name"], "desc": item.get("desc", ""),
-                               "author": item.get("author", ""), "theme": item["theme"],
-                               "source": "market"})
-    except Exception as e:
-        print(f"[Theme] Market fetch failed: {e}")
+
+    def _fetch_remote():
+        remote = []
+        try:
+            import urllib.request
+            with urllib.request.urlopen(url, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for item in (data.get("themes") or []):
+                if isinstance(item, dict) and item.get("name") and isinstance(item.get("theme"), dict):
+                    remote.append({"name": item["name"], "desc": item.get("desc", ""),
+                                   "author": item.get("author", ""), "theme": item["theme"],
+                                   "source": "market"})
+        except Exception as e:
+            print(f"[Theme] Market fetch failed: {e}")
+        return remote
+
+    # 与版本/插件市场一致：同步外网请求移出事件循环，避免整站请求被拖住。
+    remote = await asyncio.to_thread(_fetch_remote)
     presets = [dict(p, source="preset") for p in _THEME_PRESETS]
     return {"themes": presets + remote}
 
@@ -310,7 +317,9 @@ async def get_api_version():
     from core.auto_upgrade import AutoUpgrader, get_channel
     upgrader = AutoUpgrader()
     current = get_version()
-    latest = upgrader.fetch_latest_release()
+    # GitHub/内网清单检查是同步网络 IO（超时 15 秒）。在 async 路由里直接
+    # 调用会冻结整个事件循环，让无关的插件、设置和静态资源请求全部排队。
+    latest = await asyncio.to_thread(upgrader.fetch_latest_release)
     return {
         "current": current,
         "latest": latest or current,

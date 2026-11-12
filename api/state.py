@@ -180,6 +180,8 @@ def _broadcast_task_history(task_id: int, session_id: int, task_status: str = "i
         rows = conn.execute(
             "SELECT step_number, tool_name, tool_label, args_preview, result_preview, full_result, full_args, success, thinking_content, sub_task "
             "FROM task_steps WHERE task_id=? ORDER BY id ASC", (task_id,)).fetchall()
+        task = conn.execute(
+            "SELECT created_at, updated_at FROM tasks WHERE id=?", (task_id,)).fetchone()
         conn.close()
         if not rows:
             return
@@ -205,6 +207,8 @@ def _broadcast_task_history(task_id: int, session_id: int, task_status: str = "i
         _broadcast_to_websockets({
             "type": "history_steps", "task_id": task_id,
             "session_id": session_id, "steps": steps, "task_status": task_status,
+            "task_created_at": task["created_at"] if task else None,
+            "task_updated_at": task["updated_at"] if task else None,
         })
     except Exception as e:
         print(f"[Task] Failed to broadcast task history: {e}")

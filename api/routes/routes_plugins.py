@@ -230,5 +230,7 @@ async def plugin_delete(name: str):
 @router.get("/api/marketplace")
 async def get_marketplace():
     from core.plugin_manager import fetch_marketplace
-    data = fetch_marketplace()
+    # 外网索引可能等待到超时；同步 urllib 不能堵住事件循环，否则同次页面
+    # 刷新里的插件列表、静态资源和 WebSocket 都会一起排队。
+    data = await asyncio.to_thread(fetch_marketplace)
     return {"marketplace": data}

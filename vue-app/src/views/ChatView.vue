@@ -249,6 +249,15 @@ function isDupMessage(role, content, messageId) {
 }
 
 // ── 实时进度卡片 ──
+function taskTimeMs(value) {
+  if (!value) return 0;
+  // SQLite CURRENT_TIMESTAMP 是 UTC 的 "YYYY-MM-DD HH:MM:SS"，不能按本地时区解析。
+  const text = String(value);
+  const normalized = /(?:Z|[+-]\d\d:?\d\d)$/i.test(text) ? text : text.replace(' ', 'T') + 'Z';
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function ensureLiveCard(data) {
   // 按 task_id 归属：多任务并发（前台新任务 + 后台恢复任务）时各进各的卡。
   // 此前只认 liveCard 单槽（不看 task_id）——任务 B 的进度会写进任务 A 的
@@ -261,6 +270,11 @@ function ensureLiveCard(data) {
   if (tid) {
     const existing = items.value.find((i) => i.kind === 'progress' && i.taskId === tid);
     if (existing) {
+      // 历史卡被「继续」接管时开始一轮新的计时；重连到已在运行的卡片则保留原起点。
+      if (!existing.live) {
+        existing.startedAt = Date.now();
+        existing.endedAt = 0;
+      }
       existing.live = true;
       existing.history = false;
       liveCard.value = existing;
@@ -270,6 +284,7 @@ function ensureLiveCard(data) {
   const card = reactive({
     kind: 'progress', key: nextKey(), taskId: tid,
     live: true, history: false, resumable: false, collapsed: true,
+    startedAt: Date.now(), endedAt: 0,
     entries: [], shellLines: [], tokenUsage: '',
   });
   items.value.push(card);
@@ -282,6 +297,7 @@ function finishLiveCard() {
   if (!card) return;
   card.live = false;
   card.collapsed = true;
+  card.endedAt = Date.now();
   liveCard.value = null;
 }
 
@@ -309,7 +325,12 @@ function renderHistorySteps(data) {
   if (existingIdx >= 0) items.value.splice(existingIdx, 1);
   if (!steps.length) return;
 
-  const isLive = data.task_status === 'running' || data.task_status === 'resuming';
+  // backgrounded 仍在后台执行，只是前台等待已结束；不能渲染成可继续的历史卡。
+  const isLive = ['running', 'resuming', 'backgrounded'].includes(data.task_status);
+  const firstStepAt = taskTimeMs(steps[0] && steps[0].created_at);
+  const lastStepAt = taskTimeMs(steps[steps.length - 1] && steps[steps.length - 1].created_at);
+  const startedAt = taskTimeMs(data.task_created_at) || firstStepAt || (isLive ? Date.now() : 0);
+  const endedAt = isLive ? 0 : (taskTimeMs(data.task_updated_at) || lastStepAt);
   // 同步 LLM_ERROR 重试集合：failed → 气泡可挂「重试」；任务一旦推进到
   // 其它状态（恢复/完成）即摘除，按钮只在 failed 且可恢复时出现
   if (data.task_status === 'failed') llmErrorTasks.add(data.task_id);
@@ -319,6 +340,7 @@ function renderHistorySteps(data) {
     live: isLive, history: !isLive,
     resumable: RESUMABLE_STATUSES.includes(data.task_status),
     collapsed: !isLive,
+    startedAt, endedAt,
     entries: steps.flatMap((s) => {
       const ok = s.success === 1 || s.success === true;
       const failed = s.success === 0 || s.success === false;
@@ -402,18 +424,29 @@ function onProgress(data) {
   if (data.task_id && card.taskId == null) card.taskId = data.task_id;
 
   switch (ev) {
-    case 'thinking':
+    case 'thinking': {
+      const ekey = `thought-${data.iteration || 0}`;
+      const existing = card.entries.find((e) => e.kind === 'thinking' && e.ekey === ekey);
       if (data.content) {
-        const ekey = `thought-${data.iteration || 0}`;
-        const existing = card.entries.find((e) => e.kind === 'thinking' && e.ekey === ekey);
-        // 流式增量追加（llm_stream_enabled）；非流式整换
-        if (existing) existing.content = data.stream ? (existing.content + data.content) : data.content;
-        else card.entries.push({ kind: 'thinking', ekey, content: data.content });
+        // 占位后收到的首个流式分片要替换占位文案，不能拼在它后面。
+        if (existing) {
+          const append = data.stream && !existing.pending;
+          existing.content = append ? (existing.content + data.content) : data.content;
+          existing.pending = false;
+        } else {
+          card.entries.push({ kind: 'thinking', ekey, content: data.content, pending: false });
+        }
       } else {
+        // kimi_code 默认非流式：LLM 思考期间只有状态事件，没有正文。
+        // 在收起卡片里立即给出等待预览，实际 reasoning 返回后原地替换。
+        if (!existing) {
+          card.entries.push({ kind: 'thinking', ekey, content: t.thinkingPending, pending: true });
+        }
         thinking.text = personaText(t.thinking);
         thinking.visible = true;
       }
       break;
+    }
     case 'shell_output':
       pushShellLine(card, data.text || '');
       break;
@@ -917,7 +950,10 @@ async function loadRecentTaskCard(sid) {
     // 该接口按 created_at DESC 返回，渲染前反转为正序（修正旧版历史卡片顺序 bug）
     const steps = (stepData.steps || []).slice().reverse();
     if (!steps.length) return;
-    renderHistorySteps({ task_id: task.id, task_status: task.status, steps, session_id: sid });
+    renderHistorySteps({
+      task_id: task.id, task_status: task.status, steps, session_id: sid,
+      task_created_at: task.created_at, task_updated_at: task.updated_at,
+    });
   } catch {
     /* 进度卡片是可选增强，失败静默 */
   }
