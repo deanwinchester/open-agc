@@ -62,7 +62,7 @@ class TestSoulInjection:
         monkeypatch.setattr("core.paths.get_data_path", lambda f: str(tmp_path / f))
         import api.config as cfgmod
         monkeypatch.setattr(cfgmod, "load_config", lambda: {
-            "ui_theme": {"assistant_name": "小新"}})
+            "ui_theme": {"assistant_name": "小管家"}})
         agent = ag.OpenAGCAgent.__new__(ag.OpenAGCAgent)
         agent.system_prompt_base = ""
         agent.sandbox_dir = str(tmp_path / "no_sandbox")
@@ -70,7 +70,7 @@ class TestSoulInjection:
             prompt = agent._build_system_prompt()
         except TypeError:
             pytest.skip("_build_system_prompt 签名不适用直调")
-        assert "小新" in prompt
+        assert "小管家" in prompt
         assert "智能助手" in prompt
         assert "熊猫" not in prompt
 

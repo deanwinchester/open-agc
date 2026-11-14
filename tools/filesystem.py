@@ -1,6 +1,36 @@
 import os
+import json
 from typing import Any, Dict
-from tools.base import BaseTool, SandboxBlocked
+from tools.base import BaseTool
+
+
+def _load_sandbox_config() -> dict:
+    """文件工具共用的配置读取；配置缺失/损坏时仍按默认沙箱模式处理。"""
+    from core.paths import get_data_path
+    try:
+        with open(get_data_path("config.json"), "r", encoding="utf-8") as stream:
+            config = json.load(stream)
+        return config if isinstance(config, dict) else {"_open_agc_config_missing": True}
+    except (OSError, ValueError, TypeError):
+        return {"_open_agc_config_missing": True}
+
+
+def _resolve_and_check(tool: BaseTool, path: str, kwargs: dict) -> str:
+    """相对路径先落到沙箱再检查，避免检查与实际 open 使用不同基准目录。"""
+    config = _load_sandbox_config()
+    if not config.get("sandbox_mode", True):
+        return path
+    path = _resolve_relative(path, config)
+    # 保留既有的「配置缺失时不拦截绝对路径」兼容语义；相对路径仍必须
+    # 解析到默认可写沙箱，不能落入 frozen App 的资源目录。
+    if config.get("_open_agc_config_missing"):
+        return path
+    tool.check_sandbox(
+        path,
+        config=config,
+        session_whitelist=kwargs.get("_session_whitelist"),
+    )
+    return path
 
 class ReadFileTool(BaseTool):
     name: str = "read_file"
@@ -34,25 +64,11 @@ class ReadFileTool(BaseTool):
         }
 
     def execute(self, **kwargs) -> str:
-        import json
-        from core.paths import get_data_path
-        
         path = kwargs.get("path")
         if not path:
             return "Error: No file path provided."
-            
-        # Sandbox Mode Enforcement
-        config_path = get_data_path("config.json")
-        if os.path.exists(config_path):
-            config = {}
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-            except Exception:
-                pass
-            if config.get("sandbox_mode", True):
-                whitelist = kwargs.get("_session_whitelist", None)
-                self.check_sandbox(path, config=config, session_whitelist=whitelist)
+
+        path = _resolve_and_check(self, path, kwargs)
                 
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -147,31 +163,12 @@ class WriteFileTool(BaseTool):
         }
 
     def execute(self, **kwargs) -> str:
-        import json
-        from core.paths import get_data_path
-
         path = kwargs.get("path")
         content = kwargs.get("content", "")
         if not path:
             return "Error: No file path provided."
 
-        # Sandbox Mode Enforcement
-        config_path = get_data_path("config.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-
-                if config.get("sandbox_mode", True):
-                    # 相对路径按沙箱目录解析（生产实证：此前按进程 CWD 解析，
-                    # agent 写 outputs/x.md 落到了仓库根目录而不是 workspace/outputs/）
-                    path = _resolve_relative(path, config)
-                    whitelist = kwargs.get("_session_whitelist", None)
-                    self.check_sandbox(path, config=config, session_whitelist=whitelist)
-            except SandboxBlocked:
-                raise
-            except Exception:
-                pass
+        path = _resolve_and_check(self, path, kwargs)
                 
         try:
             # Ensure directory exists
@@ -285,9 +282,6 @@ class EditFileTool(BaseTool):
         }
 
     def execute(self, **kwargs) -> str:
-        import json
-        from core.paths import get_data_path
-
         path = kwargs.get("path")
         old_string = kwargs.get("old_string")
         new_string = kwargs.get("new_string")
@@ -302,22 +296,7 @@ class EditFileTool(BaseTool):
                     "创建/整体覆盖文件请用 write_file；插入内容时，把插入点周围的原文作为 old_string，"
                     "new_string 写原文加新内容。")
 
-        # Sandbox Mode Enforcement
-        config_path = get_data_path("config.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-
-                if config.get("sandbox_mode", True):
-                    # 同 write_file：相对路径按沙箱目录解析（见 _resolve_relative）
-                    path = _resolve_relative(path, config)
-                    whitelist = kwargs.get("_session_whitelist", None)
-                    self.check_sandbox(path, config=config, session_whitelist=whitelist)
-            except SandboxBlocked:
-                raise
-            except Exception:
-                pass
+        path = _resolve_and_check(self, path, kwargs)
         if not os.path.exists(path):
             return f"Error: File '{path}' does not exist."
 
@@ -419,7 +398,6 @@ class ApplyPatchTool(BaseTool):
 
     def execute(self, **kwargs) -> str:
         import json
-        from core.paths import get_data_path
 
         patches = kwargs.get("patches")
         if isinstance(patches, str):
@@ -430,23 +408,15 @@ class ApplyPatchTool(BaseTool):
         if not isinstance(patches, list) or not patches:
             return "Error: patches 必须是非空数组：[{path, edits: [{old_string, new_string, replace_all?}]}]。"
 
-        # Sandbox Mode Enforcement —— 全部路径先预检（与 edit_file 同一模式）。
-        # 任一路径被拒则抛 SandboxBlocked：一处都未应用，授权后整个调用可安全重试。
-        config_path = get_data_path("config.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                if config.get("sandbox_mode", True):
-                    whitelist = kwargs.get("_session_whitelist", None)
-                    for block in patches:
-                        p = block.get("path") if isinstance(block, dict) else None
-                        if p:
-                            self.check_sandbox(p, config=config, session_whitelist=whitelist)
-            except SandboxBlocked:
-                raise
-            except Exception:
-                pass
+        # 全部路径先解析并预检；任一路径被拒则抛 SandboxBlocked，
+        # 一处都未应用，授权后整个调用可安全重试。
+        prepared_patches = []
+        for block in patches:
+            if isinstance(block, dict) and block.get("path"):
+                block = dict(block)
+                block["path"] = _resolve_and_check(self, block["path"], kwargs)
+            prepared_patches.append(block)
+        patches = prepared_patches
 
         # 顺序应用语义：逐块逐条应用，成功即落盘；单条失败不中断后续，
         # 逐块报告 + 末尾汇总，绝不存在静默的部分应用。
@@ -565,26 +535,13 @@ class ListDirTool(BaseTool):
         }
 
     def execute(self, **kwargs) -> str:
-        import json
         import time as _time
-        from core.paths import get_data_path
 
         path = kwargs.get("path")
         if not path:
             return "Error: No directory path provided."
 
-        # Sandbox Mode Enforcement (same pattern as ReadFileTool)
-        config_path = get_data_path("config.json")
-        if os.path.exists(config_path):
-            config = {}
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-            except Exception:
-                pass
-            if config.get("sandbox_mode", True):
-                whitelist = kwargs.get("_session_whitelist", None)
-                self.check_sandbox(path, config=config, session_whitelist=whitelist)
+        path = _resolve_and_check(self, path, kwargs)
 
         if not os.path.isdir(path):
             return f"Error: '{path}' is not a directory (or does not exist)."

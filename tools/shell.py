@@ -424,23 +424,18 @@ class ShellTool(BaseTool):
             if not domain_ok:
                 raise SandboxBlocked(url, sandbox_dir="network", tool_name="execute_shell")
 
-        # Sandbox Mode Enforcement
+        # Sandbox Mode Enforcement：config 缺失也使用默认可写沙箱，不能退到
+        # frozen App 的 Contents/Frameworks 当前目录。
         cwd = None
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                if config.get("sandbox_mode", True):
-                    agent_ctx = kwargs.get("_agent_context")
-                    if agent_ctx and getattr(agent_ctx, "sandbox_dir", None):
-                        sandbox_dir = agent_ctx.sandbox_dir
-                    else:
-                        from core.paths import resolve_sandbox_dir
-                        sandbox_dir = resolve_sandbox_dir(config.get("sandbox_dir"))
-                    os.makedirs(sandbox_dir, exist_ok=True)
-                    cwd = sandbox_dir
-            except Exception as e:
-                print(f"[ShellTool] Warning: failed to load sandbox config: {e}")
+        if config.get("sandbox_mode", True):
+            agent_ctx = kwargs.get("_agent_context")
+            if agent_ctx and getattr(agent_ctx, "sandbox_dir", None):
+                sandbox_dir = agent_ctx.sandbox_dir
+            else:
+                from core.paths import resolve_sandbox_dir
+                sandbox_dir = resolve_sandbox_dir(config.get("sandbox_dir"))
+            os.makedirs(sandbox_dir, exist_ok=True)
+            cwd = sandbox_dir
 
         # ── Secrets substitution ──
         # Replace {{secret:name.field}} placeholders with real values ONLY in the

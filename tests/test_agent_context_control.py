@@ -64,6 +64,18 @@ class TestSpillNotePagingGuidance:
         files = list((tmp_path / "tool_results").glob("fetch_url_*.txt"))
         assert len(files) == 1
         assert files[0].read_text(encoding="utf-8") == big
+    def test_spill_without_agent_sandbox_never_uses_frozen_cwd(
+            self, tmp_path, monkeypatch):
+        agent = OpenAGCAgent.__new__(OpenAGCAgent)
+        agent.sandbox_dir = None
+        frozen_cwd = tmp_path / "Contents" / "Frameworks"
+        frozen_cwd.mkdir(parents=True)
+        workspace = tmp_path / "workspace"
+        monkeypatch.chdir(frozen_cwd)
+        monkeypatch.setattr("core.paths.resolve_sandbox_dir", lambda _: str(workspace))
+        agent._spill_tool_result("full result", "execute_shell", 11)
+        assert list((workspace / "tool_results").glob("execute_shell_*.txt"))
+        assert not (frozen_cwd / "tool_results").exists()
 
 
 # ── 2. read_file offset/limit 分段（含边界） ──

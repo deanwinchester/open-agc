@@ -2,7 +2,8 @@ import os
 import glob
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
-from tools.base import BaseTool, SandboxBlocked
+from tools.base import BaseTool
+from tools.filesystem import _resolve_and_check
 
 class GlobTool(BaseTool):
     name: str = "find_files"
@@ -32,54 +33,30 @@ class GlobTool(BaseTool):
         }
 
     def execute(self, **kwargs) -> str:
-        import json
-        from core.paths import get_data_path
-        
         pattern = kwargs.get("pattern")
-        base_path = kwargs.get("path", os.getcwd())
-        
+        base_path = kwargs.get("path") or "."
+
         if not pattern:
             return "Error: No pattern provided."
-            
-        # Sandbox Mode Enforcement
-        config_path = get_data_path("config.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                if config.get("sandbox_mode", True):
-                    whitelist = kwargs.get("_session_whitelist", None)
-                    self.check_sandbox(base_path, config=config, session_whitelist=whitelist)
-            except SandboxBlocked:
-                raise
-            except Exception:
-                pass
+
+        base_path = _resolve_and_check(self, base_path, kwargs)
 
         try:
-            # Change to the target directory to make globbing easier, then change back
-            original_dir = os.getcwd()
-            os.chdir(base_path)
-            
-            # Use recursive glob
-            matches = glob.glob(pattern, recursive=True)
-            
-            os.chdir(original_dir)
-            
-            if not matches:
+            # 不切换进程级 CWD：打包版 CWD 指向 App 资源目录，且多任务并发时
+            # chdir 会互相污染。直接以沙箱内绝对路径执行 glob。
+            matches = glob.glob(os.path.join(base_path, pattern), recursive=True)
+            files_only = [m for m in matches if os.path.isfile(m)]
+
+            if not files_only:
                 return f"No files matched the pattern '{pattern}' in {base_path}."
-                
-            # Filter out directories
-            files_only = [m for m in matches if os.path.isfile(os.path.join(base_path, m))]
-            
+
             result = f"Found {len(files_only)} matching files in {base_path}:\n"
-            result += "\n".join(files_only[:100])
+            result += "\n".join(os.path.relpath(m, base_path) for m in files_only[:100])
             if len(files_only) > 100:
                 result += f"\n... and {len(files_only) - 100} more files."
-                
+
             return result
         except Exception as e:
-            if 'original_dir' in locals():
-                os.chdir(original_dir)
             return f"Error executing find_files: {str(e)}"
 
 def _grep_target_files(target_path: str, include: Optional[str]) -> List[str]:
@@ -155,12 +132,10 @@ class GrepSearchTool(BaseTool):
         }
 
     def execute(self, **kwargs) -> str:
-        import json
-        from core.paths import get_data_path
         import shutil
-        
+
         pattern = kwargs.get("pattern")
-        target_path = kwargs.get("path", os.getcwd())
+        target_path = kwargs.get("path") or "."
         include = kwargs.get("include")
         output_mode = kwargs.get("output_mode", "content")
         
@@ -178,20 +153,8 @@ class GrepSearchTool(BaseTool):
         except (TypeError, ValueError):
             return "Error: head_limit must be an integer."
             
-        # Sandbox Mode Enforcement
-        config_path = get_data_path("config.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                if config.get("sandbox_mode", True):
-                    whitelist = kwargs.get("_session_whitelist", None)
-                    self.check_sandbox(target_path, config=config, session_whitelist=whitelist)
-            except SandboxBlocked:
-                raise
-            except Exception:
-                pass
-                
+        target_path = _resolve_and_check(self, target_path, kwargs)
+
         # Try ripgrep first
         rg_path = shutil.which("rg")
         if rg_path:

@@ -30,6 +30,10 @@ except Exception:
     pass
 # --------------------------------------------
 
+# 后端崩溃时立即通知等待界面，避免已经失败还多等 60 秒才显示通用错误。
+_server_failure = threading.Event()
+_server_failure_message = ""
+
 
 def find_free_port():
     import socket
@@ -79,7 +83,9 @@ def start_server(port):
         # 应用无需 NAT 保活，TCP 断开已由内核可靠上报。
         uvicorn.run(app, host=host, port=port, log_level="warning",
                     proxy_headers=False, ws_ping_interval=None, ws_ping_timeout=None)
-    except Exception as e:
+    except BaseException as e:
+        global _server_failure_message
+        _server_failure_message = str(e) or type(e).__name__
         try:
             import traceback
             with open(_crash_log_path(), "a", encoding="utf-8") as f:
@@ -92,6 +98,8 @@ def start_server(port):
                 print(f"Server crash: {e}", file=sys.stderr)
             except Exception:
                 pass
+        finally:
+            _server_failure.set()
 
 
 def wait_for_server_ready(port, timeout=60):
@@ -106,6 +114,8 @@ def wait_for_server_ready(port, timeout=60):
     t0 = time.time()
     deadline = t0 + timeout
     while time.time() < deadline:
+        if _server_failure.is_set():
+            return False
         try:
             resp = requests.get(f"http://localhost:{port}/static/icon_rounded.png", timeout=1)
             if resp.status_code == 200:
@@ -157,6 +167,8 @@ def check_server_and_load(window, port):
 
     deadline = t0 + 60
     while time.time() < deadline:
+        if _server_failure.is_set():
+            break
         el = time.time() - t0
         if el < 2:
             _phase("正在初始化服务……")
@@ -176,14 +188,21 @@ def check_server_and_load(window, port):
             pass
         time.sleep(0.1 if el < 3 else 0.5)
 
-    # Timeout reached without success
+    # 后端已崩溃则立即到达这里；展示实际错误和完整日志路径，便于直接定位。
     try:
-        window.evaluate_js("""
-            document.querySelector('.loader').style.display = 'none';
-            document.querySelector('h2').innerText = '启动失败 (Startup Failed)';
-            document.querySelector('h2').style.color = '#ef4444';
-            document.querySelector('p').innerHTML = '后台服务未能正常启动，可能是端口被占用或内部错误。<br>请尝试查看 server_crash.log。';
-        """)
+        import json
+        if _server_failure.is_set():
+            error_html = (f"启动错误：{_server_failure_message or '未知错误'}"
+                          f"<br>日志：{_crash_log_hint()}")
+        else:
+            error_html = ("后台服务启动超时，可能是端口被占用或内部错误。"
+                          f"<br>日志：{_crash_log_hint()}")
+        window.evaluate_js(
+            "document.querySelector('.loader').style.display = 'none';"
+            "document.querySelector('h2').innerText = '启动失败 (Startup Failed)';"
+            "document.querySelector('h2').style.color = '#ef4444';"
+            f"document.querySelector('p').innerHTML = {json.dumps(error_html, ensure_ascii=False)};"
+        )
     except Exception:
         pass
 
@@ -318,7 +337,7 @@ def create_window(port):
     <body>
         <div class="container">
             <div class="loader"></div>
-            <h2>Starting Open-AGC Panda...</h2>
+            <h2>Starting 熊猫事务所...</h2>
             <p>Loading core components...</p>
         </div>
     </body>
@@ -339,7 +358,7 @@ def create_window(port):
                         return name
         except Exception:
             pass
-        return "Open-AGC Panda"
+        return "熊猫事务所"
 
     # Create native window — 任一环节失败（GTK 后端缺 gi、WebKit2 typelib
     # 缺失、Python 版本不匹配等）都回退浏览器模式，保证 Web UI 可用。
@@ -544,7 +563,7 @@ def main():
             print(msg.encode('ascii', 'replace').decode('ascii'))
 
     safe_print("=" * 40)
-    safe_print("  [*] Open-AGC Panda is starting...")
+    safe_print("  [*] 熊猫事务所 is starting...")
     safe_print(f"  http://localhost:{port}")
     safe_print("=" * 40)
 

@@ -18,6 +18,18 @@ from core.paths import get_data_path
 # 内置默认表（也是播种模板）。注意 match 全部小写比较。
 DEFAULT_GUIDES = [
     {
+        "id": "missing-credentials",
+        "match": "err:missing credentials,err:missing api key,err:api key not found",
+        "hint": ("当前模型还没有配置可用的 API Key。请前往 "
+                 "[「设置 → 模型服务」](/app/settings/models)，为当前模型填写并保存密钥"),
+    },
+    {
+        "id": "subscription-permission",
+        "match": "err:current subscription does not have access,err:subscription does not include,err:upgrade your plan",
+        "hint": ("当前账号的订阅未开通 Kimi Code。请升级订阅，或前往 "
+                 "[「设置 → 模型服务」](/app/settings/models) 切换到其他可用模型"),
+    },
+    {
         "match": "authentication,permissiondenied,err: 401,err:invalid api key,err:invalid_api_key",
         "hint": ("模型服务拒绝了 API Key（未配置、无效或已过期）。"
                  "请到 [「设置 → 模型服务」](/app/settings/models) 检查对应厂商的密钥；"
@@ -91,7 +103,23 @@ def load_guides() -> list:
         with open(_seed_path(), "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, list) and all("match" in g and "hint" in g for g in data):
-            return data
+            # 老版本已播种的 JSON 不含后来新增的规则。按匹配键补充带 id 的
+            # 内置规则，避免老用户仍看到误导文案；用户自定义规则保持不变，
+            # 若用户已定义相同匹配键，则以用户规则为准、不再注入内置项。
+            existing_keys = {
+                key.strip()
+                for guide in data
+                for key in str(guide.get("match", "")).split(",")
+                if key.strip()
+            }
+            additions = []
+            for guide in DEFAULT_GUIDES:
+                if not guide.get("id"):
+                    continue
+                keys = {k.strip() for k in guide["match"].split(",") if k.strip()}
+                if not keys.intersection(existing_keys):
+                    additions.append(guide)
+            return additions + data
     except Exception as e:
         print(f"[LLMErrorGuides] 指引表读取失败，回退内置默认: {e}")
     return DEFAULT_GUIDES

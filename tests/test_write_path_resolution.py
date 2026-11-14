@@ -13,7 +13,14 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from tools.filesystem import WriteFileTool, EditFileTool, _resolve_relative  # noqa: E402
+from tools.filesystem import (  # noqa: E402
+    ApplyPatchTool,
+    ListDirTool,
+    ReadFileTool,
+    WriteFileTool,
+    EditFileTool,
+    _resolve_relative,
+)
 
 
 @pytest.fixture()
@@ -48,6 +55,30 @@ class TestResolveRelative:
                                      new_string="沙箱")
         assert "Error" not in out
         assert (sandbox_env / "a.txt").read_text(encoding="utf-8") == "hello 沙箱"
+
+    def test_read_file_relative_uses_same_sandbox(self, sandbox_env):
+        (sandbox_env / "tool_results").mkdir()
+        (sandbox_env / "tool_results" / "result.txt").write_text(
+            "完整工具结果", encoding="utf-8")
+        out = ReadFileTool().execute(path="tool_results/result.txt")
+        assert "完整工具结果" in out
+        assert "Error" not in out
+
+    def test_list_dir_relative_uses_same_sandbox(self, sandbox_env):
+        (sandbox_env / "outputs").mkdir()
+        out = ListDirTool().execute(path=".")
+        assert "outputs" in out
+        assert "Error" not in out
+
+    def test_apply_patch_relative_uses_same_sandbox(self, sandbox_env):
+        target = sandbox_env / "a.txt"
+        target.write_text("hello world", encoding="utf-8")
+        out = ApplyPatchTool().execute(patches=[{
+            "path": "a.txt",
+            "edits": [{"old_string": "world", "new_string": "沙箱"}],
+        }])
+        assert "1/1" in out
+        assert target.read_text(encoding="utf-8") == "hello 沙箱"
 
     def test_sandbox_mode_off_keeps_cwd(self, tmp_path, monkeypatch):
         cfg_file = tmp_path / "config.json"

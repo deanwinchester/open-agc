@@ -295,6 +295,10 @@ function ensureLiveCard(data) {
 function finishLiveCard() {
   const card = liveCard.value;
   if (!card) return;
+  // 没有正文的思考只是等待状态，任务结束后不应留下空白/占位条目。
+  card.entries = card.entries.filter((entry) => (
+    entry.kind !== 'thinking' || (!entry.pending && String(entry.content || '').trim())
+  ));
   card.live = false;
   card.collapsed = true;
   card.endedAt = Date.now();
@@ -359,7 +363,8 @@ function renderHistorySteps(data) {
       };
       // 该步骤前缓存的思考内容（reasoning_content 落库于 task_steps.thinking_content）
       // 作为 thinking 条目插在工具步骤之前——刷新后思考过程仍可见（用户反馈）
-      const thinkingEntry = s.thinking_content
+      const thinkingContent = String(s.thinking_content || '');
+      const thinkingEntry = thinkingContent.trim()
         ? { kind: 'thinking', ekey: `h-th-${s.step_number}`, content: s.thinking_content }
         : null;
       return thinkingEntry ? [thinkingEntry, toolEntry] : [toolEntry];
@@ -427,18 +432,19 @@ function onProgress(data) {
     case 'thinking': {
       const ekey = `thought-${data.iteration || 0}`;
       const existing = card.entries.find((e) => e.kind === 'thinking' && e.ekey === ekey);
-      if (data.content) {
+      const content = String(data.content || '');
+      if (content.trim()) {
         // 占位后收到的首个流式分片要替换占位文案，不能拼在它后面。
         if (existing) {
           const append = data.stream && !existing.pending;
-          existing.content = append ? (existing.content + data.content) : data.content;
+          existing.content = append ? (existing.content + content) : content;
           existing.pending = false;
         } else {
-          card.entries.push({ kind: 'thinking', ekey, content: data.content, pending: false });
+          card.entries.push({ kind: 'thinking', ekey, content, pending: false });
         }
       } else {
-        // kimi_code 默认非流式：LLM 思考期间只有状态事件，没有正文。
-        // 在收起卡片里立即给出等待预览，实际 reasoning 返回后原地替换。
+        // 非流式模型可能只发思考状态、不返回正文。运行时用占位预览反馈，
+        // 展开列表不渲染该占位，结束后由 finishLiveCard 清除，避免空白行。
         if (!existing) {
           card.entries.push({ kind: 'thinking', ekey, content: t.thinkingPending, pending: true });
         }
@@ -591,13 +597,9 @@ function onMessage(data) {
   // 中断等场景下 response 可能为空 —— 状态已重置，空内容不再渲染空气泡
   if (data.content && String(data.content).trim()) {
     appendItem({ kind: 'msg', key: nextKey(), role, content: data.content, taskId: data.task_id || null, id: data.message_id || null });
-    // LLM 调用失败的收口消息：显示重试条（用户反馈只见技术文案、没有
-    // 重试入口——LLM_ERROR 走普通 message 事件，不触发 onError 的重试条）
+    // 失败消息只保留气泡下方的「重试」，不再重复显示底部重试条。
     if (isLlmErrorContent(data.content)) {
-      markLlmError(data.content, data.task_id); // 气泡下同时挂「重试」按钮
-      const lastUser = [...items.value].reverse().find((i) => i.kind === 'msg' && i.role === 'user');
-      retryBar.originalQuery = lastUser ? String(lastUser.content || '') : '';
-      retryBar.visible = true;
+      markLlmError(data.content, data.task_id);
     }
   }
   scrollToBottom();
@@ -621,7 +623,9 @@ function onError(data) {
     appendItem({ kind: 'msg', key: nextKey(), role: 'system', content: data.content });
   }
   retryBar.originalQuery = data.original_query || '';
-  retryBar.visible = true;
+  // LLM_ERROR 已由消息气泡提供唯一的重试入口，避免双按钮。
+  if (isLlmErrorContent(data.content)) markLlmError(data.content, data.task_id);
+  retryBar.visible = !isLlmErrorContent(data.content);
   scrollToBottom();
 }
 

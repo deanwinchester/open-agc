@@ -1423,7 +1423,7 @@ def _guardian_resume_task(task_id: int) -> None:
         def _hb_cb(e):
             if "step" in e:
                 e["step"] = e.get("step", 0) + _hb_step_offset
-            if e.get("event") == "thinking" and e.get("content"):
+            if e.get("event") == "thinking" and str(e.get("content") or "").strip():
                 _hb_thinking["content"] = e["content"]
             if e.get("event") == "tool_start":
                 add_task_step(task_id, e.get("step", 0), e.get("tool", ""), e.get("tool_label", ""), args_preview=e.get("args_preview", ""), session_id=_hb_session, sub_task=e.get("sub_task"), thinking_content=_hb_thinking["content"], full_args=e.get("tool_args"))

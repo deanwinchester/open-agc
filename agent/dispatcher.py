@@ -520,7 +520,8 @@ def verify_execution(packet: Dict[str, Any], result: Any,
         if f and "://" not in f and f not in candidates:
             candidates.append(f)
 
-    base = sandbox_dir or os.getcwd()
+    from core.paths import resolve_sandbox_dir
+    base = sandbox_dir or resolve_sandbox_dir(None)
     cwd = os.getcwd()
     for c in candidates:
         if os.path.isabs(c):

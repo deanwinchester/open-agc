@@ -32,6 +32,28 @@ class TestLLMErrorGuides:
         hint = G.render_llm_error_hint("APIError", "status code: 401")
         assert "API Key" in hint
 
+    def test_missing_credentials_is_not_internal_server_error(self, tmp_guides):
+        hint = G.render_llm_error_hint(
+            "InternalServerError",
+            "Missing credentials. Please set the MOONSHOT_API_KEY environment variable.",
+        )
+        assert "API Key" in hint and "/app/settings/models" in hint
+        assert "内部错误" not in hint
+
+    def test_subscription_permission_is_not_connection_error(self, tmp_guides):
+        hint = G.render_llm_error_hint(
+            "APIConnectionError",
+            "permission_error: Your current subscription does not have access to Kimi Code. Upgrade your plan.",
+        )
+        assert "订阅" in hint and "Kimi Code" in hint
+        assert "连不上" not in hint
+
+    def test_legacy_guide_file_gets_new_builtin_rules(self, tmp_guides):
+        """老安装已有 JSON 时也要获得新增规则，而不是继续沿用错误分类。"""
+        (tmp_guides / G._GUIDE_FILE).write_text("[]", encoding="utf-8")
+        hint = G.render_llm_error_hint("InternalServerError", "Missing credentials")
+        assert "API Key" in hint
+
     def test_user_customized_guides_win(self, tmp_guides):
         """用户编辑 data/llm_error_guides.json 后按用户文案走。"""
         _seed = tmp_guides / G._GUIDE_FILE

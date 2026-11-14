@@ -50,7 +50,35 @@ build_single_arch() {
 echo ""
 echo "[1/5] Preparing build environment..."
 
-# Build frontend with Vite (required for packaging)
+# rapidocr-onnxruntime 尚未提供 Python 3.13+ 的兼容发行版；与 CI 一致优先
+# 使用 3.10，也允许 3.11/3.12。可通过 PYTHON_BIN 显式指定解释器。
+if [ -z "${PYTHON_BIN:-}" ]; then
+    for candidate in python3.10 python3.11 python3.12; do
+        if command -v "${candidate}" >/dev/null 2>&1; then
+            PYTHON_BIN=$(command -v "${candidate}")
+            break
+        fi
+    done
+fi
+if [ -z "${PYTHON_BIN:-}" ] || ! "${PYTHON_BIN}" -c \
+    'import sys; raise SystemExit(not ((3, 10) <= sys.version_info[:2] < (3, 13)))'; then
+    echo "  ERROR: macOS 构建需要 Python 3.10–3.12（CI 使用 3.10）。"
+    echo "  请先安装，例如 brew install python@3.10，或设置 PYTHON_BIN。"
+    exit 1
+fi
+if [ -d "build_venv" ]; then
+    if ! build_venv/bin/python -c \
+        'import sys; raise SystemExit(not ((3, 10) <= sys.version_info[:2] < (3, 13)))'; then
+        echo "  ERROR: 现有 build_venv 使用了不兼容的 Python："
+        build_venv/bin/python --version
+        echo "  请先移走该目录，再重新运行构建（脚本不会擅自删除旧环境）。"
+        exit 1
+    fi
+else
+    "${PYTHON_BIN}" -m venv build_venv
+fi
+
+# 构建前端（Vite 产物会被 PyInstaller 收集）
 echo "  Building frontend with Vite..."
 if command -v npm &> /dev/null; then
     [ ! -d "node_modules/@vitejs/plugin-vue" ] && npm install
@@ -61,15 +89,27 @@ else
     exit 1
 fi
 
-if [ ! -d "build_venv" ]; then
-    python3 -m venv build_venv
-fi
 source build_venv/bin/activate
 
-pip install --upgrade pip -q 2>/dev/null
-pip install pyinstaller -q 2>/dev/null
-pip install -r requirements.txt -q 2>/dev/null
-pip install httptools websockets pywebview -q 2>/dev/null || true
+# 不隐藏 stderr：此前 Python 3.13 依赖不兼容被 2>/dev/null 吞掉，脚本
+# 只显示前端构建完成便静默退出，用户无法判断 DMG 为什么没有生成。
+pip install --upgrade pip -q
+pip install pyinstaller -q
+pip install -r requirements.txt -q
+pip install httptools websockets pywebview -q || true
+
+# 依赖完整性的最后防线：缺失时必须在生成 DMG 前失败。此前本机 pip 在
+# RapidOCR 处中断，后半段依赖未装上，仍打出了启动即崩溃的损坏包。
+python - <<'PY'
+import chromadb
+import docx
+import mcp
+import openpyxl
+import psutil
+import pymupdf
+import rapidocr_onnxruntime
+print("  ✅ Runtime dependency preflight passed")
+PY
 
 # ---- 2. Build ----
 echo "[2/5] Building application..."
@@ -116,8 +156,16 @@ fi
 
 echo "  ✅ Build complete: dist/${APP_NAME}.app"
 
-# ---- 3. Code sign (ad-hoc) ----
-echo "[3/5] Code signing..."
+# ---- 3. Validate packaged imports, then code sign (ad-hoc) ----
+echo "[3/5] Checking imports inside the packaged application..."
+
+# 宿主机能 import 不代表 PyInstaller 已收集对应模块。直接用包内解释器
+# 再跑一遍关键导入，任何缺失都必须在 DMG 生成前让构建失败。
+# 必须在签名前运行：动态源码导入可能生成 __pycache__，签后运行会破坏签名。
+"dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}" \
+    --pyrun packaging/macos_import_smoke.py
+
+echo "  Code signing..."
 codesign --force --deep --sign - "dist/${APP_NAME}.app" 2>/dev/null && \
     echo "  ✅ Signed (ad-hoc)" || \
     echo "  ⚠️  Code signing skipped"

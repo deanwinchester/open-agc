@@ -161,7 +161,8 @@ class BrowserAutomationTool:
                         msg += "\n请运行: playwright install chromium"
                     self._init_queue.put({"status": "error", "message": f"Chromium 不可用: {msg}"})
                     return
-                user_data_dir = os.path.join(os.getcwd(), "data", "browser_profile")
+                from core.paths import get_data_path
+                user_data_dir = get_data_path("browser_profile")
                 os.makedirs(user_data_dir, exist_ok=True)
 
                 # 清理可能残留的锁文件

@@ -486,7 +486,10 @@ class OpenAGCAgent:
         current_date = datetime.now().strftime("%Y年%m月%d日")
 
         # Store config for later use
-        self.sandbox_dir = None
+        # 即使 config.json 尚未创建，内部产物也有稳定的可写根目录；不能退到
+        # frozen App 的 CWD（Contents/Frameworks）。
+        from core.paths import resolve_sandbox_dir
+        self.sandbox_dir = resolve_sandbox_dir(None)
         self.browser_headless = False
         # Tiered tool exposure: only a small resident core in tool_schemas,
         # everything else discovered+injected via search_available_tools.
@@ -498,8 +501,9 @@ class OpenAGCAgent:
                 with open(config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
                     if config.get("sandbox_mode", True):
-                        from core.paths import resolve_sandbox_dir
                         self.sandbox_dir = resolve_sandbox_dir(config.get("sandbox_dir"))
+                    else:
+                        self.sandbox_dir = None
                     self.browser_headless = config.get("browser_headless", False)
                     self.tool_tiered_exposure = config.get("tool_tiered_exposure", True)
                     # Initialize token budget from config if available
@@ -1369,8 +1373,8 @@ class OpenAGCAgent:
                     f.write(_default_soul_md())
             else:
                 # 品牌线升级：内容是通用默认（逐字节一致）或带熊猫人格标记
-                # （历史版本播种的默认人格），或品牌默认人格但名字还是旧默认
-                # 「小新」——都换成当前品牌默认人格；用户自己改过的保留。
+                # （历史版本播种的默认人格）时换成当前品牌默认人格；用户自己
+                # 修改过的内容保留。
                 try:
                     from core.paths import get_brand as _gb
                     if _gb():
@@ -1379,7 +1383,6 @@ class OpenAGCAgent:
                         _is_stock = (
                             _existing.strip() == _DEFAULT_SOUL_MD.strip()
                             or ("熊猫" in _existing and "Panda" in _existing)
-                            or ("名字：小新" in _existing and "助手" in _existing)
                         )
                         if _is_stock:
                             with open(soul_path, "w", encoding="utf-8") as f:
@@ -2726,7 +2729,8 @@ class OpenAGCAgent:
         import re as _re
         import time as _time
         try:
-            base = getattr(self, "sandbox_dir", None) or os.getcwd()
+            from core.paths import resolve_sandbox_dir
+            base = getattr(self, "sandbox_dir", None) or resolve_sandbox_dir(None)
             out_dir = os.path.join(base, "tool_results")
             os.makedirs(out_dir, exist_ok=True)
             safe_name = _re.sub(r"[^A-Za-z0-9_-]", "_", tool_name)[:40]
@@ -3093,7 +3097,8 @@ class OpenAGCAgent:
                 # 告知数字任务 ID 与检查点文件路径（「大任务检查点」约定的
                 # 落盘位置）——任务 ID 只在运行期经 run_turn 传入，静态提示
                 # 里无法写死；恢复时服务端读取同一文件把断点注入上下文。
-                _ckpt_path = os.path.join(self.sandbox_dir or os.getcwd(),
+                from core.paths import resolve_sandbox_dir as _resolve_sandbox_dir
+                _ckpt_path = os.path.join(self.sandbox_dir or _resolve_sandbox_dir(None),
                                           ".checkpoints", f"task_{self.task_id}.json")
                 _dyn_parts.append(
                     f"## 当前任务检查点\n当前任务 ID: {self.task_id}。"
@@ -3734,8 +3739,9 @@ class OpenAGCAgent:
                     _outputs_dir = None
                     _outputs_before = None
                     if function_name in ("execute_python", "execute_shell"):
+                        from core.paths import resolve_sandbox_dir as _resolve_sandbox_dir
                         _outputs_dir = os.path.join(
-                            getattr(self, "sandbox_dir", None) or os.getcwd(), "outputs")
+                            getattr(self, "sandbox_dir", None) or _resolve_sandbox_dir(None), "outputs")
                         _outputs_before = _snapshot_outputs(_outputs_dir)
 
                     # Tool Loop Detection Check

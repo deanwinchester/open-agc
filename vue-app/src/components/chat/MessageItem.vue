@@ -26,6 +26,9 @@ watch(() => props.item.feedback, (v) => { feedback.value = v || 0; });
 const feedbackBusy = ref(false);
 
 const canFeedback = computed(() => props.item.role === 'agent' && !!props.item.id);
+// [LLM_ERROR] 仅用于前端识别可重试消息，不作为技术标签展示给用户。
+const displayContent = computed(() => String(props.item.content || '')
+  .replace(/^\[LLM_ERROR\]\s*/, ''));
 
 async function onFeedback(score) {
   if (feedbackBusy.value) return;
@@ -120,7 +123,7 @@ async function openPath(p) {
 <template>
   <div v-if="item.role === 'system'" class="msg-row system">
     <div class="msg-system-inner">
-      <MarkdownView :content="item.content" />
+      <MarkdownView :content="displayContent" />
       <router-link v-if="item.taskId" class="task-link" :to="`/tasks/${item.taskId}`">#{{ item.taskId }}</router-link>
       <div v-if="timeText" class="msg-time">{{ timeText }}</div>
     </div>
@@ -152,7 +155,7 @@ async function openPath(p) {
     <div class="msg-col">
       <div class="msg-bubble agent">
         <button v-if="canDelete" class="msg-del" :title="t.deleteMessage" @click="onDelete">×</button>
-        <MarkdownView :content="item.content" />
+        <MarkdownView :content="displayContent" />
         <router-link v-if="item.taskId" class="task-link" :to="`/tasks/${item.taskId}`">#{{ item.taskId }}</router-link>
         <div v-if="localPaths.length" class="msg-deliv">
           <button

@@ -515,7 +515,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception as _bc_e:
                         print(f"[WS] sandbox_blocked broadcast failed: {_bc_e}")
 
-                if event.get("event") == "thinking" and event.get("content"):
+                if event.get("event") == "thinking" and str(event.get("content") or "").strip():
                     _pending_thinking["content"] = event["content"]
 
                 # Record task steps (offset on resume to continue numbering)

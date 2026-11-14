@@ -55,7 +55,8 @@ if os.path.exists('build_data/config.json'):
 # Windows/Linux 定制版读不到 prompt_identity 等品牌字段
 if os.path.exists('build_data/brand.json'):
     datas.append(('build_data/brand.json', 'data'))
-if sys.platform == 'darwin':
+if sys.platform == 'darwin' and os.path.isdir('build/tiktoken_cache'):
+    # 预热缓存存在才打包；CI 干净检出没有 build/ 目录，不能因此中断 DMG 构建。
     datas.append(('build/tiktoken_cache', 'tiktoken_cache'))
 
 # Do NOT bundle data/ directory as it may contain sensitive user data (API keys).
@@ -214,7 +215,8 @@ a = Analysis(
         'pydub',
         'sentry_sdk',
         'prometheus_client', 'prometheus_fastapi_instrumentator',
-        'grpc', 'grpc_reflection',
+        # grpc 不能排除：当前 chromadb 顶层导入经 opentelemetry OTLP
+        # exporter 直接依赖 grpc，排除后文档/记忆功能在冻结包中不可用。
         # 注意：opentelemetry 不能排除——chromadb（memory_store/embedding 打分）
         # 的 import 链会 import 它，开发机上它只是 litellm/chromadb 的传递依赖
         # 所以无感，冻结包里一旦排除，全新机器启动即崩（生产实证）。

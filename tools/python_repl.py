@@ -269,22 +269,15 @@ class PythonREPLTool(BaseTool):
         except Exception:
             exec_code = code
 
-        # Read sandbox config
-        import json
-        from core.paths import get_data_path
+        # config 缺失也按默认沙箱执行，避免脚本在 App 资源目录下写文件。
+        from tools.filesystem import _load_sandbox_config
+        from core.paths import resolve_sandbox_dir
+        config = _load_sandbox_config()
         cwd = None
-        config_path = get_data_path("config.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                if config.get("sandbox_mode", True):
-                    from core.paths import resolve_sandbox_dir
-                    sandbox_dir = resolve_sandbox_dir(config.get("sandbox_dir"))
-                    os.makedirs(sandbox_dir, exist_ok=True)
-                    cwd = sandbox_dir
-            except Exception:
-                pass
+        if config.get("sandbox_mode", True):
+            sandbox_dir = resolve_sandbox_dir(config.get("sandbox_dir"))
+            os.makedirs(sandbox_dir, exist_ok=True)
+            cwd = sandbox_dir
 
         # Create a temporary file to run the python code cleanly
         # Keep it in the system temp folder to avoid triggering uvicorn WatchFiles

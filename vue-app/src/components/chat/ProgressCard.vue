@@ -21,6 +21,10 @@ function respPreview(content) {
   return plain.length > 60 ? plain.slice(0, 60) + '…' : plain;
 }
 
+function hasThinkingContent(entry) {
+  return !entry.pending && !!String(entry.content || '').trim();
+}
+
 const props = defineProps({
   card: { type: Object, required: true },
 });
@@ -79,7 +83,8 @@ const collapsedPreview = computed(() => {
     if (content) {
       return {
         content,
-        label: entry.kind === 'thinking' ? t.thinkingProcess : t.llmResponse,
+        label: entry.kind === 'thinking' ? '🧠' : '💬',
+        title: entry.kind === 'thinking' ? t.thinkingProcess : t.llmResponse,
       };
     }
   }
@@ -208,7 +213,7 @@ function onSubmitAsk(entry, answer) {
       @click="toggle"
     >
       <div class="pc-preview-clamp">
-        <span class="pc-preview-label">{{ collapsedPreview.label }}</span>
+        <span class="pc-preview-label" :title="collapsedPreview.title">{{ collapsedPreview.label }}</span>
         {{ collapsedPreview.content }}
       </div>
     </div>
@@ -224,22 +229,21 @@ function onSubmitAsk(entry, answer) {
           </div>
         </div>
 
-        <div v-else-if="entry.kind === 'thinking'" class="pc-step thinking">
-          <span class="step-icon">🧠</span>
+        <div v-else-if="entry.kind === 'thinking' && hasThinkingContent(entry)" class="pc-step thinking">
+          <span class="step-icon" :title="t.thinkingProcess">🧠</span>
           <div class="step-body">
             <details>
-              <summary class="step-label">{{ t.thinkingProcess }}</summary>
+              <summary class="step-label" :aria-label="t.thinkingProcess"></summary>
               <div class="step-detail thinking-content">{{ entry.content }}</div>
             </details>
           </div>
         </div>
 
         <div v-else-if="entry.kind === 'response'" class="pc-step response">
-          <span class="step-icon">💬</span>
+          <span class="step-icon" :title="t.llmResponse">💬</span>
           <div class="step-body">
             <details>
-              <summary class="step-label">
-                {{ t.llmResponse }}
+              <summary class="step-label" :aria-label="t.llmResponse">
                 <span class="resp-preview">{{ respPreview(entry.content) }}</span>
               </summary>
               <MarkdownView :content="entry.content" class="resp-md" />
@@ -535,7 +539,7 @@ function onSubmitAsk(entry, answer) {
 }
 
 .resp-preview {
-  margin-left: 8px;
+  margin-left: 0;
   font-weight: normal;
   color: var(--el-text-color-placeholder);
   font-size: 12px;
