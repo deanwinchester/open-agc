@@ -346,14 +346,31 @@ def reconcile_downloads():
                     "WHERE id=last_insert_rowid()"
                 )
 
-    # 4. Mark orphaned DB records
+    # 4. Mark all interrupted downloads, including ordinary files outside models_dir.
+    # No download worker can survive a server restart. Previously only .partial files
+    # under models_dir were reconciled, leaving data/downloads records stuck forever.
     cursor.execute(
         "SELECT id, partial_path, target_path, status FROM downloads "
         "WHERE status IN ('downloading', 'paused')"
     )
     for row in cursor.fetchall():
         rec_id, partial_path, target_path, status = row
-        if partial_path and not os.path.exists(partial_path):
+        if partial_path and os.path.exists(partial_path):
+            if status == 'downloading':
+                file_size = os.path.getsize(partial_path)
+                cursor.execute(
+                    "UPDATE downloads SET status='paused', downloaded_bytes=?, "
+                    "error_message='应用重启，下载已暂停，可续传', "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (file_size, rec_id)
+                )
+                cursor.execute(
+                    "UPDATE downloads SET progress="
+                    "CASE WHEN total_size > 0 THEN CAST(downloaded_bytes AS REAL) / total_size "
+                    "ELSE progress END WHERE id=?",
+                    (rec_id,)
+                )
+        elif status == 'downloading' or (partial_path and not os.path.exists(partial_path)):
             if target_path and os.path.exists(target_path):
                 cursor.execute(
                     "UPDATE downloads SET status='completed', progress=1.0, "
@@ -363,7 +380,7 @@ def reconcile_downloads():
             else:
                 cursor.execute(
                     "UPDATE downloads SET status='failed', "
-                    "error_message='Server restart - partial file lost', "
+                    "error_message='应用重启后未找到下载分片，无法续传', "
                     "updated_at=CURRENT_TIMESTAMP WHERE id=?",
                     (rec_id,)
                 )

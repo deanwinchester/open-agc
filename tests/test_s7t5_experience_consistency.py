@@ -132,12 +132,21 @@ class TestResolveAttribution:
         new_tid = _resolve_task_for_query(1, "好的")
         assert new_tid != tid
 
-    def test_window_uses_updated_at_not_created_at(self, tmp_db):
-        """窗口看 updated_at：created_at 很新（刚建）但 updated_at 陈旧 →
-        即使命中续接词也不续接。"""
+    def test_short_continue_never_expires(self, tmp_db):
+        """次日说「继续」仍续接原任务，不能因 30 分钟窗口丢检查点另开任务。"""
+        from api.task_core import _resolve_task_for_query
+        tid = _insert_task(tmp_db, status="completed", updated_at=_utc_ts(days=2))
+        assert _resolve_task_for_query(1, "继续") == tid
+        conn = tmp_db.db_connect()
+        st = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()[0]
+        conn.close()
+        assert st == "running"
+
+    def test_stale_unrelated_long_query_still_creates_new_task(self, tmp_db):
+        """只有明确的短续接命令不过期，长的新话题仍受时间窗口限制。"""
         from api.task_core import _resolve_task_for_query
         tid = _insert_task(tmp_db, status="interrupted", updated_at=_utc_ts(minutes=40))
-        new_tid = _resolve_task_for_query(1, "继续")
+        new_tid = _resolve_task_for_query(1, "请帮我写一个全新的详细计划方案")
         assert new_tid != tid
 
     def test_running_with_live_background_agent_queues_message(self, tmp_db, monkeypatch):

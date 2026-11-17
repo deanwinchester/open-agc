@@ -64,6 +64,59 @@ def _all(db_path):
     return rows
 
 
+def test_restart_pauses_direct_file_outside_models_dir(env):
+    """普通下载目录也必须对账，不能重启后永久显示 downloading。"""
+    models_dir, db_path, srv = env
+    downloads_dir = os.path.join(os.path.dirname(db_path), "downloads")
+    os.makedirs(downloads_dir)
+    partial = os.path.join(downloads_dir, "model-00001.safetensors.partial")
+    with open(partial, "wb") as f:
+        f.write(b"x" * 4242)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO downloads (type, label, filename, source, url, "
+        "target_path, partial_path, total_size, downloaded_bytes, status, progress) "
+        "VALUES ('file','model direct','model-00001.safetensors','direct','https://hf/x',"
+        "?, ?, 10000, 0, 'downloading', 0.4242)",
+        (partial[:-len('.partial')], partial))
+    rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    conn.close()
+
+    srv.reconcile_downloads()
+
+    row = _row(db_path, rid)
+    assert row["status"] == "paused"
+    assert row["downloaded_bytes"] == 4242
+    assert row["progress"] == 0.4242
+    assert "可续传" in row["error_message"]
+
+
+def test_restart_preserves_ratio_when_total_size_unknown(env):
+    models_dir, db_path, srv = env
+    downloads_dir = os.path.join(os.path.dirname(db_path), "downloads")
+    os.makedirs(downloads_dir)
+    partial = os.path.join(downloads_dir, "file.bin.partial")
+    with open(partial, "wb") as f:
+        f.write(b"x" * 100)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO downloads (type, label, filename, source, target_path, partial_path, "
+        "total_size, downloaded_bytes, status, progress) VALUES "
+        "('file','file','file.bin','direct','file.bin',?,0,0,'downloading',0.6)",
+        (partial,))
+    rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    conn.close()
+
+    srv.reconcile_downloads()
+
+    row = _row(db_path, rid)
+    assert row["status"] == "paused"
+    assert row["downloaded_bytes"] == 100
+    assert row["progress"] == 0.6
+
+
 def test_case_mismatch_matches_and_pauses(env):
     """DB 大写路径 vs 磁盘小写文件：应匹配并置 paused，不产生重复记录。"""
     models_dir, db_path, srv = env

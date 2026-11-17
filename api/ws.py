@@ -23,7 +23,7 @@ from api.task_core import (
     add_task_step, _extract_task_title, _record_task_deliverables, _load_session_context,
     _resolve_task_for_query, _resolve_goal_for_query, _check_goal_completeness, _get_task_step_count,
     _get_step_offset, QUEUED_TO_LIVE_AGENT, kill_tracked_background_process,
-    format_checkpoint_notice,
+    format_checkpoint_notice, is_short_continuation_query,
 )
 from core.paths import get_data_path
 from core.llamacpp_manager import get_llamacpp_manager
@@ -464,6 +464,18 @@ async def websocket_endpoint(websocket: WebSocket):
         # first new step is MAX+1 — same rule as background.py / guardian.
         if ws_task_id:
             step_offset = _get_step_offset(ws_task_id)
+
+        # A typed「继续」now resumes the real task context, not merely the last
+        # 20 chat bubbles. This restores the original goal, tool results and
+        # checkpoint even when the user returns days later.
+        if not resume_task_id and ws_task_id and is_short_continuation_query(query):
+            try:
+                continued_ctx = get_task_context(ws_task_id)
+                if continued_ctx:
+                    session_history = continued_ctx
+                    print(f"[WS] Loaded continued task #{ws_task_id} context ({len(continued_ctx)} msgs)")
+            except Exception as ctx_err:
+                print(f"[WS] Failed to load continued task #{ws_task_id} context: {ctx_err}")
 
         # Additional resume-specific handling (status update)
         if resume_task_id:

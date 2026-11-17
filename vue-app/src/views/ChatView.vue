@@ -31,6 +31,7 @@ import ProgressCard from '../components/chat/ProgressCard.vue';
 import AskUserForm from '../components/chat/AskUserForm.vue';
 import SandboxModal from '../components/chat/SandboxModal.vue';
 import ChatInput from '../components/chat/ChatInput.vue';
+import { isEmptyResponseContent } from '../utils/messageContent';
 
 const t = zh.chat;
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
@@ -470,11 +471,9 @@ function onProgress(data) {
       break;
     }
     case 'response': {
-      if (!data.content) break;
-      // 过滤空回复与历史占位符：旧 sanitizer 把空正文写成「（空）」，
-      // 模型会模仿输出（生产实证：进度卡片满屏空助手回复）
-      const respText = String(data.content).trim();
-      if (!respText || respText === '（空）') break;
+      // 过滤空回复、零宽协议占位与 LiteLLM 的可见空消息占位，
+      // 避免模型只有工具调用时在步骤卡片里刷屏「助手回复」。
+      if (isEmptyResponseContent(data.content)) break;
       if (data.stream) {
         // 流式增量：按迭代轮次分卡。同一轮追加，跨轮新建，避免多轮回复串成一条。
         const iter = data.iteration != null ? data.iteration : null;

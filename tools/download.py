@@ -169,13 +169,13 @@ class DownloadTool(BaseTool):
 
         # Start background download
         def _download_thread():
+            slot_key = f"{dl_type}_{record_id}"
             try:
-                log_download_event(record_id, "started", f"开始下载: {label}", f"url={download_url}")
-                slot_key = f"{dl_type}_{record_id}"
                 _llamacpp_download_state[slot_key] = {
                     "active": True, "type": dl_type, "label": label, "id": record_id,
                     "progress": 0.0, "stage": "downloading", "error": "", "cancelled": False
                 }
+                log_download_event(record_id, "started", f"开始下载: {label}", f"url={download_url}")
                 _llamacpp_download_state["active"] = True
                 _llamacpp_download_state["cancelled"] = False
                 _broadcast_to_websockets({
@@ -190,13 +190,13 @@ class DownloadTool(BaseTool):
                         return
                     from api.routes.routes_settings import update_download_progress
                     _llamacpp_download_state[slot_key]["progress"] = pct
-                    update_download_progress(record_id, pct, status='downloading')
-                    _broadcast_to_websockets({
-                        "type": "llamacpp_download",
-                        "download_id": record_id,
-                        "task": dl_type, "label": label,
-                        "progress": pct, "stage": "downloading", "error": ""
-                    })
+                    if update_download_progress(record_id, pct, status='downloading'):
+                        _broadcast_to_websockets({
+                            "type": "llamacpp_download",
+                            "download_id": record_id,
+                            "task": dl_type, "label": label,
+                            "progress": pct, "stage": "downloading", "error": ""
+                        })
 
                 if _llamacpp_download_state.get("cancelled"):
                     return
@@ -252,7 +252,16 @@ class DownloadTool(BaseTool):
                 err_msg = str(e)
                 print(f"[Download] EXCEPTION in download thread #{record_id}: {err_msg}")
                 from api.routes.routes_settings import update_download_progress
-                update_download_progress(record_id, None, status='failed', error_message=err_msg)
+                failed_path = f"{dl_dir}/{filename}.partial"
+                failed_bytes = os.path.getsize(failed_path) if os.path.exists(failed_path) else 0
+                try:
+                    update_download_progress(
+                        record_id, _llamacpp_download_state[slot_key].get("progress", 0.0),
+                        downloaded_bytes=failed_bytes, status='failed', error_message=err_msg)
+                except Exception as status_err:
+                    # State cleanup below must still run; startup reconciliation is
+                    # the final fallback if the DB remains unavailable.
+                    print(f"[Download] Failed to persist failure #{record_id}: {status_err}")
                 # Also notify session directly if pending task link exists
                 try:
                     sid = kwargs.get("_session_id")
@@ -439,6 +448,12 @@ def _download_direct(url: str, target: str, progress_callback=None) -> bool:
         resp.raise_for_status()
         if resp.status_code not in (200, 206):
             raise RuntimeError(f"Unexpected HTTP status {resp.status_code} for {url}")
+        if resume_offset > 0 and resp.status_code != 206:
+            # Never silently discard existing progress when a server ignores Range.
+            raise RuntimeError(
+                f"Server ignored Range request (got {resp.status_code} instead of 206); "
+                "existing partial file was preserved"
+            )
         total = int(resp.headers.get("content-length", 0)) + (resume_offset if resp.status_code == 206 else 0)
         mode = "ab" if resp.status_code == 206 else "wb"
         downloaded = resume_offset if mode == "ab" else 0

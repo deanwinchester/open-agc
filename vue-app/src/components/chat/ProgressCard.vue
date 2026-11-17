@@ -8,6 +8,7 @@ import { request } from '../../api/client';
 import { personaEmoji } from '../../stores/theme';
 import AskUserForm from './AskUserForm.vue';
 import MarkdownView from '../MarkdownView.vue';
+import { isEmptyResponseContent } from '../../utils/messageContent';
 
 const t = zh.chat;
 
@@ -23,6 +24,10 @@ function respPreview(content) {
 
 function hasThinkingContent(entry) {
   return !entry.pending && !!String(entry.content || '').trim();
+}
+
+function hasResponseContent(entry) {
+  return !isEmptyResponseContent(entry.content);
 }
 
 const props = defineProps({
@@ -74,6 +79,8 @@ const collapsedPreview = computed(() => {
   for (let i = props.card.entries.length - 1; i >= 0; i--) {
     const entry = props.card.entries[i];
     if (entry.kind !== 'thinking' && entry.kind !== 'response') continue;
+    if (entry.kind === 'response' && isEmptyResponseContent(entry.content)) continue;
+    if (entry.kind === 'thinking' && entry.pending) continue;
     const content = String(entry.content || '')
       .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
       .replace(/[*_`#>~]/g, '')
@@ -239,7 +246,7 @@ function onSubmitAsk(entry, answer) {
           </div>
         </div>
 
-        <div v-else-if="entry.kind === 'response'" class="pc-step response">
+        <div v-else-if="entry.kind === 'response' && hasResponseContent(entry)" class="pc-step response">
           <span class="step-icon" :title="t.llmResponse">💬</span>
           <div class="step-body">
             <details>

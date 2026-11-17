@@ -11,6 +11,13 @@ const t = zh.settings.models; // 复用 models 节下 heartbeat/dispatcher/sandb
 
 const loading = ref(true);   // 初始配置加载中（期间禁止保存，避免用默认值覆盖真实配置）
 const saving = ref(false);
+const debugVisible = ref(localStorage.getItem('debug_unlocked') === '1');
+
+function onDebugVisibleChange(value) {
+  if (value) localStorage.setItem('debug_unlocked', '1');
+  else localStorage.removeItem('debug_unlocked');
+  window.dispatchEvent(new Event('debug-unlock-changed'));
+}
 
 const form = reactive({
   heartbeatEnabled: false,
@@ -400,6 +407,21 @@ onMounted(loadSettings);
         </el-form-item>
         <el-form-item :label="t.email.smtp">
           <el-input v-model="form.emailSmtp" :placeholder="t.email.smtpPlaceholder" />
+        </el-form-item>
+      </el-form>
+    </el-card>
+
+    <el-card class="settings-card" shadow="never">
+      <template #header>
+        <div class="card-header">
+          <span class="card-title">开发者选项</span>
+          <p class="card-desc">控制调试入口在左侧导航中的显示，不影响调试数据收集。</p>
+        </div>
+      </template>
+      <el-form label-position="top">
+        <el-form-item label="显示调试菜单">
+          <el-switch v-model="debugVisible" @change="onDebugVisibleChange" />
+          <div class="field-hint">开启后，左侧导航会显示日志、模型调用、工具统计等调试入口。</div>
         </el-form-item>
       </el-form>
     </el-card>

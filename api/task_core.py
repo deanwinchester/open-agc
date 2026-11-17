@@ -25,6 +25,17 @@ _CONTINUATION_PREFIXES = [
 QUEUED_TO_LIVE_AGENT = -1
 
 
+def is_short_continuation_query(query: str) -> bool:
+    """Explicit short resume command; unlike a new topic, it has no expiry.
+
+    Users may return the next day and say exactly「继续」. Treating that as a new
+    task discards the original goal, tool history and checkpoint.
+    """
+    q = (query or "").strip().lower()
+    return len(q) <= 10 and any(
+        kw and (q.startswith(kw) or q == kw) for kw in _CONTINUATION_PREFIXES)
+
+
 # Staleness threshold for 'running' tasks. Must exceed the worst-case
 # no-step window of a HEALTHY task: one LLM call can take timeout=600s
 # (llamacpp non-stream, core/llm_client.py:621) x 3 retries (:647) ~= 30min
@@ -465,7 +476,8 @@ def _resolve_task_for_query(session_id: int, query: str) -> int:
                 _blind_continue = (len(query.strip()) > 10
                                    and status in ('interrupted', 'backgrounded'))
 
-                if is_recent and (_is_continuation or _blind_continue):
+                if is_short_continuation_query(query) or (
+                        is_recent and (_is_continuation or _blind_continue)):
                     print(f"[Task] Continuing task {tid} for session {session_id}")
                     update_task_status(tid, "running")
                     return tid

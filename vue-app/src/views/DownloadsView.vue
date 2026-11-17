@@ -63,7 +63,8 @@ function canResume(dl) {
 }
 
 function showProgress(dl) {
-  return dl.status === 'downloading' || dl.status === 'paused';
+  return dl.status === 'downloading' || dl.status === 'paused'
+    || (dl.status === 'failed' && (dl.progress > 0 || dl.downloaded_bytes > 0));
 }
 
 async function loadDownloads({ silent = false } = {}) {

@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from dotenv import load_dotenv, set_key
 
-from api.db import DB_PATH
+from api.db import DB_PATH, db_connect
 from api.config import load_config, save_config, CONFIG_PATH
 from api.state import connected_websockets, _llamacpp_download_state, _broadcast_to_websockets, _active_agents, _background_agents, _sandbox_waits
 from api.task_core import create_task, get_task_context, save_task_context, add_task_step, claim_task_for_resume
@@ -81,7 +81,7 @@ def get_download_events(download_id: int) -> list:
 def log_download_event(download_id: int, event_type: str, message: str = "", details: str = ""):
     """Write a structured event to the download_events log table."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = db_connect()
         conn.execute(
             "INSERT INTO download_events (download_id, event_type, message, details) VALUES (?, ?, ?, ?)",
             (download_id, event_type, message, details)
@@ -166,10 +166,29 @@ def _inject_notice_to_running_agent(task_id: int, session_id: int, notice: str) 
 
 
 
+# Downloaders report every 8 KB chunk. Persist at most once per second per
+# download; otherwise parallel multi-GB downloads hundreds of thousands of
+# SQLite commits, starving each other and sometimes dying on database locks.
+_download_progress_lock = threading.Lock()
+_download_progress_last_write = {}
+_DOWNLOAD_PROGRESS_WRITE_INTERVAL = 1.0
+
+
 def update_download_progress(download_id: int, progress: float,
                               downloaded_bytes: int = None,
                               status: str = None, error_message: str = None):
-    conn = sqlite3.connect(DB_PATH)
+    now = time.monotonic()
+    if status in (None, "downloading"):
+        with _download_progress_lock:
+            last_write = _download_progress_last_write.get(download_id, 0.0)
+            if now - last_write < _DOWNLOAD_PROGRESS_WRITE_INTERVAL:
+                return False
+            _download_progress_last_write[download_id] = now
+    elif status in ("completed", "failed"):
+        with _download_progress_lock:
+            _download_progress_last_write.pop(download_id, None)
+
+    conn = db_connect()
     cursor = conn.cursor()
     fields = ["progress=?", "updated_at=CURRENT_TIMESTAMP"]
     params = [progress]
@@ -318,6 +337,7 @@ def update_download_progress(download_id: int, progress: float,
             print(f"[Download] NOTIFICATION ERROR for #{download_id}: {notify_err}")
 
     conn.close()
+    return True
 
 
 
@@ -1231,21 +1251,20 @@ async def setup_llamacpp():
 
                 _llamacpp_download_state["stage"] = "downloading"
 
-                update_download_progress(dl_id, ratio)
+                if update_download_progress(dl_id, ratio):
+                    _broadcast_to_websockets({
 
-                _broadcast_to_websockets({
+                        "type": "llamacpp_download",
 
-                    "type": "llamacpp_download",
+                        "task": "binary",
 
-                    "task": "binary",
+                        "label": "正在下载 llama.cpp 二进制文件...",
 
-                    "label": "正在下载 llama.cpp 二进制文件...",
+                        "progress": ratio,
 
-                    "progress": ratio,
+                        "stage": "downloading"
 
-                    "stage": "downloading"
-
-                })
+                    })
 
 
 
@@ -1625,21 +1644,20 @@ async def download_llamacpp_from_hf(req: ModelDownloadHFRequest):
 
                 _llamacpp_download_state["stage"] = "downloading"
 
-                update_download_progress(dl_id, ratio)
+                if update_download_progress(dl_id, ratio):
+                    _broadcast_to_websockets({
 
-                _broadcast_to_websockets({
+                        "type": "llamacpp_download",
 
-                    "type": "llamacpp_download",
+                        "task": "model",
 
-                    "task": "model",
+                        "label": f"正在下载 {short_name}...",
 
-                    "label": f"正在下载 {short_name}...",
+                        "progress": ratio,
 
-                    "progress": ratio,
+                        "stage": "downloading"
 
-                    "stage": "downloading"
-
-                })
+                    })
 
 
 
@@ -1790,6 +1808,39 @@ class ResumeDownloadResponse(BaseModel):
 
 
 
+def _execute_download_record(record: Dict[str, Any], manager, progress_callback):
+    """Resume a record with its original downloader and destination.
+
+    Ordinary files must not go through LlamaCppManager: that manager always writes
+    below models_dir, silently moving safetensors/other files away from their
+    original data/downloads target.
+    """
+    if record["type"] == "binary":
+        return manager.download_binary(progress_callback=progress_callback)
+
+    url = record.get("url") or ""
+    if record["type"] == "file" and url:
+        from tools.download import _download_direct, _download_ftp
+        target_path = record.get("target_path") or ""
+        if not target_path:
+            raise RuntimeError("下载记录缺少原始保存路径，无法续传")
+        os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
+        if url.lower().startswith("ftp://"):
+            return _download_ftp(url, target_path, progress_callback=progress_callback)
+        return _download_direct(url, target_path, progress_callback=progress_callback)
+
+    if record["source"] == "modelscope":
+        return manager.download_model_from_ms(
+            record["repo_id"], record["filename"], progress_callback=progress_callback)
+    if url and not record["repo_id"]:
+        from urllib.parse import urlparse
+        filename = record["filename"] or os.path.basename(urlparse(url).path) or "download"
+        return manager.download_model(
+            url, filename, progress_callback=progress_callback, resume=True)
+    return manager.download_model_from_hf(
+        record["repo_id"], record["filename"], progress_callback=progress_callback)
+
+
 @router.post("/api/downloads/{download_id}/resume")
 
 async def resume_download(download_id: int):
@@ -1886,21 +1937,20 @@ async def resume_download(download_id: int):
 
                 _llamacpp_download_state["stage"] = "downloading"
 
-                update_download_progress(dl_id, ratio)
+                if update_download_progress(dl_id, ratio):
+                    _broadcast_to_websockets({
 
-                _broadcast_to_websockets({
+                        "type": "llamacpp_download",
 
-                    "type": "llamacpp_download",
+                        "task": record["type"],
 
-                    "task": record["type"],
+                        "label": f"续传 {short_name}...",
 
-                    "label": f"续传 {short_name}...",
+                        "progress": ratio,
 
-                    "progress": ratio,
+                        "stage": "downloading"
 
-                    "stage": "downloading"
-
-                })
+                    })
 
 
 
@@ -1910,39 +1960,7 @@ async def resume_download(download_id: int):
 
                 return
 
-            if record["type"] == "binary":
-
-                success = manager.download_binary(progress_callback=progress_cb)
-
-            elif record["source"] == "modelscope":
-
-                success = manager.download_model_from_ms(
-
-                    record["repo_id"], record["filename"], progress_callback=progress_cb
-
-                )
-
-            elif record["url"] and not record["repo_id"]:
-
-                # Direct URL download (use url from record)
-
-                from urllib.parse import urlparse
-
-                fname = record["filename"] or os.path.basename(urlparse(record["url"]).path) or "download"
-
-                success = manager.download_model(
-
-                    record["url"], fname, progress_callback=progress_cb, resume=True
-
-                )
-
-            else:
-
-                success = manager.download_model_from_hf(
-
-                    record["repo_id"], record["filename"], progress_callback=progress_cb
-
-                )
+            success = _execute_download_record(record, manager, progress_cb)
 
 
 
@@ -1972,7 +1990,10 @@ async def resume_download(download_id: int):
                 err_msg = f"下载失败：{err_detail}" if err_detail else "下载失败"
                 _llamacpp_download_state.update({"active": False, "stage": "error", "error": err_msg})
 
-                update_download_progress(dl_id, 0.0, status="failed", error_message=err_msg)
+                failed_bytes = os.path.getsize(partial_path) if partial_path and os.path.exists(partial_path) else 0
+                failed_progress = _llamacpp_download_state.get("progress", record["progress"] or 0.0)
+                update_download_progress(dl_id, failed_progress, downloaded_bytes=failed_bytes,
+                                         status="failed", error_message=err_msg)
 
                 _broadcast_to_websockets({
 
@@ -1982,7 +2003,7 @@ async def resume_download(download_id: int):
 
                     "label": f"{short_name} 下载失败",
 
-                    "progress": 0.0,
+                    "progress": failed_progress,
 
                     "stage": "error",
 
@@ -1994,7 +2015,10 @@ async def resume_download(download_id: int):
 
             _llamacpp_download_state.update({"active": False, "stage": "error", "error": str(e)})
 
-            update_download_progress(dl_id, 0.0, status="failed", error_message=str(e))
+            failed_bytes = os.path.getsize(partial_path) if partial_path and os.path.exists(partial_path) else 0
+            failed_progress = _llamacpp_download_state.get("progress", record["progress"] or 0.0)
+            update_download_progress(dl_id, failed_progress, downloaded_bytes=failed_bytes,
+                                     status="failed", error_message=str(e))
 
             _broadcast_to_websockets({
 
@@ -2004,7 +2028,7 @@ async def resume_download(download_id: int):
 
                 "label": f"续传失败: {e}",
 
-                "progress": 0.0,
+                "progress": failed_progress,
 
                 "stage": "error",
 

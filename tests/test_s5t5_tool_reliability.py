@@ -208,6 +208,24 @@ class TestDirectDownload:
         with pytest.raises(RuntimeError, match="empty"):
             _download_direct("http://example.com/x.bin", str(tmp_path / "x.bin"))
 
+    def test_ignored_range_preserves_existing_partial(self, tmp_path, monkeypatch):
+        import requests
+        target = str(tmp_path / "partial.bin")
+        with open(target + ".partial", "wb") as f:
+            f.write(b"already-downloaded")
+
+        def fake_get(url, **kw):
+            assert kw["headers"]["Range"] == f"bytes={len(b'already-downloaded')}-"
+            return _FakeResp(
+                status_code=200, body=b"replacement",
+                headers={"content-length": "11"})
+
+        monkeypatch.setattr(requests, "get", fake_get)
+        with pytest.raises(RuntimeError, match="ignored Range"):
+            _download_direct("http://example.com/partial.bin", target)
+        with open(target + ".partial", "rb") as f:
+            assert f.read() == b"already-downloaded"
+
     def test_success_writes_file(self, tmp_path, monkeypatch):
         import requests
         body = b"GGUF" + b"\x00" * 100

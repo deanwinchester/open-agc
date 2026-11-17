@@ -219,9 +219,9 @@ const menus = [
   { path: '/debug', label: zh.menu.debug },
 ];
 
-// 调试菜单可见性：dev/rc 构建默认显示；release（版本号无 rc）默认隐藏，
-// 在「设置 → 系统设置」底部连点版本号 5 次解锁；解锁状态存 localStorage，
-// 调试页内可再关闭（dispatch debug-unlock-changed 同步侧栏）。
+// 调试菜单可见性：dev/rc 构建默认显示；release 默认隐藏，
+// 可在「设置 → 系统设置 → 开发者选项」中显式开启；状态存 localStorage，
+// 开关通过 debug-unlock-changed 同步侧栏。
 const debugUnlocked = ref(localStorage.getItem('debug_unlocked') === '1');
 const visibleMenus = computed(() => menus.filter((m) => {
   if (m.path !== '/debug') return true;

@@ -2921,6 +2921,8 @@ class OpenAGCAgent:
         # 会来跟进）。本轮是否已调 pause_and_wait 落地承诺 + 拦截重跑计数
         self._called_pause_wait_this_turn = False
         self._promise_retries = 0
+        # 「继续」零工具回复拦截：执行指令不能被降级成重新提问/给选项。
+        self._continuation_retries = 0
         # 工具调用 JSON 格式漂移纠错重试计数（上限 2 次/轮次）
         self._format_drift_retries = 0
         # 调用日志归属本会话/本任务（SubAgent 共享 self.llm，日志随主任务）
@@ -4286,6 +4288,28 @@ class OpenAGCAgent:
 
                 final_answer = message.content
 
+                # ──「继续」零工具拦截：用户是在下达执行命令，不是请求一份新方案。
+                # 生产实证：恢复 Strata 任务时模型仅凭聊天气泡重新给出 A/B 选项，
+                # 本轮一次工具都未调用，用户永远停在「定了我就继续」。
+                _is_continue_command = bool(re.fullmatch(
+                    r"\s*(继续|接着|继续搞|继续做|继续下载|再来|再试|恢复|"
+                    r"retry|continue|resume|next|yes)[。！!．.\s]*",
+                    user_input or "", flags=re.IGNORECASE)) or (
+                        (user_input or "").startswith("【系统提示】任务已恢复"))
+                _tools_used = (sum(1 for m in self.messages if m.get("role") == "tool")
+                               - self._tool_msg_baseline)
+                if (_is_continue_command and self._continuation_retries < 1
+                        and _tools_used == 0):
+                    self._continuation_retries += 1
+                    print("[Agent] ⚠️「继续」零工具拦截：执行指令被降级成文字回复，注入纠错")
+                    self.messages.append({"role": "system", "content": (
+                        "⚠️ 系统检测：用户说的是「继续」，这是要求你立即恢复执行的命令。"
+                        "你刚才没有调用任何工具，却又给出计划、选项或确认问题。"
+                        "现在必须基于历史目标和检查点调用工具，先核实进程、文件和下载状态，"
+                        "再执行尚未完成的步骤。不得重复询问用户已经作出的选择，"
+                        "不得以「你确认后我就继续」收尾。")})
+                    continue
+
                 # ── 空头承诺拦截：回复承诺「稍后/定期检查/自动继续」，
                 # 但本轮没有 pause_and_wait 落地——回合结束承诺必然落空
                 # （生产实证 #529 grafana：「让后台继续拉，我每隔一会儿检查
@@ -4297,7 +4321,8 @@ class OpenAGCAgent:
                         r"(我(将|会|来|再|稍后|随后|每隔)[^。！？\n]{0,24}"
                         r"(检查|查看|确认|跟进|关注|继续|自动跑|自动继续|自动部署)"
                         r"|一就绪就[^。！？\n]{0,16}(跑|继续|部署|跟进)"
-                        r"|就绪后[^。！？\n]{0,16}(自动|再|继续|部署|跟进))", final_answer)
+                        r"|就绪后[^。！？\n]{0,16}(自动|再|继续|部署|跟进)"
+                        r"|下载(?:完|完成|结束后)[^。！？\n]{0,30}(自动|再|继续|启动|调优))", final_answer)
                     if _promise:
                         self._promise_retries += 1
                         print("[Agent] ⚠️ 空头承诺拦截：承诺跟进但未调 pause_and_wait，注入纠错")

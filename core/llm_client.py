@@ -870,8 +870,11 @@ class LLMClient:
     # 当成历史 assistant 输出模仿，工具调用轮也自己输出「（空）」，进度卡片
     # 里满屏空回复（生产实证）。单空格既过 Anthropic 非空校验（实测 k3 接受），
     # 又不给模型留下可模仿的内容。
-    _EMPTY_TEXT_PLACEHOLDER = " "
-    _EMPTY_TEXT_BLOCK = {"type": "text", "text": " "}
+    # 不能只用普通空格：LiteLLM 会把纯空白再次替换为可见的
+    # "[System: Empty message content sanitised to satisfy protocol]"，
+    # 模型随后可能把它当成正文模仿输出。零宽空格既满足非空协议，又不可见。
+    _EMPTY_TEXT_PLACEHOLDER = "​"
+    _EMPTY_TEXT_BLOCK = {"type": "text", "text": "​"}
 
     @staticmethod
     def _sanitize_for_anthropic(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
