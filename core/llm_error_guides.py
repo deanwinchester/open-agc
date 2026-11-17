@@ -56,6 +56,13 @@ DEFAULT_GUIDES = [
                  "点「继续」重试；频繁出现请检查模型服务状态或更换模型"),
     },
     {
+        "id": "malformed-response",
+        "match": ("err:model service returned an invalid response,"
+                  "err:nonetype' object is not iterable"),
+        "hint": ("模型服务返回了空或格式异常的响应（并非本地模型未启动）。"
+                 "系统已自动重试；反复出现请检查当前模型服务状态或切换模型"),
+    },
+    {
         "match": "apiconnection",
         "hint": ("连不上模型服务。检查服务地址是否正确、本地模型服务"
                  "（llamacpp/ollama 等）是否已启动"),

@@ -4,6 +4,8 @@
 实证：Guardian 恢复 #591 时 kimi_code/k3 报 400 "text content is empty"——
 快照/中断轮次里混入空 content 消息，Anthropic Messages API 直接拒绝。"""
 from core.llm_client import LLMClient
+import core.llm_client as llm_client
+import pytest
 
 
 def _s(msgs):
@@ -59,3 +61,22 @@ def test_normal_messages_untouched():
             {"role": "assistant", "content": "hi"},
             {"role": "user", "content": [{"type": "text", "text": "ok"}]}]
     assert _s(msgs) == msgs
+
+
+def test_null_anthropic_response_content_raises_specific_error():
+    llm_client._install_anthropic_response_guard()
+    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+    with pytest.raises(llm_client.MalformedModelResponseError,
+                       match="invalid response"):
+        AnthropicConfig().extract_response_content({"content": None})
+
+
+def test_anthropic_response_guard_is_idempotent_and_preserves_valid_content():
+    llm_client._install_anthropic_response_guard()
+    llm_client._install_anthropic_response_guard()
+    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+    parsed = AnthropicConfig().extract_response_content(
+        {"content": [{"type": "text", "text": "ok"}]})
+    assert parsed[0] == "ok"

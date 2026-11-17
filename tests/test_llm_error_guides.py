@@ -48,6 +48,14 @@ class TestLLMErrorGuides:
         assert "订阅" in hint and "Kimi Code" in hint
         assert "连不上" not in hint
 
+    def test_null_anthropic_content_is_not_local_connection_error(self, tmp_guides):
+        hint = G.render_llm_error_hint(
+            "APIConnectionError",
+            "litellm.APIConnectionError: 'NoneType' object is not iterable",
+        )
+        assert "格式异常" in hint and "并非本地模型未启动" in hint
+        assert "连不上模型服务" not in hint
+
     def test_legacy_guide_file_gets_new_builtin_rules(self, tmp_guides):
         """老安装已有 JSON 时也要获得新增规则，而不是继续沿用错误分类。"""
         (tmp_guides / G._GUIDE_FILE).write_text("[]", encoding="utf-8")

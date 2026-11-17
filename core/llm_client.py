@@ -40,6 +40,38 @@ _warnings.filterwarnings("ignore", message="Pydantic serializer warnings.*",
                          category=UserWarning)
 
 
+class MalformedModelResponseError(RuntimeError):
+    """模型端已返回 HTTP 响应，但正文不符合 Anthropic Messages 协议。"""
+
+
+_MALFORMED_ANTHROPIC_RESPONSE = (
+    "Model service returned an invalid response: Anthropic content is null or not a list"
+)
+
+
+def _install_anthropic_response_guard():
+    """把 LiteLLM 的 content=None TypeError 转成可识别、可重试的协议错误。
+
+    Kimi Code 偶发返回 HTTP 200 但 ``content`` 为 null；LiteLLM 直接迭代该
+    字段，最终包装成 APIConnectionError，界面因而误报「本地模型未启动」。
+    仅在 Anthropic 渠道首次使用时安装，不给其他 provider 增加启动开销。
+    """
+    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+    original = AnthropicConfig.extract_response_content
+    if getattr(original, "_open_agc_null_content_guard", False):
+        return
+
+    def guarded_extract_response_content(self, completion_response):
+        content = completion_response.get("content")
+        if not isinstance(content, list):
+            raise MalformedModelResponseError(_MALFORMED_ANTHROPIC_RESPONSE)
+        return original(self, completion_response)
+
+    guarded_extract_response_content._open_agc_null_content_guard = True
+    AnthropicConfig.extract_response_content = guarded_extract_response_content
+
+
 def _llm():
     """显式取 litellm 模块（启动预热线程用；返回已缓存的真实模块）。"""
     return litellm._load()
@@ -959,6 +991,7 @@ class LLMClient:
         elif "kimi_code/" in model:
             # Kimi Code 订阅渠道：Anthropic 兼容端点，模型名映射到 anthropic/ 前缀。
             # 与正式 Anthropic key 隔离，api_key/api_base 按调用传入。
+            _install_anthropic_response_guard()
             kwargs["model"] = f"anthropic/{model.split('/', 1)[1]}"
             kwargs["api_key"] = self.kimi_code_api_key
             kwargs["api_base"] = self.kimi_code_api_base
@@ -996,6 +1029,7 @@ class LLMClient:
             cleaned = self._remove_orphaned_tool_calls(messages)
             # Anthropic（官方或兼容端点）同样需要显式 cache_control 才会报告缓存命中。
             if "claude" in model.lower() or "anthropic" in model.lower():
+                _install_anthropic_response_guard()
                 cleaned = self._mark_anthropic_prompt_cache(cleaned)
             kwargs["messages"] = cleaned
 

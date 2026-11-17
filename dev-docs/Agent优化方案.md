@@ -1220,3 +1220,24 @@ Claude Code 内置了强大的 `MCPTool`, `ListMcpResourcesTool` 等原生支持
 
 验证：`tests/test_continuation_execution.py`、`tests/test_s7t5_experience_consistency.py`、
 下载与调度相关回归共 250 项通过；前端生产构建通过。
+
+---
+
+## 二十、Anthropic 空响应识别与错误分类（2026-11-17）
+
+生产实证：任务 #14 的 12 步工具执行正常，随后 `kimi_code/k3` 两次显示「本地模型
+服务未启动」。真实异常发生在 Anthropic 响应转换阶段：服务返回 `content: null`，
+LiteLLM 直接迭代该字段，产生 `NoneType object is not iterable`，再包装成
+`APIConnectionError`，因此被通用连接错误指引误分类。
+
+已修复：
+
+- Anthropic/Kimi Code 首次调用时安装响应校验，`content` 缺失、为 null 或不是
+  数组时抛出明确的 `MalformedModelResponseError`，仍走现有限次自动重试，不把空
+  响应当作有效回复；正常文本响应保持原解析逻辑。
+- 新增 `malformed-response` 错误指引，明确这是远程模型返回空或格式异常响应，
+  并非本地模型未启动；老安装已播种的 JSON 会自动补充该内置规则。
+- 防护只在 Anthropic 渠道首次使用时安装，不影响 LiteLLM 懒加载及其他厂商。
+
+验证：`tests/test_anthropic_sanitize.py`、`tests/test_llm_error_guides.py`、
+`tests/test_litellm_lazy_import.py` 及 LLM 客户端相关回归共 116 项通过。
